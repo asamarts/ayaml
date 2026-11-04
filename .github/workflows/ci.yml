@@ -60,7 +60,9 @@ jobs:
           tmp="${RUNNER_TEMP}/ayaml-downstream"
           rm -rf "$tmp"
           cargo new --quiet "$tmp"
-          printf '\nayaml = { path = "%s/target/package/ayaml-0.1.0" }\n' "$GITHUB_WORKSPACE" >> "$tmp/Cargo.toml"
+          package="$(find "$GITHUB_WORKSPACE/target/package" -maxdepth 1 -type d -name 'ayaml-*' | head -n1)"
+          test -n "$package"
+          printf '\nayaml = { path = "%s" }\n' "$package" >> "$tmp/Cargo.toml"
           cargo check --quiet --manifest-path "$tmp/Cargo.toml"
 
   cross:
