@@ -164,6 +164,11 @@ impl<'a> Scanner<'a> {
         })
     }
 
+    /// The input length, used to choose a token-arena growth chunk.
+    pub(crate) fn input_len(&self) -> usize {
+        self.input.len()
+    }
+
     /// Return the next token, or `None` after the stream end has been emitted.
     pub(crate) fn next_token(&mut self) -> Result<Option<Token<'a>>, Error> {
         if !self.started {
@@ -227,7 +232,7 @@ impl<'a> Scanner<'a> {
                     // parser see one logical flow collection across lines.
                     continue;
                 }
-                return self.make(TokenKind::LineBreak, start, self.pos);
+                return self.make_line_break(start, self.pos);
             }
             break;
         }
@@ -305,7 +310,7 @@ impl<'a> Scanner<'a> {
             }
             '-' if self.indicator_follows(start, 1) => {
                 self.pos += 1;
-                self.make(TokenKind::BlockEntry, start, self.pos)
+                self.make_indicator(TokenKind::BlockEntry, start, self.pos)
             }
             // In flow context libyaml treats every `?` as an explicit-key
             // indicator. YAML 1.2.2 makes `?x` a plain scalar (HM87, 652Z);
@@ -314,13 +319,13 @@ impl<'a> Scanner<'a> {
                 || self.indicator_follows(start, 1) =>
             {
                 self.pos += 1;
-                self.make(TokenKind::Key, start, self.pos)
+                self.make_indicator(TokenKind::Key, start, self.pos)
             }
             ':' if self.colon_indicator(start)
                 || (self.flow_level > 0 && self.previous_flow_end) =>
             {
                 self.pos += 1;
-                self.make(TokenKind::Value, start, self.pos)
+                self.make_indicator(TokenKind::Value, start, self.pos)
             }
             '&' => self.scan_anchor(false),
             '*' => self.scan_anchor(true),
@@ -356,6 +361,45 @@ impl<'a> Scanner<'a> {
             self.quoted_only_next += 1;
         }
         Ok(())
+    }
+
+    /// Emit a block indicator. These tokens only advance the event count,
+    /// mark the document open, and clear flow adjacency.
+    fn make_indicator(
+        &mut self,
+        kind: TokenKind<'a>,
+        start: usize,
+        end: usize,
+    ) -> Result<Option<Token<'a>>, Error> {
+        self.tokens += 1;
+        self.limits
+            .check_events(self.tokens)
+            .map_err(|error| self.limit_at(start, error))?;
+        if self.quoted_only_next < self.quoted_only.len() {
+            self.check_quoted_only(None)?;
+        }
+        self.previous_flow_end = false;
+        self.document_open = true;
+        let span = self.span(start, end)?;
+        Ok(Some(Token { kind, span }))
+    }
+
+    /// Emit a line break. The parser uses only the token kind; the span still
+    /// belongs to the token for diagnostics and event consumers.
+    fn make_line_break(&mut self, start: usize, end: usize) -> Result<Option<Token<'a>>, Error> {
+        self.tokens += 1;
+        self.limits
+            .check_events(self.tokens)
+            .map_err(|error| self.limit_at(start, error))?;
+        if self.quoted_only_next < self.quoted_only.len() {
+            self.check_quoted_only(None)?;
+        }
+        self.previous_flow_end = false;
+        let span = self.span(start, end)?;
+        Ok(Some(Token {
+            kind: TokenKind::LineBreak,
+            span,
+        }))
     }
 
     fn make(
@@ -437,15 +481,9 @@ impl<'a> Scanner<'a> {
     }
 
     fn span(&self, start: usize, end: usize) -> Result<Span, Error> {
-        let start_marker = self
-            .line_index
-            .marker(self.input, start)
-            .ok_or_else(|| self.error_at(start, "invalid start position"))?;
-        let end_marker = self
-            .line_index
-            .marker(self.input, end)
-            .ok_or_else(|| self.error_at(end, "invalid end position"))?;
-        Ok(Span::new(start_marker, end_marker))
+        self.line_index
+            .span(self.input, start, end)
+            .ok_or_else(|| self.error_at(start, "invalid span position"))
     }
 
     fn limit_at(&self, index: usize, limit: crate::limits::LimitExceeded) -> Error {
@@ -1505,7 +1543,9 @@ impl<'a> Scanner<'a> {
         // (which scans the line prefix) until a line break proves the scalar
         // may continue.
         let mut continuation = None;
-        let mut value = String::new();
+        // Keep the common single-line scalar borrowed: only create an owned
+        // value when a continuation is actually accepted.
+        let mut value: Option<String> = None;
         loop {
             let content_start = self.pos;
             while let Some(ch) = self.peek() {
@@ -1528,12 +1568,33 @@ impl<'a> Scanner<'a> {
                 }
                 self.pos += ch.len_utf8();
             }
-            value.push_str(&self.input[content_start..self.pos]);
-            while value.ends_with([' ', '\t']) {
-                value.pop();
+            if let Some(value) = value.as_mut() {
+                value.push_str(&self.input[content_start..self.pos]);
+                while value.ends_with([' ', '\t']) {
+                    value.pop();
+                }
             }
             if !self.peek().is_some_and(is_line_break) {
                 break;
+            }
+            // A scalar that starts after a block prefix cannot continue on a
+            // line at or below the prefix's indentation. Reject that common
+            // case before scanning the line prefix for an owner.
+            let line_start = self.line_index.line_start(start);
+            if !self.compat_flow && self.flow_level == 0 && start > line_start {
+                let prefix = &self.input[line_start..start];
+                let trimmed = prefix.trim_start_matches([' ', '\t']);
+                let has_block_prefix = trimmed.starts_with("- ")
+                    || trimmed.starts_with("? ")
+                    || trimmed.starts_with(": ")
+                    || prefix.contains(": ");
+                if has_block_prefix
+                    && self
+                        .next_content_indent()
+                        .is_some_and(|indent| indent <= self.line_indent(start))
+                {
+                    break;
+                }
             }
             let continuation = match continuation {
                 Some(continuation) => continuation,
@@ -1543,8 +1604,25 @@ impl<'a> Scanner<'a> {
                     computed
                 }
             };
-            if !self.try_plain_continuation(continuation, &mut value) {
+            let first_end = self.pos;
+            let Some(breaks) = self.try_plain_continuation(continuation) else {
                 break;
+            };
+            if value.is_none() {
+                let mut first = String::with_capacity(first_end.saturating_sub(start) + 1);
+                first.push_str(&self.input[start..first_end]);
+                while first.ends_with([' ', '\t']) {
+                    first.pop();
+                }
+                value = Some(first);
+            }
+            let value = value.as_mut().expect("initialized");
+            if breaks == 1 {
+                value.push(' ');
+            } else {
+                for _ in 1..breaks {
+                    value.push('\n');
+                }
             }
         }
         let end = self.pos;
@@ -1553,7 +1631,10 @@ impl<'a> Scanner<'a> {
         }
         let raw_text = &self.input[start..end];
         let raw = Cow::Borrowed(raw_text);
-        let value = scalar_cow(value, raw_text);
+        let value = match value {
+            Some(value) => Cow::Owned(value),
+            None => Cow::Borrowed(&self.input[start..self.trim_trailing_whitespace(start, end)]),
+        };
         self.make(
             TokenKind::Scalar {
                 value,
@@ -1563,6 +1644,31 @@ impl<'a> Scanner<'a> {
             start,
             end,
         )
+    }
+
+    /// The indentation of the next non-blank line after the current position,
+    /// without changing scanner state.
+    fn next_content_indent(&self) -> Option<usize> {
+        let mut index = self.pos;
+        while index < self.input.len() {
+            let ch = self.input[index..].chars().next().expect("in bounds");
+            if !is_line_break(ch) {
+                break;
+            }
+            index += ch.len_utf8();
+            if ch == '\r' && self.input[index..].starts_with('\n') {
+                index += 1;
+            }
+        }
+        if index >= self.input.len() {
+            return None;
+        }
+        let mut indent = 0;
+        while self.input[index..].starts_with(' ') {
+            index += 1;
+            indent += 1;
+        }
+        Some(indent)
     }
 
     /// How a plain scalar starting at `start` may continue on later lines.
@@ -1591,7 +1697,7 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    fn try_plain_continuation(&mut self, continuation: Continuation, value: &mut String) -> bool {
+    fn try_plain_continuation(&mut self, continuation: Continuation) -> Option<usize> {
         let saved = self.pos;
         let mut breaks = 0;
         loop {
@@ -1610,11 +1716,11 @@ impl<'a> Scanner<'a> {
         }
         if breaks == 0 || self.pos >= self.input.len() {
             self.pos = saved;
-            return false;
+            return None;
         }
         if self.flow_level > 0 && matches!(self.peek(), Some(',' | ']' | '}')) {
             self.pos = saved;
-            return false;
+            return None;
         }
         let line_start = self.line_index.line_start(self.pos);
         let indent = self.input[line_start..self.pos]
@@ -1648,16 +1754,9 @@ impl<'a> Scanner<'a> {
             || self.peek() == Some('#')
         {
             self.pos = saved;
-            return false;
+            return None;
         }
-        if breaks == 1 {
-            value.push(' ');
-        } else {
-            for _ in 1..breaks {
-                value.push('\n');
-            }
-        }
-        true
+        Some(breaks)
     }
 
     fn looks_like_block_start(&self, position: usize, allow_block_indicator: bool) -> bool {

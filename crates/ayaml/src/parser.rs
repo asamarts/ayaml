@@ -18,33 +18,53 @@ use crate::span::Span;
 use crate::tag::Tag;
 use crate::value::Value;
 
+/// A logical line's token range in the parser's shared token arena.
 #[derive(Clone, Debug)]
-struct Line<'a> {
-    tokens: Vec<Token<'a>>,
+struct Line {
+    start: usize,
+    end: usize,
     indent: usize,
 }
 
-impl<'a> Line<'a> {
-    fn new(mut tokens: Vec<Token<'a>>) -> Self {
-        tokens.shrink_to_fit();
+impl Line {
+    fn new(tokens: &[Token<'_>], start: usize, end: usize) -> Self {
         let indent = tokens
-            .first()
+            .get(start)
             .map_or(0, |token| token.span.start().column().saturating_sub(1));
-        Self { tokens, indent }
+        Self { start, end, indent }
     }
 
-    fn first(&self) -> Option<&Token<'a>> {
-        self.tokens.first()
+    fn len(&self) -> usize {
+        self.end - self.start
     }
 
     fn is_empty(&self) -> bool {
-        self.tokens.is_empty()
+        self.start == self.end
     }
+
+    fn advance(&mut self, count: usize) {
+        self.start = self.start.saturating_add(count).min(self.end);
+    }
+}
+
+/// Token-arena growth chunks. Power-of-two growth leaves large unused
+/// capacity on wide inputs; fixed chunks bound the waste. Small inputs use a
+/// smaller first chunk so the shrink-to-fit transient stays cheap.
+const TOKEN_ARENA_CHUNK: usize = 8 * 1024;
+const TOKEN_ARENA_SMALL_CHUNK: usize = 64;
+const TOKEN_ARENA_MID_CHUNK: usize = 256;
+
+fn push_token<'a>(tokens: &mut Vec<Token<'a>>, token: Token<'a>, chunk: usize) {
+    if tokens.len() == tokens.capacity() {
+        tokens.reserve_exact(chunk);
+    }
+    tokens.push(token);
 }
 
 /// Logical lines read from the scanner, plus the stream boundary spans.
 struct Lines<'a> {
-    lines: Vec<Line<'a>>,
+    lines: Vec<Line>,
+    tokens: Vec<Token<'a>>,
     stream_start: Option<Span>,
     stream_end: Option<Span>,
 }
@@ -55,8 +75,14 @@ struct Lines<'a> {
 /// them into per-line vectors. A block scalar consumes the rest of its line,
 /// so it flushes the logical line immediately.
 fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
+    let chunk = match scanner.input_len() {
+        0..=4096 => TOKEN_ARENA_SMALL_CHUNK,
+        4097..=32768 => TOKEN_ARENA_MID_CHUNK,
+        _ => TOKEN_ARENA_CHUNK,
+    };
     let mut lines = Vec::new();
-    let mut current = Vec::new();
+    let mut tokens = Vec::new();
+    let mut line_start = 0;
     let mut stream_start = None;
     let mut stream_end = None;
     while let Some(token) = scanner.next_token()? {
@@ -67,8 +93,9 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
                 break;
             }
             TokenKind::LineBreak => {
-                if !current.is_empty() {
-                    lines.push(Line::new(std::mem::take(&mut current)));
+                if tokens.len() > line_start {
+                    lines.push(Line::new(&tokens, line_start, tokens.len()));
+                    line_start = tokens.len();
                 }
             }
             _ => {
@@ -79,18 +106,26 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
                         ..
                     }
                 );
-                current.push(token);
+                push_token(&mut tokens, token, chunk);
                 if block_scalar {
-                    lines.push(Line::new(std::mem::take(&mut current)));
+                    lines.push(Line::new(&tokens, line_start, tokens.len()));
+                    line_start = tokens.len();
                 }
             }
         }
     }
-    if !current.is_empty() {
-        lines.push(Line::new(current));
+    if tokens.len() > line_start {
+        lines.push(Line::new(&tokens, line_start, tokens.len()));
+    }
+    // Small token arenas gain more from exact capacity than the one-time copy
+    // costs in peak memory. Large arenas keep their growth capacity so the
+    // shrink copy does not dominate the parse peak.
+    if tokens.len() <= 8192 {
+        tokens.shrink_to_fit();
     }
     Ok(Lines {
         lines,
+        tokens,
         stream_start,
         stream_end,
     })
@@ -114,7 +149,8 @@ impl<'a> EventSink<'a> {
 }
 
 struct Parser<'a> {
-    lines: Vec<Line<'a>>,
+    lines: Vec<Line>,
+    token_arena: Vec<Token<'a>>,
     sink: EventSink<'a>,
     limits: Limits,
     input_len: usize,
@@ -218,9 +254,10 @@ impl<'a> EventCursor<'a> {
 
     fn load_chunk(&mut self) -> Result<Option<Vec<Event<'a>>>, Error> {
         let mut lines = Vec::new();
+        let mut tokens = Vec::new();
         let mut seen_document = false;
         loop {
-            let tokens = if let Some(tokens) = self.pending_line.take() {
+            let line_tokens = if let Some(tokens) = self.pending_line.take() {
                 tokens
             } else {
                 match self.read_line()? {
@@ -229,23 +266,25 @@ impl<'a> EventCursor<'a> {
                 }
             };
             let is_start = matches!(
-                tokens.first().map(|token| &token.kind),
+                line_tokens.first().map(|token| &token.kind),
                 Some(TokenKind::DocumentStart { .. })
             );
             let is_end = matches!(
-                tokens.first().map(|token| &token.kind),
+                line_tokens.first().map(|token| &token.kind),
                 Some(TokenKind::DocumentEnd)
             );
             if is_start && seen_document {
-                self.pending_line = Some(tokens);
+                self.pending_line = Some(line_tokens);
                 break;
             }
             seen_document |= is_start
                 || !matches!(
-                    tokens.first().map(|token| &token.kind),
+                    line_tokens.first().map(|token| &token.kind),
                     Some(TokenKind::Directive { .. })
                 );
-            lines.push(Line::new(tokens));
+            let start = tokens.len();
+            tokens.extend(line_tokens);
+            lines.push(Line::new(&tokens, start, tokens.len()));
             if is_end {
                 break;
             }
@@ -253,7 +292,16 @@ impl<'a> EventCursor<'a> {
         if lines.is_empty() {
             return Ok(None);
         }
-        let events = parse_lines(lines, &self.limits, self.input_len)?;
+        let events = parse_lines(
+            Lines {
+                lines,
+                tokens,
+                stream_start: None,
+                stream_end: None,
+            },
+            &self.limits,
+            self.input_len,
+        )?;
         let documents = events
             .iter()
             .filter(|event| matches!(event, Event::DocumentStart { .. }))
@@ -320,13 +368,14 @@ impl<'a> EventCursor<'a> {
 }
 
 fn parse_lines<'a>(
-    lines: Vec<Line<'a>>,
+    lines: Lines<'a>,
     limits: &Limits,
     input_len: usize,
 ) -> Result<Vec<Event<'a>>, Error> {
-    let event_capacity = event_capacity(&lines);
+    let event_capacity = event_capacity(&lines.lines, &lines.tokens);
     let mut parser = Parser {
-        lines,
+        lines: lines.lines,
+        token_arena: lines.tokens,
         sink: EventSink::Events(Vec::with_capacity(event_capacity)),
         limits: limits.clone(),
         input_len,
@@ -341,10 +390,9 @@ fn parse_lines<'a>(
     }
 }
 
-fn event_capacity(lines: &[Line<'_>]) -> usize {
-    let emitting = lines
+fn event_capacity(lines: &[Line], tokens: &[Token<'_>]) -> usize {
+    let emitting = tokens
         .iter()
-        .flat_map(|line| &line.tokens)
         .filter(|token| {
             !matches!(
                 token.kind,
@@ -397,17 +445,19 @@ fn parse_events_with_compat<'a>(
     let mut scanner = Scanner::with_compat(input, limits.clone(), compat_flow)?;
     let Lines {
         lines,
+        tokens,
         stream_start,
         stream_end,
     } = read_lines(&mut scanner)?;
 
-    let event_capacity = event_capacity(&lines).saturating_add(2);
+    let event_capacity = event_capacity(&lines, &tokens).saturating_add(2);
     let mut events = Vec::with_capacity(event_capacity);
     events.push(Event::StreamStart {
         span: stream_start.unwrap_or_else(|| Span::empty(crate::span::Marker::new(0, 1, 1))),
     });
     let mut parser = Parser {
         lines,
+        token_arena: tokens,
         sink: EventSink::Events(events),
         limits: limits.clone(),
         input_len: input.len(),
@@ -436,9 +486,10 @@ pub(crate) fn parse_documents(
     single_document: bool,
 ) -> Result<Vec<Value>, Error> {
     let mut scanner = Scanner::new(input, limits.clone())?;
-    let lines = read_lines(&mut scanner)?.lines;
+    let lines = read_lines(&mut scanner)?;
     let mut parser = Parser {
-        lines,
+        lines: lines.lines,
+        token_arena: lines.tokens,
         sink: EventSink::Streaming(Box::new(StreamingComposer::new(
             limits.clone(),
             input.len(),
@@ -461,13 +512,10 @@ impl<'a> Parser<'a> {
         let mut index = 0;
         while index < self.lines.len() {
             let mut saw_directive = false;
-            while let Some(TokenKind::Directive { name, value }) = self
-                .lines
-                .get(index)
-                .and_then(Line::first)
-                .map(|token| &token.kind)
+            while let Some(TokenKind::Directive { name, value }) =
+                self.line_first(index).map(|token| &token.kind)
             {
-                let span = self.lines[index].first().expect("directive").span;
+                let span = self.line_first(index).expect("directive").span;
                 let event = Event::Directive {
                     name: name.clone(),
                     value: value.clone(),
@@ -489,7 +537,7 @@ impl<'a> Parser<'a> {
                 })
             {
                 return Err(self.error(
-                    self.lines[index].first().expect("checked").span,
+                    self.line_first(index).expect("checked").span,
                     "directive must be followed by a document start",
                 ));
             }
@@ -498,7 +546,7 @@ impl<'a> Parser<'a> {
             // allows any number of document suffixes between documents, so a
             // `...`-only stream has zero documents.
             if !saw_directive
-                && self.lines[index].tokens.len() == 1
+                && self.lines[index].len() == 1
                 && self.line_starts_with(index, |kind| matches!(kind, TokenKind::DocumentEnd))
             {
                 index += 1;
@@ -506,14 +554,16 @@ impl<'a> Parser<'a> {
             }
 
             let mut explicit_start = false;
-            let mut document_start_span = self.lines[index]
-                .first()
+            let mut document_start_span = self
+                .line_first(index)
                 .map_or_else(|| self.empty_span(index), |token| token.span);
             if self.line_starts_with(index, |kind| {
                 matches!(kind, TokenKind::DocumentStart { .. })
             }) {
                 explicit_start = true;
-                document_start_span = self.lines[index].tokens.remove(0).span;
+                document_start_span = self
+                    .take_line_first_span(index)
+                    .unwrap_or(document_start_span);
                 if self.lines[index].is_empty() {
                     index += 1;
                 } else {
@@ -573,8 +623,10 @@ impl<'a> Parser<'a> {
                     && self.line_starts_with(index, |kind| matches!(kind, TokenKind::DocumentEnd))
                 {
                     explicit_end = true;
-                    document_end_span = self.lines[index].tokens.remove(0).span;
-                    if let Some(token) = self.lines[index].first() {
+                    document_end_span = self
+                        .take_line_first_span(index)
+                        .unwrap_or(document_end_span);
+                    if let Some(token) = self.line_first(index) {
                         return Err(self.error(token.span, "content after document end marker"));
                     }
                     index += 1;
@@ -593,8 +645,7 @@ impl<'a> Parser<'a> {
                 && !self.line_starts_with(index, |kind| matches!(kind, TokenKind::DocumentEnd))
             {
                 return Err(self.error(
-                    self.lines[index]
-                        .first()
+                    self.line_first(index)
                         .map_or_else(|| self.empty_span(index), |token| token.span),
                     "unexpected content after document",
                 ));
@@ -996,35 +1047,68 @@ impl<'a> Parser<'a> {
         mut state: BlockState,
         stack: &mut Vec<Cont>,
     ) -> Result<Step<'a>, Error> {
-        let (rest, next_index) = if let Some(rest) = state.first.take() {
-            (rest, state.current_index)
-        } else {
-            let current_index = state.current_index;
-            if current_index >= self.lines.len()
-                || self.lines[current_index].indent != state.indent
-                || !self
-                    .line_starts_with(current_index, |kind| matches!(kind, TokenKind::BlockEntry))
-            {
-                self.emit(Event::SequenceEnd {
-                    span: self.last_span(current_index),
-                })?;
-                return Ok(Step::Return(current_index));
+        loop {
+            let (rest, next_index) = if let Some(rest) = state.first.take() {
+                (rest, state.current_index)
+            } else {
+                let current_index = state.current_index;
+                if current_index >= self.lines.len()
+                    || self.lines[current_index].indent != state.indent
+                    || !self.line_starts_with(current_index, |kind| {
+                        matches!(kind, TokenKind::BlockEntry)
+                    })
+                {
+                    self.emit(Event::SequenceEnd {
+                        span: self.last_span(current_index),
+                    })?;
+                    return Ok(Step::Return(current_index));
+                }
+                (self.line_run(current_index).from(1), current_index + 1)
+            };
+            state.entries += 1;
+            let span = self.last_span(state.current_index);
+            self.limits
+                .check_collection_entries(state.entries)
+                .map_err(|error| self.limit_at(span, error))?;
+            // The overwhelmingly common block-sequence entry is one scalar.
+            // Emit it inline so a wide sequence does not pay a continuation
+            // stack push/pop and nested parser call for every item.
+            if let Some(token) = self.single_scalar(rest) {
+                let event = Event::Scalar {
+                    value: token.0.clone(),
+                    raw: token.1.clone(),
+                    style: token.2,
+                    tag: None,
+                    anchor: None,
+                    span: token.3,
+                };
+                self.emit(event)?;
+                state.current_index = next_index;
+                continue;
             }
-            (self.line_run(current_index).from(1), current_index + 1)
-        };
-        state.entries += 1;
-        let span = self.last_span(state.current_index);
-        self.limits
-            .check_collection_entries(state.entries)
-            .map_err(|error| self.limit_at(span, error))?;
-        let (indent, depth) = (state.indent, state.depth);
-        stack.push(Cont::Sequence(state));
-        Ok(Step::Call(Call::SequenceItem {
-            rest,
-            next_index,
-            indent,
-            depth: depth + 1,
-        }))
+            let (indent, depth) = (state.indent, state.depth);
+            stack.push(Cont::Sequence(state));
+            return Ok(Step::Call(Call::SequenceItem {
+                rest,
+                next_index,
+                indent,
+                depth: depth + 1,
+            }));
+        }
+    }
+
+    /// A one-token scalar entry that needs no property or nested-node work.
+    fn single_scalar(&self, run: Run) -> Option<(Cow<'a, str>, Cow<'a, str>, ScalarStyle, Span)> {
+        if run.len() != 1 {
+            return None;
+        }
+        let token = self.token(run, 0);
+        match &token.kind {
+            TokenKind::Scalar { value, raw, style } => {
+                Some((value.clone(), raw.clone(), *style, token.span))
+            }
+            _ => None,
+        }
     }
 
     fn sequence_item(
@@ -1159,104 +1243,145 @@ impl<'a> Parser<'a> {
         mut state: BlockState,
         stack: &mut Vec<Cont>,
     ) -> Result<Step<'a>, Error> {
-        let tokens = if let Some(first) = state.first.take() {
-            first
-        } else {
-            let current_index = state.current_index;
-            if current_index >= self.lines.len()
-                || self.lines[current_index].indent != state.indent
-                || !is_mapping_line(&self.lines[current_index].tokens)
-            {
-                self.emit(Event::MappingEnd {
-                    span: self.last_span(current_index),
-                })?;
-                return Ok(Step::Return(current_index));
-            }
-            state.current_index += 1;
-            self.line_run(current_index)
-        };
-        let (indent, depth) = (state.indent, state.depth);
+        loop {
+            let tokens = if let Some(first) = state.first.take() {
+                first
+            } else {
+                let current_index = state.current_index;
+                if current_index >= self.lines.len()
+                    || self.lines[current_index].indent != state.indent
+                    || !is_mapping_line(self.line_tokens(current_index))
+                {
+                    self.emit(Event::MappingEnd {
+                        span: self.last_span(current_index),
+                    })?;
+                    return Ok(Step::Return(current_index));
+                }
+                state.current_index += 1;
+                self.line_run(current_index)
+            };
+            let (indent, depth) = (state.indent, state.depth);
 
-        if matches!(self.token(tokens, 0).kind, TokenKind::Key) {
-            // `? <node>`: the rest of the line is a block-indented node, so a
-            // `:` on this line belongs to a compact mapping inside the key.
-            // The entry's value is a separate `:` line at this indentation.
-            let key_rest = tokens.from(1);
-            let current_index = state.current_index;
-            if key_rest.is_empty() {
-                if current_index < self.lines.len() {
-                    let next_indent = self.lines[current_index].indent;
-                    let indentless_sequence = next_indent == indent
-                        && self.line_starts_with(current_index, |kind| {
-                            matches!(kind, TokenKind::BlockEntry)
-                        });
-                    if next_indent > indent || indentless_sequence {
-                        stack.push(Cont::MappingExplicitKey(state));
-                        return Ok(Step::Call(Call::Node {
-                            index: current_index,
-                            indent: next_indent,
-                            depth: depth + 1,
+            // A very common explicit entry is `? key` followed by `: value`,
+            // both single plain scalars. Emit the pair inline instead of paying
+            // continuation frames for the key and value nodes.
+            if matches!(self.token(tokens, 0).kind, TokenKind::Key) {
+                let key_rest = tokens.from(1);
+                let current_index = state.current_index;
+                if let Some(key) = self.single_scalar(key_rest)
+                    && current_index < self.lines.len()
+                    && self.lines[current_index].indent == indent
+                    && self.line_starts_with(current_index, |kind| matches!(kind, TokenKind::Value))
+                {
+                    let value = self.line_run(current_index).from(1);
+                    if let Some(value) = self.single_scalar(value) {
+                        state.entries += 1;
+                        self.limits
+                            .check_collection_entries(state.entries)
+                            .map_err(|error| self.limit_at(key.3, error))?;
+                        self.emit(Event::Scalar {
+                            value: key.0,
+                            raw: key.1,
+                            style: key.2,
                             tag: None,
                             anchor: None,
-                            bounds: NodeBounds::block_out(indent),
-                        }));
+                            span: key.3,
+                        })?;
+                        self.emit(Event::Scalar {
+                            value: value.0,
+                            raw: value.1,
+                            style: value.2,
+                            tag: None,
+                            anchor: None,
+                            span: value.3,
+                        })?;
+                        state.current_index = current_index + 1;
+                        continue;
                     }
                 }
-                let span = Span::empty(self.token(tokens, 0).span.end());
-                self.emit(self.null_scalar(span))?;
-                return self.mapping_after_explicit_key(state, stack);
             }
-            stack.push(Cont::MappingExplicitKey(state));
-            return Ok(Step::Call(Call::SequenceItem {
-                rest: key_rest,
-                next_index: current_index,
-                indent,
-                depth: depth + 1,
+
+            if matches!(self.token(tokens, 0).kind, TokenKind::Key) {
+                // `? <node>`: the rest of the line is a block-indented node, so a
+                // `:` on this line belongs to a compact mapping inside the key.
+                // The entry's value is a separate `:` line at this indentation.
+                let key_rest = tokens.from(1);
+                let current_index = state.current_index;
+                if key_rest.is_empty() {
+                    if current_index < self.lines.len() {
+                        let next_indent = self.lines[current_index].indent;
+                        let indentless_sequence = next_indent == indent
+                            && self.line_starts_with(current_index, |kind| {
+                                matches!(kind, TokenKind::BlockEntry)
+                            });
+                        if next_indent > indent || indentless_sequence {
+                            stack.push(Cont::MappingExplicitKey(state));
+                            return Ok(Step::Call(Call::Node {
+                                index: current_index,
+                                indent: next_indent,
+                                depth: depth + 1,
+                                tag: None,
+                                anchor: None,
+                                bounds: NodeBounds::block_out(indent),
+                            }));
+                        }
+                    }
+                    let span = Span::empty(self.token(tokens, 0).span.end());
+                    self.emit(self.null_scalar(span))?;
+                    return self.mapping_after_explicit_key(state, stack);
+                }
+                stack.push(Cont::MappingExplicitKey(state));
+                return Ok(Step::Call(Call::SequenceItem {
+                    rest: key_rest,
+                    next_index: current_index,
+                    indent,
+                    depth: depth + 1,
+                }));
+            }
+
+            let value_index = value_indicator_index(self.tokens(tokens));
+            let key = value_index.map_or(tokens, |index| tokens.until(index));
+            if !key.is_empty() {
+                let key_tokens = self.tokens(key);
+                let key_line = key_tokens[0].span.start().line();
+                if key_tokens.iter().any(|token| {
+                    token.span.start().line() != key_line || token.span.end().line() != key_line
+                }) {
+                    return Err(self.error(
+                        key_tokens[0].span,
+                        "implicit mapping keys must be on one line",
+                    ));
+                }
+                if let Some(value_index) = value_index
+                    && !implicit_key_fits(
+                        key_tokens[0].span.start(),
+                        self.token(tokens, value_index).span.start(),
+                    )
+                {
+                    return Err(self.error(
+                        key_tokens[0].span,
+                        "an implicit mapping key may be at most 1024 characters long",
+                    ));
+                }
+            }
+            if key.is_empty() {
+                let span = Span::empty(self.token(tokens, 0).span.start());
+                self.emit(self.null_scalar(span))?;
+                return self.mapping_after_implicit_key(state, tokens, value_index, stack);
+            }
+            stack.push(Cont::MappingImplicitKey {
+                state,
+                tokens,
+                value_index,
+                key,
+            });
+            return Ok(Step::Call(Call::Inline {
+                tokens: key,
+                depth,
+                tag: None,
+                anchor: None,
             }));
         }
-
-        let value_index = value_indicator_index(self.tokens(tokens));
-        let key = value_index.map_or(tokens, |index| tokens.until(index));
-        if !key.is_empty() {
-            let key_tokens = self.tokens(key);
-            let key_line = key_tokens[0].span.start().line();
-            if key_tokens.iter().any(|token| {
-                token.span.start().line() != key_line || token.span.end().line() != key_line
-            }) {
-                return Err(self.error(
-                    key_tokens[0].span,
-                    "implicit mapping keys must be on one line",
-                ));
-            }
-            if let Some(value_index) = value_index
-                && !implicit_key_fits(
-                    key_tokens[0].span.start(),
-                    self.token(tokens, value_index).span.start(),
-                )
-            {
-                return Err(self.error(
-                    key_tokens[0].span,
-                    "an implicit mapping key may be at most 1024 characters long",
-                ));
-            }
-        }
-        if key.is_empty() {
-            let span = Span::empty(self.token(tokens, 0).span.start());
-            self.emit(self.null_scalar(span))?;
-            return self.mapping_after_implicit_key(state, tokens, value_index, stack);
-        }
-        stack.push(Cont::MappingImplicitKey {
-            state,
-            tokens,
-            value_index,
-            key,
-        });
-        Ok(Step::Call(Call::Inline {
-            tokens: key,
-            depth,
-            tag: None,
-            anchor: None,
-        }))
     }
 
     fn mapping_after_explicit_key(
@@ -1946,16 +2071,50 @@ impl<'a> Parser<'a> {
     }
 
     /// All of line `index`'s tokens.
+    fn line_first(&self, index: usize) -> Option<&Token<'a>> {
+        let line = self.lines.get(index)?;
+        if line.is_empty() {
+            return None;
+        }
+        self.token_arena.get(line.start)
+    }
+
+    fn line_last(&self, index: usize) -> Option<&Token<'a>> {
+        let line = self.lines.get(index)?;
+        if line.is_empty() {
+            return None;
+        }
+        line.end
+            .checked_sub(1)
+            .and_then(|end| self.token_arena.get(end))
+    }
+
+    fn line_tokens(&self, index: usize) -> &[Token<'a>] {
+        let line = &self.lines[index];
+        &self.token_arena[line.start..line.end]
+    }
+
+    fn take_line_first_span(&mut self, index: usize) -> Option<Span> {
+        let line = self.lines.get_mut(index)?;
+        if line.is_empty() {
+            return None;
+        }
+        let span = self.token_arena[line.start].span;
+        line.advance(1);
+        Some(span)
+    }
+
     fn line_run(&self, index: usize) -> Run {
         Run {
             line: index,
             start: 0,
-            end: self.lines[index].tokens.len(),
+            end: self.lines[index].len(),
         }
     }
 
     fn tokens(&self, run: Run) -> &[Token<'a>] {
-        &self.lines[run.line].tokens[run.start..run.end]
+        let line = &self.lines[run.line];
+        &self.token_arena[line.start + run.start..line.start + run.end]
     }
 
     /// The token at `index` within `run`, which must exist.
@@ -2007,15 +2166,13 @@ impl<'a> Parser<'a> {
     }
 
     fn line_starts_with(&self, index: usize, predicate: impl Fn(&TokenKind<'a>) -> bool) -> bool {
-        self.lines
-            .get(index)
-            .and_then(Line::first)
+        self.line_first(index)
             .is_some_and(|token| predicate(&token.kind))
     }
 
     fn empty_span(&self, index: usize) -> Span {
-        if let Some(line) = self.lines.get(index)
-            && let Some(token) = line.first()
+        if self.lines.get(index).is_some()
+            && let Some(token) = self.line_first(index)
         {
             let marker = token.span.start();
             return Span::empty(marker);
@@ -2025,8 +2182,8 @@ impl<'a> Parser<'a> {
 
     fn last_span(&self, index: usize) -> Span {
         if index > 0
-            && let Some(line) = self.lines.get(index - 1)
-            && let Some(token) = line.tokens.last()
+            && self.lines.get(index - 1).is_some()
+            && let Some(token) = self.line_last(index - 1)
         {
             return Span::empty(token.span.end());
         }
@@ -2101,7 +2258,7 @@ impl NodeBounds {
     }
 }
 
-/// A run of one logical line's tokens, `lines[line].tokens[start..end]`.
+/// A run of one logical line's tokens in the shared token arena.
 /// Every token slice the grammar works on is one; a flow collection is
 /// always on one logical line.
 #[derive(Clone, Copy, Debug)]

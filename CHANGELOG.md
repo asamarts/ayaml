@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — 2026-11-04
+
+A performance patch for wide documents made of short block entries. There are
+no public API changes.
+
+### Performance
+
+- Parser token storage now uses a shared arena instead of one token vector per
+  logical line.
+- Single-line plain scalars are borrowed from the input instead of allocating a
+  temporary `String`.
+- Same-line source spans reuse the starting line's position data.
+- Common one-scalar sequence entries and simple explicit key/value pairs use
+  direct parser paths.
+- Token-arena growth is tuned for small inputs while bounding unused capacity
+  on wide inputs.
+
+### Validation
+
+- Default and compatibility conformance are unchanged.
+- The public 9,428-file corpus comparison reports no reading changed.
+- Full tests, fuzzing, package, and cross-platform CI pass.
+
 ## [0.1.0] — 2026-11-04
 
 The first public release. ayaml is a safe, pure-Rust YAML 1.2.2 parser, event
@@ -118,4 +141,5 @@ stream, value model, Serde implementation, and emitter.
 - Benchmark and memory results are environment-specific; the repository
   includes the harnesses and methodology, not a performance guarantee.
 
+[0.1.1]: https://github.com/asamarts/ayaml/releases/tag/v0.1.1
 [0.1.0]: https://github.com/asamarts/ayaml/releases/tag/v0.1.0

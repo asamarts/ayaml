@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 # `libyaml-compat` is only used by compatibility checks; the default parser is
 # unchanged.
-ayaml = { path = "../crates/ayaml", version = "=0.1.0", features = ["libyaml-compat"] }
+ayaml = { path = "../crates/ayaml", version = "=0.1.1", features = ["libyaml-compat"] }
 libfuzzer-sys = "=0.4.13"
 
 [[bin]]

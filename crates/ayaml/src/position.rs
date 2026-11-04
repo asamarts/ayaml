@@ -112,6 +112,43 @@ impl LineIndex {
         Some(Marker::new(index, line + 1, column))
     }
 
+    /// Return a span for `start..end`, reusing the start line for the common
+    /// same-line case.
+    #[must_use]
+    pub(crate) fn span(&self, input: &str, start: usize, end: usize) -> Option<crate::span::Span> {
+        let start_marker = self.marker(input, start)?;
+        if end < start {
+            return None;
+        }
+        if end == start {
+            return Some(crate::span::Span::empty(start_marker));
+        }
+        if end > self.len || (!self.ascii && !input.is_char_boundary(end)) {
+            return None;
+        }
+        let line = self.last_line.get();
+        let next_start = self.starts.get(line + 1).copied().unwrap_or(self.len);
+        if end < next_start || (end == next_start && line + 1 == self.starts.len()) {
+            let line_start = self.starts[line];
+            let content_start = if line == 0 {
+                line_start.max(self.content_start)
+            } else {
+                line_start
+            };
+            let column = if end < content_start {
+                1
+            } else if self.ascii {
+                end - content_start + 1
+            } else {
+                input[content_start..end].chars().count() + 1
+            };
+            let end_marker = crate::span::Marker::new(end, line + 1, column);
+            return Some(crate::span::Span::new(start_marker, end_marker));
+        }
+        self.marker(input, end)
+            .map(|end_marker| crate::span::Span::new(start_marker, end_marker))
+    }
+
     /// Return the number of lines (including a final empty line after a break).
     #[must_use]
     /// Byte offset of the line containing `index`.
