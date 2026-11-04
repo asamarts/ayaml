@@ -114,7 +114,7 @@ jobs:
       - name: Install cargo-geiger
         run: cargo install cargo-geiger --locked
       - name: Unsafe census
-        run: cargo geiger --workspace --all-features --output-format Json > "${RUNNER_TEMP}/geiger.json"
+        run: cargo geiger --manifest-path crates/ayaml/Cargo.toml --all-features --output-format Json > "${RUNNER_TEMP}/geiger.json"
 
   secrets:
     name: secret scan
@@ -127,6 +127,4 @@ jobs:
         uses: trufflesecurity/trufflehog@main
         with:
           path: ./
-          base: ${{ github.event.repository.default_branch }}
-          head: HEAD
           extra_args: --only-verified

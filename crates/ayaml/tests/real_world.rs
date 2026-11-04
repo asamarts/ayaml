@@ -84,7 +84,9 @@ fn check(name: &str, yaml_serde: YamlSerde) {
     if std::env::var_os("AYAML_BLESS").is_some() {
         std::fs::write(&golden_path, &actual).expect("bless");
     }
-    let golden = std::fs::read_to_string(&golden_path).expect("golden");
+    let golden = std::fs::read_to_string(&golden_path)
+        .expect("golden")
+        .replace("\r\n", "\n");
     assert_eq!(actual, golden, "{name}: documents differ from {name}.json");
 
     // yaml_serde.
