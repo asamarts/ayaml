@@ -1,0 +1,12 @@
+# P32: a quoted scalar holds a raw DEL (U+007F) in the third symbol name.
+# Reduced from llvm/test/tools/llvm-dlltool/Inputs/llvm_foo_dll_1.yaml.
+--- !COFF
+header:
+  Machine: IMAGE_FILE_MACHINE_AMD64
+symbols:
+  - Name: __imp_foo
+    Value: 0
+  - Name: __NULL_IMPORT_DESCRIPTOR
+    Value: 0
+  - Name: "foo_NULL_THUNK_DATA"
+    Value: 0

@@ -1,0 +1,41 @@
+[
+  {
+    "intrinsics": [
+      {
+        "name": "vand{neon_type.no}",
+        "compose": [
+          {
+            "FnCall": [
+              "simd_and",
+              [
+                "a",
+                "b"
+              ]
+            ]
+          }
+        ]
+      },
+      {
+        "name": "vabd{neon_type.no}",
+        "compose": [
+          {
+            "FnCall": [
+              "simd_cast",
+              [
+                {
+                  "FnCall": [
+                    "vabd_{neon_type[0]}",
+                    [
+                      "c",
+                      "d"
+                    ]
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      }
+    ]
+  }
+]

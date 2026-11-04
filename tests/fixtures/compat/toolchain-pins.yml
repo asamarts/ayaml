@@ -1,0 +1,434 @@
+# Synthetic compatibility fixture.
+#
+# This ruleset exercises the YAML constructs used by the compatibility
+# profile: block mappings and sequences, flow collections, tagged scalars,
+# cross-file rules, regexes, JSON/YAML extraction selectors, and deeply
+# nested conditions. It is an anonymized synthetic compatibility
+# fixture; it carries no external attribution.
+#
+version: 1
+
+facts:
+  # Node.js: .nvmrc is the explicit authority.
+  - id: toolchain_node_anchor_present
+    any_file_exists: .nvmrc
+  - id: toolchain_node_anchor_exact
+    file_content_matches:
+      paths: .nvmrc
+      pattern: '\A[ \t]*v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?[ \t]*(?:\r?\n)?\z'
+  - id: toolchain_node_anchor_stable
+    file_content_matches:
+      paths: .nvmrc
+      pattern: '\A[ \t]*v?[0-9]+\.[0-9]+\.[0-9]+[ \t]*(?:\r?\n)?\z'
+
+  # Rust: rust-toolchain.toml [toolchain].channel is the authority.
+  - id: toolchain_rust_anchor_present
+    any_file_exists: rust-toolchain.toml
+  - id: toolchain_rust_anchor_exact
+    file_content_matches:
+      paths: rust-toolchain.toml
+      extract: { toml: "$.toolchain.channel" }
+      pattern: '\A(?:[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?|nightly-[0-9]{4}-[0-9]{2}-[0-9]{2})\z'
+  - id: toolchain_rust_anchor_stable
+    file_content_matches:
+      paths: rust-toolchain.toml
+      extract: { toml: "$.toolchain.channel" }
+      pattern: '\A[0-9]+\.[0-9]+\.[0-9]+\z'
+
+  # Python: .python-version is the authority.
+  - id: toolchain_python_anchor_present
+    any_file_exists: .python-version
+  - id: toolchain_python_anchor_exact
+    file_content_matches:
+      paths: .python-version
+      pattern: '\A[ \t]*v?[0-9]+\.[0-9]+\.[0-9]+(?:(?:a|b|rc)[0-9]+)?(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?[ \t]*(?:\r?\n)?\z'
+  - id: toolchain_python_anchor_stable
+    file_content_matches:
+      paths: .python-version
+      pattern: '\A[ \t]*v?[0-9]+\.[0-9]+\.[0-9]+[ \t]*(?:\r?\n)?\z'
+
+  # Ruby: .ruby-version is the authority.
+  - id: toolchain_ruby_anchor_present
+    any_file_exists: .ruby-version
+  - id: toolchain_ruby_anchor_exact
+    file_content_matches:
+      paths: .ruby-version
+      pattern: '\A[ \t]*v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?[ \t]*(?:\r?\n)?\z'
+  - id: toolchain_ruby_anchor_stable
+    file_content_matches:
+      paths: .ruby-version
+      pattern: '\A[ \t]*v?[0-9]+\.[0-9]+\.[0-9]+[ \t]*(?:\r?\n)?\z'
+
+  # JVM: .java-version is the authority. Cross-vendor surfaces compare the
+  # feature/interim/update release core, not vendor or build identity.
+  - id: toolchain_jvm_anchor_present
+    any_file_exists: .java-version
+  - id: toolchain_jvm_anchor_exact
+    file_content_matches:
+      paths: .java-version
+      pattern: '\A[ \t]*(?:[A-Za-z][A-Za-z0-9_-]*-)?[1-9][0-9]*\.[0-9]+\.[0-9]+(?:[-+_][0-9A-Za-z._+-]+)?[ \t]*(?:\r?\n)?\z'
+
+  # .NET: global.json sdk.version is the authority.
+  - id: toolchain_dotnet_anchor_present
+    any_file_exists: global.json
+  - id: toolchain_dotnet_anchor_exact
+    file_content_matches:
+      paths: global.json
+      extract: { json: "$.sdk.version" }
+      pattern: '\A[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?\z'
+  - id: toolchain_dotnet_anchor_stable
+    file_content_matches:
+      paths: global.json
+      extract: { json: "$.sdk.version" }
+      pattern: '\A[0-9]+\.[0-9]+\.[0-9]+\z'
+
+rules:
+  # Node.js ----------------------------------------------------------
+  - id: toolchain-node-anchor-exact
+    when: facts.toolchain_node_anchor_present
+    kind: file_content_matches
+    paths: .nvmrc
+    pattern: '\A[ \t]*v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?[ \t]*(?:\r?\n)?\z'
+    level: warning
+    message: ".nvmrc must contain one exact Node.js version, not a range or moving alias."
+
+  - id: toolchain-node-declarations-coherent
+    when: facts.toolchain_node_anchor_exact
+    kind: cross_file
+    source:
+      file: .nvmrc
+      extract:
+        regex: '\A[ \t]*v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?)[ \t]*(?:\r?\n)?\z'
+    targets:
+      - file: .node-version
+        extract:
+          regex: '\A[ \t]*v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?)[ \t]*(?:\r?\n)?\z'
+      - file: .tool-versions
+        extract:
+          regex: '(?m)^[ \t]*(?:node|nodejs)[ \t]+v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?)[ \t]*(?:#.*)?$'
+      - file: package.json
+        extract: { json: "$['engines','volta'].node" }
+        matches: '^[0-9]+[.][0-9]+[.][0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:[+][0-9A-Za-z]+[0-9A-Za-z.-]*)?$'
+    relation: equals
+    allow_missing_target: true
+    level: warning
+    message: "Node.js declaration differs from .nvmrc."
+    fix: { sync_from: {} }
+
+  - id: toolchain-node-dockerfiles-coherent
+    when: facts.toolchain_node_anchor_exact and facts.toolchain_node_anchor_stable
+    kind: cross_file
+    source: { file: .nvmrc, extract: { regex: '\A[ \t]*v?([0-9]+\.[0-9]+\.[0-9]+)[ \t]*(?:\r?\n)?\z' } }
+    targets:
+      files: "**/Dockerfile*"
+      extract:
+        regex: '(?mi)^[ \t]*FROM(?:[ \t]+--platform=\S+)?[ \t]+(?:[A-Za-z0-9._-]+(?::[0-9]+)?/)*(?:library/)?node:v?([0-9]+\.[0-9]+\.[0-9]+)(?:-[A-Za-z0-9._-]+)*(?:@sha256:[a-f0-9]{64})?(?:[ \t]+AS[ \t]+\S+)?[ \t]*$'
+    relation: equals
+    allow_missing_target: true
+    level: warning
+    message: "Node.js Docker base release differs from .nvmrc."
+    fix: { sync_from: {} }
+
+  - id: toolchain-node-github-actions-coherent
+    when: facts.toolchain_node_anchor_exact
+    kind: cross_file
+    source: { file: .nvmrc, extract: { regex: '\A[ \t]*v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?)[ \t]*(?:\r?\n)?\z' } }
+    targets:
+      files: ".github/workflows/*.{yml,yaml}"
+      extract:
+        yaml: "$.jobs.*.steps[?match(@.uses, '^actions/setup-node@.+') && match(@.with['node-version'], '^[0-9]+[.][0-9]+[.][0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:[+][0-9A-Za-z]+[0-9A-Za-z.-]*)?$')].with['node-version']"
+    relation: equals
+    allow_missing_target: true
+    level: warning
+    message: "actions/setup-node version differs from .nvmrc."
+    fix: { sync_from: {} }
+
+  # Rust -------------------------------------------------------------
+  - id: toolchain-rust-anchor-exact
+    when: facts.toolchain_rust_anchor_present
+    kind: toml_path_matches
+    paths: rust-toolchain.toml
+    path: "$.toolchain.channel"
+    matches: '^(?:[0-9]+[.][0-9]+[.][0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:[+][0-9A-Za-z]+[0-9A-Za-z.-]*)?|nightly-[0-9]{4}-[0-9]{2}-[0-9]{2})$'
+    level: warning
+    message: "rust-toolchain.toml must declare an exact release or dated nightly channel."
+
+  - id: toolchain-rust-declarations-coherent
+    when: facts.toolchain_rust_anchor_exact
+    kind: cross_file
+    source:
+      file: rust-toolchain.toml
+      extract: { toml: "$.toolchain.channel" }
+    targets:
+      - file: rust-toolchain
+        extract:
+          regex: '(?m)(?:\A[ \t]*|^[ \t]*channel[ \t]*=[ \t]*["''])((?:[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?|nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}))(?:["''][ \t]*(?:#.*)?$|[ \t]*(?:\r?\n)?\z)'
+      - file: .tool-versions
+        extract:
+          regex: '(?m)^[ \t]*rust[ \t]+((?:[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?|nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}))[ \t]*(?:#.*)?$'
+    relation: equals
+    allow_missing_target: true
+    level: warning
+    message: "Rust toolchain declaration differs from rust-toolchain.toml."
+    fix: { sync_from: {} }
+
+  - id: toolchain-rust-dockerfiles-coherent
+    when: facts.toolchain_rust_anchor_exact and facts.toolchain_rust_anchor_stable
+    kind: cross_file
+    source:
+      file: rust-toolchain.toml
+      extract: { toml: "$.toolchain.channel" }
+    targets:
+      files: "**/Dockerfile*"
+      extract:
+        regex: '(?mi)^[ \t]*FROM(?:[ \t]+--platform=\S+)?[ \t]+(?:[A-Za-z0-9._-]+(?::[0-9]+)?/)*(?:library/)?rust:([0-9]+\.[0-9]+\.[0-9]+)(?:-[A-Za-z0-9._-]+)*(?:@sha256:[a-f0-9]{64})?(?:[ \t]+AS[ \t]+\S+)?[ \t]*$'
+    relation: equals
+    allow_missing_target: true
+    level: warning
+    message: "Rust Docker base release differs from rust-toolchain.toml."
+    fix: { sync_from: {} }
+
+  - id: toolchain-rust-github-actions-coherent
+    when: facts.toolchain_rust_anchor_exact
+    kind: cross_file
+    source:
+      file: rust-toolchain.toml
+      extract: { toml: "$.toolchain.channel" }
+    targets:
+      files: ".github/workflows/*.{yml,yaml}"
+      extract:
+        yaml: "$.jobs.*.steps[?match(@.uses, '^(?:dtolnay/rust-toolchain|actions-rust-lang/setup-rust-toolchain|actions-rs/toolchain)@.+') && match(@.with.toolchain, '^(?:[0-9]+[.][0-9]+[.][0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:[+][0-9A-Za-z]+[0-9A-Za-z.-]*)?|nightly-[0-9]{4}-[0-9]{2}-[0-9]{2})$')].with.toolchain"
+    relation: equals
+    allow_missing_target: true
+    level: warning
+    message: "GitHub Actions Rust toolchain differs from rust-toolchain.toml."
+    fix: { sync_from: {} }
+
+  # Python -----------------------------------------------------------
+  - id: toolchain-python-anchor-exact
+    when: facts.toolchain_python_anchor_present
+    kind: file_content_matches
+    paths: .python-version
+    pattern: '\A[ \t]*v?[0-9]+\.[0-9]+\.[0-9]+(?:(?:a|b|rc)[0-9]+)?(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?[ \t]*(?:\r?\n)?\z'
+    level: warning
+    message: ".python-version must contain one exact Python version."
+
+  - id: toolchain-python-declarations-coherent
+    when: facts.toolchain_python_anchor_exact
+    kind: cross_file
+    source: { file: .python-version, extract: { regex: '\A[ \t]*v?([0-9]+\.[0-9]+\.[0-9]+(?:(?:a|b|rc)[0-9]+)?(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?)[ \t]*(?:\r?\n)?\z' } }
+    targets:
+      - file: .tool-versions
+        extract:
+          regex: '(?m)^[ \t]*python[ \t]+v?([0-9]+\.[0-9]+\.[0-9]+(?:(?:a|b|rc)[0-9]+)?(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?)[ \t]*(?:#.*)?$'
+      - file: runtime.txt
+        extract:
+          regex: '\A[ \t]*python-v?([0-9]+\.[0-9]+\.[0-9]+(?:(?:a|b|rc)[0-9]+)?(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?)[ \t]*(?:\r?\n)?\z'
+      - file: Pipfile
+        extract: { toml: "$.requires.python_full_version" }
+        matches: '^[0-9]+[.][0-9]+[.][0-9]+(?:(?:a|b|rc)[0-9]+)?(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:[+][0-9A-Za-z]+[0-9A-Za-z.-]*)?$'
+    relation: equals
+    allow_missing_target: true
+    level: warning
+    message: "Python toolchain declaration differs from .python-version."
+    fix: { sync_from: {} }
+
+  - id: toolchain-python-dockerfiles-coherent
+    when: facts.toolchain_python_anchor_exact and facts.toolchain_python_anchor_stable
+    kind: cross_file
+    source: { file: .python-version, extract: { regex: '\A[ \t]*v?([0-9]+\.[0-9]+\.[0-9]+)[ \t]*(?:\r?\n)?\z' } }
+    targets:
+      files: "**/Dockerfile*"
+      extract:
+        regex: '(?mi)^[ \t]*FROM(?:[ \t]+--platform=\S+)?[ \t]+(?:[A-Za-z0-9._-]+(?::[0-9]+)?/)*(?:library/)?python:([0-9]+\.[0-9]+\.[0-9]+)(?:-[A-Za-z0-9._-]+)*(?:@sha256:[a-f0-9]{64})?(?:[ \t]+AS[ \t]+\S+)?[ \t]*$'
+    relation: equals
+    allow_missing_target: true
+    level: warning
+    message: "Python Docker base release differs from .python-version."
+    fix: { sync_from: {} }
+
+  - id: toolchain-python-github-actions-coherent
+    when: facts.toolchain_python_anchor_exact
+    kind: cross_file
+    source: { file: .python-version, extract: { regex: '\A[ \t]*v?([0-9]+\.[0-9]+\.[0-9]+(?:(?:a|b|rc)[0-9]+)?(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?)[ \t]*(?:\r?\n)?\z' } }
+    targets:
+      files: ".github/workflows/*.{yml,yaml}"
+      extract:
+        yaml: "$.jobs.*.steps[?match(@.uses, '^actions/setup-python@.+') && match(@.with['python-version'], '^[0-9]+[.][0-9]+[.][0-9]+(?:(?:a|b|rc)[0-9]+)?(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:[+][0-9A-Za-z]+[0-9A-Za-z.-]*)?$')].with['python-version']"
+    relation: equals
+    allow_missing_target: true
+    level: warning
+    message: "actions/setup-python version differs from .python-version."
+    fix: { sync_from: {} }
+
+  # Ruby -------------------------------------------------------------
+  - id: toolchain-ruby-anchor-exact
+    when: facts.toolchain_ruby_anchor_present
+    kind: file_content_matches
+    paths: .ruby-version
+    pattern: '\A[ \t]*v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?[ \t]*(?:\r?\n)?\z'
+    level: warning
+    message: ".ruby-version must contain one exact Ruby version."
+
+  - id: toolchain-ruby-declarations-coherent
+    when: facts.toolchain_ruby_anchor_exact
+    kind: cross_file
+    source: { file: .ruby-version, extract: { regex: '\A[ \t]*v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?)[ \t]*(?:\r?\n)?\z' } }
+    targets:
+      - file: .tool-versions
+        extract:
+          regex: '(?m)^[ \t]*ruby[ \t]+v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?)[ \t]*(?:#.*)?$'
+      - file: Gemfile
+        extract:
+          regex: '(?m)^ruby[ \t]*["'']v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?)["'']'
+      - file: Gemfile.lock
+        extract:
+          regex: '(?m)^[ \t]+ruby[ \t]+v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?)(?:p[0-9]+)?[ \t]*$'
+    relation: equals
+    allow_missing_target: true
+    level: warning
+    message: "Ruby toolchain declaration differs from .ruby-version."
+    fix: { sync_from: {} }
+
+  - id: toolchain-ruby-dockerfiles-coherent
+    when: facts.toolchain_ruby_anchor_exact and facts.toolchain_ruby_anchor_stable
+    kind: cross_file
+    source: { file: .ruby-version, extract: { regex: '\A[ \t]*v?([0-9]+\.[0-9]+\.[0-9]+)[ \t]*(?:\r?\n)?\z' } }
+    targets:
+      files: "**/Dockerfile*"
+      extract:
+        regex: '(?mi)^[ \t]*FROM(?:[ \t]+--platform=\S+)?[ \t]+(?:[A-Za-z0-9._-]+(?::[0-9]+)?/)*(?:library/)?ruby:([0-9]+\.[0-9]+\.[0-9]+)(?:-[A-Za-z0-9._-]+)*(?:@sha256:[a-f0-9]{64})?(?:[ \t]+AS[ \t]+\S+)?[ \t]*$'
+    relation: equals
+    allow_missing_target: true
+    level: warning
+    message: "Ruby Docker base release differs from .ruby-version."
+    fix: { sync_from: {} }
+
+  - id: toolchain-ruby-github-actions-coherent
+    when: facts.toolchain_ruby_anchor_exact
+    kind: cross_file
+    source: { file: .ruby-version, extract: { regex: '\A[ \t]*v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?)[ \t]*(?:\r?\n)?\z' } }
+    targets:
+      files: ".github/workflows/*.{yml,yaml}"
+      extract:
+        yaml: "$.jobs.*.steps[?match(@.uses, '^ruby/setup-ruby@.+') && match(@.with['ruby-version'], '^[0-9]+[.][0-9]+[.][0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:[+][0-9A-Za-z]+[0-9A-Za-z.-]*)?$')].with['ruby-version']"
+    relation: equals
+    allow_missing_target: true
+    level: warning
+    message: "ruby/setup-ruby version differs from .ruby-version."
+    fix: { sync_from: {} }
+
+  # JVM --------------------------------------------------------------
+  - id: toolchain-jvm-anchor-exact
+    when: facts.toolchain_jvm_anchor_present
+    kind: file_content_matches
+    paths: .java-version
+    pattern: '\A[ \t]*(?:[A-Za-z][A-Za-z0-9_-]*-)?[1-9][0-9]*\.[0-9]+\.[0-9]+(?:[-+_][0-9A-Za-z._+-]+)?[ \t]*(?:\r?\n)?\z'
+    level: warning
+    message: ".java-version must contain one exact three-component JVM release."
+
+  - id: toolchain-jvm-declarations-coherent
+    when: facts.toolchain_jvm_anchor_exact
+    kind: cross_file
+    source: { file: .java-version, extract: { regex: '\A[ \t]*(?:[A-Za-z][A-Za-z0-9_-]*-)?([1-9][0-9]*\.[0-9]+\.[0-9]+)[^ \t\r\n]*[ \t]*(?:\r?\n)?\z' } }
+    targets:
+      - file: .tool-versions
+        extract:
+          regex: '(?m)^[ \t]*java[ \t]+(?:[A-Za-z][A-Za-z0-9_-]*-)?([1-9][0-9]*\.[0-9]+\.[0-9]+)[^ \t#\r\n]*[ \t]*(?:#.*)?$'
+      - file: .sdkmanrc
+        extract:
+          regex: '(?m)^[ \t]*java[ \t]*=[ \t]*(?:[A-Za-z][A-Za-z0-9_-]*-)?([1-9][0-9]*\.[0-9]+\.[0-9]+)[^ \t#\r\n]*[ \t]*(?:#.*)?$'
+    relation: equals
+    allow_missing_target: true
+    level: warning
+    message: "JVM release declaration differs from .java-version."
+    fix: { sync_from: {} }
+
+  - id: toolchain-jvm-dockerfiles-coherent
+    when: facts.toolchain_jvm_anchor_exact
+    kind: cross_file
+    source: { file: .java-version, extract: { regex: '\A[ \t]*(?:[A-Za-z][A-Za-z0-9_-]*-)?([1-9][0-9]*\.[0-9]+\.[0-9]+)[^ \t\r\n]*[ \t]*(?:\r?\n)?\z' } }
+    targets:
+      files: "**/Dockerfile*"
+      extract:
+        regex: '(?mi)^[ \t]*FROM(?:[ \t]+--platform=\S+)?[ \t]+(?:[A-Za-z0-9._-]+(?::[0-9]+)?/)*(?:eclipse-temurin|amazoncorretto|azul/zulu-openjdk|openjdk):([1-9][0-9]*\.[0-9]+\.[0-9]+)(?:[-_+][A-Za-z0-9._+-]+)*(?:@sha256:[a-f0-9]{64})?(?:[ \t]+AS[ \t]+\S+)?[ \t]*$'
+    relation: equals
+    allow_missing_target: true
+    level: warning
+    message: "JVM Docker base release differs from .java-version."
+    fix: { sync_from: {} }
+
+  - id: toolchain-jvm-github-actions-coherent
+    when: facts.toolchain_jvm_anchor_exact
+    kind: cross_file
+    source: { file: .java-version, extract: { regex: '\A[ \t]*(?:[A-Za-z][A-Za-z0-9_-]*-)?([1-9][0-9]*\.[0-9]+\.[0-9]+)[^ \t\r\n]*[ \t]*(?:\r?\n)?\z' } }
+    targets:
+      files: ".github/workflows/*.{yml,yaml}"
+      extract:
+        yaml: "$.jobs.*.steps[?match(@.uses, '^actions/setup-java@.+') && match(@.with['java-version'], '^[1-9][0-9]*[.][0-9]+[.][0-9]+$')].with['java-version']"
+    relation: equals
+    allow_missing_target: true
+    level: warning
+    message: "actions/setup-java release differs from .java-version."
+    fix: { sync_from: {} }
+
+  # .NET -------------------------------------------------------------
+  - id: toolchain-dotnet-anchor-exact
+    when: facts.toolchain_dotnet_anchor_present
+    kind: json_path_matches
+    paths: global.json
+    path: "$.sdk.version"
+    matches: '^[0-9]+[.][0-9]+[.][0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:[+][0-9A-Za-z]+[0-9A-Za-z.-]*)?$'
+    level: warning
+    message: "global.json sdk.version must be an exact .NET SDK version."
+
+  - id: toolchain-dotnet-declarations-coherent
+    when: facts.toolchain_dotnet_anchor_exact
+    kind: cross_file
+    source:
+      file: global.json
+      extract: { json: "$.sdk.version" }
+    targets:
+      - file: .tool-versions
+        extract:
+          regex: '(?m)^[ \t]*(?:dotnet|dotnet-core)[ \t]+v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z]+[0-9A-Za-z.-]*)?)[ \t]*(?:#.*)?$'
+      - file: global.json
+        extract: { json: "$.tools.dotnet" }
+        matches: '^[0-9]+[.][0-9]+[.][0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:[+][0-9A-Za-z]+[0-9A-Za-z.-]*)?$'
+    relation: equals
+    allow_missing_target: true
+    level: warning
+    message: ".NET SDK declaration differs from global.json sdk.version."
+    fix: { sync_from: {} }
+
+  - id: toolchain-dotnet-dockerfiles-coherent
+    when: facts.toolchain_dotnet_anchor_exact and facts.toolchain_dotnet_anchor_stable
+    kind: cross_file
+    source:
+      file: global.json
+      extract: { json: "$.sdk.version" }
+    targets:
+      files: "**/Dockerfile*"
+      extract:
+        regex: '(?mi)^[ \t]*FROM(?:[ \t]+--platform=\S+)?[ \t]+mcr\.microsoft\.com/dotnet/sdk:([0-9]+\.[0-9]+\.[0-9]+)(?:-[A-Za-z0-9._-]+)*(?:@sha256:[a-f0-9]{64})?(?:[ \t]+AS[ \t]+\S+)?[ \t]*$'
+    relation: equals
+    allow_missing_target: true
+    level: warning
+    message: ".NET SDK Docker image differs from global.json sdk.version."
+    fix: { sync_from: {} }
+
+  - id: toolchain-dotnet-github-actions-coherent
+    when: facts.toolchain_dotnet_anchor_exact
+    kind: cross_file
+    source:
+      file: global.json
+      extract: { json: "$.sdk.version" }
+    targets:
+      files: ".github/workflows/*.{yml,yaml}"
+      extract:
+        yaml: "$.jobs.*.steps[?match(@.uses, '^actions/setup-dotnet@.+') && match(@.with['dotnet-version'], '^[0-9]+[.][0-9]+[.][0-9]+(?:-[0-9A-Za-z]+[0-9A-Za-z.-]*)?(?:[+][0-9A-Za-z]+[0-9A-Za-z.-]*)?$')].with['dotnet-version']"
+    relation: equals
+    allow_missing_target: true
+    level: warning
+    message: "actions/setup-dotnet SDK version differs from global.json sdk.version."
+    fix: { sync_from: {} }

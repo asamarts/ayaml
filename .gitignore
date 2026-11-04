@@ -1,0 +1,11 @@
+/target/
+/AGENTS.md
+/CLAUDE.md
+/fuzz/target
+/fuzz/artifacts
+/fuzz/corpus/**/*
+!/fuzz/corpus/parse/basic.yml
+!/fuzz/corpus/emit/block.yml
+!/fuzz/corpus/emit/alias.yml
+!/fuzz/corpus/borrowed/
+!/fuzz/corpus/borrowed/basic.yml

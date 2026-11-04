@@ -1,0 +1,23 @@
+[
+  {
+    "!COFF": {
+      "header": {
+        "Machine": "IMAGE_FILE_MACHINE_AMD64"
+      },
+      "symbols": [
+        {
+          "Name": "__imp_foo",
+          "Value": 0
+        },
+        {
+          "Name": "__NULL_IMPORT_DESCRIPTOR",
+          "Value": 0
+        },
+        {
+          "Name": "foo_NULL_THUNK_DATA",
+          "Value": 0
+        }
+      ]
+    }
+  }
+]

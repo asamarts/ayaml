@@ -1,0 +1,17 @@
+## P6: two `...` markers end the first document; the second starts no
+## document. Reduced from llvm/test/ObjectYAML/MachO/DWARF-debug_info.yaml.
+--- !mach-o
+FileHeader:
+  magic: 0xFEEDFACF
+  ncmds: 1
+...
+...
+
+#      DWARF32: DWARF:
+#      DWARF32:   debug_info:
+
+--- !mach-o
+FileHeader:
+  magic: 0xFEEDFACF
+  ncmds: 2
+...

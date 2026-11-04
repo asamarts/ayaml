@@ -1,0 +1,19 @@
+[package]
+name = "ayaml-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Pinned YAML Test Suite and ayaml fixture conformance runner"
+
+[features]
+# Run the suite against the libyaml-compatible parser. Enable it only
+# with `-p ayaml-conformance` so the workspace build keeps the default parser.
+compat = ["ayaml/libyaml-compat"]
+
+[dependencies]
+ayaml = { path = "../ayaml", version = "=0.1.0", features = ["bench-internals"] }
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,2399 @@
+//! Lexical scanner foundation for P1.
+//!
+//! This is an iterative UTF-8 scanner that produces spanned tokens. It does
+//! not yet expose a public parser entry point or parse block structure; those
+//! are P1/P2 work. The token layer is deliberately kept below the public API
+//! until it is complete enough to back `parse_events`.
+
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::fmt;
+
+use crate::error::{Error, ErrorKind};
+use crate::event::ScalarStyle;
+use crate::limits::Limits;
+use crate::position::LineIndex;
+use crate::span::Span;
+use crate::tag::Tag;
+
+/// A lexical token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Token<'a> {
+    pub kind: TokenKind<'a>,
+    pub span: Span,
+}
+
+/// The token vocabulary the scanner currently produces.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TokenKind<'a> {
+    StreamStart,
+    StreamEnd,
+    DocumentStart {
+        explicit: bool,
+    },
+    DocumentEnd,
+    Directive {
+        name: Cow<'a, str>,
+        value: Cow<'a, str>,
+    },
+    BlockEntry,
+    Key,
+    Value,
+    FlowSequenceStart,
+    FlowSequenceEnd,
+    FlowMappingStart,
+    FlowMappingEnd,
+    FlowEntry,
+    LineBreak,
+    Scalar {
+        value: Cow<'a, str>,
+        raw: Cow<'a, str>,
+        style: ScalarStyle,
+    },
+    Anchor(Cow<'a, str>),
+    Alias(Cow<'a, str>),
+    Tag(Tag),
+}
+
+impl fmt::Display for TokenKind<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StreamStart => formatter.write_str("stream start"),
+            Self::StreamEnd => formatter.write_str("stream end"),
+            Self::DocumentStart { explicit } => {
+                write!(formatter, "document start ({explicit})")
+            }
+            Self::DocumentEnd => formatter.write_str("document end"),
+            Self::Directive { name, .. } => write!(formatter, "directive %{name}"),
+            Self::BlockEntry => formatter.write_str("block entry"),
+            Self::Key => formatter.write_str("key indicator"),
+            Self::Value => formatter.write_str("value indicator"),
+            Self::FlowSequenceStart => formatter.write_str("["),
+            Self::FlowSequenceEnd => formatter.write_str("]"),
+            Self::FlowMappingStart => formatter.write_str("{"),
+            Self::FlowMappingEnd => formatter.write_str("}"),
+            Self::FlowEntry => formatter.write_str(","),
+            Self::LineBreak => formatter.write_str("line break"),
+            Self::Scalar { .. } => formatter.write_str("scalar"),
+            Self::Anchor(_) => formatter.write_str("anchor"),
+            Self::Alias(_) => formatter.write_str("alias"),
+            Self::Tag(_) => formatter.write_str("tag"),
+        }
+    }
+}
+
+/// An iterative scanner over a UTF-8 YAML input.
+#[derive(Debug)]
+pub(crate) struct Scanner<'a> {
+    input: &'a str,
+    pos: usize,
+    line_index: LineIndex,
+    limits: Limits,
+    tokens: usize,
+    anchors: usize,
+    flow_level: usize,
+    flow_stack: Vec<char>,
+    flow_allow_zero_indent: Vec<bool>,
+    previous_flow_end: bool,
+    yaml_directive_seen: bool,
+    tag_handles: HashMap<String, String>,
+    pending_tag_handles: Vec<(String, String)>,
+    started: bool,
+    finished: bool,
+    initial_bom: bool,
+    compat_flow: bool,
+    /// Whether a document has started: a `---`, or any node token since the
+    /// last `...`. A byte order mark may appear only outside a document or
+    /// right before the next one (P16).
+    document_open: bool,
+    /// Byte offsets of the non-printable characters that only a quoted
+    /// scalar may hold (P32), in order, and the first one not yet checked.
+    quoted_only: Vec<usize>,
+    quoted_only_next: usize,
+}
+
+impl<'a> Scanner<'a> {
+    /// Create a scanner and check the input-size limit.
+    pub(crate) fn new(input: &'a str, limits: Limits) -> Result<Self, Error> {
+        Self::with_compat(input, limits, false)
+    }
+
+    pub(crate) fn with_compat(
+        input: &'a str,
+        limits: Limits,
+        compat_flow: bool,
+    ) -> Result<Self, Error> {
+        limits.validate()?;
+        limits.check_input(input.len()).map_err(|error| {
+            Error::from(error).with_span(Span::empty(crate::span::Marker::new(0, 1, 1)))
+        })?;
+        let quoted_only = match non_printable_characters(input) {
+            Ok(quoted_only) => quoted_only,
+            Err(index) => {
+                let marker = LineIndex::new(input).marker(input, index);
+                let error = non_printable_error(input, index);
+                return Err(match marker {
+                    Some(marker) => error.with_span(Span::empty(marker)),
+                    None => error,
+                });
+            }
+        };
+        let initial_bom = input.starts_with('\u{feff}');
+        let pos = if initial_bom { 3 } else { 0 };
+        Ok(Self {
+            input,
+            pos,
+            line_index: LineIndex::new(input),
+            limits,
+            tokens: 0,
+            anchors: 0,
+            flow_level: 0,
+            flow_stack: Vec::new(),
+            flow_allow_zero_indent: Vec::new(),
+            previous_flow_end: false,
+            yaml_directive_seen: false,
+            tag_handles: default_tag_handles(),
+            pending_tag_handles: Vec::new(),
+            started: false,
+            finished: false,
+            initial_bom,
+            compat_flow,
+            document_open: false,
+            quoted_only,
+            quoted_only_next: 0,
+        })
+    }
+
+    /// Return the next token, or `None` after the stream end has been emitted.
+    pub(crate) fn next_token(&mut self) -> Result<Option<Token<'a>>, Error> {
+        if !self.started {
+            self.started = true;
+            return self.make(TokenKind::StreamStart, self.pos, self.pos);
+        }
+        if self.finished {
+            return Ok(None);
+        }
+
+        loop {
+            self.skip_insignificant()?;
+            if self.pos >= self.input.len() {
+                self.finished = true;
+                return self.make(TokenKind::StreamEnd, self.pos, self.pos);
+            }
+            if self.at_line_start()
+                && self.peek() == Some('\u{feff}')
+                && !(self.compat_flow && self.pos == 3 && self.initial_bom)
+            {
+                // libyaml skips a BOM at the start of any line, and the compat
+                // scanner keeps that; YAML 1.2.2 allows one only in a document
+                // prefix (P16).
+                if !self.compat_flow && self.document_open && !self.bom_starts_prefix(self.pos) {
+                    return Err(
+                        self.error_at(self.pos, "a byte order mark can only start a document")
+                    );
+                }
+                self.pos += '\u{feff}'.len_utf8();
+                continue;
+            }
+            if self.peek().is_some_and(is_line_break) {
+                let start = self.pos;
+                self.consume_line_break();
+                if self.flow_level > 0 {
+                    if !self.compat_flow
+                        && matches!(self.flow_stack.last(), Some('[' | '{'))
+                        && self.flow_allow_zero_indent.last() == Some(&false)
+                    {
+                        let mut content = self.pos;
+                        while matches!(self.input[content..].chars().next(), Some(' ' | '\t')) {
+                            content += 1;
+                        }
+                        let top = self.flow_stack.last().copied();
+                        let next = self.input[content..].chars().next();
+                        let closing = match top {
+                            Some('[') => ']',
+                            Some('{') => '}',
+                            _ => unreachable!("flow stack checked"),
+                        };
+                        if content == self.pos
+                            && next.is_some_and(|ch| !is_line_break(ch) && ch != closing)
+                        {
+                            return Err(
+                                self.error_at(content, "flow collection entries must be indented")
+                            );
+                        }
+                    }
+                    // Line breaks separate flow tokens but are not block
+                    // structure. Keeping them out of the token stream lets the
+                    // parser see one logical flow collection across lines.
+                    continue;
+                }
+                return self.make(TokenKind::LineBreak, start, self.pos);
+            }
+            break;
+        }
+
+        if self.flow_level > 0 && self.at_line_start() {
+            let rest = &self.input[self.pos..];
+            if (rest.starts_with("---") || rest.starts_with("..."))
+                && self.marker_follows(self.pos, 3)
+            {
+                return Err(self.error_at(
+                    self.pos,
+                    "document markers are not allowed inside flow collections",
+                ));
+            }
+        }
+        if self.flow_level == 0 && self.at_line_start() {
+            if let Some(token) = self.scan_document_marker()? {
+                return Ok(Some(token));
+            }
+            if self.peek() == Some('%') {
+                return self.scan_directive();
+            }
+        }
+
+        let start = self.pos;
+        let ch = self.peek().expect("checked EOF");
+        match ch {
+            '[' => {
+                self.flow_level += 1;
+                self.flow_stack.push('[');
+                let line_start = self.input[..start]
+                    .rfind(['\n', '\r'])
+                    .map_or(0, |index| index + 1);
+                let prefix = self.input[line_start..start].trim_matches(is_blank);
+                self.flow_allow_zero_indent
+                    .push(prefix.is_empty() || prefix.starts_with("---"));
+                self.limits
+                    .check_depth(self.flow_level)
+                    .map_err(|error| self.limit_at(start, error))?;
+                self.pos += 1;
+                self.make(TokenKind::FlowSequenceStart, start, self.pos)
+            }
+            ']' => {
+                self.pos += 1;
+                self.flow_level = self.flow_level.saturating_sub(1);
+                self.flow_stack.pop();
+                self.flow_allow_zero_indent.pop();
+                self.make(TokenKind::FlowSequenceEnd, start, self.pos)
+            }
+            '{' => {
+                self.flow_level += 1;
+                self.flow_stack.push('{');
+                let line_start = self.input[..start]
+                    .rfind(['\n', '\r'])
+                    .map_or(0, |index| index + 1);
+                let prefix = self.input[line_start..start].trim_matches(is_blank);
+                self.flow_allow_zero_indent
+                    .push(prefix.is_empty() || prefix.starts_with("---"));
+                self.limits
+                    .check_depth(self.flow_level)
+                    .map_err(|error| self.limit_at(start, error))?;
+                self.pos += 1;
+                self.make(TokenKind::FlowMappingStart, start, self.pos)
+            }
+            '}' => {
+                self.pos += 1;
+                self.flow_level = self.flow_level.saturating_sub(1);
+                self.flow_stack.pop();
+                self.flow_allow_zero_indent.pop();
+                self.make(TokenKind::FlowMappingEnd, start, self.pos)
+            }
+            ',' => {
+                self.pos += 1;
+                self.make(TokenKind::FlowEntry, start, self.pos)
+            }
+            '-' if self.indicator_follows(start, 1) => {
+                self.pos += 1;
+                self.make(TokenKind::BlockEntry, start, self.pos)
+            }
+            // In flow context libyaml treats every `?` as an explicit-key
+            // indicator. YAML 1.2.2 makes `?x` a plain scalar (HM87, 652Z);
+            // the compatibility scanner keeps the libyaml reading.
+            '?' if (self.compat_flow && self.flow_level > 0)
+                || self.indicator_follows(start, 1) =>
+            {
+                self.pos += 1;
+                self.make(TokenKind::Key, start, self.pos)
+            }
+            ':' if self.colon_indicator(start)
+                || (self.flow_level > 0 && self.previous_flow_end) =>
+            {
+                self.pos += 1;
+                self.make(TokenKind::Value, start, self.pos)
+            }
+            '&' => self.scan_anchor(false),
+            '*' => self.scan_anchor(true),
+            '!' => self.scan_tag(),
+            '\'' => self.scan_single_quoted(),
+            '"' => self.scan_double_quoted(),
+            '|' => self.scan_block_scalar(start, true),
+            '>' => self.scan_block_scalar(start, false),
+            // Indicators that cannot start a plain scalar (`ns-plain-first`);
+            // libyaml rejects them too.
+            '%' | '@' | '`' => Err(self.error_at(
+                start,
+                format!("{ch:?} is a reserved indicator and cannot start a plain scalar"),
+            )),
+            _ => self.scan_plain(),
+        }
+    }
+
+    /// Every non-printable character the scanner has passed must sit inside
+    /// `quoted`, the quoted scalar being made, if any (P32).
+    fn check_quoted_only(&mut self, quoted: Option<std::ops::Range<usize>>) -> Result<(), Error> {
+        while let Some(&index) = self.quoted_only.get(self.quoted_only_next) {
+            if index >= self.pos {
+                break;
+            }
+            if !quoted.as_ref().is_some_and(|range| range.contains(&index)) {
+                let error = non_printable_error(self.input, index);
+                return Err(match self.line_index.marker(self.input, index) {
+                    Some(marker) => error.with_span(Span::empty(marker)),
+                    None => error,
+                });
+            }
+            self.quoted_only_next += 1;
+        }
+        Ok(())
+    }
+
+    fn make(
+        &mut self,
+        kind: TokenKind<'a>,
+        start: usize,
+        end: usize,
+    ) -> Result<Option<Token<'a>>, Error> {
+        self.tokens += 1;
+        self.limits
+            .check_events(self.tokens)
+            .map_err(|error| self.limit_at(start, error))?;
+        if self.quoted_only_next < self.quoted_only.len() {
+            let quoted = matches!(
+                kind,
+                TokenKind::Scalar {
+                    style: ScalarStyle::SingleQuoted | ScalarStyle::DoubleQuoted,
+                    ..
+                }
+            );
+            self.check_quoted_only(quoted.then_some(start..end))?;
+        }
+        if let TokenKind::Scalar { raw, .. } = &kind {
+            self.limits
+                .check_scalar_bytes(raw.len())
+                .map_err(|error| self.limit_at(start, error))?;
+        }
+        self.previous_flow_end = matches!(
+            kind,
+            TokenKind::FlowSequenceEnd
+                | TokenKind::FlowMappingEnd
+                | TokenKind::Scalar {
+                    style: ScalarStyle::SingleQuoted | ScalarStyle::DoubleQuoted,
+                    ..
+                }
+        );
+        match kind {
+            TokenKind::DocumentEnd => self.document_open = false,
+            TokenKind::StreamStart
+            | TokenKind::StreamEnd
+            | TokenKind::LineBreak
+            | TokenKind::Directive { .. } => {}
+            _ => self.document_open = true,
+        }
+        let span = self.span(start, end)?;
+        Ok(Some(Token { kind, span }))
+    }
+
+    /// Whether the byte order mark at `position`, at the start of a line,
+    /// begins a document prefix: everything up to the next `---` line, or to
+    /// the end of the input, is blank lines and comments (YAML 1.2.2
+    /// productions 202 and 211).
+    fn bom_starts_prefix(&self, position: usize) -> bool {
+        let mut line_start = position;
+        loop {
+            let mut text = &self.input[line_start..];
+            while let Some(rest) = text.strip_prefix('\u{feff}') {
+                text = rest;
+            }
+            let content = line_start + (self.input.len() - line_start - text.len());
+            if text.starts_with("---") && self.marker_follows(content, 3) {
+                return true;
+            }
+            let line_end = text.find(['\n', '\r']).unwrap_or(text.len());
+            let line = text[..line_end].trim_start_matches([' ', '\t']);
+            if !(line.is_empty() || line.starts_with('#')) {
+                return false;
+            }
+            if line_end == text.len() {
+                return true;
+            }
+            line_start = content + line_end + 1;
+            if self.input.as_bytes()[content + line_end] == b'\r'
+                && self.input.as_bytes().get(line_start) == Some(&b'\n')
+            {
+                line_start += 1;
+            }
+        }
+    }
+
+    fn span(&self, start: usize, end: usize) -> Result<Span, Error> {
+        let start_marker = self
+            .line_index
+            .marker(self.input, start)
+            .ok_or_else(|| self.error_at(start, "invalid start position"))?;
+        let end_marker = self
+            .line_index
+            .marker(self.input, end)
+            .ok_or_else(|| self.error_at(end, "invalid end position"))?;
+        Ok(Span::new(start_marker, end_marker))
+    }
+
+    fn limit_at(&self, index: usize, limit: crate::limits::LimitExceeded) -> Error {
+        let mut error = Error::from(limit);
+        if let Some(marker) = self.line_index.marker(self.input, index) {
+            error = error.with_span(Span::empty(marker));
+        }
+        error
+    }
+
+    fn error_at(&self, index: usize, message: impl Into<String>) -> Error {
+        let span = self.line_index.marker(self.input, index).map(Span::empty);
+        let mut error = Error::new(ErrorKind::Scanner, message);
+        if let Some(span) = span {
+            error = error.with_span(span);
+        }
+        error
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.input[self.pos..].chars().next()
+    }
+
+    fn peek_second(&self) -> Option<char> {
+        let mut chars = self.input[self.pos..].chars();
+        chars.next()?;
+        chars.next()
+    }
+
+    fn at_line_start(&self) -> bool {
+        if self.pos == 0 || (!self.compat_flow && self.pos == 3 && self.initial_bom) {
+            return true;
+        }
+        let previous = self.input.as_bytes().get(self.pos - 1).copied();
+        if matches!(previous, Some(b'\n' | b'\r')) {
+            return true;
+        }
+        if previous.is_some_and(|byte| byte < 0x80) {
+            return false;
+        }
+        self.input[..self.pos]
+            .chars()
+            .next_back()
+            .is_some_and(is_line_break)
+    }
+
+    fn indicator_follows(&self, start: usize, offset: usize) -> bool {
+        let after = start + offset;
+        let Some(rest) = self.input.get(after..) else {
+            return true;
+        };
+        // A flow indicator only ends `-` or `?` inside a flow collection; in
+        // block context `-,` and `?]` are plain scalars.
+        match rest.chars().next() {
+            None => true,
+            Some(ch) => is_blank(ch) || (self.flow_level > 0 && matches!(ch, ',' | ']' | '}')),
+        }
+    }
+
+    fn colon_indicator(&self, start: usize) -> bool {
+        let after = start + 1;
+        match self.input.get(after..).and_then(|rest| rest.chars().next()) {
+            None => true,
+            Some(ch) => is_blank(ch) || (self.flow_level > 0 && matches!(ch, ',' | ']' | '}')),
+        }
+    }
+
+    fn skip_insignificant(&mut self) -> Result<(), Error> {
+        loop {
+            if self.pos >= self.input.len() {
+                return Ok(());
+            }
+            let ch = self.peek().expect("checked EOF");
+            match ch {
+                ' ' => self.pos += 1,
+                '\t' => {
+                    if self.flow_level == 0 && self.tab_starts_block_structure(self.pos) {
+                        return Err(self.error_at(
+                            self.pos,
+                            "tab cannot separate a block structural indicator",
+                        ));
+                    }
+                    if self.flow_level > 0 && self.tab_only_flow_indentation(self.pos) {
+                        return Err(self.error_at(
+                            self.pos,
+                            "tabs cannot be the only flow-collection indentation",
+                        ));
+                    }
+                    self.pos += 1;
+                }
+                '#' if self.comment_is_legal() => {
+                    while let Some(ch) = self.peek() {
+                        if is_line_break(ch) {
+                            break;
+                        }
+                        if ch == '\u{feff}' && !self.compat_flow {
+                            return Err(self.error_at(
+                                self.pos,
+                                "a byte order mark can only start a document",
+                            ));
+                        }
+                        self.pos += ch.len_utf8();
+                    }
+                }
+                _ if is_line_break(ch) => return Ok(()),
+                _ => return Ok(()),
+            }
+        }
+    }
+
+    fn tab_only_flow_indentation(&self, position: usize) -> bool {
+        let line_start = self.input[..position]
+            .rfind(['\n', '\r'])
+            .map_or(0, |index| index + 1);
+        let prefix = &self.input[line_start..position];
+        if !prefix.chars().all(|ch| ch == '\t') {
+            return false;
+        }
+        let mut content = position;
+        while matches!(self.input[content..].chars().next(), Some(' ' | '\t')) {
+            content += 1;
+        }
+        let next = self.input[content..].chars().next();
+        next.is_some_and(|ch| !matches!(ch, ']' | '}') && !is_line_break(ch))
+    }
+
+    fn tab_starts_block_structure(&self, position: usize) -> bool {
+        let mut content = position;
+        while matches!(self.input[content..].chars().next(), Some(' ' | '\t')) {
+            content += 1;
+        }
+        let line_end = self.input[content..]
+            .find(['\n', '\r'])
+            .map_or(self.input.len(), |offset| content + offset);
+        let rest = &self.input[content..line_end];
+        if rest == "-" || rest == "?" || rest == ":" {
+            return true;
+        }
+        if rest.starts_with("- ") || rest.starts_with("? ") || rest.starts_with(": ") {
+            return true;
+        }
+        let mut chars = rest.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == ':' && chars.peek().is_none_or(|next| is_blank(*next)) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn comment_is_legal(&self) -> bool {
+        if self.pos == 0 {
+            return true;
+        }
+        let previous = self.input[..self.pos].chars().next_back();
+        // A BOM at the start of a line leaves the comment at the start of
+        // the line too (YAML 1.2.2 example 5.1).
+        let after_line_start_bom = previous == Some('\u{feff}') && {
+            let bom = self.pos - '\u{feff}'.len_utf8();
+            bom == 0 || self.input[..bom].ends_with(['\n', '\r'])
+        };
+        previous.is_none_or(is_blank)
+            || after_line_start_bom
+            || (self.compat_flow
+                && self.flow_level > 0
+                && previous.is_some_and(|ch| matches!(ch, '[' | '{' | ',')))
+    }
+
+    fn consume_line_break(&mut self) {
+        let ch = self.peek().expect("line break");
+        self.pos += ch.len_utf8();
+        if ch == '\r' && self.peek() == Some('\n') {
+            self.pos += 1;
+        }
+    }
+
+    fn scan_document_marker(&mut self) -> Result<Option<Token<'a>>, Error> {
+        let start = self.pos;
+        // yaml_serde treats a stream-start BOM as content for marker detection,
+        // so `BOM---` is a plain scalar rather than an explicit document start.
+        // The compat scanner keeps that; by default a BOM is not content (P9).
+        if self.compat_flow && start == 3 && self.initial_bom {
+            return Ok(None);
+        }
+        let rest = &self.input[start..];
+        if rest.starts_with("---") && self.marker_follows(start, 3) {
+            self.pos += 3;
+            self.yaml_directive_seen = false;
+            self.tag_handles = default_tag_handles();
+            for (handle, prefix) in self.pending_tag_handles.drain(..) {
+                self.tag_handles.insert(handle, prefix);
+            }
+            return self.make(TokenKind::DocumentStart { explicit: true }, start, self.pos);
+        }
+        if rest.starts_with("...") && self.marker_follows(start, 3) {
+            self.pos += 3;
+            self.yaml_directive_seen = false;
+            self.tag_handles = default_tag_handles();
+            self.pending_tag_handles.clear();
+            return self.make(TokenKind::DocumentEnd, start, self.pos);
+        }
+        Ok(None)
+    }
+
+    fn marker_follows(&self, start: usize, offset: usize) -> bool {
+        let after = start + offset;
+        self.input
+            .get(after..)
+            .is_none_or(|rest| rest.chars().next().is_none_or(is_blank))
+    }
+
+    fn scan_directive(&mut self) -> Result<Option<Token<'a>>, Error> {
+        let start = self.pos;
+        self.pos += 1;
+        let name_start = self.pos;
+        while let Some(ch) = self.peek() {
+            if is_blank(ch) {
+                break;
+            }
+            self.pos += ch.len_utf8();
+        }
+        if self.pos == name_start {
+            return Err(self.error_at(start, "a directive needs a name"));
+        }
+        let name = Cow::Borrowed(&self.input[name_start..self.pos]);
+        while matches!(self.peek(), Some(' ' | '\t')) {
+            self.pos += 1;
+        }
+        let value_start = self.pos;
+        while let Some(ch) = self.peek() {
+            if is_line_break(ch) {
+                break;
+            }
+            self.pos += ch.len_utf8();
+        }
+        let value = Cow::Borrowed(self.input[value_start..self.pos].trim_end_matches(is_blank));
+        // Directive names and parameters are `ns-char`s, which exclude the
+        // byte order mark; libyaml rejects it too.
+        if self.input[name_start..self.pos].contains('\u{feff}') {
+            return Err(self.error_at(start, "a directive cannot contain a byte order mark"));
+        }
+        if name == "YAML" {
+            let version_end = value.find(is_blank).unwrap_or(value.len());
+            let version = &value[..version_end];
+            let trailing = value[version_end..].trim_start_matches(is_blank);
+            let version_like = |candidate: &str| {
+                candidate.strip_prefix("1.").is_some_and(|minor| {
+                    !minor.is_empty() && minor.chars().all(|ch| ch.is_ascii_digit())
+                })
+            };
+            let valid = version_like(version)
+                && (trailing.is_empty() || trailing.starts_with('#') || version_like(trailing));
+            if !valid {
+                return Err(self.error_at(start, "invalid %YAML directive"));
+            }
+            if self.yaml_directive_seen {
+                return Err(self.error_at(start, "duplicate %YAML directive"));
+            }
+            self.yaml_directive_seen = true;
+        }
+        if name == "TAG" {
+            let mut parts = value.split(is_blank).filter(|part| !part.is_empty());
+            let (Some(handle), Some(prefix), None) = (parts.next(), parts.next(), parts.next())
+            else {
+                return Err(self.error_at(start, "%TAG requires a handle and a prefix"));
+            };
+            // A handle is `!`, `!!`, or word characters between two `!`s;
+            // libyaml also allows `_`, and the compat scanner keeps that.
+            let named = handle
+                .strip_prefix('!')
+                .and_then(|rest| rest.strip_suffix('!'))
+                .is_some_and(|name| {
+                    !name.is_empty()
+                        && name.chars().all(|ch| {
+                            ch.is_ascii_alphanumeric()
+                                || ch == '-'
+                                || (self.compat_flow && ch == '_')
+                        })
+                });
+            if !(handle == "!" || handle == "!!" || named) {
+                return Err(self.error_at(start, format!("invalid %TAG handle {handle}")));
+            }
+            // A prefix is `!` and URI characters (a local prefix), or URI
+            // characters that do not start with `!` or a flow indicator.
+            // libyaml allows a leading flow indicator, and so does compat.
+            let prefix_ok = match prefix.strip_prefix('!') {
+                Some(local) => uri_text_ok(local),
+                None => {
+                    (self.compat_flow || prefix.chars().next().is_some_and(is_tag_char))
+                        && uri_text_ok(prefix)
+                }
+            };
+            if !prefix_ok {
+                return Err(self.error_at(start, format!("invalid %TAG prefix {prefix}")));
+            }
+            // The prefix's %-escapes are decoded like a suffix's, as libyaml
+            // does (P33). `uri_text_ok` has checked their syntax.
+            let prefix = decode_percent_escapes(prefix)
+                .map_err(|_| self.error_at(start, "tag %-escapes do not form valid UTF-8"))?;
+            self.pending_tag_handles.push((handle.to_owned(), prefix));
+        }
+        self.make(TokenKind::Directive { name, value }, start, self.pos)
+    }
+
+    fn scan_anchor(&mut self, alias: bool) -> Result<Option<Token<'a>>, Error> {
+        let start = self.pos;
+        self.pos += 1;
+        let name_start = self.pos;
+        while let Some(ch) = self.peek() {
+            if is_blank(ch) || matches!(ch, '[' | ']' | '{' | '}' | ',') {
+                break;
+            }
+            // Anchor names are `ns-char`s, which exclude the BOM; libyaml
+            // allows only word characters.
+            if ch == '\u{feff}' {
+                return Err(
+                    self.error_at(self.pos, "an anchor name cannot contain a byte order mark")
+                );
+            }
+            // YAML 1.2.2 allows any non-space, non-flow-indicator character in
+            // an anchor name, so `&an:chor` is the anchor `an:chor` (Y2GN).
+            // libyaml stops at `?` and at a `:` followed by more text; the
+            // compatibility scanner keeps that. It does not keep libyaml's stop
+            // at a `:` before a blank or flow indicator (`&a: b`), which
+            // 2SXE and W5VH rule out (P27).
+            if self.compat_flow && ch == '?' {
+                break;
+            }
+            if self.compat_flow && ch == ':' && self.pos > name_start {
+                let after = self.input[self.pos + 1..].chars().next();
+                if after.is_some_and(|next| {
+                    !is_blank(next) && !matches!(next, '[' | ']' | '{' | '}' | ',')
+                }) {
+                    break;
+                }
+            }
+            self.pos += ch.len_utf8();
+        }
+        if self.pos == name_start {
+            return Err(self.error_at(start, "anchor/alias name must not be empty"));
+        }
+        // A node's properties are separated from its content (production
+        // 96), so `&a[b]` is not an anchored sequence; libyaml rejects it too.
+        if matches!(self.peek(), Some('[' | '{')) {
+            return Err(self.error_at(
+                self.pos,
+                "an anchor or alias must be followed by white space",
+            ));
+        }
+        let name = Cow::Borrowed(&self.input[name_start..self.pos]);
+        if alias {
+            self.make(TokenKind::Alias(name), start, self.pos)
+        } else {
+            self.anchors += 1;
+            self.limits
+                .check_anchors(self.anchors)
+                .map_err(|error| self.limit_at(start, error))?;
+            self.make(TokenKind::Anchor(name), start, self.pos)
+        }
+    }
+
+    fn scan_tag(&mut self) -> Result<Option<Token<'a>>, Error> {
+        let start = self.pos;
+        self.pos += 1;
+        let tag = if self.peek() == Some('!') {
+            self.pos += 1;
+            let suffix_start = self.pos;
+            self.consume_tag_suffix();
+            let prefix = self
+                .tag_handles
+                .get("!!")
+                .cloned()
+                .ok_or_else(|| self.error_at(start, "undefined secondary tag handle"))?;
+            Tag::new(prefix, self.decode_tag_suffix(suffix_start)?)
+        } else if self.peek() == Some('<') {
+            self.pos += 1;
+            let suffix_start = self.pos;
+            while let Some(ch) = self.peek() {
+                if ch == '>' {
+                    break;
+                }
+                if !is_uri_char(ch) {
+                    return Err(self.error_at(
+                        self.pos,
+                        "a verbatim tag may only hold URI characters; escape others as %XX",
+                    ));
+                }
+                self.pos += ch.len_utf8();
+            }
+            if self.peek() != Some('>') {
+                return Err(self.error_at(start, "unterminated verbatim tag"));
+            }
+            let suffix = &self.input[suffix_start..self.pos];
+            self.pos += 1;
+            Tag::new("", suffix)
+        } else {
+            let handle_start = self.pos;
+            while let Some(ch) = self.peek() {
+                if ch == '!' || !is_tag_char(ch) {
+                    break;
+                }
+                self.pos += ch.len_utf8();
+            }
+            if self.peek() == Some('!') {
+                self.pos += 1;
+                let suffix_start = self.pos;
+                self.consume_tag_suffix();
+                let handle = &self.input[handle_start - 1..suffix_start];
+                let prefix = self.tag_handles.get(handle).ok_or_else(|| {
+                    self.error_at(start, format!("undefined tag handle {handle:?}"))
+                })?;
+                Tag::new(prefix.clone(), self.decode_tag_suffix(suffix_start)?)
+            } else {
+                let prefix = self
+                    .tag_handles
+                    .get("!")
+                    .cloned()
+                    .ok_or_else(|| self.error_at(start, "undefined primary tag handle"))?;
+                Tag::new(prefix, self.decode_tag_suffix(handle_start)?)
+            }
+        };
+        if self.peek().is_some_and(|ch| {
+            !(is_blank(ch) || (self.flow_level > 0 && matches!(ch, ',' | ']' | '}')))
+        }) {
+            return Err(self.error_at(
+                self.pos,
+                "a tag must be followed by whitespace or a line break",
+            ));
+        }
+        self.make(TokenKind::Tag(tag), start, self.pos)
+    }
+
+    /// The shorthand tag suffix from `start` to the current position, with
+    /// `%XX` escapes decoded (YAML 1.2.2 §6.8.2; suite 6CK3). Verbatim tags
+    /// are delivered as written.
+    fn decode_tag_suffix(&self, start: usize) -> Result<String, Error> {
+        decode_percent_escapes(&self.input[start..self.pos]).map_err(|error| match error {
+            PercentError::Escape(index) => self.error_at(start + index, "invalid %-escape in tag"),
+            PercentError::Utf8 => self.error_at(start, "tag %-escapes do not form valid UTF-8"),
+        })
+    }
+
+    fn consume_tag_suffix(&mut self) {
+        while let Some(ch) = self.peek() {
+            if !is_tag_char(ch) {
+                break;
+            }
+            self.pos += ch.len_utf8();
+        }
+    }
+
+    fn scan_single_quoted(&mut self) -> Result<Option<Token<'a>>, Error> {
+        let start = self.pos;
+        let start_indent = self.line_indent(start);
+        let allow_same_indent = self.quoted_allows_same_indent(start);
+        self.pos += 1;
+        let mut value = String::new();
+        loop {
+            let Some(ch) = self.peek() else {
+                return Err(self.error_at(start, "unterminated single-quoted scalar"));
+            };
+            match ch {
+                '\'' => {
+                    if self.peek_second() == Some('\'') {
+                        value.push('\'');
+                        self.pos += 2;
+                    } else {
+                        self.pos += 1;
+                        break;
+                    }
+                }
+                ch if is_line_break(ch) => {
+                    self.scan_quoted_line_break(
+                        &mut value,
+                        start_indent,
+                        allow_same_indent,
+                        0,
+                        false,
+                    )?;
+                }
+                ch => {
+                    value.push(ch);
+                    self.pos += ch.len_utf8();
+                }
+            }
+        }
+        let raw_text = &self.input[start..self.pos];
+        let raw = Cow::Borrowed(raw_text);
+        let value = scalar_cow(
+            value,
+            raw_text
+                .get(1..raw_text.len().saturating_sub(1))
+                .unwrap_or(""),
+        );
+        self.make(
+            TokenKind::Scalar {
+                value,
+                raw,
+                style: ScalarStyle::SingleQuoted,
+            },
+            start,
+            self.pos,
+        )
+    }
+
+    fn quoted_allows_same_indent(&self, start: usize) -> bool {
+        let line_start = self.input[..start]
+            .rfind(['\n', '\r'])
+            .map_or(0, |index| index + 1);
+        let prefix = self.input[line_start..start].trim_matches(is_blank);
+        prefix.is_empty() || prefix.starts_with("---") || prefix.starts_with("...")
+    }
+
+    fn scan_quoted_line_break(
+        &mut self,
+        value: &mut String,
+        start_indent: usize,
+        allow_same_indent: bool,
+        protected_len: usize,
+        escaped: bool,
+    ) -> Result<(), Error> {
+        // White space before an escaped line break is content.
+        while !escaped && value.len() > protected_len && value.ends_with([' ', '\t']) {
+            value.pop();
+        }
+        let mut breaks = 0;
+        loop {
+            while matches!(self.peek(), Some(' ' | '\t')) {
+                self.pos += 1;
+            }
+            if self.peek().is_some_and(is_line_break) {
+                self.consume_line_break();
+                breaks += 1;
+            } else {
+                break;
+            }
+        }
+        if breaks == 0 {
+            return Ok(());
+        }
+        let line_start = self.input[..self.pos]
+            .rfind(['\n', '\r'])
+            .map_or(0, |index| index + 1);
+        let indentation = &self.input[line_start..self.pos];
+        let indent = indentation
+            .chars()
+            .take_while(|ch| *ch == ' ' || *ch == '\t')
+            .count();
+        if !allow_same_indent && indentation.contains('\t') && !indentation.contains(' ') {
+            return Err(self.error_at(
+                line_start,
+                "tabs cannot be the only quoted-scalar indentation",
+            ));
+        }
+        let rest = &self.input[self.pos..];
+        if indent == 0
+            && (rest.starts_with("---") || rest.starts_with("..."))
+            && rest
+                .get(3..)
+                .is_none_or(|tail| tail.chars().next().is_none_or(is_blank))
+        {
+            return Err(self.error_at(self.pos, "document marker inside quoted scalar"));
+        }
+        let closing = matches!(self.peek(), Some('"' | '\''));
+        if !closing && (indent < start_indent || (!allow_same_indent && indent == start_indent)) {
+            return Err(self.error_at(
+                self.pos,
+                "quoted scalar continuation must be indented more than its parent",
+            ));
+        }
+        // A folded break is a space; each empty line after it, or after an
+        // escaped break, is a line feed (YAML 1.2.2 productions 112, 73).
+        if breaks == 1 && !escaped {
+            value.push(' ');
+        } else {
+            for _ in 1..breaks {
+                value.push('\n');
+            }
+        }
+        Ok(())
+    }
+
+    fn scan_double_quoted(&mut self) -> Result<Option<Token<'a>>, Error> {
+        let start = self.pos;
+        let start_indent = self.line_indent(start);
+        let allow_same_indent = self.quoted_allows_same_indent(start);
+        self.pos += 1;
+        let mut value = String::new();
+        let mut protected_len = 0;
+        loop {
+            let Some(ch) = self.peek() else {
+                return Err(self.error_at(start, "unterminated double-quoted scalar"));
+            };
+            match ch {
+                '"' => {
+                    self.pos += 1;
+                    break;
+                }
+                '\\' => {
+                    let escape_start = self.pos;
+                    self.pos += 1;
+                    if self.peek().is_some_and(is_line_break) {
+                        self.scan_quoted_line_break(
+                            &mut value,
+                            start_indent,
+                            allow_same_indent,
+                            protected_len,
+                            true,
+                        )?;
+                        continue;
+                    }
+                    let Some(escape) = self.peek() else {
+                        return Err(self.error_at(escape_start, "unterminated escape"));
+                    };
+                    self.pos += escape.len_utf8();
+                    let before = value.len();
+                    match escape {
+                        '0' => value.push('\0'),
+                        'a' => value.push('\u{0007}'),
+                        'b' => value.push('\u{0008}'),
+                        't' | '\t' => value.push('\t'),
+                        'n' => value.push('\n'),
+                        'v' => value.push('\u{000b}'),
+                        'f' => value.push('\u{000c}'),
+                        'r' => value.push('\r'),
+                        'e' => value.push('\u{001b}'),
+                        ' ' => value.push(' '),
+                        '"' => value.push('"'),
+                        '/' => value.push('/'),
+                        '\\' => value.push('\\'),
+                        'N' => value.push('\u{0085}'),
+                        '_' => value.push('\u{00a0}'),
+                        'L' => value.push('\u{2028}'),
+                        'P' => value.push('\u{2029}'),
+                        'x' => value.push(self.scan_hex_escape(2, escape_start)?),
+                        'u' => value.push(self.scan_hex_escape(4, escape_start)?),
+                        'U' => value.push(self.scan_hex_escape(8, escape_start)?),
+                        other => {
+                            return Err(
+                                self.error_at(escape_start, format!("unknown escape \\{other}"))
+                            );
+                        }
+                    }
+                    if value.len() > before && value.ends_with([' ', '\t']) {
+                        protected_len = value.len();
+                    }
+                }
+                ch if is_line_break(ch) => {
+                    self.scan_quoted_line_break(
+                        &mut value,
+                        start_indent,
+                        allow_same_indent,
+                        protected_len,
+                        false,
+                    )?;
+                }
+                ch => {
+                    value.push(ch);
+                    self.pos += ch.len_utf8();
+                }
+            }
+        }
+        let raw_text = &self.input[start..self.pos];
+        let raw = Cow::Borrowed(raw_text);
+        let value = scalar_cow(
+            value,
+            raw_text
+                .get(1..raw_text.len().saturating_sub(1))
+                .unwrap_or(""),
+        );
+        self.make(
+            TokenKind::Scalar {
+                value,
+                raw,
+                style: ScalarStyle::DoubleQuoted,
+            },
+            start,
+            self.pos,
+        )
+    }
+
+    fn scan_hex_escape(&mut self, digits: usize, escape_start: usize) -> Result<char, Error> {
+        let mut value = 0_u32;
+        for _ in 0..digits {
+            let Some(ch) = self.peek() else {
+                return Err(self.error_at(escape_start, "short hexadecimal escape"));
+            };
+            let Some(digit) = ch.to_digit(16) else {
+                return Err(self.error_at(self.pos, "invalid hexadecimal escape"));
+            };
+            value = value * 16 + digit;
+            self.pos += ch.len_utf8();
+        }
+        char::from_u32(value)
+            .ok_or_else(|| self.error_at(escape_start, "escape is not a Unicode scalar value"))
+    }
+
+    fn scan_block_scalar(
+        &mut self,
+        start: usize,
+        literal: bool,
+    ) -> Result<Option<Token<'a>>, Error> {
+        self.pos += 1;
+        let mut chomping = Chomping::Clip;
+        let mut explicit_indent = None;
+        loop {
+            match self.peek() {
+                Some('+') => {
+                    chomping = Chomping::Keep;
+                    self.pos += 1;
+                }
+                Some('-') => {
+                    chomping = Chomping::Strip;
+                    self.pos += 1;
+                }
+                Some(ch @ '1'..='9') => {
+                    explicit_indent = Some(ch.to_digit(10).expect("digit") as usize);
+                    self.pos += 1;
+                }
+                Some(' ' | '\t') => self.pos += 1,
+                Some('#') => {
+                    let previous = self.input[..self.pos].chars().next_back();
+                    if !previous.is_some_and(is_blank) {
+                        return Err(self.error_at(
+                            self.pos,
+                            "a block scalar header comment requires preceding whitespace",
+                        ));
+                    }
+                    while let Some(ch) = self.peek() {
+                        if is_line_break(ch) {
+                            break;
+                        }
+                        self.pos += ch.len_utf8();
+                    }
+                    break;
+                }
+                Some(ch) if is_line_break(ch) => break,
+                Some(ch) => {
+                    return Err(self.error_at(
+                        self.pos,
+                        format!("unexpected {ch:?} in block scalar header"),
+                    ));
+                }
+                None => break,
+            }
+        }
+        if self.peek().is_some_and(|ch| !is_line_break(ch)) {
+            return Err(self.error_at(start, "block scalar header must end at a line break"));
+        }
+        let base_indent = self.line_indent(start);
+        let line_start = self.input[..start]
+            .rfind(['\n', '\r'])
+            .map_or(0, |index| index + 1);
+        let prefix = self.input[line_start..start].trim_matches(is_blank);
+        let root_context = prefix.is_empty() || prefix == "---" || prefix == "...";
+        if self.peek().is_some() {
+            self.consume_line_break();
+        }
+        let content_start = self.pos;
+        // Content indentation is relative to the block collection that owns
+        // the scalar: in `- key: |2` that is the mapping at column 2, not the
+        // line's indentation. Root scalars count from column 0, as libyaml
+        // does.
+        let (detect_base, allow_base, explicit_base) = match self.owner_of(start) {
+            Owner::Root => (0, true, 0),
+            Owner::Block(n) => (n, false, n),
+            Owner::Unknown => (
+                base_indent,
+                root_context,
+                if prefix.is_empty() { 0 } else { base_indent },
+            ),
+        };
+        let indent = explicit_indent.map_or_else(
+            || self.detect_block_indent(content_start, detect_base, allow_base),
+            |digits| Ok(explicit_base + digits),
+        )?;
+
+        // When the indentation is detected, leading empty lines may not be
+        // indented more than the first non-empty content line (YAML 1.2.2
+        // section 8.1.1.1). With an indentation indicator, a "blank" line
+        // with more spaces than that is content (P14). Tabs on a leading
+        // empty line are ambiguous and rejected as scalar indentation.
+        let mut probe = content_start;
+        let mut first_content = None;
+        while probe < self.input.len() {
+            let line_end = self.input[probe..]
+                .find(['\n', '\r'])
+                .map_or(self.input.len(), |offset| probe + offset);
+            let line = &self.input[probe..line_end];
+            if line.chars().all(|ch| ch == ' ' || ch == '\t') {
+                if line.contains('\t') && !line.contains(' ') {
+                    return Err(self.error_at(
+                        probe,
+                        "tabs are not allowed as leading block-scalar indentation",
+                    ));
+                }
+                probe = line_end;
+                if probe < self.input.len() {
+                    let ch = self.input[probe..].chars().next().expect("line break");
+                    probe += ch.len_utf8();
+                    if ch == '\r' && self.input[probe..].starts_with('\n') {
+                        probe += 1;
+                    }
+                }
+                continue;
+            }
+            first_content = Some((probe, self.count_spaces(probe)));
+            break;
+        }
+        if let Some((_, first_spaces)) = first_content.filter(|_| explicit_indent.is_none()) {
+            let mut leading = content_start;
+            while leading < probe {
+                let line_end = self.input[leading..]
+                    .find(['\n', '\r'])
+                    .map_or(self.input.len(), |offset| leading + offset);
+                let spaces = self.count_spaces(leading);
+                if !self.input[leading..line_end].contains('\t') && spaces > first_spaces {
+                    return Err(self.error_at(
+                        leading,
+                        "leading empty block-scalar lines are more indented than the content",
+                    ));
+                }
+                let line_end = self.input[leading..]
+                    .find(['\n', '\r'])
+                    .map_or(self.input.len(), |offset| leading + offset);
+                leading = line_end;
+                if leading < self.input.len() {
+                    let ch = self.input[leading..].chars().next().expect("line break");
+                    leading += ch.len_utf8();
+                    if ch == '\r' && self.input[leading..].starts_with('\n') {
+                        leading += 1;
+                    }
+                }
+            }
+        }
+
+        let mut lines: Vec<(String, bool)> = Vec::new();
+        let mut seen_content = false;
+        let mut end = content_start;
+        loop {
+            if self.pos >= self.input.len() {
+                break;
+            }
+            let line_start = self.pos;
+            let spaces = self.count_spaces(line_start);
+            let after_spaces = line_start + spaces;
+            let next = self.input[after_spaces..].chars().next();
+            let blank = next.is_none_or(is_line_break);
+            if blank {
+                if let Some(ch) = next {
+                    self.pos = after_spaces + ch.len_utf8();
+                    if ch == '\r' && self.peek() == Some('\n') {
+                        self.pos += 1;
+                    }
+                } else {
+                    self.pos = after_spaces;
+                }
+                // Spaces past the indentation are content, on a leading line
+                // too when an indicator fixes the indentation (P14).
+                let text = if (seen_content || explicit_indent.is_some()) && spaces > indent {
+                    " ".repeat(spaces - indent)
+                } else {
+                    String::new()
+                };
+                // The suite treats a whitespace-only last line at end of input
+                // as a complete line (JEF9, L24T); libyaml drops its line
+                // break, and the compatibility scanner keeps that.
+                let at_eof_line = next.is_none() && spaces > 0 && !self.compat_flow;
+                lines.push((text, next.is_some() || at_eof_line));
+                end = self.pos;
+                continue;
+            }
+            if spaces < indent {
+                break;
+            }
+            if indent == 0 {
+                // Document markers at column 0 end any block scalar, including
+                // one whose header follows `---` on the same line. A column-0
+                // `#` line is content in YAML 1.2.2 (DK3J). libyaml indents a
+                // root block scalar by at least one space, so there it is a
+                // comment ending the scalar before any content; the compat
+                // scanner keeps that wherever libyaml accepts the input (P29).
+                // A column-0 byte order mark ends it there the same way, and
+                // libyaml then skips the BOM (P36).
+                let rest = &self.input[line_start..];
+                if (rest.starts_with("---") && self.marker_follows(line_start, 3))
+                    || (rest.starts_with("...") && self.marker_follows(line_start, 3))
+                    || (self.compat_flow && !seen_content && rest.starts_with(['#', '\u{feff}']))
+                {
+                    break;
+                }
+            }
+            if !self.compat_flow && self.input[line_start..].starts_with('\u{feff}') {
+                // A BOM line ends the scalar when it starts a document prefix
+                // (P16); otherwise the BOM is an error below.
+                if self.bom_starts_prefix(line_start) {
+                    break;
+                }
+            }
+            self.pos = line_start + indent;
+            let mut text_start = self.pos;
+            let bom_stripped =
+                self.compat_flow && indent == 0 && self.input[text_start..].starts_with('\u{feff}');
+            if bom_stripped {
+                text_start += '\u{feff}'.len_utf8();
+                self.pos = text_start;
+            }
+            while let Some(ch) = self.peek() {
+                if is_line_break(ch) {
+                    break;
+                }
+                if ch == '\u{feff}' && !self.compat_flow {
+                    return Err(
+                        self.error_at(self.pos, "a byte order mark can only start a document")
+                    );
+                }
+                self.pos += ch.len_utf8();
+            }
+            let mut text = self.input[text_start..self.pos].to_owned();
+            if bom_stripped {
+                text.clear();
+            }
+            let had_break = self.peek().is_some_and(is_line_break);
+            if had_break {
+                self.consume_line_break();
+            }
+            seen_content = true;
+            lines.push((text, had_break));
+            end = self.pos;
+        }
+        self.pos = end;
+
+        let value = build_block_scalar(&lines, literal, chomping);
+        let raw = Cow::Borrowed(&self.input[start..end]);
+        self.make(
+            TokenKind::Scalar {
+                value: Cow::Owned(value),
+                raw,
+                style: if literal {
+                    ScalarStyle::Literal
+                } else {
+                    ScalarStyle::Folded
+                },
+            },
+            start,
+            end,
+        )
+    }
+
+    /// The block structure owning the node that starts at `start` (see
+    /// [`Owner`]). Only meaningful in block context.
+    fn owner_of(&self, start: usize) -> Owner {
+        let line_start = self.line_index.line_start(start);
+        match line_shape(&self.input[line_start..start], self.compat_flow) {
+            LineShape::Owner(owner) => owner,
+            LineShape::Open => self.owner_from_previous_lines(line_start),
+            LineShape::Content => Owner::Unknown,
+        }
+    }
+
+    /// For a node that starts its line (after optional properties), the
+    /// owner is whatever the previous non-empty line opened.
+    fn owner_from_previous_lines(&self, line_start: usize) -> Owner {
+        let mut end = line_start;
+        loop {
+            if end == 0 || (end == 3 && self.initial_bom) {
+                return Owner::Root;
+            }
+            let mut previous_end = end;
+            if self.input[..previous_end].ends_with('\n') {
+                previous_end -= 1;
+            }
+            if self.input[..previous_end].ends_with('\r') {
+                previous_end -= 1;
+            }
+            if previous_end == end {
+                // A Unicode line break; the line index knows where it starts.
+                let start = self.line_index.line_start(end.saturating_sub(1));
+                previous_end = self.input[start..end]
+                    .char_indices()
+                    .rev()
+                    .find(|(_, ch)| !is_line_break(*ch))
+                    .map_or(start, |(offset, ch)| start + offset + ch.len_utf8());
+            }
+            let previous_start = self.line_index.line_start(previous_end);
+            let code = strip_comment(&self.input[previous_start..previous_end]);
+            if code.trim_matches(is_blank).is_empty() {
+                end = previous_start;
+                continue;
+            }
+            if code.starts_with('%') {
+                return Owner::Unknown;
+            }
+            if code.starts_with("...") && code[3..].trim_matches(is_blank).is_empty() {
+                return Owner::Root;
+            }
+            match line_shape(code, self.compat_flow) {
+                LineShape::Owner(owner) => return owner,
+                LineShape::Open => end = previous_start,
+                LineShape::Content => return Owner::Unknown,
+            }
+        }
+    }
+
+    fn line_indent(&self, position: usize) -> usize {
+        let line_start = self.line_index.line_start(position);
+        self.input[line_start..]
+            .chars()
+            .take_while(|ch| *ch == ' ')
+            .count()
+    }
+
+    fn count_spaces(&self, position: usize) -> usize {
+        self.input[position..]
+            .chars()
+            .take_while(|ch| *ch == ' ')
+            .count()
+    }
+
+    fn detect_block_indent(
+        &self,
+        content_start: usize,
+        base_indent: usize,
+        allow_base: bool,
+    ) -> Result<usize, Error> {
+        let mut position = content_start;
+        while position < self.input.len() {
+            let spaces = self.count_spaces(position);
+            let after = position + spaces;
+            let next = self.input[after..].chars().next();
+            if next.is_none() {
+                return Ok(base_indent + 1);
+            }
+            if next.is_some_and(is_line_break) {
+                position = after + next.expect("checked").len_utf8();
+                continue;
+            }
+            if spaces < base_indent || (!allow_base && spaces == base_indent) {
+                // A dedented line ends the scalar; it is not an error. This is
+                // how an empty block scalar is represented.
+                return Ok(base_indent + 1);
+            }
+            return Ok(spaces);
+        }
+        Ok(base_indent + 1)
+    }
+
+    fn scan_plain(&mut self) -> Result<Option<Token<'a>>, Error> {
+        let start = self.pos;
+        if self.peek() == Some('#') {
+            return Err(self.error_at(
+                start,
+                "a comment must be separated from the preceding token",
+            ));
+        }
+        // Most plain scalars end on their own line. Defer the owner analysis
+        // (which scans the line prefix) until a line break proves the scalar
+        // may continue.
+        let mut continuation = None;
+        let mut value = String::new();
+        loop {
+            let content_start = self.pos;
+            while let Some(ch) = self.peek() {
+                if is_line_break(ch) {
+                    break;
+                }
+                if ch == '#' && self.previous_is_whitespace() {
+                    break;
+                }
+                if self.flow_level > 0 && matches!(ch, '[' | ']' | '{' | '}' | ',') {
+                    break;
+                }
+                if ch == ':' && self.colon_indicator(self.pos) {
+                    break;
+                }
+                if ch == '\u{feff}' && !self.compat_flow {
+                    return Err(
+                        self.error_at(self.pos, "a byte order mark can only start a document")
+                    );
+                }
+                self.pos += ch.len_utf8();
+            }
+            value.push_str(&self.input[content_start..self.pos]);
+            while value.ends_with([' ', '\t']) {
+                value.pop();
+            }
+            if !self.peek().is_some_and(is_line_break) {
+                break;
+            }
+            let continuation = match continuation {
+                Some(continuation) => continuation,
+                None => {
+                    let computed = self.plain_continuation(start);
+                    continuation = Some(computed);
+                    computed
+                }
+            };
+            if !self.try_plain_continuation(continuation, &mut value) {
+                break;
+            }
+        }
+        let end = self.pos;
+        if end == start {
+            return Err(self.error_at(start, "expected a token"));
+        }
+        let raw_text = &self.input[start..end];
+        let raw = Cow::Borrowed(raw_text);
+        let value = scalar_cow(value, raw_text);
+        self.make(
+            TokenKind::Scalar {
+                value,
+                raw,
+                style: ScalarStyle::Plain,
+            },
+            start,
+            end,
+        )
+    }
+
+    /// How a plain scalar starting at `start` may continue on later lines.
+    fn plain_continuation(&self, start: usize) -> Continuation {
+        if self.flow_level > 0 {
+            // Continuation lines inside flow collections are not measured
+            // against block indentation. Analyzing the line prefix per flow
+            // item would also be quadratic on a long single-line collection.
+            return Continuation::Flow;
+        }
+        match self.owner_of(start) {
+            // A root plain scalar continues at any indentation.
+            Owner::Root => Continuation::Indent(0),
+            // Inside a block collection indented by `n`, continuation lines
+            // need at least `n + 1` spaces.
+            Owner::Block(n) => Continuation::Indent(n + 1),
+            Owner::Unknown => {
+                let line_start = self.line_index.line_start(start);
+                let prefix = &self.input[line_start..start];
+                Continuation::Line {
+                    start_indent: self.line_indent(start),
+                    standalone: prefix.chars().all(|ch| is_blank(ch) || ch == '\u{feff}'),
+                    allow_block_indicator: !prefix.contains(':'),
+                }
+            }
+        }
+    }
+
+    fn try_plain_continuation(&mut self, continuation: Continuation, value: &mut String) -> bool {
+        let saved = self.pos;
+        let mut breaks = 0;
+        loop {
+            if !self.peek().is_some_and(is_line_break) {
+                break;
+            }
+            self.consume_line_break();
+            breaks += 1;
+            while matches!(self.peek(), Some(' ' | '\t')) {
+                self.pos += 1;
+            }
+            if self.peek().is_some_and(is_line_break) {
+                continue;
+            }
+            break;
+        }
+        if breaks == 0 || self.pos >= self.input.len() {
+            self.pos = saved;
+            return false;
+        }
+        if self.flow_level > 0 && matches!(self.peek(), Some(',' | ']' | '}')) {
+            self.pos = saved;
+            return false;
+        }
+        let line_start = self.line_index.line_start(self.pos);
+        let indent = self.input[line_start..self.pos]
+            .chars()
+            .take_while(|ch| *ch == ' ')
+            .count();
+        let bom_line = self.input[self.pos..].starts_with('\u{feff}');
+        let (allowed, allow_block_indicator) = match continuation {
+            Continuation::Flow => (true, false),
+            Continuation::Indent(minimum) => (indent >= minimum, true),
+            Continuation::Line {
+                start_indent,
+                standalone,
+                allow_block_indicator,
+            } => (
+                if standalone {
+                    indent >= start_indent
+                } else {
+                    indent > start_indent
+                },
+                allow_block_indicator,
+            ),
+        };
+        // A line starting with a BOM ends the scalar by default; the BOM is
+        // then a document prefix or an error (P16). libyaml continues a
+        // scalar onto it only where the indentation allows, as compat does.
+        if !allowed
+            || (bom_line && !self.compat_flow)
+            || (self.flow_level == 0
+                && self.looks_like_block_start(self.pos, allow_block_indicator))
+            || self.peek() == Some('#')
+        {
+            self.pos = saved;
+            return false;
+        }
+        if breaks == 1 {
+            value.push(' ');
+        } else {
+            for _ in 1..breaks {
+                value.push('\n');
+            }
+        }
+        true
+    }
+
+    fn looks_like_block_start(&self, position: usize, allow_block_indicator: bool) -> bool {
+        let rest = &self.input[position..];
+        if rest.starts_with("---") || rest.starts_with("...") {
+            return true;
+        }
+        if rest.starts_with(": ") {
+            return true;
+        }
+        if !allow_block_indicator && (rest.starts_with("- ") || rest.starts_with("? ")) {
+            return true;
+        }
+        let mut chars = rest.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if is_line_break(ch) {
+                break;
+            }
+            if ch == ':' && chars.peek().is_none_or(|next| is_blank(*next)) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn previous_is_whitespace(&self) -> bool {
+        self.input[..self.pos]
+            .chars()
+            .next_back()
+            .is_some_and(is_blank)
+    }
+
+    fn trim_trailing_whitespace(&self, start: usize, end: usize) -> usize {
+        let mut trimmed = end;
+        while trimmed > start {
+            let ch = self.input[..trimmed].chars().next_back().expect("nonempty");
+            if ch == ' ' || ch == '\t' {
+                trimmed -= ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        trimmed
+    }
+}
+
+/// The block structure that owns a node, as far as the context-free scanner
+/// can tell from the text around it.
+///
+/// YAML measures the indentation of a node's continuation lines (plain
+/// scalars) and content lines (block scalars) against the indentation `n` of
+/// the block collection that contains the node, not against the line the node
+/// starts on. In `- - a` the inner sequence is indented by 2 even though the
+/// line is indented by 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Owner {
+    /// A root node (the spec's indentation -1).
+    Root,
+    /// A node inside a block collection indented by this many columns.
+    Block(usize),
+    /// The surrounding text does not determine the owner.
+    Unknown,
+}
+
+/// How far a plain scalar's continuation lines must be indented.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Continuation {
+    /// Inside a flow collection.
+    Flow,
+    /// At least this many spaces.
+    Indent(usize),
+    /// Fallback when the owner is unknown: measured against the scalar's own
+    /// line. Standalone scalars may continue at their own indentation.
+    Line {
+        start_indent: usize,
+        standalone: bool,
+        allow_block_indicator: bool,
+    },
+}
+
+/// What a line (or the part of a line before a node) says about ownership.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineShape {
+    /// The text ends with structure that owns what follows it.
+    Owner(Owner),
+    /// Only whitespace or node properties: look at the previous line.
+    Open,
+    /// The text ends with content, so it doesn't own what follows.
+    Content,
+}
+
+/// Classify `text`, which starts at a line start: leading spaces, an optional
+/// `---`, block indicators (`- `, `? `, `: `), an optional implicit key with
+/// its `:`, and node properties. The last indicator or key decides the owner.
+/// `compat` ends anchor and alias names where the compat scanner does.
+fn line_shape(text: &str, compat: bool) -> LineShape {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let bytes = text.as_bytes();
+    let separator = |index: usize| index >= bytes.len() || matches!(bytes[index], b' ' | b'\t');
+    let skip_blanks = |mut index: usize| {
+        while index < bytes.len() && matches!(bytes[index], b' ' | b'\t') {
+            index += 1;
+        }
+        index
+    };
+    let mut index = 0;
+    while index < bytes.len() && bytes[index] == b' ' {
+        index += 1;
+    }
+    let mut owner = None;
+    if index == 0 && text.starts_with("---") && separator(3) {
+        owner = Some(Owner::Root);
+        index = skip_blanks(3);
+    }
+    while index < bytes.len() && matches!(bytes[index], b'-' | b'?' | b':') && separator(index + 1)
+    {
+        // Indicators are ASCII, and so is everything before them on the line,
+        // so the byte offset is the column.
+        owner = Some(Owner::Block(index));
+        index = skip_blanks(index + 1);
+    }
+    let rest = &text[index..];
+    if let Some(colon) = find_value_indicator(rest, compat) {
+        return if only_properties(&rest[colon + 1..], compat) {
+            LineShape::Owner(Owner::Block(text[..index].chars().count()))
+        } else {
+            LineShape::Content
+        };
+    }
+    if only_properties(rest, compat) {
+        owner.map_or(LineShape::Open, LineShape::Owner)
+    } else {
+        LineShape::Content
+    }
+}
+
+/// Whether `text` holds nothing but node properties (anchors and tags).
+fn only_properties(text: &str, compat: bool) -> bool {
+    text.split([' ', '\t'])
+        .filter(|token| !token.is_empty())
+        .all(|token| {
+            token.starts_with('!')
+                || (token.starts_with('&')
+                    && !(compat
+                        && (1..token.len())
+                            .any(|index| compat_name_stop(token.as_bytes(), index, 1))))
+        })
+}
+
+/// Whether the compat scanner ends the anchor or alias name that starts at
+/// `name_start` before `bytes[index]`: libyaml stops at a `?`, and at a `:`
+/// followed by more name text (see `scan_anchor`).
+fn compat_name_stop(bytes: &[u8], index: usize, name_start: usize) -> bool {
+    match bytes[index] {
+        b'?' => true,
+        b':' => {
+            index > name_start
+                && bytes.get(index + 1).is_some_and(|next| {
+                    !matches!(next, b' ' | b'\t' | b'[' | b']' | b'{' | b'}' | b',')
+                })
+        }
+        _ => false,
+    }
+}
+
+/// The byte offset of the first block mapping-value indicator (`:` followed
+/// by whitespace or the end) in `text`, skipping quoted scalars and flow
+/// collections. Stops at a comment.
+fn find_value_indicator(text: &str, compat: bool) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 0_usize;
+    let mut index = 0;
+    let mut token_start = true;
+    // Inside a plain scalar at depth 0, quotes, flow indicators, and
+    // property indicators are content: `a [b: |` has the key `a [b` (P28).
+    let mut in_plain = false;
+    let mut name_stopped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match byte {
+            b'#' if token_start => return None,
+            b':' if depth == 0
+                && bytes
+                    .get(index + 1)
+                    .is_none_or(|next| matches!(next, b' ' | b'\t')) =>
+            {
+                return Some(index);
+            }
+            _ if in_plain => {}
+            b'"' | b'\'' if token_start || depth > 0 => {
+                index += 1;
+                while index < bytes.len() {
+                    if byte == b'"' && bytes[index] == b'\\' {
+                        index += 2;
+                        continue;
+                    }
+                    if bytes[index] == byte {
+                        if byte == b'\'' && bytes.get(index + 1) == Some(&b'\'') {
+                            index += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            // A tag, anchor, or alias runs to the next blank (or flow
+            // indicator inside a flow collection); a `:` in it, as in
+            // `!: |` or `&a: x`, is part of the name. In compat an anchor or
+            // alias name ends where libyaml ends it, and a new token starts
+            // there: `&a:: |` is the key `:` anchored `a`.
+            b'!' | b'&' | b'*' if token_start => {
+                let name_start = index + 1;
+                while index + 1 < bytes.len()
+                    && !matches!(bytes[index + 1], b' ' | b'\t')
+                    && !(depth > 0 && matches!(bytes[index + 1], b',' | b'[' | b']' | b'{' | b'}'))
+                {
+                    if compat && byte != b'!' && compat_name_stop(bytes, index + 1, name_start) {
+                        name_stopped = true;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            b'[' | b'{' if token_start || depth > 0 => depth += 1,
+            b']' | b'}' if depth > 0 => depth -= 1,
+            b' ' | b'\t' => {}
+            _ if token_start && depth == 0 => in_plain = true,
+            _ => {}
+        }
+        token_start = std::mem::take(&mut name_stopped)
+            || matches!(byte, b' ' | b'\t')
+            || (depth > 0 && matches!(byte, b',' | b'[' | b'{'));
+        index += 1;
+    }
+    None
+}
+
+/// `line` without a trailing comment (a `#` that starts a token).
+fn strip_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut quote = None;
+    for (index, &byte) in bytes.iter().enumerate() {
+        match quote {
+            Some(open) if byte == open => quote = None,
+            Some(_) => {}
+            None if matches!(byte, b'"' | b'\'')
+                && (index == 0 || matches!(bytes[index - 1], b' ' | b'\t')) =>
+            {
+                quote = Some(byte);
+            }
+            None if byte == b'#' && (index == 0 || matches!(bytes[index - 1], b' ' | b'\t')) => {
+                return &line[..index];
+            }
+            None => {}
+        }
+    }
+    line
+}
+
+/// Check the stream's characters (P8, P32). A character outside `nb-json`
+/// (a C0 control other than tab, line feed, or carriage return) is an error
+/// anywhere: its offset is the `Err`. A character in `nb-json` but outside
+/// `c-printable` (DEL, a C1 control other than NEL, U+FFFE, or U+FFFF) may
+/// appear only inside a quoted scalar (YAML 1.2.2 section 5.1); the `Ok`
+/// lists their offsets for the scanner to check in context. Escapes in
+/// double-quoted scalars can still produce any character.
+fn non_printable_characters(input: &str) -> Result<Vec<usize>, usize> {
+    let bytes = input.as_bytes();
+    let mut quoted_only = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte < 0x80 {
+            if byte < 0x20 && !matches!(byte, b'\t' | b'\n' | b'\r') {
+                return Err(index);
+            }
+            if byte == 0x7f {
+                quoted_only.push(index);
+            }
+            index += 1;
+            continue;
+        }
+        let ch = input[index..]
+            .chars()
+            .next()
+            .expect("index is a char boundary");
+        let code = u32::from(ch);
+        if !(code == 0x85
+            || (0xa0..=0xd7ff).contains(&code)
+            || (0xe000..=0xfffd).contains(&code)
+            || code >= 0x1_0000)
+        {
+            quoted_only.push(index);
+        }
+        index += ch.len_utf8();
+    }
+    Ok(quoted_only)
+}
+
+fn non_printable_error(input: &str, index: usize) -> Error {
+    let ch = input[index..]
+        .chars()
+        .next()
+        .expect("index is a char boundary");
+    Error::new(
+        ErrorKind::Scanner,
+        format!(
+            "non-printable character U+{:04X} is not allowed in YAML",
+            u32::from(ch)
+        ),
+    )
+}
+
+/// Why [`decode_percent_escapes`] failed.
+enum PercentError {
+    /// A `%` at this byte offset is not followed by two hex digits.
+    Escape(usize),
+    /// The decoded bytes are not UTF-8.
+    Utf8,
+}
+
+/// Decode the `%XX` escapes in tag text (YAML 1.2.2 section 6.8.2).
+fn decode_percent_escapes(raw: &str) -> Result<String, PercentError> {
+    if !raw.contains('%') {
+        return Ok(raw.to_owned());
+    }
+    let bytes = raw.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = raw
+                .get(index + 1..index + 3)
+                .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                .and_then(|digits| u8::from_str_radix(digits, 16).ok())
+                .ok_or(PercentError::Escape(index))?;
+            decoded.push(hex);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).map_err(|_| PercentError::Utf8)
+}
+
+fn scalar_cow<'a>(value: String, candidate: &'a str) -> Cow<'a, str> {
+    if value == candidate {
+        Cow::Borrowed(candidate)
+    } else {
+        Cow::Owned(value)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Chomping {
+    Strip,
+    Clip,
+    Keep,
+}
+
+fn fold_block_scalar(raw: &str) -> String {
+    let lines: Vec<&str> = raw.split('\n').collect();
+    let mut value = String::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        value.push_str(line);
+        if index + 1 == lines.len() {
+            break;
+        }
+        let mut next = index + 1;
+        while next < lines.len() && lines[next].is_empty() {
+            next += 1;
+        }
+        if next == lines.len() {
+            for _ in index + 1..lines.len() {
+                value.push('\n');
+            }
+            break;
+        }
+        let breaks = next - index;
+        let more_indented = line.starts_with([' ', '\t']) || lines[next].starts_with([' ', '\t']);
+        if line.is_empty() || more_indented {
+            for _ in 0..breaks {
+                value.push('\n');
+            }
+        } else if breaks == 1 {
+            value.push(' ');
+        } else {
+            for _ in 0..breaks - 1 {
+                value.push('\n');
+            }
+        }
+        index = next;
+    }
+    value
+}
+
+fn build_block_scalar(lines: &[(String, bool)], literal: bool, chomping: Chomping) -> String {
+    let mut value = String::new();
+    if literal {
+        for (text, had_break) in lines {
+            value.push_str(text);
+            if *had_break {
+                value.push('\n');
+            }
+        }
+    } else {
+        let mut raw = String::new();
+        for (text, had_break) in lines {
+            raw.push_str(text);
+            if *had_break {
+                raw.push('\n');
+            }
+        }
+        value = fold_block_scalar(&raw);
+    }
+    let final_break = lines
+        .iter()
+        .rev()
+        .find(|(text, _)| !text.is_empty())
+        .is_some_and(|(_, had_break)| *had_break);
+    match chomping {
+        Chomping::Strip => {
+            while value.ends_with('\n') {
+                value.pop();
+            }
+        }
+        Chomping::Clip => {
+            while value.ends_with('\n') {
+                value.pop();
+            }
+            if final_break && !value.is_empty() {
+                value.push('\n');
+            }
+        }
+        Chomping::Keep => {}
+    }
+    value
+}
+
+fn default_tag_handles() -> HashMap<String, String> {
+    let mut handles = HashMap::new();
+    handles.insert("!".to_owned(), "!".to_owned());
+    handles.insert("!!".to_owned(), "tag:yaml.org,2002:".to_owned());
+    handles
+}
+
+/// A URI character (production 39, `ns-uri-char`), counting `%` alone; the
+/// two hex digits after it are checked when the escape is decoded.
+fn is_uri_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric()
+        || matches!(
+            ch,
+            '-' | '#'
+                | ';'
+                | '/'
+                | '?'
+                | ':'
+                | '@'
+                | '&'
+                | '='
+                | '+'
+                | '$'
+                | ','
+                | '_'
+                | '.'
+                | '!'
+                | '~'
+                | '*'
+                | '\''
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '%'
+        )
+}
+
+/// A tag shorthand character (production 40, `ns-tag-char`): a URI character
+/// other than `!` and the flow indicators.
+/// Whether `text` is URI characters, with each `%` starting a `%XX` escape.
+fn uri_text_ok(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    text.char_indices().all(|(index, ch)| {
+        is_uri_char(ch)
+            && (ch != '%'
+                || (bytes.get(index + 1).is_some_and(u8::is_ascii_hexdigit)
+                    && bytes.get(index + 2).is_some_and(u8::is_ascii_hexdigit)))
+    })
+}
+
+fn is_tag_char(ch: char) -> bool {
+    is_uri_char(ch) && !matches!(ch, '!' | ',' | '[' | ']' | '{' | '}')
+}
+
+/// YAML white space (production 33, `s-white`) or a line break. Other
+/// Unicode spaces, such as U+00A0, are ordinary content characters.
+fn is_blank(ch: char) -> bool {
+    matches!(ch, ' ' | '\t') || is_line_break(ch)
+}
+
+/// Whether `ch` is a YAML 1.2 line break. NEL, LS, and PS were line breaks
+/// in YAML 1.1 and libyaml; in YAML 1.2 they are content (P17).
+fn is_line_break(ch: char) -> bool {
+    matches!(ch, '\n' | '\r')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Scanner, TokenKind};
+    use crate::event::ScalarStyle;
+    use crate::limits::Limits;
+    use crate::tag::Tag;
+
+    fn tokens(input: &str) -> Vec<TokenKind<'_>> {
+        let mut scanner = Scanner::new(input, Limits::default()).expect("scanner");
+        let mut tokens = Vec::new();
+        while let Some(token) = scanner.next_token().expect("token") {
+            tokens.push(token.kind);
+        }
+        tokens
+    }
+
+    fn scalar(input: &str) -> (String, ScalarStyle, String) {
+        let tokens = tokens(input);
+        for token in tokens {
+            if let TokenKind::Scalar { value, raw, style } = token {
+                return (value.into_owned(), style, raw.into_owned());
+            }
+        }
+        panic!("no scalar in {input:?}");
+    }
+
+    #[test]
+    fn block_tokens_and_indicators() {
+        let kinds = tokens("a: 1\n- b\n");
+        assert!(matches!(kinds[0], TokenKind::StreamStart));
+        assert!(kinds.iter().any(|kind| matches!(kind, TokenKind::Value)));
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, TokenKind::BlockEntry))
+        );
+        assert!(matches!(kinds.last(), Some(TokenKind::StreamEnd)));
+    }
+
+    #[test]
+    fn flow_tokens_are_nested_and_comma_separated() {
+        let kinds = tokens("[1, {a: 2}]");
+        assert!(matches!(kinds[1], TokenKind::FlowSequenceStart));
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, TokenKind::FlowEntry))
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, TokenKind::FlowMappingStart))
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, TokenKind::FlowMappingEnd))
+        );
+    }
+
+    #[test]
+    fn block_scalars_support_literal_folding_and_chomping() {
+        let (value, style, raw) = scalar("|\n  a\n  b\n");
+        assert_eq!(value, "a\nb\n");
+        assert_eq!(style, ScalarStyle::Literal);
+        assert_eq!(raw, "|\n  a\n  b\n");
+
+        let (value, style, _) = scalar(">\n  a\n  b\n");
+        assert_eq!(value, "a b\n");
+        assert_eq!(style, ScalarStyle::Folded);
+
+        let (value, _, _) = scalar("|-\n  a\n  b\n");
+        assert_eq!(value, "a\nb");
+
+        let (value, _, _) = scalar("|+\n  a\n\n");
+        assert_eq!(value, "a\n\n");
+    }
+
+    #[test]
+    fn block_scalar_indent_indicator_is_relative_to_the_header() {
+        let (value, _, _) = scalar("|2\n    a\n");
+        assert_eq!(value, "  a\n");
+    }
+
+    #[test]
+    fn single_quotes_decode_doubled_quote() {
+        let (value, style, raw) = scalar("'it''s'");
+        assert_eq!(value, "it's");
+        assert_eq!(style, ScalarStyle::SingleQuoted);
+        assert_eq!(raw, "'it''s'");
+    }
+
+    #[test]
+    fn double_quotes_decode_escapes() {
+        let (value, style, _) = scalar("\"a\\n\\u00e9\"");
+        assert_eq!(value, "a\né");
+        assert_eq!(style, ScalarStyle::DoubleQuoted);
+    }
+
+    #[test]
+    fn multiline_quoted_scalars_fold_line_breaks() {
+        let (value, style, _) = scalar("'a\n  b'");
+        assert_eq!(value, "a b");
+        assert_eq!(style, ScalarStyle::SingleQuoted);
+
+        let (value, style, _) = scalar("\"a\n  b\"");
+        assert_eq!(value, "a b");
+        assert_eq!(style, ScalarStyle::DoubleQuoted);
+
+        let (value, _, _) = scalar("'a\n\n  b'");
+        assert_eq!(value, "a\nb");
+    }
+
+    #[test]
+    fn escaped_line_break_in_double_quotes_is_a_continuation() {
+        let (value, _, _) = scalar("\"a\\\n  b\"");
+        assert_eq!(value, "ab");
+    }
+
+    #[test]
+    fn anchors_aliases_tags_and_directives() {
+        let kinds = tokens("%YAML 1.2\n---\na: &b !Custom {x: 1}\nc: *b\n");
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, TokenKind::Directive { name, .. } if name == "YAML"))
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, TokenKind::DocumentStart { explicit: true }))
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, TokenKind::Anchor(name) if name == "b"))
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, TokenKind::Alias(name) if name == "b"))
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, TokenKind::Tag(tag) if tag == &Tag::local("Custom")))
+        );
+    }
+
+    #[test]
+    fn comments_are_skipped_and_line_breaks_are_tokens() {
+        let kinds = tokens("a: 1 # comment\nb: 2\n");
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, TokenKind::LineBreak))
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, TokenKind::Scalar { value, .. } if value == "1"))
+        );
+        assert!(!kinds.iter().any(
+            |kind| matches!(kind, TokenKind::Scalar { value, .. } if value.contains("comment"))
+        ));
+    }
+
+    #[test]
+    fn crlf_and_bom_are_handled() {
+        let kinds = tokens("\u{feff}a: 1\r\nb: 2\r\n");
+        assert!(matches!(kinds[0], TokenKind::StreamStart));
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, TokenKind::LineBreak))
+        );
+    }
+
+    #[test]
+    fn unicode_span_is_byte_based() {
+        let mut scanner = Scanner::new("é: 1", Limits::default()).expect("scanner");
+        let mut spans = Vec::new();
+        while let Some(token) = scanner.next_token().expect("token") {
+            if let TokenKind::Scalar { value, .. } = &token.kind
+                && value == "é"
+            {
+                spans.push(token.span);
+            }
+        }
+        assert_eq!(spans.len(), 1);
+        assert_eq!((spans[0].start().index(), spans[0].end().index()), (0, 2));
+    }
+
+    #[test]
+    fn unterminated_quotes_and_unknown_escapes_error() {
+        let mut scanner = Scanner::new("\"unterminated", Limits::default()).expect("scanner");
+        let error = loop {
+            match scanner.next_token() {
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("expected an error"),
+                Err(error) => break error,
+            }
+        };
+        assert_eq!(error.kind(), crate::error::ErrorKind::Scanner);
+
+        let mut scanner = Scanner::new("\"\\q\"", Limits::default()).expect("scanner");
+        let error = loop {
+            match scanner.next_token() {
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("expected an error"),
+                Err(error) => break error,
+            }
+        };
+        assert_eq!(error.kind(), crate::error::ErrorKind::Scanner);
+    }
+
+    #[test]
+    fn input_limit_is_enforced_before_scanning() {
+        let error = Scanner::new(
+            "x",
+            Limits {
+                max_input_bytes: 0,
+                ..Limits::default()
+            },
+        )
+        .expect_err("input limit");
+        assert_eq!(error.kind(), crate::error::ErrorKind::Limit);
+    }
+}

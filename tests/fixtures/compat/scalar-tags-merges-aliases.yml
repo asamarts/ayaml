@@ -1,0 +1,13 @@
+plain_bool_word: yes
+legacy_octal: 0123
+binary: 0b11
+hex: 0x1f
+exponent: 1e3
+date_like: 2026-10-19
+null_value: ~
+infinity: .inf
+core_string: !!str 123
+tagged: !Custom {x: 1}
+base: &base {x: 1}
+alias: *base
+merged: {<<: *base, y: 2}

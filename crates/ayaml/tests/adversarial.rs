@@ -1,0 +1,578 @@
+//! Adversarial inputs on every public entry point.
+//!
+//! Each test drives every public path that reads YAML, so that no entry
+//! point bypasses a limit that another enforces.
+
+use std::hash::Hash;
+
+use ayaml::{ErrorKind, Limits, MAX_DEPTH, MAX_DEPTH_CAP, Value};
+use serde::de::IgnoredAny;
+
+/// A billion-laughs bomb: nine levels of nine aliases each, 468 bytes
+/// that expand to 9^9 scalars.
+fn alias_bomb() -> String {
+    let mut bomb = String::from("a0: &a0 [x, x, x, x, x, x, x, x, x]\n");
+    for level in 1..9 {
+        let previous = format!("*a{}", level - 1);
+        let row = [previous.as_str(); 9].join(", ");
+        bomb.push_str(&format!("a{level}: &a{level} [{row}]\n"));
+    }
+    bomb
+}
+
+fn ok<T>(result: Result<T, ayaml::Error>) -> Result<(), ayaml::Error> {
+    result.map(drop)
+}
+
+/// Every public entry point that composes or decodes `input`, with the
+/// default limits, paired with its name.
+fn entry_points(input: &str) -> Vec<(&'static str, Result<(), ayaml::Error>)> {
+    let cursor = |next: fn(&mut ayaml::Deserializer<'_>) -> Result<(), ayaml::Error>| {
+        ayaml::Deserializer::from_str(input).and_then(|mut cursor| next(&mut cursor))
+    };
+    let results = vec![
+        ("parse_value", ok(ayaml::parse_value(input))),
+        ("parse_documents", ok(ayaml::parse_documents(input))),
+        ("from_str", ok(ayaml::from_str::<Value>(input))),
+        (
+            "from_slice",
+            ok(ayaml::from_slice::<Value>(input.as_bytes())),
+        ),
+        (
+            "from_str_borrowed",
+            ok(ayaml::from_str_borrowed::<Value>(input)),
+        ),
+        (
+            "from_str_borrowed (IgnoredAny)",
+            ok(ayaml::from_str_borrowed::<IgnoredAny>(input)),
+        ),
+        (
+            "from_slice_borrowed",
+            ok(ayaml::from_slice_borrowed::<Value>(input.as_bytes())),
+        ),
+        (
+            "Deserializer::next",
+            cursor(|cursor| cursor.next::<Value>().map(drop)),
+        ),
+        (
+            "Deserializer::next_borrowed",
+            cursor(|cursor| cursor.next_borrowed::<IgnoredAny>().map(drop)),
+        ),
+        (
+            "Deserializer::next_seed",
+            cursor(|cursor| {
+                cursor
+                    .next_seed(std::marker::PhantomData::<Value>)
+                    .map(drop)
+            }),
+        ),
+        (
+            "Deserializer::next_seed_borrowed",
+            cursor(|cursor| {
+                cursor
+                    .next_seed_borrowed(std::marker::PhantomData::<IgnoredAny>)
+                    .map(drop)
+            }),
+        ),
+    ];
+    #[cfg(feature = "libyaml-compat")]
+    let results = {
+        let mut results = results;
+        results.extend([
+            (
+                "compat::from_str",
+                ok(ayaml::compat::from_str::<Value>(input)),
+            ),
+            (
+                "compat::from_str_seed",
+                ok(ayaml::compat::from_str_seed(
+                    input,
+                    std::marker::PhantomData::<IgnoredAny>,
+                )),
+            ),
+            (
+                "compat::deserialize_any",
+                ok(ayaml::compat::deserialize_any(input, IgnoredAny)),
+            ),
+        ]);
+        results
+    };
+    results
+}
+
+/// L1: every entry point enforces the alias limits.
+#[test]
+fn alias_bomb_is_rejected_on_every_entry_point() {
+    let bomb = alias_bomb();
+    assert!(bomb.len() < 512, "{} bytes", bomb.len());
+    for (name, result) in entry_points(&bomb) {
+        let error = result.expect_err(name);
+        assert_eq!(error.kind(), ErrorKind::Limit, "{name}: {error}");
+    }
+}
+
+/// L1: the dereference count is enforced on every entry point, even
+/// when the expansion is small.
+#[test]
+fn alias_dereference_limit_is_enforced_on_every_entry_point() {
+    let mut input = String::from("a: &a 1\nb: [");
+    input.push_str(&vec!["*a"; 100_001].join(", "));
+    input.push_str("]\n");
+    for (name, result) in entry_points(&input) {
+        let error = result.expect_err(name);
+        assert!(
+            error.kind() == ErrorKind::Limit || error.to_string().contains("alias"),
+            "{name}: {error}"
+        );
+    }
+}
+
+/// The limits that accept an input on one entry point accept it on all.
+#[test]
+fn ordinary_aliases_are_accepted_on_every_entry_point() {
+    let input = "base: &b {x: [1, 2]}\nuse: *b\nmore: [*b, *b]\n";
+    for (name, result) in entry_points(input) {
+        result.unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+}
+
+#[test]
+fn compat_profile_keeps_its_single_document_limit() {
+    assert_eq!(Limits::compat().max_documents, 1);
+}
+
+/// `a0: &a0 [0]`, then `aN: &aN [*aN-1]`: each alias nests the previous
+/// chain one level deeper.
+fn alias_chain(links: usize) -> String {
+    let mut chain = String::from("a0: &a0 [0]\n");
+    for link in 1..links {
+        chain.push_str(&format!("a{link}: &a{link} [*a{}]\n", link - 1));
+    }
+    chain
+}
+
+/// L2: an alias's nesting counts toward `max_depth` where the alias sits,
+/// as in yaml_serde, which accepts 127 links and rejects 128.
+#[test]
+fn alias_nesting_counts_toward_the_depth_limit_on_every_entry_point() {
+    for (name, result) in entry_points(&alias_chain(127)) {
+        result.unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+    for links in [128, 8_000] {
+        for (name, result) in entry_points(&alias_chain(links)) {
+            let error = result.expect_err(name);
+            // Compat reports yaml_serde's message for the depth limit.
+            let message = error.to_string();
+            assert!(
+                (error.kind() == ErrorKind::Limit && message.contains("depth"))
+                    || message.contains("recursion limit exceeded"),
+                "{name}: {error}"
+            );
+        }
+    }
+}
+
+/// V1: anchors cost nothing until an alias uses them. A 4 MiB scalar under
+/// 100 nested anchors used to be copied once per anchor.
+#[test]
+fn nested_anchors_are_not_copied() {
+    let mut input = String::new();
+    for level in 0..100 {
+        input.push_str(&format!("&a{level} ["));
+    }
+    input.push_str(&"x".repeat(4 << 20));
+    input.push_str(&"]".repeat(100));
+    let mut value = &ayaml::parse_value(&input).expect("parse");
+    for _ in 0..100 {
+        value = &value[0];
+    }
+    assert_eq!(value.as_str().map(str::len), Some(4 << 20));
+    ayaml::from_str_borrowed::<IgnoredAny>(&input).expect("typed");
+}
+
+/// The nesting shapes the depth tests use, each with a different recursion
+/// profile in Serde (sequences, mappings) or the parser (block, flow,
+/// compact, aliases).
+const SHAPES: [&str; 6] = [
+    "flow sequence",
+    "flow mapping",
+    "block sequence",
+    "block mapping",
+    "compact sequence",
+    "alias chain",
+];
+
+/// `depth` nested collections of one shape around a scalar.
+fn nested(shape: &str, depth: usize) -> String {
+    let lines = |entry: &str| {
+        let mut text: String = (0..depth)
+            .map(|level| format!("{}{entry}\n", " ".repeat(level)))
+            .collect();
+        text.push_str(&format!("{}0\n", " ".repeat(depth)));
+        text
+    };
+    match shape {
+        "flow sequence" => format!("{}0{}", "[".repeat(depth), "]".repeat(depth)),
+        "flow mapping" => format!("{}0{}", "{a: ".repeat(depth), "}".repeat(depth)),
+        "block sequence" => lines("-"),
+        "block mapping" => lines("a:"),
+        "compact sequence" => format!("{}0\n", "- ".repeat(depth)),
+        // `a0: &a0 {k: 0}`, then `aN: &aN {k: *aN-1}`: the root mapping
+        // and N + 1 nested mappings, the deepest Serde recursion per level.
+        "alias chain" => {
+            let mut chain = String::from("a0: &a0 {k: 0}\n");
+            for link in 1..depth - 1 {
+                chain.push_str(&format!("a{link}: &a{link} {{k: *a{}}}\n", link - 1));
+            }
+            chain
+        }
+        _ => unreachable!("{shape}"),
+    }
+}
+
+/// Run `body` on a thread with a 2 MiB stack, the default for spawned and
+/// test threads. A stack overflow aborts the test binary.
+fn on_small_stack(body: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(body)
+        .expect("spawn")
+        .join()
+        .expect("no panic");
+}
+
+/// Every public entry point that takes explicit limits and reads YAML.
+fn limited_entry_points(
+    input: &str,
+    limits: &Limits,
+) -> Vec<(&'static str, Result<(), ayaml::Error>)> {
+    let cursor = |next: fn(&mut ayaml::Deserializer<'_>) -> Result<(), ayaml::Error>| {
+        ayaml::Deserializer::from_str_with_limits(input, limits)
+            .and_then(|mut cursor| next(&mut cursor))
+    };
+    vec![
+        (
+            "parse_events_with_limits",
+            ayaml::parse_events_with_limits(input, limits)
+                .and_then(|stream| stream.collect::<Result<Vec<_>, _>>())
+                .map(drop),
+        ),
+        (
+            "parse_value_with_limits",
+            ok(ayaml::parse_value_with_limits(input, limits)),
+        ),
+        (
+            "parse_documents_with_limits",
+            ok(ayaml::parse_documents_with_limits(input, limits)),
+        ),
+        (
+            "from_str_borrowed_with_limits",
+            ok(ayaml::from_str_borrowed_with_limits::<Value>(input, limits)),
+        ),
+        (
+            "from_str_borrowed_with_limits (serde_json)",
+            ok(ayaml::from_str_borrowed_with_limits::<serde_json::Value>(
+                input, limits,
+            )),
+        ),
+        (
+            "from_str_borrowed_with_limits (IgnoredAny)",
+            ok(ayaml::from_str_borrowed_with_limits::<IgnoredAny>(
+                input, limits,
+            )),
+        ),
+        (
+            "Deserializer::next",
+            cursor(|cursor| cursor.next::<Value>().map(drop)),
+        ),
+        (
+            "Deserializer::next_borrowed",
+            cursor(|cursor| cursor.next_borrowed::<serde_json::Value>().map(drop)),
+        ),
+        (
+            "Deserializer::next_seed",
+            cursor(|cursor| {
+                cursor
+                    .next_seed(std::marker::PhantomData::<Value>)
+                    .map(drop)
+            }),
+        ),
+        (
+            "Deserializer::next_seed_borrowed",
+            cursor(|cursor| {
+                cursor
+                    .next_seed_borrowed(std::marker::PhantomData::<IgnoredAny>)
+                    .map(drop)
+            }),
+        ),
+    ]
+}
+
+/// Every public path that takes an already-parsed value or event stream:
+/// decoding, emitting, merging, and the `Value` trait implementations.
+fn value_paths(input: &str, limits: &Limits) -> Vec<(&'static str, Result<(), ayaml::Error>)> {
+    let value = ayaml::parse_value_with_limits(input, limits).expect("parse");
+    let events = ayaml::parse_events_with_limits(input, limits)
+        .and_then(|stream| stream.collect::<Result<Vec<_>, _>>())
+        .expect("events");
+    let mut merged = value.clone();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    let debug = format!("{value:?}");
+    vec![
+        ("from_value", ok(ayaml::from_value::<Value>(value.clone()))),
+        (
+            "from_value (serde_json)",
+            ok(ayaml::from_value::<serde_json::Value>(value.clone())),
+        ),
+        ("to_value", ok(ayaml::to_value(&value))),
+        (
+            "to_string_value_with_limits",
+            ok(ayaml::to_string_value_with_limits(&value, limits)),
+        ),
+        (
+            "to_string_with_limits",
+            ok(ayaml::to_string_with_limits(&value, limits)),
+        ),
+        (
+            "to_string_documents_with_limits",
+            ok(ayaml::to_string_documents_with_limits(
+                std::slice::from_ref(&value),
+                limits,
+            )),
+        ),
+        (
+            "to_string_events_with_limits",
+            ok(ayaml::to_string_events_with_limits(&events, limits)),
+        ),
+        (
+            "to_writer_event_stream_with_limits",
+            ayaml::parse_events_with_limits(input, limits).and_then(|stream| {
+                ayaml::to_writer_event_stream_with_limits(&mut Vec::new(), stream, limits)
+            }),
+        ),
+        ("apply_merge_keys", merged.apply_merge_keys()),
+        ("clone, eq, hash, debug", {
+            assert_eq!(merged, value);
+            assert!(!debug.is_empty());
+            Ok(())
+        }),
+    ]
+}
+
+/// Expect the depth limit from an entry point reading `depth`-deep
+/// `shape`. The event stream leaves aliases unexpanded, so an alias chain
+/// stays shallow there.
+fn assert_depth_error(shape: &str, name: &str, result: Result<(), ayaml::Error>) {
+    if shape == "alias chain" && name == "parse_events_with_limits" {
+        result.unwrap_or_else(|error| panic!("{shape}, {name}: {error}"));
+        return;
+    }
+    let error = result.expect_err(name);
+    let message = error.to_string();
+    // Compat reports yaml_serde's message for the depth limit.
+    assert!(
+        (error.kind() == ErrorKind::Limit && message.contains("depth"))
+            || message.contains("recursion limit exceeded"),
+        "{shape}, {name}: {error}"
+    );
+}
+
+/// a `max_depth` above the cap is a configuration error on every path
+/// that takes limits; the cap itself is accepted.
+#[test]
+fn max_depth_above_the_cap_is_rejected_on_every_entry_point() {
+    let over = Limits::default().with_max_depth(MAX_DEPTH_CAP + 1);
+    let at_cap = Limits::default().with_max_depth(MAX_DEPTH_CAP);
+    let input = "a: [1, {b: 2}]\n";
+    let value = ayaml::parse_value(input).expect("parse");
+    let events = ayaml::parse_events(input)
+        .and_then(|stream| stream.collect::<Result<Vec<_>, _>>())
+        .expect("events");
+    let emitters = |limits: &Limits| -> Vec<(&'static str, Result<(), ayaml::Error>)> {
+        vec![
+            (
+                "to_string_value_with_limits",
+                ok(ayaml::to_string_value_with_limits(&value, limits)),
+            ),
+            (
+                "to_string_with_limits",
+                ok(ayaml::to_string_with_limits(&value, limits)),
+            ),
+            (
+                "to_string_documents_with_limits",
+                ok(ayaml::to_string_documents_with_limits(
+                    std::slice::from_ref(&value),
+                    limits,
+                )),
+            ),
+            (
+                "to_string_events_with_limits",
+                ok(ayaml::to_string_events_with_limits(&events, limits)),
+            ),
+            (
+                "to_writer_event_stream_with_limits",
+                ayaml::parse_events_with_limits(input, &Limits::default()).and_then(|stream| {
+                    ayaml::to_writer_event_stream_with_limits(&mut Vec::new(), stream, limits)
+                }),
+            ),
+        ]
+    };
+    for (name, result) in limited_entry_points(input, &over)
+        .into_iter()
+        .chain(emitters(&over))
+    {
+        let error = result.expect_err(name);
+        assert_eq!(error.kind(), ErrorKind::Limit, "{name}: {error}");
+        let expected = format!("max_depth {}", MAX_DEPTH_CAP + 1);
+        assert!(error.to_string().contains(&expected), "{name}: {error}");
+    }
+    for (name, result) in limited_entry_points(input, &at_cap)
+        .into_iter()
+        .chain(emitters(&at_cap))
+    {
+        result.unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+}
+
+/// At the cap, every path fits a 2 MiB thread, and one level
+/// more is a depth error, not an abort. CI runs this file in debug and
+/// release builds.
+#[test]
+fn every_entry_point_fits_a_small_stack_at_the_depth_cap() {
+    on_small_stack(|| {
+        let limits = Limits::default().with_max_depth(MAX_DEPTH_CAP);
+        for shape in SHAPES {
+            let input = nested(shape, MAX_DEPTH_CAP);
+            for (name, result) in limited_entry_points(&input, &limits)
+                .into_iter()
+                .chain(value_paths(&input, &limits))
+            {
+                result.unwrap_or_else(|error| panic!("{shape}, {name}: {error}"));
+            }
+            for (name, result) in limited_entry_points(&nested(shape, MAX_DEPTH_CAP + 1), &limits) {
+                assert_depth_error(shape, name, result);
+            }
+        }
+    });
+}
+
+/// The entry points without a limits parameter, compat included, use the
+/// default depth and fit a 2 MiB thread at it.
+#[test]
+fn default_entry_points_fit_a_small_stack_at_the_default_depth() {
+    on_small_stack(|| {
+        for shape in SHAPES {
+            for (name, result) in entry_points(&nested(shape, MAX_DEPTH)) {
+                result.unwrap_or_else(|error| panic!("{shape}, {name}: {error}"));
+            }
+            for (name, result) in entry_points(&nested(shape, MAX_DEPTH + 1)) {
+                assert_depth_error(shape, name, result);
+            }
+        }
+    });
+}
+
+/// L6: the parser keeps its own stack, so nesting far past any depth limit
+/// is a limit error on a 2 MiB thread, never an abort.
+#[test]
+fn deep_nesting_is_a_limit_error_on_a_small_stack() {
+    on_small_stack(|| {
+        let limits = Limits::default().with_max_depth(MAX_DEPTH_CAP);
+        for shape in SHAPES {
+            // Far past the limit: every path stops at its depth check.
+            let depth = if shape.starts_with("block") {
+                1_000
+            } else {
+                10_000
+            };
+            let input = nested(shape, depth);
+            for (name, result) in limited_entry_points(&input, &limits) {
+                assert_depth_error(shape, name, result);
+            }
+            for (name, result) in entry_points(&input) {
+                assert_depth_error(shape, name, result);
+            }
+        }
+    });
+}
+
+/// `entries` entries of one wide shape: a single collection, or a run of
+/// entries without nested nodes, that a grammar loop must not turn into one
+/// native frame per entry.
+fn wide(shape: &str, entries: usize) -> String {
+    let each = |entry: &dyn Fn(usize) -> String| (0..entries).map(entry).collect::<String>();
+    match shape {
+        "empty explicit keys" => "?\n".repeat(entries),
+        "explicit pairs" => each(&|index| format!("? k{index}\n: v\n")),
+        "block keys" => each(&|index| format!("k{index}:\n")),
+        "block pairs" => each(&|index| format!("k{index}: v\n")),
+        "block sequence" => "-\n".repeat(entries),
+        "block scalars" => "- a\n".repeat(entries),
+        "block properties" => each(&|index| format!("- &a{index} x\n")),
+        "empty flow pairs" => format!("{{{}}}", ":, ".repeat(entries)),
+        "flow keys" => format!("{{{}}}", each(&|index| format!("k{index}, "))),
+        "flow explicit keys" => format!("{{{}}}", each(&|index| format!("? k{index}, "))),
+        "flow explicit pairs" => format!("{{{}}}", each(&|index| format!("? k{index} : v, "))),
+        "flow sequence" => format!("[{}]", "a, ".repeat(entries)),
+        "flow pairs in a sequence" => format!("[{}]", each(&|index| format!("k{index}: v, "))),
+        "explicit pairs in a sequence" => {
+            format!("[{}]", each(&|index| format!("? k{index} : v, ")))
+        }
+        "empty keys in a sequence" => format!("[{}]", ": v, ".repeat(entries)),
+        _ => unreachable!("{shape}"),
+    }
+}
+
+/// Wide collections fit a 2 MiB thread on every entry point and through
+/// the event writer. Whether a value path accepts them (repeated null keys
+/// are duplicates) does not matter here, only that nothing aborts.
+#[test]
+fn wide_collections_fit_a_small_stack() {
+    on_small_stack(|| {
+        let limits = Limits::default();
+        for shape in [
+            "empty explicit keys",
+            "explicit pairs",
+            "block keys",
+            "block pairs",
+            "block sequence",
+            "block scalars",
+            "block properties",
+            "empty flow pairs",
+            "flow keys",
+            "flow explicit keys",
+            "flow explicit pairs",
+            "flow sequence",
+            "flow pairs in a sequence",
+            "explicit pairs in a sequence",
+            "empty keys in a sequence",
+        ] {
+            // The per-entry recursion fixed after 7529fc4 (L8) aborted below
+            // 5,000 entries in a release build and 1,000 in a debug build.
+            // CI runs this file in both builds.
+            let entries = if cfg!(debug_assertions) {
+                3_000
+            } else {
+                10_000
+            };
+            let input = wide(shape, entries);
+            let events = ayaml::parse_events_with_limits(&input, &limits)
+                .and_then(|stream| stream.collect::<Result<Vec<_>, _>>())
+                .unwrap_or_else(|error| panic!("{shape}: {error}"));
+            ayaml::to_string_events_with_limits(&events, &limits)
+                .unwrap_or_else(|error| panic!("{shape}, to_string_events: {error}"));
+            for (name, result) in limited_entry_points(&input, &limits)
+                .into_iter()
+                .chain(entry_points(&input))
+            {
+                if let Err(error) = result {
+                    // Owned decoding reports duplicates through Serde.
+                    let duplicate = error.kind() == ErrorKind::DuplicateKey
+                        || error.to_string().contains("duplicate");
+                    assert!(duplicate, "{shape}, {name}: {error}");
+                }
+            }
+        }
+    });
+}

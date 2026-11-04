@@ -1,0 +1,5 @@
+name: borrowed
+items:
+  - one
+  - "two"
+map: {1: one, 2: two}

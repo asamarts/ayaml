@@ -1,0 +1,6 @@
+repository=https://github.com/yaml/yaml-test-suite
+revision=da267a5c4782e7361e82889e76c0dc7df0e1e870
+source_date=2026-10-21
+files=351
+content_sha256=e3a740a23046f3324c9acc833f2d3223a3885589c33ba530710c6bfd620c5148
+license=MIT

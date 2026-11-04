@@ -1,0 +1,19 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 71e304ec8f4e0758d8d74b080dda518575b7035be8fecbb28b207190daa5e17a # shrinks to values = ["ࡀ:"]
+cc 2a14b456caeba4a1c97f313ad55644a12015ea021b33da7bc8f17e1e12d63a77 # shrinks to text = "0:"
+cc c1ceeb1b85b0dae17f6e2fc563183a364eb262bc7eac816b1a20916db7a562fd # shrinks to values = ["\u{2028}"]
+cc 2941604010c5775c1e0694f8ebc71b1bfdab789d6ee79e39dc1d5b2ece97da1a # shrinks to text = "\u{1e08f}:\u{a0}0"
+cc 24d3392c8470a0c27e45ff8b0cde5a8f4b1277b49e836694835fcaaae1514681 # shrinks to values = ["(:\u{2000}𑤉"]
+cc caaa386f6d04752dd8ca811df4eebb4d689301e4fc3dcee25da324c6e91d6b84 # shrinks to value = Mapping(Mapping {Null: Tagged(TaggedValue { tag: Tag { handle: "!", suffix: "a" }, value: Bool(false) })}), flow = false, indent = 2, indent_sequences = false, style = None
+cc 02adff5c16e296b6eccfff6ec09cc6050d7238acebd8af2e5992b3e282dbee73 # shrinks to value = Tagged(TaggedValue { tag: Tag { handle: "!", suffix: "A" }, value: Bool(false) })
+cc 3d9cfb4349fdc0bcd7c9e2ee3b8786137facbea179ce91fb02eaa18608f67420 # shrinks to value = Sequence([Tagged(TaggedValue { tag: Tag { handle: "!", suffix: "A" }, value: Bool(false) })])
+cc ae08d75b2851f7dd81e6978e6cdff4a07ca4c053786b822dbdfaca7645f02686 # shrinks to text = "-,"
+cc c4aae85599f5eb4f5ad66f11efaf4d975d497c1acc23440faf85b87ae6d4796c # shrinks to values = ["-,"]
+cc 58e14de5c263a39208143190afbbe2c333692da40436a82c5bd805a30b7c1aea # shrinks to value = Sequence([Tagged(TaggedValue { tag: Tag { handle: "!", suffix: ":" }, value: String("\n0") })])
+cc 9c033391f5eaee7d0265349f48723944779a7fe61ffd7c0a3abcea1e72d5d614 # shrinks to value = Sequence([Mapping(Mapping {Tagged(TaggedValue { tag: Tag { handle: "!", suffix: "a" }, value: Bool(false) }): Null, Null: Null})])
+cc 6c71b6dc4e8ab17a39e7ca1e90d250c1d027ce85673361a4f464192013cab119 # shrinks to input = "!"

@@ -1,0 +1,22 @@
+# Known YAML Test Suite deviations.
+#
+# Format: <case>#<index> <default|compat|all> <check> <reason>
+# Checks: class, tree, tree-eager, json, emit-events, emit-stream, emit-value (see
+# crates/ayaml-conformance/src/main.rs). AYAML_STRICT_SUITE=1 fails on any
+# deviation missing here and on any entry here that no longer deviates.
+#
+# The default profile follows YAML 1.2.2. `compat` entries describe intentional
+# libyaml-compatible behavior in the optional compatibility mode.
+652Z#0   compat  json         compatibility mode: libyaml-compatible behavior
+652Z#0   compat  tree         compatibility mode: libyaml-compatible behavior
+9C9N#0   compat  class        compatibility mode: zero-indented flow continuation lines are accepted
+CVW2#0   compat  class        compatibility mode: a comment directly after a flow indicator is accepted
+HM87#1   compat  json         compatibility mode: libyaml-compatible behavior
+HM87#1   compat  tree         compatibility mode: libyaml-compatible behavior
+JEF9#2   compat  json         compatibility mode: libyaml-compatible behavior
+JEF9#2   compat  tree         compatibility mode: libyaml-compatible behavior
+L24T#1   compat  json         compatibility mode: libyaml-compatible behavior
+L24T#1   compat  tree         compatibility mode: libyaml-compatible behavior
+VJP3#0   compat  class        compatibility mode: zero-indented flow continuation lines are accepted
+Y2GN#0   compat  json         compatibility mode: libyaml-compatible behavior
+Y2GN#0   compat  tree         compatibility mode: libyaml-compatible behavior

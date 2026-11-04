@@ -1,0 +1,37 @@
+[
+  {
+    "!minidump": {
+      "Streams": [
+        {
+          "Type": "ThreadList",
+          "Threads": [
+            {
+              "Thread Id": 14750,
+              "Stack": {
+                "Start of Memory Range": 140733117278648,
+                "Content": 30044000000000000000000000000000
+              }
+            }
+          ]
+        },
+        {
+          "Type": "MemoryList",
+          "Memory Ranges": [
+            {
+              "Start of Memory Range": 140733117276160,
+              "Content": 3.0044e+39
+            },
+            {
+              "Start of Memory Range": 140733117280256,
+              "Content": "0000000000000000"
+            },
+            {
+              "Start of Memory Range": 140733117284352,
+              "Content": "30044000000000000000000000000000"
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

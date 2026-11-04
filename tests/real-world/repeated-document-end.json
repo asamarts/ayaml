@@ -1,0 +1,18 @@
+[
+  {
+    "!mach-o": {
+      "FileHeader": {
+        "magic": 4277009103,
+        "ncmds": 1
+      }
+    }
+  },
+  {
+    "!mach-o": {
+      "FileHeader": {
+        "magic": 4277009103,
+        "ncmds": 2
+      }
+    }
+  }
+]
