@@ -116,6 +116,28 @@ jobs:
       - name: Unsafe census
         run: cargo geiger --manifest-path "$GITHUB_WORKSPACE/crates/ayaml/Cargo.toml" --all-features --output-format Json > "${RUNNER_TEMP}/geiger.json"
 
+  semver:
+    name: semver checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo-semver-checks
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: ayaml
+
+  minimal-versions:
+    name: minimal versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Select minimal versions
+        run: cargo update -Z minimal-versions
+      - name: Test minimal graph
+        run: cargo test --workspace --all-features
+
   secrets:
     name: secret scan
     runs-on: ubuntu-latest
