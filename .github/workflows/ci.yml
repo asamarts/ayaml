@@ -60,7 +60,7 @@ jobs:
           tmp="${RUNNER_TEMP}/ayaml-downstream"
           rm -rf "$tmp"
           cargo new --quiet "$tmp"
-          printf '\n[dependencies]\nayaml = { path = "%s/target/package/ayaml-0.1.0" }\n' "$GITHUB_WORKSPACE" >> "$tmp/Cargo.toml"
+          printf '\nayaml = { path = "%s/target/package/ayaml-0.1.0" }\n' "$GITHUB_WORKSPACE" >> "$tmp/Cargo.toml"
           cargo check --quiet --manifest-path "$tmp/Cargo.toml"
 
   cross:
@@ -114,7 +114,7 @@ jobs:
       - name: Install cargo-geiger
         run: cargo install cargo-geiger --locked
       - name: Unsafe census
-        run: cargo geiger --manifest-path crates/ayaml/Cargo.toml --all-features --output-format Json > "${RUNNER_TEMP}/geiger.json"
+        run: cargo geiger --manifest-path "$GITHUB_WORKSPACE/crates/ayaml/Cargo.toml" --all-features --output-format Json > "${RUNNER_TEMP}/geiger.json"
 
   secrets:
     name: secret scan
