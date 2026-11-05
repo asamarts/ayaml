@@ -8,7 +8,7 @@ publish = false
 description = "Benchmarks for ayaml"
 
 [dev-dependencies]
-ayaml = { path = "../ayaml", features = ["bench-internals"] }
+ayaml = { path = "../ayaml", version = "=0.1.1", features = ["bench-internals"] }
 criterion.workspace = true
 
 [[bench]]
