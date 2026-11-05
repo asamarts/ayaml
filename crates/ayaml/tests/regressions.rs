@@ -1528,7 +1528,10 @@ fn aliases_resolve_through_open_and_finished_collections() {
         parse("a: [[&x {k: v}]]\nb: *x\n"),
         json!({"a": [[{"k": "v"}]], "b": {"k": "v"}})
     );
-    assert_eq!(parse("- [&x 1, [*x, [*x]]]\n- *x\n"), json!([[1, [1, [1]]], 1]));
+    assert_eq!(
+        parse("- [&x 1, [*x, [*x]]]\n- *x\n"),
+        json!([[1, [1, [1]]], 1])
+    );
     assert_eq!(
         parse("a: &outer\n  b: &inner [1, 2]\n  c: *inner\nd: *outer\ne: *inner\n"),
         json!({
