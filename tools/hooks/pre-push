@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Run the leak gate over exactly what this push would publish.
+#
+# Setup, once per clone (linked worktrees share it):
+#   git config core.hooksPath tools/hooks
+# See tools/leak-scan/README.md.
+set -euo pipefail
+
+remote_name="${1:-origin}"
+hook_dir="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+gate="$hook_dir/../leak-scan/gate.py"
+
+updates=()
+while read -r local_ref local_sha remote_ref remote_sha extra; do
+    if [[ -z "${local_ref:-}" || -z "${local_sha:-}" || -z "${remote_ref:-}" || -z "${remote_sha:-}" || -n "${extra:-}" ]]; then
+        echo "pre-push: malformed ref update from Git; the leak gate did not run" >&2
+        exit 2
+    fi
+    updates+=("$local_sha $remote_ref $remote_sha")
+done
+
+# `set -e` stops at the first rejected ref, which is enough to stop the push.
+for update in "${updates[@]+"${updates[@]}"}"; do
+    read -r local_sha remote_ref remote_sha <<<"$update"
+    if [[ "$local_sha" =~ ^0+$ ]]; then
+        continue
+    fi
+    case "$remote_ref" in
+        refs/heads/* | refs/tags/v*) ;;
+        *)
+            echo "pre-push: refusing to publish $remote_ref: only branches and v* tags belong here" >&2
+            exit 1
+            ;;
+    esac
+    args=(--head "$local_sha" --exclude-remote "$remote_name")
+    if ! [[ "$remote_sha" =~ ^0+$ ]]; then
+        args+=(--not "$remote_sha")
+    fi
+    python3 "$gate" scan "${args[@]}"
+done

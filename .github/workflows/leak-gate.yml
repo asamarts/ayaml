@@ -1,0 +1,40 @@
+name: leak gate
+
+# Separate from ci.yml so that editing a pull request's title or body re-runs
+# only this check.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  leak-scan:
+    name: leak scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Install the pinned scanner
+        run: echo "AYAML_GITLEAKS=$(tools/leak-scan/install-gitleaks.sh "$RUNNER_TEMP/gitleaks")" >> "$GITHUB_ENV"
+      - name: Test the gate
+        run: python3 tools/leak-scan/test_gate.py
+      - name: Scan commits and tree
+        env:
+          AYAML_LEAK_PATTERNS: ${{ secrets.AYAML_LEAK_PATTERNS }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python3 tools/leak-scan/gate.py scan --head "$HEAD_SHA" --not "$BASE_SHA"
+      - name: Scan the pull request's title and body
+        if: github.event_name == 'pull_request'
+        env:
+          AYAML_LEAK_PATTERNS: ${{ secrets.AYAML_LEAK_PATTERNS }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 tools/leak-scan/gate.py text PR_TITLE PR_BODY
