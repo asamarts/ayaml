@@ -56,6 +56,8 @@ jobs:
         run: tools/check_alloc_corpus.sh
       - name: Benchmarks compile
         run: cargo bench --locked -p ayaml-bench --no-run
+      - name: Fuzz targets compile
+        run: cargo check --manifest-path fuzz/Cargo.toml --locked --bins
 
   package:
     name: package and downstream smoke
@@ -101,7 +103,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest]
+        os: [macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
