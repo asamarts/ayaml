@@ -1,0 +1,4 @@
+title = "ayaml public repository scan"
+
+[extend]
+useDefault = true
