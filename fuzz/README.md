@@ -3,10 +3,10 @@
 These targets are a separate cargo-fuzz workspace:
 
 ```sh
-cargo install cargo-fuzz
-cargo fuzz run parse --target x86_64-unknown-linux-gnu
-cargo fuzz run emit --target x86_64-unknown-linux-gnu
-cargo fuzz run borrowed --target x86_64-unknown-linux-gnu
+cargo install cargo-fuzz --locked
+cargo +nightly fuzz run parse --target x86_64-unknown-linux-gnu
+cargo +nightly fuzz run emit --target x86_64-unknown-linux-gnu
+cargo +nightly fuzz run borrowed --target x86_64-unknown-linux-gnu
 ```
 
 `parse` exercises value/event/document parsing and event collection. `emit`

@@ -8,9 +8,11 @@ is ignored by Git and can hold notes specific to one machine.
 
 - `crates/ayaml`: the library, including the optional `ayaml::compat` module.
 - `crates/ayaml-conformance`: the YAML Test Suite runner.
+- `crates/ayaml-bench`: timing benchmarks.
 - `tests/`: fixtures, the pinned suite, and real-world files.
 - `fuzz/`: `cargo-fuzz` targets and seeds.
-- `tools/`: local CI, the dependency policy check, and the leak gate.
+- `tools/`: local CI, allocation and instruction checks, the dependency policy check,
+  and the leak gate.
 - `aplan/tasks/`: the task plan.
 - `docs/`: design, limits, compatibility, and decisions.
 
@@ -57,6 +59,9 @@ limit regresses, so always bound them:
 ( ulimit -v 8388608; timeout -k 5 300 nice -n 10 cargo test -p ayaml --all-features --locked )
 ```
 
+- A sanitizer build can't run under `ulimit -v`, because it reserves a huge address
+  space. Bound a fuzz run with libFuzzer's `-rss_limit_mb=2048`, plus `timeout` and
+  `nice`.
 - Never run a mutant or experiment that disables or zeroes an alias, depth, or
   expansion limit on a shared machine.
 - If an adversarial test's memory passes a few GiB on unmodified code, stop it and

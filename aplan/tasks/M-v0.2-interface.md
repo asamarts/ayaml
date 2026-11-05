@@ -24,3 +24,4 @@ with the shapes adotenv already uses.
 
 - [ ] every member is closed with test evidence
 - [ ] ayaml 0.2 is published through the release flow, with a migration note in the changelog
+- [ ] `SECURITY.md` names the versions that get fixes after 0.2

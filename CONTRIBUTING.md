@@ -15,6 +15,10 @@ To report a vulnerability, follow [`SECURITY.md`](SECURITY.md) instead.
 
 ## Setting up a clone
 
+You need stable Rust and Rust 1.88, the oldest version ayaml supports. Fuzzing needs
+nightly and `cargo-fuzz`, the instruction check needs `valgrind`, and plan changes need
+`aplan` (`cargo install aplan --version 0.6.0 --locked`).
+
 Maintainers also set up the leak gate, which needs a private pattern list. See
 [`tools/leak-scan/README.md`](tools/leak-scan/README.md). Pull requests from forks
 don't get that list, so a maintainer runs the check by bringing the change onto a
@@ -22,7 +26,8 @@ branch here.
 
 ## Running the checks locally
 
-`tools/ci-local.sh` mirrors the hosted workflows:
+`tools/ci-local.sh` runs most of what the hosted workflows run, and its header lists what
+differs:
 
 ```sh
 tools/ci-local.sh --list          # the job names
@@ -41,12 +46,31 @@ parser, so bound them on a shared machine:
 Don't run an experiment that disables or zeroes an alias, depth, or expansion limit
 without a memory bound. It can turn those tests into real memory exhaustion.
 
+## Checks that run before a release
+
+Maintainers run two further sets of checks before a release, and tasks in `aplan/tasks/`
+refer to them:
+
+- The **performance gates** compare timing and peak memory with earlier measurements.
+  They need a machine with nothing else running, called a quiet host in the tasks.
+- The **comparison gates** check parsing results against a larger private set of inputs.
+
+Their results aren't published. CI's allocation budgets and instruction counts are the
+public checks of the same concerns.
+
+## Releasing
+
+Until the automated workflow in task AY-004 exists, a release is done by hand: the version
+bump and changelog land through a pull request, a maintainer tags that commit on `main` as
+`vX.Y.Z`, and then publishes from a clean checkout of the tag with `cargo publish`.
+
 ## Conventions
 
 - **Dependencies:** `tools/check_deps.py` and `deny.toml` classify every dependency,
   and [`docs/dependencies.md`](docs/dependencies.md) gives the policy. Adding a
   runtime dependency is a decision to discuss first.
-- **Unsafe code:** this workspace forbids it.
+- **Unsafe code:** this workspace forbids it. The fuzz workspace's counting allocator
+  is the one exception.
 - **Compatibility:** the default mode follows YAML 1.2.2. Behavior that imitates
   libyaml belongs only in `ayaml::compat`, and libyaml is the one other parser the
   documentation names. Describe behavior on its own terms, with literal expected

@@ -1522,6 +1522,21 @@ fn aliases_resolve_through_open_and_finished_collections() {
         ),
         ("&r [&e a, *e, {*e : *e}]\n", "[a, a, {a: a}]\n"),
     ];
+    // The written-out forms have no aliases, so they don't depend on alias handling.
+    // These pin the reading of a few of them to literal values too.
+    assert_eq!(
+        parse("a: [[&x {k: v}]]\nb: *x\n"),
+        json!({"a": [[{"k": "v"}]], "b": {"k": "v"}})
+    );
+    assert_eq!(parse("- [&x 1, [*x, [*x]]]\n- *x\n"), json!([[1, [1, [1]]], 1]));
+    assert_eq!(
+        parse("a: &outer\n  b: &inner [1, 2]\n  c: *inner\nd: *outer\ne: *inner\n"),
+        json!({
+            "a": {"b": [1, 2], "c": [1, 2]},
+            "d": {"b": [1, 2], "c": [1, 2]},
+            "e": [1, 2],
+        })
+    );
     for (input, written_out) in cases {
         let expected = ayaml::parse_value(written_out).expect("written out");
         let value = ayaml::parse_value(input).unwrap_or_else(|error| panic!("{input:?}: {error}"));

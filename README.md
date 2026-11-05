@@ -27,8 +27,8 @@ Rust 1.88, and is dual-licensed under MIT or Apache-2.0.
   document streams, with per-node styles and output limits.
 - **Native resource limits** for input size, depth, documents, scalars,
   collections, events, anchors, aliases, alias expansion, and output.
-- **No `unsafe`** in ayaml-owned code and no third-party YAML parser in the
-  runtime dependency graph.
+- **No `unsafe`** in the crates ayaml publishes and no third-party YAML parser in
+  the runtime dependency graph.
 - **Optional libyaml-compatible mode** behind the additive `libyaml-compat`
   feature, without changing the default parsing profile.
 

@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+No changes that users can see yet.
+
 ## [0.1.1] — 2026-11-04
 
 A performance patch for wide documents made of short block entries. There are
@@ -24,8 +28,7 @@ no public API changes.
 ### Validation
 
 - Default and compatibility conformance are unchanged.
-- The public 9,428-file corpus comparison reports no reading changed.
-- Full tests, fuzzing, package, and cross-platform CI pass.
+- Tests, package checks, and cross-platform CI pass.
 
 ## [0.1.0] — 2026-11-04
 

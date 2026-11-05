@@ -38,7 +38,8 @@ second scanner with different rules for values, Serde, or emission.
 
 ## Safety
 
-- ayaml-owned crates forbid `unsafe` code.
+- The crates in this workspace forbid `unsafe` code. Only the fuzz workspace, which
+  isn't published, has any: the counting allocator behind the allocation budgets.
 - The parser does not depend on a third-party YAML parser, native library, or
   FFI bridge.
 - Parser, composer, typed builder, and event writer state machines keep
