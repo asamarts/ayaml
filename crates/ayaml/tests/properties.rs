@@ -276,6 +276,67 @@ prop_compose! {
     }
 }
 
+/// The round trip below can't notice a matching mistake in the emitter and the
+/// reader, so this pins both sides to literal text.
+#[test]
+fn serde_types_match_literal_yaml() {
+    let document = Document {
+        names: vec![vec!["a".to_owned(), "b c".to_owned()], Vec::new()],
+        pairs: vec![(1, -2)],
+        maybe: Some("kept".to_owned()),
+        nothing: None,
+        shape: Shape::Newtype(7),
+        shapes: vec![
+            Shape::Unit,
+            Shape::Flag(true),
+            Shape::Tuple(3, "t".to_owned()),
+            Shape::Struct {
+                name: None,
+                sizes: vec![4, 5],
+            },
+        ],
+        table: std::collections::BTreeMap::from([("k".to_owned(), vec![6])]),
+        ratio: 1.5,
+        small: 0.25,
+        letter: 'z',
+        unit: (),
+    };
+    let text = "\
+names:
+- - a
+  - b c
+- []
+pairs:
+- - 1
+  - -2
+maybe: kept
+nothing: null
+shape: !Newtype 7
+shapes:
+- Unit
+- !Flag true
+-
+  !Tuple
+  - 3
+  - t
+-
+  !Struct
+  name: null
+  sizes:
+  - 4
+  - 5
+table:
+  k:
+  - 6
+ratio: 1.5
+small: 0.25
+letter: z
+unit: null
+";
+    assert_eq!(ayaml::to_string(&document).expect("emit"), text);
+    assert_eq!(ayaml::from_str::<Document>(text).expect("read"), document);
+}
+
 proptest! {
     #[test]
     fn serde_types_round_trip(document in document()) {

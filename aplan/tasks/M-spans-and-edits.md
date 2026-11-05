@@ -18,5 +18,5 @@ trust. ayaml has none of these yet.
 
 ## Acceptance criteria
 
-- [ ] every member is closed with test evidence
-- [ ] a downstream multi-format fix layer's YAML set and removal cases pass through these APIs
+- [ ] every member is closed with the evidence its tags require
+- [ ] a fixture of YAML set and removal cases, shaped like what a fix tool needs, passes through these APIs

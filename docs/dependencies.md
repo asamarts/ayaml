@@ -15,7 +15,9 @@ normal dependency graph.
 
 ## Unsafe code policy
 
-- ayaml-owned crates use `#![forbid(unsafe_code)]`.
+- The crates in this workspace forbid `unsafe` code. Only the fuzz workspace, which
+  isn't published, has any: the counting allocator in
+  `fuzz/src/bin/memcount.rs`.
 - The YAML-specific parser and composer code is written in safe Rust and does
   not use FFI.
 - `serde` and `indexmap` contain reviewed implementations with internal
@@ -25,9 +27,9 @@ normal dependency graph.
 - Dev-only differential, property-test, fuzzing, and benchmark dependencies are
   not part of the shipped graph.
 
-`cargo tree -e normal` is the shipped graph. The workspace dependency check
-enforces the direct allowlist and a complete allowlist for the normal graph, so
-any other crate there fails, including a YAML parser.
+`cargo tree -p ayaml -e normal,build --all-features` is the shipped graph.
+`tools/check_deps.py` reads it, and any crate not on its allowlists fails, including
+a YAML parser.
 
 ## Build and test dependencies
 

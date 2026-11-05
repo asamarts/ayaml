@@ -1,6 +1,6 @@
 ---
 id: M-v0.1.2
-title: Publish the hardened, aplan-compatible ayaml 0.1.2 release
+title: Publish the hardened ayaml 0.1.2 release
 phase: 1
 status: todo
 blocked_by:
@@ -32,6 +32,7 @@ blocked_by:
 - AY-011
 - AY-013
 - AY-043
+- AY-056
 tags:
 - milestone
 - v0.1.2
@@ -39,14 +40,13 @@ tags:
 
 ## Why
 
-Aplan A2-009 can replace its translated libyaml bridge only with an immutable
-ayaml release that preserves the consumer's typed errors, compatibility forms,
-diagnostic context, and supply-chain evidence. This cut contains the ayaml-side
-work needed to produce that release. It also fixes defects and gate gaps found
-in 0.1.1, so that aplan and other users qualify one release, not two.
+Consumers moving from a libyaml-based stack need an immutable release that keeps their
+typed errors, compatibility forms, diagnostic context, and supply-chain evidence. This cut
+holds that work. It also fixes defects and gate gaps found in 0.1.1, so that users qualify one
+release, not two.
 
 ## Acceptance criteria
 
-- [ ] every member is closed with test evidence
+- [ ] every member is closed with the evidence its tags require
 - [ ] ayaml 0.1.2 is published from the attested public tag
-- [ ] the immutable release evidence is sufficient for aplan A2-009 to resume
+- [ ] the release record names the tag, commit, crate checksum, and attestation, with commands that verify each
