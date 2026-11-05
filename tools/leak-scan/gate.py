@@ -3,10 +3,11 @@
 
 Commands:
 
-    gate.py scan --head REV [--not REV ...] [--exclude-remote NAME]
+    gate.py scan --head REV [--not REV ...] [--exclude-remote NAME] [--ref NAME ...]
         Scan every commit reachable from REV and not from the excluded
-        revisions (raw metadata and message, changed paths, added lines), and
-        the whole tree at REV.
+        revisions (raw metadata and message, changed paths, added lines), any
+        annotated tags REV names, the whole tree at REV, and the given branch
+        or tag names.
 
     gate.py text NAME [NAME ...]
         Scan the text held in the named environment variables, such as a pull
@@ -29,7 +30,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
@@ -46,8 +47,10 @@ LIST_CONFIG = "ayaml.leakPatterns"
 SCANNER_ENV = "AYAML_GITLEAKS"
 SCANNER_CONFIG = "ayaml.gitleaks"
 
-# A list without one of these classes is treated as truncated.
+# A list without one of these classes, or whose last pattern is not of the end
+# class, is treated as truncated.
 REQUIRED_CLASSES = ("host", "runner", "repo", "comparison")
+END_CLASS = "end"
 SCOPES = ("tree", "added")
 
 
@@ -69,12 +72,22 @@ def builtin(id_: str, regex: bytes) -> Pattern:
 
 # Personal paths reveal nothing by being listed here, so they need no private
 # list. The trailing separators keep prose such as "the home directory" clean.
+# The last entry is the scanner's own opt-out comment, split so that this file
+# doesn't hold it.
 BUILTIN_PATTERNS = (
     builtin("path-home", rb"/home/[a-z_][a-z0-9_-]*/"),
     builtin("path-macos", rb"/Users/[a-z][a-z0-9._-]*/"),
     builtin("path-windows", rb"\b[a-z]:\\Users\\"),
-    builtin("path-tilde", rb"~/(?:projects|\.tmp)\b"),
+    builtin("path-tilde", rb"~/(?:projects|\.tmp|\.claude)\b"),
+    builtin("path-home-var", rb"\$\{?HOME\}?/(?:projects|\.tmp|\.claude)\b"),
+    builtin("path-root", rb"(?<![\w./-])/root/[\w.-]"),
+    builtin("scanner-opt-out", rb"gitleaks:" + rb"allow"),
 )
+
+
+def variants(data: bytes) -> list[bytes]:
+    """Return the forms of `data` to scan. UTF-16 and UTF-32 hide text behind NULs."""
+    return [data, data.replace(b"\0", b"")] if b"\0" in data else [data]
 
 
 @dataclasses.dataclass
@@ -83,12 +96,13 @@ class Findings:
     hits: dict[tuple[str, str, str], tuple[int, int]] = dataclasses.field(default_factory=dict)
 
     def scan(self, location: str, data: bytes, patterns: list[Pattern]) -> None:
-        for pattern in patterns:
-            for match in pattern.regex.finditer(data):
-                key = (location, pattern.id, pattern.cls)
-                line = data.count(b"\n", 0, match.start()) + 1
-                first, count = self.hits.get(key, (line, 0))
-                self.hits[key] = (first, count + 1)
+        for form in variants(data):
+            for pattern in patterns:
+                for match in pattern.regex.finditer(form):
+                    key = (location, pattern.id, pattern.cls)
+                    line = form.count(b"\n", 0, match.start()) + 1
+                    first, count = self.hits.get(key, (line, 0))
+                    self.hits[key] = (first, count + 1)
 
     def report(self, patterns: list[Pattern]) -> None:
         for (location, pattern_id, cls), (line, count) in sorted(self.hits.items()):
@@ -155,6 +169,8 @@ def parse_list(text: str) -> list[Pattern]:
     missing = [cls for cls in REQUIRED_CLASSES if not any(p.cls == cls for p in patterns)]
     if missing:
         raise GateError(f"pattern list has no {', '.join(missing)} pattern, so it looks truncated")
+    if patterns[-1].cls != END_CLASS:
+        raise GateError(f"pattern list does not end with an {END_CLASS} pattern, so it looks truncated")
     return patterns
 
 
@@ -195,11 +211,14 @@ def redact(data: bytes, patterns: list[Pattern]) -> bytes:
 
 def run_scanner(scanner: str, patterns: list[Pattern], mode: list[str], input_: bytes | None = None) -> bool:
     """Return True when gitleaks reports nothing."""
+    # gitleaks reads an ignore file from its working directory. Running it here
+    # keeps the change being scanned from supplying one.
     completed = subprocess.run(
         [scanner, *mode, "--no-banner", "--redact", "--log-level=warn", "--config", str(REPO_CONFIG)],
         input=input_ if input_ is not None else b"",
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        cwd=GATE_DIR,
     )
     if completed.returncode != 0:
         # gitleaks redacts the secret value. Its report still names files.
@@ -288,18 +307,34 @@ def changed_paths(sha: str) -> list[str]:
 
 
 def scan_commits(shas: list[str], patterns: list[Pattern], findings: Findings) -> bytes:
-    """Scan each commit and return the concatenated raw commit objects."""
-    raw_commits = bytearray()
+    """Scan each commit and return what it adds, as text for gitleaks.
+
+    gitleaks reads this text rather than the repository, because its own history
+    mode exits 0 when it can't read the history.
+    """
+    text = bytearray()
     for sha in shas:
         short = sha[:12]
         raw = git("cat-file", "commit", sha)
-        raw_commits += raw + b"\n"
+        text += b"\n".join(variants(raw)) + b"\n"
         findings.scan(f"commit {short} message or metadata", raw, patterns)
         for path in changed_paths(sha):
             findings.scan(f"commit {short} path {path}", path.encode("utf-8", "surrogateescape"), patterns)
-        for path, line, text in added_lines(sha):
-            findings.scan(f"commit {short} {path}:{line}", text, patterns)
-    return bytes(raw_commits)
+        for path, line, added in added_lines(sha):
+            text += b"\n".join(variants(added)) + b"\n"
+            findings.scan(f"commit {short} {path}:{line}", added, patterns)
+    return bytes(text)
+
+
+def peel_tags(rev: str) -> list[bytes]:
+    """Return every annotated tag object between REV and the commit it names."""
+    tags: list[bytes] = []
+    oid = git("rev-parse", "--verify", rev).decode().strip()
+    while git("cat-file", "-t", oid).strip() == b"tag":
+        raw = git("cat-file", "tag", oid)
+        tags.append(raw)
+        oid = raw.split(b"\n", 1)[0].split()[1].decode()
+    return tags
 
 
 def tree_entries(rev: str) -> list[tuple[str, str]]:
@@ -316,24 +351,33 @@ def tree_entries(rev: str) -> list[tuple[str, str]]:
 
 
 def scan_tree(rev: str, patterns: list[Pattern], findings: Findings, export: Path) -> None:
-    """Scan tree-scoped patterns over paths and blobs, exporting for gitleaks."""
+    """Scan tree-scoped patterns over paths and blobs, exporting for gitleaks.
+
+    Exported names get a suffix because gitleaks skips files by extension, and
+    errors name no path because a path can hold the private text.
+    """
     tree_patterns = [pattern for pattern in patterns if pattern.scope == "tree"]
     batch = subprocess.Popen(["git", "cat-file", "--batch"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     assert batch.stdin is not None and batch.stdout is not None
     try:
         for path, oid in tree_entries(rev):
             findings.scan(f"tree path {path}", path.encode("utf-8", "surrogateescape"), tree_patterns)
+            if ".." in PurePosixPath(path).parts or path.startswith("/"):
+                raise GateError("a path in the tree leaves the tree")
             batch.stdin.write(oid.encode() + b"\n")
             batch.stdin.flush()
             header = batch.stdout.readline().split()
             if len(header) != 3:
-                raise GateError(f"cannot read a blob for {path}")
+                raise GateError("cannot read a blob")
             data = batch.stdout.read(int(header[2]))
             batch.stdout.read(1)
             findings.scan(f"tree {path}", data, tree_patterns)
-            target = export / path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
+            target = export / f"{path}.scan"
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            except OSError as error:
+                raise GateError(f"cannot export a blob ({error.strerror})") from None
     finally:
         batch.stdin.close()
         batch.stdout.close()
@@ -354,11 +398,14 @@ def command_scan(args: argparse.Namespace) -> int:
     shas = git("rev-list", *rev_args).decode().split()
 
     findings = Findings()
-    messages = scan_commits(shas, patterns, findings)
-    if git("cat-file", "-t", args.head).strip() == b"tag":
-        tag = git("cat-file", "tag", args.head)
+    text = scan_commits(shas, patterns, findings)
+    for tag in peel_tags(args.head):
         findings.scan("annotated tag", tag, patterns)
-        messages += tag
+        text += b"\n".join(variants(tag)) + b"\n"
+    for ref in args.refs:
+        name = ref.encode("utf-8", "surrogateescape")
+        findings.scan("branch or tag name", name, patterns)
+        text += name + b"\n"
 
     clean = True
     scratch = git("rev-parse", "--absolute-git-dir").decode().strip()
@@ -367,9 +414,7 @@ def command_scan(args: argparse.Namespace) -> int:
         export.mkdir()
         scan_tree(args.head, patterns, findings, export)
         clean &= run_scanner(scanner, patterns, ["dir", str(export)])
-    if shas:
-        clean &= run_scanner(scanner, patterns, ["git", "--log-opts", " ".join(rev_args), "."])
-        clean &= run_scanner(scanner, patterns, ["stdin"], messages)
+    clean &= run_scanner(scanner, patterns, ["stdin"], text)
 
     findings.report(patterns)
     print(f"leak gate: scanned {len(shas)} commit(s) and the tree at {args.head}")
@@ -387,7 +432,7 @@ def command_text(args: argparse.Namespace) -> int:
     for name in args.names:
         data = os.environ.get(name, "").encode("utf-8", "surrogateescape")
         findings.scan(name, data, patterns)
-        clean &= run_scanner(scanner, patterns, ["stdin"], data)
+        clean &= run_scanner(scanner, patterns, ["stdin"], b"\n".join(variants(data)))
     findings.report(patterns)
     print(f"leak gate: scanned {len(args.names)} text field(s)")
     if findings.hits or not clean:
@@ -413,6 +458,7 @@ def main() -> int:
     scan.add_argument("--head", required=True)
     scan.add_argument("--not", dest="excludes", action="append", default=[])
     scan.add_argument("--exclude-remote", dest="exclude_remotes", action="append", default=[])
+    scan.add_argument("--ref", dest="refs", action="append", default=[])
     scan.set_defaults(run=command_scan)
 
     text = commands.add_parser("text")
@@ -427,6 +473,10 @@ def main() -> int:
         return args.run(args)
     except GateError as error:
         print(f"leak gate: could not run: {error}", file=sys.stderr)
+        return 2
+    except Exception as error:
+        # A traceback can print a path, and a path can hold the private text.
+        print(f"leak gate: could not run: {type(error).__name__}", file=sys.stderr)
         return 2
 
 

@@ -19,6 +19,8 @@ import unittest
 GATE_DIR = Path(__file__).resolve().parent
 GATE = GATE_DIR / "gate.py"
 HOOK = GATE_DIR.parent / "hooks" / "pre-push"
+INSTALL_HOOK = GATE_DIR / "install-hook.sh"
+REPO_ROOT = GATE_DIR.parent.parent
 
 PATTERNS = """\
 # id class scope regex
@@ -27,6 +29,7 @@ r1 runner tree \\bfake-runner-7\\b
 p1 repo tree \\bfake-org/fake-private\\b
 i1 identity tree fake-person
 c1 comparison added \\bother_yaml_crate\\b
+z1 end tree (?!)
 """
 
 # Split so that this file holds no complete personal path.
@@ -34,6 +37,10 @@ HOME_PATH = "/ho" + "me/someone/projects/x"
 MACOS_PATH = "/Us" + "ers/someone/x"
 WINDOWS_PATH = "C:" + "\\Users\\someone"
 TILDE_PATH = "~/" + "projects/x"
+CLAUDE_PATH = "~/" + ".claude/x"
+HOME_VAR_PATH = "$HOME" + "/.tmp/x"
+ROOT_PATH = "/ro" + "ot/x"
+SCANNER_OPT_OUT = "gitleaks:" + "allow"
 
 # Assembled at run time so that this file is not itself a finding.
 FAKE_CREDENTIAL = "AKIA" + "QYLPMN5HHHFPZAM2"
@@ -48,6 +55,10 @@ LEAKS = {
     "path-macos": f"open {MACOS_PATH}\n",
     "path-windows": f"open {WINDOWS_PATH}\n",
     "path-tilde": f"open {TILDE_PATH}\n",
+    "path-tilde-claude": f"open {CLAUDE_PATH}\n",
+    "path-home-var": f"open {HOME_VAR_PATH}\n",
+    "path-root": f"open {ROOT_PATH}\n",
+    "scanner-opt-out": f"key = 1 # {SCANNER_OPT_OUT}\n",
 }
 
 SENSITIVE_OUTPUT = ("fake-host-alias", "fake-runner-7", "fake-org", "fake-person", "other_yaml_crate", "someone")
@@ -244,6 +255,23 @@ class Scopes(GateCase):
         self.commit()
         self.assert_rejected(self.scan(), "blob.bin")
 
+    def test_utf16_content_is_scanned(self) -> None:
+        for encoding in ("utf-16", "utf-16-le", "utf-16-be", "utf-32"):
+            with self.subTest(encoding):
+                (self.repo / "wide.txt").write_bytes(LEAKS["host"].encode(encoding))
+                self.commit()
+                self.assert_rejected(self.scan(), "wide.txt")
+
+    def test_nested_annotated_tags_are_scanned_with_no_new_commits(self) -> None:
+        self.git("tag", "-a", "inner", "-m", LEAKS["host"])
+        self.git("tag", "-a", "outer", "inner", "-m", "clean")
+        result = self.gate("scan", "--head", "outer", "--not", "HEAD")
+        self.assert_rejected(result, "annotated tag")
+
+    def test_branch_name_is_scanned(self) -> None:
+        result = self.gate("scan", "--head", "HEAD", "--not", "HEAD", "--ref", "refs/heads/fake-host-alias")
+        self.assert_rejected(result, "branch or tag name")
+
     def test_merge_commit_message_is_scanned(self) -> None:
         self.git("checkout", "-q", "-b", "side")
         self.write("side.txt", "clean\n")
@@ -282,6 +310,25 @@ class FailsClosed(GateCase):
             with self.subTest(removed):
                 partial = "\n".join(line for line in PATTERNS.splitlines() if not line.startswith(removed))
                 self.assert_cannot_run(self.scan({"AYAML_LEAK_PATTERNS": partial}))
+
+    def test_list_cut_short_looks_truncated(self) -> None:
+        partial = "\n".join(line for line in PATTERNS.splitlines() if not line.startswith("z1 "))
+        self.assert_cannot_run(self.scan({"AYAML_LEAK_PATTERNS": partial}))
+
+    def test_path_leaving_the_tree_fails_closed_without_naming_it(self) -> None:
+        self.write("new.txt", "clean\n")
+        blob = self.git("hash-object", "-w", "new.txt").stdout.strip()
+        entry = b"100644 ../fake-host-alias\0" + bytes.fromhex(blob)
+        tree = subprocess.run(
+            ["git", "hash-object", "-t", "tree", "-w", "--stdin", "--literally"],
+            cwd=self.repo,
+            env=self.env,
+            input=entry,
+            capture_output=True,
+            check=True,
+        ).stdout.decode().strip()
+        commit = self.git("commit-tree", tree, "-m", "Change").stdout.strip()
+        self.assert_cannot_run(self.gate("scan", "--head", commit, "--not", "HEAD"))
 
     def test_malformed_list(self) -> None:
         for bad in ("x host tree", "x host nowhere fake-person", "x host tree fake-person(", "h1 host tree fake-person"):
@@ -411,6 +458,104 @@ class Hook(GateCase):
         self.assertIn("leak gate", result.stderr)
 
 
+class InstalledHook(GateCase):
+    """The installed hook runs the gate from origin/main, whatever is checked out."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.before_gate = self.base
+        for name in ("gate.py", "gitleaks.env", "install-hook.sh"):
+            self.copy(GATE_DIR / name, f"tools/leak-scan/{name}")
+        self.copy(HOOK, "tools/hooks/pre-push")
+        self.copy(REPO_ROOT / ".gitleaks.toml", ".gitleaks.toml")
+        self.commit("Add the gate")
+        self.bare = self.root / "remote.git"
+        self.git("init", "-q", "--bare", "-b", "main", str(self.bare))
+        self.git("remote", "add", "origin", str(self.bare))
+        self.git("push", "-q", "origin", "main")
+        self.git("config", "core.hooksPath", "tools/hooks")
+        self.install()
+
+    def copy(self, source: Path, name: str) -> None:
+        target = self.repo / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+    def install(self) -> None:
+        subprocess.run(
+            [str(self.repo / "tools/leak-scan/install-hook.sh")],
+            cwd=self.repo,
+            env=self.env,
+            check=True,
+            capture_output=True,
+        )
+
+    def remote_refs(self) -> str:
+        return self.git("ls-remote", str(self.bare)).stdout
+
+    def test_install_replaces_a_relative_hooks_path(self) -> None:
+        self.assertEqual(self.git("config", "core.hooksPath", check=False).stdout, "")
+
+    def test_branch_from_before_the_gate_is_still_scanned(self) -> None:
+        self.git("checkout", "-q", "-b", "old", self.before_gate)
+        self.write("new.txt", LEAKS["host"])
+        head = self.commit()
+        result = self.git("push", "origin", "old", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("leak gate", result.stderr)
+        self.assertNotIn(head, self.remote_refs())
+        self.assert_no_disclosure(result)
+
+    def test_clean_branch_from_before_the_gate_lands(self) -> None:
+        self.git("checkout", "-q", "-b", "old", self.before_gate)
+        self.write("new.txt", "clean\n")
+        head = self.commit()
+        result = self.git("push", "origin", "old", check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(head, self.remote_refs())
+
+    def test_branch_that_disables_the_gate_is_still_scanned(self) -> None:
+        self.git("checkout", "-q", "-b", "weakened")
+        self.write("tools/leak-scan/gate.py", "raise SystemExit(0)\n")
+        self.write("new.txt", LEAKS["host"])
+        head = self.commit()
+        result = self.git("push", "origin", "weakened", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(head, self.remote_refs())
+
+    def test_missing_main_fails_closed(self) -> None:
+        self.git("update-ref", "-d", "refs/remotes/origin/main")
+        self.git("checkout", "-q", "-b", "feature")
+        head = self.commit()
+        result = self.git("push", "origin", "feature", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("did not run", result.stderr)
+        self.assertNotIn(head, self.remote_refs())
+
+    def test_branch_name_is_scanned(self) -> None:
+        head = self.commit()
+        result = self.git("push", "origin", "HEAD:refs/heads/fake-host-alias", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(head, self.remote_refs())
+        self.assert_no_disclosure(result)
+
+    def test_linked_worktree_runs_the_hook(self) -> None:
+        worktree = self.root / "linked"
+        self.git("worktree", "add", "-q", "-b", "linked", str(worktree))
+        (worktree / "new.txt").write_text(LEAKS["host"], encoding="utf-8")
+        self.git("add", "-A", cwd=worktree)
+        self.git("commit", "-q", "-m", "Change", cwd=worktree)
+        result = self.git("push", "origin", "linked", cwd=worktree, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("leak gate", result.stderr)
+
+    def test_hook_leaves_no_scratch_behind(self) -> None:
+        self.write("new.txt", "clean\n")
+        self.commit()
+        self.git("push", "-q", "origin", "HEAD:refs/heads/feature")
+        self.assertEqual(list((self.repo / ".git").glob("leak-gate.*")), [])
+
+
 @unittest.skipUnless(os.environ.get("AYAML_GITLEAKS"), "AYAML_GITLEAKS is not set")
 class RealScanner(GateCase):
     def setUp(self) -> None:
@@ -443,6 +588,49 @@ class RealScanner(GateCase):
         result = self.scan()
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertNotIn(FAKE_CREDENTIAL, result.stdout + result.stderr)
+
+    def test_credential_in_a_skipped_file_type_is_rejected(self) -> None:
+        self.write("notes.pdf", f"key = {FAKE_CREDENTIAL}\n")
+        self.commit()
+        self.git("checkout", "-q", "-b", "later")
+        self.write("other.txt", "clean\n")
+        self.commit()
+        result = self.gate("scan", "--head", "HEAD", "--not", "HEAD~1")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn(FAKE_CREDENTIAL, result.stdout + result.stderr)
+
+    def test_utf16_credential_is_rejected(self) -> None:
+        (self.repo / "wide.txt").write_bytes(f"key = {FAKE_CREDENTIAL}\n".encode("utf-16"))
+        self.commit()
+        result = self.scan()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn(FAKE_CREDENTIAL, result.stdout + result.stderr)
+
+    def test_credential_only_in_a_merge_is_rejected(self) -> None:
+        self.git("checkout", "-q", "-b", "side")
+        self.write("side.txt", "clean\n")
+        self.commit()
+        self.git("checkout", "-q", "main")
+        self.git("merge", "-q", "--no-ff", "--no-commit", "side")
+        self.write("merged.txt", f"key = {FAKE_CREDENTIAL}\n")
+        self.commit("Merge")
+        result = self.scan()
+        self.assertEqual(result.returncode, 1, result.stderr)
+
+    def test_credential_in_a_tag_with_no_new_commits_is_rejected(self) -> None:
+        self.git("tag", "-a", "v1.0.0", "-m", f"key = {FAKE_CREDENTIAL}")
+        result = self.gate("scan", "--head", "v1.0.0", "--not", "HEAD")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn(FAKE_CREDENTIAL, result.stdout + result.stderr)
+
+    def test_scan_does_not_depend_on_git_output_settings(self) -> None:
+        self.git("config", "color.ui", "always")
+        self.write("new.txt", f"key = {FAKE_CREDENTIAL}\n")
+        self.commit()
+        self.write("new.txt", "clean\n")
+        self.commit()
+        result = self.scan()
+        self.assertEqual(result.returncode, 1, result.stderr)
 
     def test_credential_in_pull_request_text_is_rejected(self) -> None:
         result = self.gate("text", "PR_BODY", env={"PR_BODY": f"key = {FAKE_CREDENTIAL}"})

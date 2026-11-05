@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Run the leak gate over exactly what this push would publish.
 #
-# Setup, once per clone (linked worktrees share it):
-#   git config core.hooksPath tools/hooks
-# See tools/leak-scan/README.md.
+# tools/leak-scan/install-hook.sh installs a hook that runs this script as it is on
+# origin/main. See tools/leak-scan/README.md.
 set -euo pipefail
 
 remote_name="${1:-origin}"
@@ -32,7 +31,7 @@ for update in "${updates[@]+"${updates[@]}"}"; do
             exit 1
             ;;
     esac
-    args=(--head "$local_sha" --exclude-remote "$remote_name")
+    args=(--head "$local_sha" --exclude-remote "$remote_name" --ref "$remote_ref")
     if ! [[ "$remote_sha" =~ ^0+$ ]]; then
         args+=(--not "$remote_sha")
     fi

@@ -20,8 +20,8 @@ Every change goes through a squash-merged pull request, and `main` refuses direc
 pushes, including from admins. Don't try to get around a failing check. Fix the cause
 or stop and say what's blocking you.
 
-- Check the leak gate's setup with `git config core.hooksPath` before the first push
-  from a clone. It should print `tools/hooks`.
+- Install the leak gate with `tools/leak-scan/install-hook.sh` before the first push
+  from a clone. See `tools/leak-scan/README.md` for the rest of its setup.
 - Never use `git push --no-verify`.
 - Commit or open a pull request only when asked.
 
