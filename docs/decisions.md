@@ -19,15 +19,22 @@ sync. `aplan verify` checks that evidence commits and tests exist in the reposit
 holding the tasks, so the tasks have to sit beside the code.
 
 **Consequences.** Each change waits for CI. Every push is public at once, so the
+<<<<<<< HEAD
 leak gate in `tools/leak-scan/` runs before a commit is pushed and on the pull request. It
 can't read a squash commit's message until that message is public, so write it from text
 that has already passed the gate, and check the run on `main` after merging.
 
 ## D67 — Dependencies are checked against an allowlist
+=======
+leak gate in `tools/leak-scan/` runs before it lands.
+
+## D66 — The leak gate judges a change from the base commit
+>>>>>>> origin/main
 
 **Date:** 2026-11-05
 **Status:** Accepted
 
+<<<<<<< HEAD
 **Decision.** `tools/check_deps.py` fails on any package in the shipped graph that isn't
 listed with a reason. It reads `cargo tree` for the `ayaml` package with every feature on.
 
@@ -123,3 +130,21 @@ Until then ayaml leaves the name `parse` unused, and it never adds `parse_recove
 what follows, and nothing needs it yet.
 
 **Consequences.** Broken YAML still stops at the first error.
+=======
+**Decision.** In CI, `gate.py` and its configuration come from the pull request's base
+commit, and the head is read as data. The head's copy of the gate runs only its tests,
+last, with no secret. Locally, the installed hook runs the gate from `origin/main`.
+
+**Alternatives.** Keep running the head's copy, which is simplest, but then a change can
+turn off its own check. Move to `pull_request_target`, which would also take the workflow
+file from the base, but runs with secrets and a write token next to untrusted changes,
+the combination GitHub's security guidance warns about.
+
+**Why.** The gate exists to stop a mistaken or careless change, so that change shouldn't
+be able to edit what judges it.
+
+**Consequences.** Editing the workflow file can still weaken the job, and only review
+catches that. A change to the gate takes effect after it lands. GitHub gives no secrets to
+pull requests from forks or from Dependabot, so the job fails on them by design, and a
+maintainer who has read the change brings it onto a branch here.
+>>>>>>> origin/main

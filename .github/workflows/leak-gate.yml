@@ -12,22 +12,32 @@ on:
 permissions:
   contents: read
 
+# The gate and its configuration come from the base commit, and the change is only
+# read as data, so a change can't weaken the gate that judges it. GitHub takes this
+# file itself from the change, so read any edit to it closely.
 jobs:
   leak-scan:
     name: leak scan
     if: github.event.deleted != true
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Check out the gate from the base
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          path: trusted
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.base.sha || (github.ref == 'refs/heads/main' && github.event.before) || 'refs/heads/main' }}
+      - name: Check out the change
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          path: change
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Install the pinned scanner
-        run: echo "AYAML_GITLEAKS=$(tools/leak-scan/install-gitleaks.sh "$RUNNER_TEMP/gitleaks")" >> "$GITHUB_ENV"
-      - name: Test the gate
-        run: python3 tools/leak-scan/test_gate.py
-      - name: Scan commits and tree
+        run: echo "AYAML_GITLEAKS=$(trusted/tools/leak-scan/install-gitleaks.sh "$RUNNER_TEMP/gitleaks")" >> "$GITHUB_ENV"
+      - name: Scan commits, tree, and the branch or tag name
+        working-directory: change
         env:
           AYAML_LEAK_PATTERNS: ${{ secrets.AYAML_LEAK_PATTERNS }}
           # A tag is scanned by name, so that its message is read. A push to main is
@@ -35,11 +45,16 @@ jobs:
           HEAD_REV: ${{ github.event.pull_request.head.sha || (startsWith(github.ref, 'refs/tags/') && github.ref) || github.sha }}
           BASE_REV: ${{ github.event.pull_request.base.sha || (github.ref == 'refs/heads/main' && github.event.before) || 'refs/remotes/origin/main' }}
           REF_NAME: ${{ github.head_ref || github.ref }}
-        run: python3 tools/leak-scan/gate.py scan --head "$HEAD_REV" --not "$BASE_REV" --ref "$REF_NAME"
+        run: python3 ../trusted/tools/leak-scan/gate.py scan --head "$HEAD_REV" --not "$BASE_REV" --ref "$REF_NAME"
       - name: Scan the pull request's title and body
         if: github.event_name == 'pull_request'
+        working-directory: change
         env:
           AYAML_LEAK_PATTERNS: ${{ secrets.AYAML_LEAK_PATTERNS }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
-        run: python3 tools/leak-scan/gate.py text PR_TITLE PR_BODY
+        run: python3 ../trusted/tools/leak-scan/gate.py text PR_TITLE PR_BODY
+      # This is the change's own code, so it runs last and with no secret.
+      - name: Test the change's copy of the gate
+        working-directory: change
+        run: python3 tools/leak-scan/test_gate.py
