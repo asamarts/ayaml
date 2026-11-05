@@ -20,19 +20,40 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let limits = ayaml::Limits::default().with_max_documents(4);
-    let Ok(mut deserializer) = ayaml::Deserializer::from_str_with_limits(input, &limits) else {
-        return;
-    };
-    let mut streamed = Vec::new();
-    loop {
-        match deserializer.next_borrowed::<ayaml::Value>() {
-            Ok(Some(value)) => streamed.push(value),
-            Ok(None) => break,
-            Err(_) => return,
+    let streamed = streamed_documents(input, &limits);
+    let composed = ayaml::parse_documents_with_limits(input, &limits);
+    match (streamed, composed) {
+        (Ok(streamed), Ok(composed)) => assert_eq!(streamed, composed, "input={input:?}"),
+        (Err(_), Err(_)) => {}
+        // The streamed path accepts a block collection on a later `---` line, and the
+        // composed path rejects it. AY-025 rejects these on every entry point.
+        (Ok(_), Err(_)) if collection_on_marker_line(input) => {}
+        (streamed, composed) => {
+            panic!("streamed {streamed:?}, composed {composed:?}, input={input:?}");
         }
     }
-    let Ok(composed) = ayaml::parse_documents_with_limits(input, &limits) else {
-        return;
-    };
-    assert_eq!(streamed, composed, "input={input:?}");
 });
+
+fn streamed_documents(
+    input: &str,
+    limits: &ayaml::Limits,
+) -> Result<Vec<ayaml::Value>, ayaml::Error> {
+    let mut deserializer = ayaml::Deserializer::from_str_with_limits(input, limits)?;
+    let mut documents = Vec::new();
+    while let Some(document) = deserializer.next_borrowed::<ayaml::Value>()? {
+        documents.push(document);
+    }
+    Ok(documents)
+}
+
+fn collection_on_marker_line(input: &str) -> bool {
+    input.split(['\n', '\r']).any(|line| {
+        line.strip_prefix("---").is_some_and(|rest| {
+            let content = rest.trim_start();
+            rest.starts_with([' ', '\t'])
+                && (content.starts_with(['-', '?', ':'])
+                    || content.ends_with(':')
+                    || content.contains(": "))
+        })
+    })
+}

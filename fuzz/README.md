@@ -12,7 +12,8 @@ cargo fuzz run borrowed --target x86_64-unknown-linux-gnu
 `parse` exercises value/event/document parsing and event collection. `emit`
 parses events, renders them, and reparses the rendered YAML; it also round-trips
 a composed `Value`. `borrowed` compares the borrowed typed path with the owned
-composition path.
+composition path, and the streamed borrowed path with the composed document list,
+including whether each accepts the input.
 
 Fuzzing is intentionally not part of the default workspace test gate because it
 requires nightly sanitizer support. Run it with an appropriate time budget and
