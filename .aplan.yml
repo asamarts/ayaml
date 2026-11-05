@@ -10,4 +10,10 @@ evidence:
 
 test:
   list: [cargo, test, --workspace, --all-features, --, --list]
-  run: [cargo, test, --workspace, --all-features, --, --exact, '{test}']
+  # The address-space and time limits stop a resource bug from taking down the host.
+  run:
+    - bash
+    - -c
+    - 'ulimit -v 8388608; exec timeout -k 5 300 cargo test --workspace --all-features -- --exact "$1"'
+    - aplan-test
+    - '{test}'

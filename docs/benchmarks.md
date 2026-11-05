@@ -37,12 +37,20 @@ revisions.
 ## Running them
 
 ```sh
-cargo bench -p ayaml-bench          # timing, with criterion
-tools/check_alloc_corpus.sh         # allocation budgets
+cargo bench -p ayaml-bench                     # timing, with criterion
+tools/check_alloc_corpus.sh                    # allocation budgets
+python3 tools/check_instructions.py BASE_REV   # instruction counts, needs valgrind
 ```
 
-CI checks the allocation budgets and that the benchmarks compile. It doesn't check
-timing, because a shared runner's timings aren't comparable from run to run.
+CI checks the allocation budgets, compares instruction counts with the pull request's
+base, and checks that the benchmarks compile. It doesn't check timing, because a shared
+runner's timings aren't comparable from run to run.
+
+The instruction check fails when any operation on any input rises more than 5%. Counts
+are repeatable to within about 1% from run to run. They catch a slower algorithm or an
+added pass, but not cache or branch effects, so maintainers also compare timing on a
+quiet machine before a release. If a rise is deliberate, add a line to
+`tools/instruction-rises.tsv` in the same change, saying why.
 
 ## Time and memory
 
