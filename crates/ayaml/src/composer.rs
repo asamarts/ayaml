@@ -8,7 +8,7 @@
 //! Open collections live on an explicit stack, so nesting costs heap rather
 //! than native stack. An anchor records where its node sits in the
 //! tree being built, plus the node's size estimate and nesting height, so a
-//! node is copied only when an alias materializes it (V1, L3).
+//! node is copied only when an alias materializes it.
 
 use std::collections::HashMap;
 
@@ -53,7 +53,7 @@ pub(crate) fn compose_documents_with_budget<'a>(
 }
 
 /// Tag a collection. A core collection tag restates the node kind and is
-/// dropped (V10).
+/// dropped.
 fn apply_tag(tag: Option<&Tag>, value: Value) -> Value {
     match tag {
         Some(tag) if !tag.is_core_collection() => Value::from(TaggedValue::new(tag.clone(), value)),
@@ -82,7 +82,7 @@ fn estimate_size(value: &Value, node_cost: usize) -> usize {
 /// `span`. An alias refers to the most recent anchor before it in the
 /// document. A collection is registered when it ends, after any anchor
 /// inside it, so it must not replace a definition that starts at or after
-/// its own start: in `&x {k: &x v}`, `*x` is `v` (V12).
+/// its own start: in `&x {k: &x v}`, `*x` is `v`.
 pub(crate) fn define_anchor<T>(
     anchors: &mut HashMap<String, (usize, T)>,
     anchor: &str,
@@ -284,7 +284,7 @@ impl<'a> StreamingComposer<'a> {
                     .charge(&self.limits, self.input_len, definition.size)
                     .map_err(|error| error.with_span(span))?;
                 // The alias nests its target here, so the target's
-                // collections count toward the depth, as in yaml_serde.
+                // collections count toward the depth.
                 if definition.height > 0 {
                     self.limits
                         .check_depth(self.stack.len() + definition.height)

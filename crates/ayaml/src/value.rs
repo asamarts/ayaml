@@ -41,8 +41,8 @@ pub trait Index: private::Sealed {
 
 /// A generic YAML value.
 ///
-/// As in yaml_serde, the `is_*` and `as_*` accessors, [`Value::get`], and
-/// indexing look through tags: `!Celsius 21` is a `u64`. [`Value::is_tagged`]
+/// The `is_*` and `as_*` accessors, [`Value::get`], and indexing look through
+/// tags: `!Celsius 21` is a `u64`. [`Value::is_tagged`]
 /// and [`Value::as_tagged`] see the tag.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Value {
@@ -206,7 +206,7 @@ impl Value {
         self.as_number().and_then(Number::as_i64)
     }
 
-    /// Borrow as `f64`. Integers convert, as in yaml_serde (V14).
+    /// Borrow as `f64`. Integers convert.
     #[must_use]
     pub fn as_f64(&self) -> Option<f64> {
         self.as_number().and_then(Number::as_f64)
@@ -281,7 +281,7 @@ impl Index for usize {
         }
     }
 
-    /// A sequence entry must exist; a sequence never grows (V13). A mapping
+    /// A sequence entry must exist; a sequence never grows. A mapping
     /// gains the integer key.
     fn index_or_insert<'a>(&self, value: &'a mut Value) -> &'a mut Value {
         match value.untag_mut() {
@@ -330,7 +330,7 @@ macro_rules! mapping_index {
             }
 
             /// A null becomes an empty mapping, and a missing key is added
-            /// with a null value, as in yaml_serde (V13).
+            /// with a null value.
             fn index_or_insert<'a>(&self, value: &'a mut Value) -> &'a mut Value {
                 if matches!(value, Value::Null) {
                     *value = Value::Mapping(Mapping::new());
@@ -488,9 +488,8 @@ partial_eq_numeric!(as_i64, i64, i8, i16, i32, i64, isize);
 partial_eq_numeric!(as_u64, u64, u8, u16, u32, u64, usize);
 partial_eq_numeric!(as_f64, f64, f32, f64);
 
-/// `value[index]` is the entry, or null when there is none, as in
-/// yaml_serde: a missing key, an offset past the end, or a value of another
-/// kind. It looks through tags, so `value[0]` on `{0: zero}` is `zero`.
+/// `value[index]` is the entry, or null when there is none: a missing key, an
+/// offset past the end, or a value of another kind. It looks through tags, so `value[0]` on `{0: zero}` is `zero`.
 impl<I: Index> OpsIndex<I> for Value {
     type Output = Value;
 
@@ -499,7 +498,7 @@ impl<I: Index> OpsIndex<I> for Value {
     }
 }
 
-/// `value[index] = ...` writes the entry, as in yaml_serde. A mapping gains
+/// `value[index] = ...` writes the entry. A mapping gains
 /// a missing key, and a null becomes a mapping first. A sequence offset
 /// must exist, since a sequence never grows. Panics on any other kind, or
 /// on an offset past the end.

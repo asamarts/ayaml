@@ -26,8 +26,8 @@ normal dependency graph.
   not part of the shipped graph.
 
 `cargo tree -e normal` is the shipped graph. The workspace dependency check
-enforces the direct allowlist and rejects known YAML parsers from the normal
-graph.
+enforces the direct allowlist and a complete allowlist for the normal graph, so
+any other crate there fails, including a YAML parser.
 
 ## Build and test dependencies
 

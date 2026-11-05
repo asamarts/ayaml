@@ -576,9 +576,9 @@ fn anchor_names_follow_the_spec_by_default() {
 }
 
 #[test]
-fn default_float_targets_follow_yaml_serde_text_parsing() {
+fn default_float_targets_parse_plain_scalar_text() {
     // Plain scalar text is parsed into a float target. Legacy octal
-    // spellings parse; radix integers are rejected, as yaml_serde does.
+    // spellings parse; radix integers are rejected.
     assert_eq!(ayaml::from_str::<f64>("01\n").unwrap(), 1.0);
     assert_eq!(ayaml::from_str::<f64>("0123\n").unwrap(), 123.0);
     assert!(ayaml::from_str::<f64>("0x1F\n").is_err());
@@ -586,7 +586,7 @@ fn default_float_targets_follow_yaml_serde_text_parsing() {
 
 #[cfg(feature = "libyaml-compat")]
 #[test]
-fn compat_float_targets_follow_yaml_serde_text_parsing() {
+fn compat_float_targets_parse_plain_scalar_text() {
     assert_eq!(ayaml::compat::from_str::<f64>("01\n").unwrap(), 1.0);
     assert_eq!(ayaml::compat::from_str::<f64>("0123\n").unwrap(), 123.0);
     assert!(ayaml::compat::from_str::<f64>("0x1F\n").is_err());
@@ -854,7 +854,7 @@ fn byte_buffer_visitors_work_on_owned_and_borrowed_paths() {
     assert_eq!(tagged, Bytes(b"hello".to_vec()));
 }
 
-/// A BOM may only start a document (YAML 1.2.2 section 5.2, P16); libyaml
+/// A BOM may only start a document (YAML 1.2.2 section 5.2); libyaml
 /// keeps one inside block-scalar content, and so does compat.
 #[test]
 fn bom_in_block_scalar_content_is_an_error() {
@@ -1135,10 +1135,10 @@ fn compat_flow_question_mark_is_always_an_explicit_key() {
 
 #[test]
 fn non_printable_characters_are_rejected() {
-    // P8: c-printable excludes C0 controls other than tab/LF/CR, DEL, C1
-    // controls other than NEL, and U+FFFE/U+FFFF. Escapes can still produce
-    // them inside double-quoted scalars, and a quoted scalar may hold all
-    // but the C0 controls raw (P32, `tests/regressions.rs`).
+    // c-printable excludes control characters other than tab, LF, CR, and
+    // NEL, and also U+FFFE and U+FFFF. Escapes can still produce them inside
+    // double-quoted scalars, and a quoted scalar may hold anything in
+    // `nb-json` raw (`tests/regressions.rs`).
     for input in [
         "a: b\u{1}c\n",
         "!c1\u{4}\0\0\n! : !",
@@ -1165,7 +1165,7 @@ fn escaped_quoted_whitespace_survives_line_folding() {
 
 /// BOMs may start each document prefix (YAML 1.2.2 productions 202 and
 /// 211), so they may precede a document, follow one, or precede a `---`;
-/// anywhere else in a document they are an error (P16).
+/// anywhere else in a document they are an error.
 #[test]
 fn boms_may_only_start_a_document() {
     assert_eq!(
@@ -1224,7 +1224,7 @@ fn root_block_scalar_bom_lines_are_blank() {
 }
 
 /// A BOM line ends a plain scalar: it starts a document prefix or is an
-/// error (P16).
+/// error.
 #[test]
 fn bom_lines_end_plain_scalars() {
     assert_eq!(

@@ -100,7 +100,7 @@ fn entry_points(input: &str) -> Vec<(&'static str, Result<(), ayaml::Error>)> {
     results
 }
 
-/// L1: every entry point enforces the alias limits.
+/// Every entry point enforces the alias limits.
 #[test]
 fn alias_bomb_is_rejected_on_every_entry_point() {
     let bomb = alias_bomb();
@@ -111,7 +111,7 @@ fn alias_bomb_is_rejected_on_every_entry_point() {
     }
 }
 
-/// L1: the dereference count is enforced on every entry point, even
+/// The dereference count is enforced on every entry point, even
 /// when the expansion is small.
 #[test]
 fn alias_dereference_limit_is_enforced_on_every_entry_point() {
@@ -151,8 +151,8 @@ fn alias_chain(links: usize) -> String {
     chain
 }
 
-/// L2: an alias's nesting counts toward `max_depth` where the alias sits,
-/// as in yaml_serde, which accepts 127 links and rejects 128.
+/// An alias's nesting counts toward `max_depth` where the alias sits: 127
+/// links are accepted and 128 rejected.
 #[test]
 fn alias_nesting_counts_toward_the_depth_limit_on_every_entry_point() {
     for (name, result) in entry_points(&alias_chain(127)) {
@@ -161,7 +161,7 @@ fn alias_nesting_counts_toward_the_depth_limit_on_every_entry_point() {
     for links in [128, 8_000] {
         for (name, result) in entry_points(&alias_chain(links)) {
             let error = result.expect_err(name);
-            // Compat reports yaml_serde's message for the depth limit.
+            // Compat reports its own message for the depth limit.
             let message = error.to_string();
             assert!(
                 (error.kind() == ErrorKind::Limit && message.contains("depth"))
@@ -172,7 +172,7 @@ fn alias_nesting_counts_toward_the_depth_limit_on_every_entry_point() {
     }
 }
 
-/// V1: anchors cost nothing until an alias uses them. A 4 MiB scalar under
+/// Anchors cost nothing until an alias uses them. A 4 MiB scalar under
 /// 100 nested anchors used to be copied once per anchor.
 #[test]
 fn nested_anchors_are_not_copied() {
@@ -370,7 +370,7 @@ fn assert_depth_error(shape: &str, name: &str, result: Result<(), ayaml::Error>)
     }
     let error = result.expect_err(name);
     let message = error.to_string();
-    // Compat reports yaml_serde's message for the depth limit.
+    // Compat reports its own message for the depth limit.
     assert!(
         (error.kind() == ErrorKind::Limit && message.contains("depth"))
             || message.contains("recursion limit exceeded"),
@@ -473,7 +473,7 @@ fn default_entry_points_fit_a_small_stack_at_the_default_depth() {
     });
 }
 
-/// L6: the parser keeps its own stack, so nesting far past any depth limit
+/// The parser keeps its own stack, so nesting far past any depth limit
 /// is a limit error on a 2 MiB thread, never an abort.
 #[test]
 fn deep_nesting_is_a_limit_error_on_a_small_stack() {
@@ -548,7 +548,7 @@ fn wide_collections_fit_a_small_stack() {
             "explicit pairs in a sequence",
             "empty keys in a sequence",
         ] {
-            // The per-entry recursion fixed after 7529fc4 (L8) aborted below
+            // Per-entry recursion, which this guards against, aborted below
             // 5,000 entries in a release build and 1,000 in a debug build.
             // CI runs this file in both builds.
             let entries = if cfg!(debug_assertions) {

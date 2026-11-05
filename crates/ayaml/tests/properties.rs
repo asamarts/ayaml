@@ -31,8 +31,8 @@ proptest! {
         let borrowed = ayaml::from_str_borrowed::<Value>(&input);
         match (composed, borrowed) {
             (Ok(composed), Ok(borrowed)) => {
-                // Both paths keep tags since V5 and V6, so they compare
-                // exactly, as the `borrowed` fuzz target does.
+                // Both paths keep tags, so they compare exactly, as the
+                // `borrowed` fuzz target does.
                 prop_assert_eq!(composed, borrowed);
             }
             (Err(_), Err(_)) => {}
@@ -117,7 +117,7 @@ fn tag_suffix() -> impl Strategy<Value = String> {
 }
 
 /// Nested values: sequences, mappings with any keys, and single-tagged
-/// values (YAML cannot hold a tag on a tagged value; see E14).
+/// values, because YAML cannot hold a tag on a tagged value.
 fn nested_value() -> impl Strategy<Value = Value> {
     scalar_value().prop_recursive(4, 48, 5, |inner| {
         prop_oneof![
@@ -215,7 +215,7 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// Serde round trips (T2)
+// Serde round trips
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -282,10 +282,6 @@ proptest! {
         let output = ayaml::to_string(&document).expect("emit");
         let decoded: Document = ayaml::from_str(&output)
             .unwrap_or_else(|error| panic!("{error}; output={output:?}"));
-        prop_assert_eq!(decoded, document.clone(), "output={:?}", output);
-        // yaml_serde reads the output as the same data.
-        let read: Document = yaml_serde::from_str(&output)
-            .unwrap_or_else(|error| panic!("yaml_serde: {error}; output={output:?}"));
-        prop_assert_eq!(read, document, "output={:?}", output);
+        prop_assert_eq!(decoded, document, "output={:?}", output);
     }
 }

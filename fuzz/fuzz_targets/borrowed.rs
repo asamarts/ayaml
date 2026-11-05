@@ -1,7 +1,7 @@
 #![no_main]
 
 //! The borrowed (typed) path must compose the same `Value` as the composed
-//! path, tags included (V5, V22), one document at a time and as a stream.
+//! path, tags included, one document at a time and as a stream.
 
 use libfuzzer_sys::fuzz_target;
 

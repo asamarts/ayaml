@@ -7,43 +7,27 @@
 //! - the composed documents, serialized with serde_json, against the
 //!   fixture's `.json` file (set `AYAML_BLESS=1` to rewrite them, then review
 //!   the diff by hand);
-//! - the reference compatibility implementation against the expectation
-//!   listed below;
 //! - the typed path and the document cursor against the composed documents;
 //! - the compat path, for single-document fixtures;
 //! - value and event round trips through both emitters.
 //!
-//! The fixtures live outside `tests/fixtures`, whose loops in
-//! `ayaml-conformance` and `ayaml-diff` require the reference implementation
-//! to agree.
+//! The fixtures live outside `tests/fixtures`, so the conformance fixture loops
+//! don't pick them up.
 
 use std::path::{Path, PathBuf};
 
-/// How yaml_serde reads a fixture.
-#[derive(Clone, Copy, Debug)]
-enum YamlSerde {
-    /// The same documents.
-    Same,
-    /// It rejects the fixture.
-    Rejects,
-    /// It reads these documents (serde_json text) instead.
-    Reads(&'static str),
-}
-
-const FIXTURES: &[(&str, YamlSerde)] = &[
-    // P1: `- - a` with `- b` below it held one scalar, `"a - b"`.
-    ("compact-nested-sequence", YamlSerde::Same),
-    // P6: the second `...` composed an extra null document.
-    ("repeated-document-end", YamlSerde::Same),
-    // P32: quoted scalars hold any non-C0 character (YAML 1.2.2 section
-    // 5.1). libyaml rejects DEL anywhere in the stream.
-    ("quoted-delete-character", YamlSerde::Rejects),
-    // V15: integers are exact up to 128 bits. yaml_serde's `Value` holds
-    // 64-bit integers only.
-    ("wide-integer-content", YamlSerde::Rejects),
-    // V22: an empty stream holds no documents; yaml_serde reads one
-    // null document.
-    ("empty-file", YamlSerde::Reads("[null]")),
+const FIXTURES: &[&str] = &[
+    // `- - a` with `- b` below it is two entries, not one scalar `"a - b"`.
+    "compact-nested-sequence",
+    // The second `...` composes no extra null document.
+    "repeated-document-end",
+    // Quoted scalars hold any `nb-json` character (YAML 1.2.2 section 5.1).
+    // libyaml rejects DEL anywhere in the stream.
+    "quoted-delete-character",
+    // Integers are exact up to 128 bits.
+    "wide-integer-content",
+    // An empty stream holds no documents.
+    "empty-file",
 ];
 
 fn fixture_dir() -> PathBuf {
@@ -60,19 +44,7 @@ fn json(documents: &impl serde::Serialize) -> String {
     text
 }
 
-fn yaml_serde_documents(text: &str) -> Result<Vec<yaml_serde::Value>, String> {
-    let mut documents = Vec::new();
-    for document in yaml_serde::Deserializer::from_str(text) {
-        // The iterator keeps yielding the same error after a failure.
-        documents.push(
-            <yaml_serde::Value as serde::Deserialize>::deserialize(document)
-                .map_err(|error| error.to_string())?,
-        );
-    }
-    Ok(documents)
-}
-
-fn check(name: &str, yaml_serde: YamlSerde) {
+fn check(name: &str) {
     let dir = fixture_dir();
     let text = std::fs::read_to_string(dir.join(format!("{name}.yml"))).expect("fixture");
     let documents = ayaml::parse_documents_with_limits(&text, &limits())
@@ -88,29 +60,6 @@ fn check(name: &str, yaml_serde: YamlSerde) {
         .expect("golden")
         .replace("\r\n", "\n");
     assert_eq!(actual, golden, "{name}: documents differ from {name}.json");
-
-    // yaml_serde.
-    match (yaml_serde, yaml_serde_documents(&text)) {
-        (YamlSerde::Same, Ok(baseline)) => {
-            assert_eq!(
-                json(&baseline),
-                golden,
-                "{name}: yaml_serde reads it differently"
-            );
-        }
-        (YamlSerde::Rejects, Err(_)) => {}
-        (YamlSerde::Reads(expected), Ok(baseline)) => {
-            let expected: serde_json::Value = serde_json::from_str(expected).expect("expected");
-            assert_eq!(
-                json(&baseline),
-                json(&expected),
-                "{name}: yaml_serde changed"
-            );
-        }
-        (expectation, result) => {
-            panic!("{name}: expected yaml_serde {expectation:?}, got {result:?}");
-        }
-    }
 
     // The typed path and the document cursor.
     let mut cursor = ayaml::Deserializer::from_str_with_limits(&text, &limits()).expect("cursor");
@@ -154,8 +103,8 @@ fn check(name: &str, yaml_serde: YamlSerde) {
 
 #[test]
 fn real_world_fixtures() {
-    for (name, yaml_serde) in FIXTURES {
-        check(name, *yaml_serde);
+    for name in FIXTURES {
+        check(name);
     }
 }
 
@@ -170,7 +119,7 @@ fn every_fixture_is_listed() {
         })
         .collect();
     names.sort();
-    let mut listed: Vec<&str> = FIXTURES.iter().map(|(name, _)| *name).collect();
+    let mut listed = FIXTURES.to_vec();
     listed.sort_unstable();
     assert_eq!(names, listed);
 }

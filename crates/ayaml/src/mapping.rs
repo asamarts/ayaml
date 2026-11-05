@@ -149,7 +149,7 @@ impl Mapping {
     }
 }
 
-/// A view into one mapping slot, mirroring the `indexmap`/yaml_serde entry API.
+/// A view into one mapping slot, mirroring the `indexmap` entry API.
 pub struct Entry<'a> {
     inner: indexmap::map::Entry<'a, Value, Value>,
 }
@@ -458,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn debug_matches_yaml_serde_shape() {
+    fn debug_prints_the_mapping_name_and_entries() {
         assert_eq!(format!("{:?}", Mapping::new()), "Mapping {}");
         let mut map = Mapping::new();
         map.insert(key("a"), Value::from(1_u64));

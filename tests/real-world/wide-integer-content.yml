@@ -1,4 +1,4 @@
-# V15: `Content` holds hex bytes. A run of decimal digits is an integer:
+# `Content` holds hex bytes. A run of decimal digits is an integer:
 # exact up to 128 bits, a float past that. A leading zero or quotes keep
 # it a string. Reduced from lldb/test/Shell/Minidump/disassemble-no-module.yaml.
 --- !minidump

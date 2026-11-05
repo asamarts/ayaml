@@ -3,8 +3,8 @@
 
 The parser graph is checked separately from the test and benchmark tooling.
 Cargo metadata cannot see module-level graph boundaries, so this script
-enforces the direct `ayaml` dependency allowlist and the normal transitive
-package set.
+enforces the direct `ayaml` dependency allowlist and an allowlist for the whole
+normal transitive package set.
 """
 
 from __future__ import annotations
@@ -20,27 +20,21 @@ AYAML_ALLOWED_DIRECT = {
     "serde",     # required Serde contract
 }
 
-# A complete YAML parser or native YAML stack must never be in ayaml's normal
-# runtime graph. Test and benchmark tooling may use a YAML oracle as a dev dependency.
-FORBIDDEN_NORMAL = {
-    "saphyr",
-    "saphyr-parser",
-    "yaml-rust",
-    "yaml-rust2",
-    "yaml_serde",
-    "libyaml-rs",
-    "unsafe-libyaml",
-    "unsafe-libyaml-norway",
-    "serde-saphyr",
-    "serde_yaml",
-    "serde_yaml_ng",
-    "serde_yaml_neo",
-    "serde_yaml_bw",
-    "noyalib",
-    "noyalib-serde-yaml",
-    "yaml-rt",
-    "yaml-rt-core",
-    "yaml-rt-serde",
+# Every package allowed in ayaml's normal graph, and why it is there. Anything
+# else fails, so a YAML parser or native YAML stack cannot arrive through a
+# transitive dependency. Cargo metadata unifies features across the workspace,
+# so the derive stack that the tests enable for `serde` appears here too.
+AYAML_ALLOWED_NORMAL = {
+    "equivalent": "indexmap",
+    "hashbrown": "indexmap",
+    "indexmap": "ordered value-layer Mapping",
+    "proc-macro2": "serde_derive",
+    "quote": "serde_derive",
+    "serde": "required Serde contract",
+    "serde_core": "serde",
+    "serde_derive": "serde's derive feature, enabled by the tests",
+    "syn": "serde_derive",
+    "unicode-ident": "proc-macro2",
 }
 
 
@@ -91,19 +85,20 @@ def main() -> int:
         if dep_id in seen:
             continue
         seen.add(dep_id)
-        package = packages[dep_id]
-        if package["name"] in FORBIDDEN_NORMAL:
-            print(
-                "FAIL: forbidden YAML parser in ayaml's normal graph: "
-                f"{package['name']} {package['version']}"
-            )
-            return 1
         stack.extend(normal_dep_ids(nodes[dep_id]))
+
+    unclassified = sorted(
+        f"{packages[dep_id]['name']} {packages[dep_id]['version']}"
+        for dep_id in seen
+        if packages[dep_id]["name"] not in AYAML_ALLOWED_NORMAL
+    )
+    if unclassified:
+        print(f"FAIL: unclassified package in ayaml's normal graph: {unclassified}")
+        return 1
 
     print(
         "OK: ayaml direct deps "
-        f"{sorted(direct_names)}; normal graph {len(seen)} packages; "
-        "no forbidden YAML parser"
+        f"{sorted(direct_names)}; normal graph {len(seen)} packages, all classified"
     )
     return 0
 

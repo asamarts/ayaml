@@ -5,7 +5,6 @@ shape of its source, and its `.json` file holds the documents ayaml composes as
 serde_json text. `crates/ayaml/tests/real_world.rs` checks every fixture:
 
 - the golden documents;
-- the reference implementation against a listed expectation;
 - the typed path, the document cursor, and the compatibility path;
 - value and event round trips.
 
@@ -20,9 +19,8 @@ serde_json text. `crates/ayaml/tests/real_world.rs` checks every fixture:
 `quoted-delete-character.yml` holds a raw U+007F inside the third symbol's
 quoted name, and so does its `.json` file.
 
-These fixtures sit outside `tests/fixtures`: the fixture loops in
-`ayaml-conformance` and `ayaml-diff` walk that tree and require the reference
-implementation to accept every file that is not an expected error.
+These fixtures sit outside `tests/fixtures`, so the conformance fixture loops
+don't pick them up.
 
 Licenses: rust-lang/stdarch is MIT OR Apache-2.0; llvm-project is Apache-2.0
 WITH LLVM-exception. The fixtures reproduce only the structure and a few

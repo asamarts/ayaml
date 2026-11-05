@@ -1,6 +1,5 @@
 //! Regression tests for parser, composer, Serde, and emitter behavior.
-//! Each test names its finding ID. Expected values follow YAML 1.2.2 and, where
-//! the spec and yaml_serde agree, yaml_serde 0.10.7.
+//! Expected values follow YAML 1.2.2 and, in compat mode, libyaml.
 
 use serde_json::{Value as Json, json};
 
@@ -26,10 +25,10 @@ fn rejects(input: &str) {
     );
 }
 
-/// P1: a plain scalar must not continue into the next entry of a compact
+/// A plain scalar must not continue into the next entry of a compact
 /// nested sequence (suite 3ALJ, A2M4, 6BCT, M5DY).
 #[test]
-fn p1_compact_nested_sequence_entries_stay_separate() {
+fn compact_nested_sequence_entries_stay_separate() {
     assert_eq!(parse("- - a\n  - b\n"), json!([["a", "b"]]));
     assert_eq!(parse("-  - a\n   - b\n"), json!([["a", "b"]]));
     assert_eq!(
@@ -45,10 +44,10 @@ fn p1_compact_nested_sequence_entries_stay_separate() {
     assert_eq!(parse("- - a\n    - b\n"), json!([["a - b"]]));
 }
 
-/// P2: explicit keys holding block collections, and compact mappings inside
+/// Explicit keys holding block collections, and compact mappings inside
 /// explicit keys (suite M2N8).
 #[test]
-fn p2_explicit_keys_hold_block_collections() {
+fn explicit_keys_hold_block_collections() {
     let value = ayaml::parse_value("? - a\n  - b\n: c\n").expect("parse");
     let mapping = value.as_mapping().expect("mapping");
     let key = ayaml::Value::Sequence(vec!["a".into(), "b".into()]);
@@ -79,10 +78,10 @@ fn p2_explicit_keys_hold_block_collections() {
     assert!(entry.is_null());
 }
 
-/// P3: a block-scalar indentation indicator counts from the owning
+/// A block-scalar indentation indicator counts from the owning
 /// collection, not from the line (suite 4WA9).
 #[test]
-fn p3_indentation_indicator_is_relative_to_the_parent_node() {
+fn indentation_indicator_is_relative_to_the_parent_node() {
     assert_eq!(
         parse("- aaa: |2\n    xxx\n  bbb: |\n    xxx\n"),
         json!([{"aaa": "xxx\n", "bbb": "xxx\n"}])
@@ -95,11 +94,11 @@ fn p3_indentation_indicator_is_relative_to_the_parent_node() {
     );
 }
 
-/// P4: continuation and block-scalar content lines are measured against the
+/// Continuation and block-scalar content lines are measured against the
 /// owning collection, which is both stricter and more permissive than the
 /// line indentation.
 #[test]
-fn p4_continuation_indentation_follows_the_owner() {
+fn continuation_indentation_follows_the_owner() {
     // Valid: more indented than the owning mapping.
     assert_eq!(parse("key: a\n  - b\n"), json!({"key": "a - b"}));
     assert_eq!(parse("key:\n    a\n  b\n"), json!({"key": "a b"}));
@@ -112,10 +111,10 @@ fn p4_continuation_indentation_follows_the_owner() {
     rejects("- a: |\n  x\n");
 }
 
-/// P5: document markers end a root block scalar, also after `--- |`
+/// Document markers end a root block scalar, also after `--- |`
 /// (suite W4TN, M7A3).
 #[test]
-fn p5_document_markers_end_root_block_scalars() {
+fn document_markers_end_root_block_scalars() {
     assert_eq!(
         parse_documents("--- |\n%!PS-Adobe-2.0\n...\n--- x\n"),
         vec![json!("%!PS-Adobe-2.0\n"), json!("x")]
@@ -126,10 +125,10 @@ fn p5_document_markers_end_root_block_scalars() {
     );
 }
 
-/// P7: an explicit key can start a compact mapping in a sequence entry
+/// An explicit key can start a compact mapping in a sequence entry
 /// (suite 4FJ6, 9MMW, and V9D5 round trips).
 #[test]
-fn p7_explicit_key_in_sequence_entry() {
+fn explicit_key_in_sequence_entry() {
     assert_eq!(parse("- ? a\n  : b\n"), json!([{"a": "b"}]));
     assert_eq!(parse("- ? a\n"), json!([{"a": null}]));
     assert_eq!(
@@ -145,9 +144,9 @@ fn p7_explicit_key_in_sequence_entry() {
     );
 }
 
-/// P6: `...` with no open document ends nothing (suite HWV9, QT73, M7A3).
+/// `...` with no open document ends nothing (suite HWV9, QT73, M7A3).
 #[test]
-fn p6_document_end_markers_without_documents() {
+fn document_end_markers_without_documents() {
     assert_eq!(parse_documents("...\n"), Vec::<Json>::new());
     assert_eq!(parse_documents("...\n...\n"), Vec::<Json>::new());
     assert_eq!(
@@ -156,9 +155,9 @@ fn p6_document_end_markers_without_documents() {
     );
 }
 
-/// P10: the spec readings by default (suite Y2GN, HM87, 652Z, JEF9, L24T).
+/// The spec readings by default (suite Y2GN, HM87, 652Z, JEF9, L24T).
 #[test]
-fn p10_spec_readings_by_default() {
+fn spec_readings_by_default() {
     assert_eq!(parse("key: &an:chor value\n"), json!({"key": "value"}));
     assert_eq!(parse("[?x]\n"), json!(["?x"]));
     assert_eq!(parse("{ ?foo: bar }\n"), json!({"?foo": "bar"}));
@@ -166,9 +165,9 @@ fn p10_spec_readings_by_default() {
     assert_eq!(parse("foo: |\n  x\n   "), json!({"foo": "x\n \n"}));
 }
 
-/// P11: `%XX` escapes in shorthand tags are decoded (suite 6CK3).
+/// `%XX` escapes in shorthand tags are decoded (suite 6CK3).
 #[test]
-fn p11_tag_escapes_are_decoded() {
+fn tag_escapes_are_decoded() {
     let value = ayaml::parse_value("%TAG !e! tag:example.com,2000:app/\n---\n!e!tag%21 baz\n")
         .expect("parse");
     let ayaml::Value::Tagged(tagged) = value else {
@@ -182,9 +181,9 @@ fn p11_tag_escapes_are_decoded() {
     assert!(ayaml::parse_value("!a%ff b\n").is_err());
 }
 
-/// P13: properties before `,`, `]`, or `}` belong to an empty node.
+/// Properties before `,`, `]`, or `}` belong to an empty node.
 #[test]
-fn p13_properties_before_flow_indicators() {
+fn properties_before_flow_indicators() {
     let value = ayaml::parse_value("[!t , &a , b]\n").expect("parse");
     let items = value.as_sequence().expect("sequence");
     assert!(matches!(&items[0], ayaml::Value::Tagged(tagged) if tagged.value.is_null()));
@@ -194,18 +193,18 @@ fn p13_properties_before_flow_indicators() {
     assert_eq!(parse("{k: &a , j: x}\n"), json!({"k": null, "j": "x"}));
 }
 
-/// P18: only space and tab separate tokens; other Unicode spaces are content.
+/// Only space and tab separate tokens; other Unicode spaces are content.
 #[test]
-fn p18_unicode_spaces_are_content() {
+fn unicode_spaces_are_content() {
     assert_eq!(parse("a:\u{a0}0\n"), json!("a:\u{a0}0"));
     assert_eq!(parse("key: x\u{a0}\n"), json!({"key": "x\u{a0}"}));
     assert_eq!(parse("\u{3000}a: b\n"), json!({"\u{3000}a": "b"}));
     assert_eq!(parse("a\u{a0}#b\n"), json!("a\u{a0}#b"));
 }
 
-/// P19: tags may only hold URI characters, escaped as `%XX` otherwise.
+/// Tags may only hold URI characters, escaped as `%XX` otherwise.
 #[test]
-fn p19_tags_hold_uri_characters_only() {
+fn tags_hold_uri_characters_only() {
     rejects("!x\u{a0}y z\n");
     rejects("!<a b> x\n");
     rejects("!foo,bar x\n");
@@ -213,18 +212,18 @@ fn p19_tags_hold_uri_characters_only() {
     assert!(value.is_tagged());
 }
 
-/// P20: in block context a flow indicator does not end `-` or `?`.
+/// In block context a flow indicator does not end `-` or `?`.
 #[test]
-fn p20_dash_and_question_mark_before_flow_indicators() {
+fn dash_and_question_mark_before_flow_indicators() {
     assert_eq!(parse("-,\n"), json!("-,"));
     assert_eq!(parse("- -]\n"), json!(["-]"]));
     assert_eq!(parse("a: ?}\n"), json!({"a": "?}"}));
 }
 
-/// P21: a `:` inside a tag or anchor is not a mapping value indicator when
+/// A `:` inside a tag or anchor is not a mapping value indicator when
 /// the scanner decides which collection owns a block scalar.
 #[test]
-fn p21_colons_inside_properties() {
+fn colons_inside_properties() {
     let value = ayaml::parse_value("- !: |-\n  \n  0\n").expect("parse");
     let ayaml::Value::Tagged(tagged) = &value.as_sequence().expect("sequence")[0] else {
         panic!("expected a tagged item, got {value:?}");
@@ -234,10 +233,10 @@ fn p21_colons_inside_properties() {
     assert_eq!(parse("- &a: |\n  x\n"), json!(["x\n"]));
 }
 
-/// P22: properties on the first key of a compact mapping do not move the
+/// Properties on the first key of a compact mapping do not move the
 /// mapping's indentation.
 #[test]
-fn p22_properties_on_the_first_compact_key() {
+fn properties_on_the_first_compact_key() {
     assert_eq!(parse("- &x a: b\n  c: d\n"), json!([{"a": "b", "c": "d"}]));
     assert_eq!(
         parse("? a\n: &x b: c\n  d: e\n"),
@@ -251,11 +250,11 @@ fn p22_properties_on_the_first_compact_key() {
     rejects("? a\n: &x - b\n");
 }
 
-/// P23: each empty line after an escaped line break in a double-quoted
+/// Each empty line after an escaped line break in a double-quoted
 /// scalar is a line feed (YAML 1.2.2 production 112). Found by the diff
 /// fuzz target.
 #[test]
-fn p23_empty_lines_after_an_escaped_line_break() {
+fn empty_lines_after_an_escaped_line_break() {
     assert_eq!(parse("\"a\\\n\nb\"\n"), json!("a\nb"));
     assert_eq!(parse("\"a\\\n  \n\n b\"\n"), json!("a\n\nb"));
     assert_eq!(parse("\"\n\\\n\n\n\"\n"), json!(" \n\n"));
@@ -269,11 +268,11 @@ fn p23_empty_lines_after_an_escaped_line_break() {
     rejects("k:\n  \"a\\\nb\"\n");
 }
 
-/// P24: a directive needs a name, and neither its name nor its parameters
+/// A directive needs a name, and neither its name nor its parameters
 /// may hold a byte order mark. Found by the emit fuzz target. Whatever
 /// directive parses, the event writer writes back.
 #[test]
-fn p24_directives_need_a_name() {
+fn directives_need_a_name() {
     rejects("%\n--- a\n");
     rejects("% \n--- a\n");
     rejects("% x\n--- a\n");
@@ -285,10 +284,10 @@ fn p24_directives_need_a_name() {
     assert!(output.contains("%TAG !e!\ttag:x,2000:"), "{output:?}");
 }
 
-/// P25: `%`, `@`, and `` ` `` are indicators and cannot start a plain
+/// `%`, `@`, and `` ` `` are indicators and cannot start a plain
 /// scalar, in either mode. Found by the borrowed fuzz target.
 #[test]
-fn p25_reserved_indicators_cannot_start_plain_scalars() {
+fn reserved_indicators_cannot_start_plain_scalars() {
     for input in [
         "a: @b\n", "a: `b\n", "a: %b\n", "[@a]\n", "- `a\n", "@a: b\n",
     ] {
@@ -298,12 +297,12 @@ fn p25_reserved_indicators_cannot_start_plain_scalars() {
     assert_eq!(parse("a: '@b'\n"), json!({"a": "@b"}));
 }
 
-/// P27: an anchor or alias is separated from the content that follows
+/// An anchor or alias is separated from the content that follows
 /// (production 96); libyaml rejects `&a[b]` too. A `:` before a blank or a
 /// flow indicator stays in the name, as YAML 1.2.2 says (2SXE, W5VH). Found by
-/// the diff fuzz target.
+/// fuzzing.
 #[test]
-fn p27_anchors_are_separated_from_their_content() {
+fn anchors_are_separated_from_their_content() {
     for input in [
         "&a[b]\n",
         "&a{b: c}\n",
@@ -318,11 +317,11 @@ fn p27_anchors_are_separated_from_their_content() {
     assert_eq!(parse("[&a:, b]\n"), json!([null, "b"]));
 }
 
-/// P14 (second half): with an indentation indicator, a leading line holding
+/// With an indentation indicator, a leading line holding
 /// only spaces keeps the spaces past the indentation as content. Without
 /// one, such a line is more indented than the content, which is an error.
 #[test]
-fn p14_explicit_indentation_keeps_leading_spaces() {
+fn explicit_indentation_keeps_leading_spaces() {
     assert_eq!(parse("a: |2\n    \n  x\n"), json!({"a": "  \nx\n"}));
     assert_eq!(parse("- >1\n  \n x\n"), json!([" \nx\n"]));
     assert_eq!(parse("a: |\n  x\n    \n"), json!({"a": "x\n  \n"}));
@@ -330,10 +329,10 @@ fn p14_explicit_indentation_keeps_leading_spaces() {
     rejects("a: |\n    \n  x\n");
 }
 
-/// P15: an implicit key is at most 1024 characters, up to its `:`, in block
+/// An implicit key is at most 1024 characters, up to its `:`, in block
 /// mappings and in flow-sequence pairs; flow-mapping keys have no limit.
 #[test]
-fn p15_implicit_keys_are_at_most_1024_characters() {
+fn implicit_keys_are_at_most_1024_characters() {
     let fits = "k".repeat(1024);
     let long = "k".repeat(1025);
     assert_eq!(parse(&format!("{fits}: v\n")), json!({ fits.clone(): "v" }));
@@ -348,9 +347,9 @@ fn p15_implicit_keys_are_at_most_1024_characters() {
     assert_eq!(parse(&format!("{{{long}: v}}\n")), json!({ long: "v" }));
 }
 
-/// P17: NEL, LS, and PS are content in YAML 1.2, not line breaks.
+/// NEL, LS, and PS are content in YAML 1.2, not line breaks.
 #[test]
-fn p17_nel_ls_and_ps_are_content() {
+fn nel_ls_and_ps_are_content() {
     for separator in ['\u{85}', '\u{2028}', '\u{2029}'] {
         assert_eq!(
             parse(&format!("a: b{separator}c\n")),
@@ -365,17 +364,17 @@ fn p17_nel_ls_and_ps_are_content() {
     }
 }
 
-/// P26: `%TAG` handles are `!`, `!!`, or word characters between `!`s, and
+/// `%TAG` handles are `!`, `!!`, or word characters between `!`s, and
 /// prefixes are URI characters that do not start with a flow indicator.
 #[test]
-fn p26_tag_directives_are_validated() {
+fn tag_directives_are_validated() {
     let document = |directive: &str| format!("{directive}\n--- !e!x a\n");
-    // A tagged value serializes as `{"!<tag>": payload}` (V6).
+    // A tagged value serializes as `{"!<tag>": payload}`.
     assert_eq!(
         parse(&document("%TAG !e! tag:x,2000:")),
         json!({ "!<tag:x,2000:x>": "a" })
     );
-    // The prefix's escapes are decoded (P33).
+    // The prefix's escapes are decoded.
     assert_eq!(
         parse(&document("%TAG !e! tag:x%21y")),
         json!({ "!<tag:x!yx>": "a" })
@@ -393,15 +392,14 @@ fn p26_tag_directives_are_validated() {
     }
 }
 
-/// P34: after a property-only line, the node may continue only within its
+/// After a property-only line, the node may continue only within its
 /// parent's bounds (YAML 1.2.2 section 8.2). A sequence entry's node cannot
 /// take the next `-` at the entry's own column as its block sequence; a
 /// mapping value's node can, since its sequence may sit at the key's column.
 /// Content may sit left of the property line, down to the parent's bound.
-/// Both modes; yaml_serde agrees on every case. Found by the `diff` fuzz
-/// target's 10-minute campaign.
+/// Both modes. Found by fuzzing.
 #[test]
-fn p34_property_lines_stay_within_the_parent() {
+fn property_lines_stay_within_the_parent() {
     let json = |input: &str| {
         let value = ayaml::parse_value(input).unwrap_or_else(|error| panic!("{input:?}: {error}"));
         #[cfg(feature = "libyaml-compat")]
@@ -410,14 +408,7 @@ fn p34_property_lines_stay_within_the_parent() {
             value,
             "{input:?}"
         );
-        let baseline: yaml_serde::Value = yaml_serde::from_str(input).expect("yaml_serde");
-        let text = serde_json::to_string(&value).expect("json");
-        assert_eq!(
-            text,
-            serde_json::to_string(&baseline).expect("json"),
-            "{input:?}"
-        );
-        text
+        serde_json::to_string(&value).expect("json")
     };
     assert_eq!(
         json("!A\r-\r  !-\t\r \r-  \r-"),
@@ -437,11 +428,11 @@ fn p34_property_lines_stay_within_the_parent() {
     assert_eq!(json("  !t\n- x\n"), r#"{"!t":["x"]}"#);
 }
 
-/// P33: `%TAG` prefixes have their %-escapes decoded, like tag suffixes
-/// (P11), as libyaml does. Verbatim tags stay as written (YAML 1.2.2 section
+/// `%TAG` prefixes have their %-escapes decoded, like tag suffixes, as
+/// libyaml does. Verbatim tags stay as written (YAML 1.2.2 section
 /// 6.9.1).
 #[test]
-fn p33_tag_prefix_escapes_are_decoded() {
+fn tag_prefix_escapes_are_decoded() {
     let tag = |input: &str| {
         let value = ayaml::parse_value(input).unwrap_or_else(|error| panic!("{input:?}: {error}"));
         value.as_tagged().expect("tagged").tag.to_string()
@@ -455,11 +446,6 @@ fn p33_tag_prefix_escapes_are_decoded() {
     assert_eq!(tag("--- !<!my%21pre-foo> 1\n"), "!my%21pre-foo");
     let error = ayaml::parse_value("%TAG !e! !%FF\n--- !e!x 1\n").expect_err("bad UTF-8");
     assert_eq!(error.kind(), ayaml::ErrorKind::Scanner);
-    let baseline: yaml_serde::Value = yaml_serde::from_str(local).expect("yaml_serde");
-    let yaml_serde::Value::Tagged(tagged) = baseline else {
-        panic!("yaml_serde did not keep the tag");
-    };
-    assert_eq!(tagged.tag.to_string(), "!my!pre-foo");
     #[cfg(feature = "libyaml-compat")]
     assert_eq!(
         ayaml::compat::from_str::<ayaml::Value>(local).expect("compat"),
@@ -467,14 +453,14 @@ fn p33_tag_prefix_escapes_are_decoded() {
     );
 }
 
-/// P36: in compat, a column-0 byte order mark before any content ends a
-/// root block scalar, as a column-0 `#` line does (P29): libyaml indents
+/// In compat, a column-0 byte order mark before any content ends a
+/// root block scalar, as a column-0 `#` line does: libyaml indents
 /// root block scalars by at least one space and then skips the BOM. Default
 /// mode reads these the same way here, since the BOM starts a document
-/// prefix. Found by the `diff` fuzz target.
+/// prefix. Found by fuzzing.
 #[cfg(feature = "libyaml-compat")]
 #[test]
-fn p36_compat_column_zero_boms_end_root_block_scalars() {
+fn compat_column_zero_boms_end_root_block_scalars() {
     for input in [
         "|+\n\u{feff}\n\n\n\n ",
         "|+\n\u{feff}\n",
@@ -482,12 +468,6 @@ fn p36_compat_column_zero_boms_end_root_block_scalars() {
     ] {
         let compat = ayaml::compat::from_str::<ayaml::Value>(input).expect("compat");
         assert_eq!(compat, "", "{input:?}");
-        let baseline: yaml_serde::Value = yaml_serde::from_str(input).expect("yaml_serde");
-        assert_eq!(
-            baseline,
-            yaml_serde::Value::String(String::new()),
-            "{input:?}"
-        );
         assert_eq!(
             ayaml::parse_value(input).expect("default"),
             compat,
@@ -501,13 +481,14 @@ fn p36_compat_column_zero_boms_end_root_block_scalars() {
     );
 }
 
-/// P32: YAML 1.2.2 section 5.1 requires every non-C0 character to be
+/// YAML 1.2.2 section 5.1 requires every JSON-compatible character to be
 /// allowed inside quoted scalars (`nb-json`), so a raw DEL, C1 control, or
 /// U+FFFE is content there, in both modes. libyaml rejects them anywhere.
-/// Outside quoted scalars they stay an error (P8), and C0 controls are an
-/// error everywhere. Found in LLVM's `llvm-dlltool` test inputs (T4).
+/// Outside quoted scalars they stay an error, and controls below U+0020 other
+/// than tab, LF, and CR are an error everywhere. Found in LLVM's
+/// `llvm-dlltool` test inputs.
 #[test]
-fn p32_quoted_scalars_hold_non_c0_characters() {
+fn quoted_scalars_hold_non_c0_characters() {
     let single = |key: &str, value: &str| {
         let mut mapping = ayaml::Mapping::new();
         mapping.insert(ayaml::Value::from(key), ayaml::Value::from(value));
@@ -558,11 +539,11 @@ fn p32_quoted_scalars_hold_non_c0_characters() {
     assert_eq!(ayaml::parse_value(&text).expect("reparse"), expected);
 }
 
-/// P28: quotes, flow indicators, and properties inside a plain key are
+/// Quotes, flow indicators, and properties inside a plain key are
 /// content, so the block-scalar owner heuristic finds the key's `:`. Found
 /// by the emit fuzz target.
 #[test]
-fn p28_flow_indicators_inside_plain_keys_are_content() {
+fn flow_indicators_inside_plain_keys_are_content() {
     let single = |key: ayaml::Value, value: ayaml::Value| {
         let mut mapping = ayaml::Mapping::new();
         mapping.insert(key, value);
@@ -579,10 +560,10 @@ fn p28_flow_indicators_inside_plain_keys_are_content() {
     assert_eq!(parse("a &b: |\n  x\n"), json!({ "a &b": "x\n" }));
 }
 
-/// P29: in a zero-indented root block scalar, a column-0 `#` line is content
+/// In a zero-indented root block scalar, a column-0 `#` line is content
 /// in YAML 1.2.2 (DK3J), whether or not the header follows `---` or a BOM.
 #[test]
-fn p29_column_zero_hash_lines_in_root_block_scalars_are_content() {
+fn column_zero_hash_lines_in_root_block_scalars_are_content() {
     assert_eq!(parse(">\n#\n"), json!("#\n"));
     assert_eq!(parse("|\n#x\n"), json!("#x\n"));
     assert_eq!(parse("|\nfoo\n# c\n"), json!("foo\n# c\n"));
@@ -591,11 +572,11 @@ fn p29_column_zero_hash_lines_in_root_block_scalars_are_content() {
     assert_eq!(parse("--- |\n  x\n# c\n"), json!("x\n"));
 }
 
-/// P29 in compat: libyaml indents a root block scalar by at least one space,
-/// so a column-0 `#` line before any content is a comment there.
+/// libyaml indents a root block scalar by at least one space, so in compat a
+/// column-0 `#` line before any content is a comment.
 #[cfg(feature = "libyaml-compat")]
 #[test]
-fn p29_compat_column_zero_hash_lines_end_root_block_scalars() {
+fn compat_column_zero_hash_lines_end_root_block_scalars() {
     for input in [
         ">\n#\n",
         "|\n#x\n",
@@ -615,23 +596,23 @@ fn p29_compat_column_zero_hash_lines_end_root_block_scalars() {
     );
 }
 
-/// P30: in compat, the block-scalar owner heuristic ends an anchor or alias
+/// In compat, the block-scalar owner heuristic ends an anchor or alias
 /// name where the compat scanner does, before a `?` or before a `:` followed
 /// by more name text. `&-:: >` is then the key `:`, whose scalar must be
-/// indented. Found by the diff fuzz target.
+/// indented. Found by fuzzing.
 #[cfg(feature = "libyaml-compat")]
 #[test]
-fn p30_compat_owner_heuristic_ends_anchors_like_the_scanner() {
+fn compat_owner_heuristic_ends_anchors_like_the_scanner() {
     assert_eq!(compat("&-:: >\n(0: ("), json!({ ":": "", "(0": "(" }));
     assert_eq!(compat("&-:: >\n x\n"), json!({ ":": "x\n" }));
     assert_eq!(compat("&a?b: |\n x\n"), json!({ "?b": "x\n" }));
     assert_eq!(compat("&a:b: >\n x\n"), json!({ ":b": "x\n" }));
 }
 
-/// P30 by default: anchor names hold `:` and `?`, so these are anchored
+/// By default, anchor names hold `:` and `?`, so these are anchored
 /// root scalars.
 #[test]
-fn p30_anchor_names_hold_colons_and_question_marks() {
+fn anchor_names_hold_colons_and_question_marks() {
     assert_eq!(parse("&-:: >\n(0: ("), json!("(0: ("));
     assert_eq!(parse("&a?b: |\nx\n"), json!("x\n"));
 }
@@ -643,9 +624,9 @@ fn compat(input: &str) -> Json {
     serde_json::to_value(&value).expect("JSON-compatible value")
 }
 
-/// V8: a custom tag keeps its scalar payload resolved, as in yaml_serde.
+/// A custom tag keeps its scalar payload resolved.
 #[test]
-fn v8_custom_tags_resolve_their_payloads() {
+fn custom_tags_resolve_their_payloads() {
     let payload = |input: &str| match ayaml::parse_value(input).expect("parse") {
         ayaml::Value::Tagged(tagged) => tagged.value,
         other => panic!("expected a tagged value, got {other:?}"),
@@ -658,10 +639,10 @@ fn v8_custom_tags_resolve_their_payloads() {
     assert_eq!(payload("! 5\n"), ayaml::Value::from("5"));
 }
 
-/// V17 and E7: tags compare by their full name, so verbatim and shorthand
+/// Tags compare by their full name, so verbatim and shorthand
 /// spellings of a tag are the same tag.
 #[test]
-fn v17_e7_tags_compare_by_full_name() {
+fn tags_compare_by_full_name() {
     assert_eq!(
         ayaml::parse_value("!<tag:yaml.org,2002:int> 12\n").expect("parse"),
         ayaml::Value::from(12_u64)
@@ -696,11 +677,10 @@ struct FieldA {
     b: u32,
 }
 
-/// V2: a struct field is named by its key's text, so an integer key does not
-/// bind a field by position, and a key naming no field is ignored, as in
-/// yaml_serde.
+/// A struct field is named by its key's text, so an integer key does not
+/// bind a field by position, and a key naming no field is ignored.
 #[test]
-fn v2_integer_keys_do_not_bind_fields_by_position() {
+fn integer_keys_do_not_bind_fields_by_position() {
     for input in [
         "a: 1\n1: 7\n",
         "a: 1\n0: 5\n",
@@ -717,9 +697,9 @@ fn v2_integer_keys_do_not_bind_fields_by_position() {
     }
 }
 
-/// V7: a sequence longer than a tuple or array is an error.
+/// A sequence longer than a tuple or array is an error.
 #[test]
-fn v7_overlong_sequences_are_an_error() {
+fn overlong_sequences_are_an_error() {
     for result in every_path::<(u32, u32)>("[1, 2, 3]\n") {
         assert!(result.is_err(), "{result:?}");
     }
@@ -742,12 +722,11 @@ struct Defaults {
     m: std::collections::BTreeMap<String, u32>,
 }
 
-/// V9: an empty value reads as an empty sequence, an empty map, or a struct
-/// with its defaults. On the typed path an explicit `~` does not, as in
-/// yaml_serde; a `Value` cannot tell the two apart (fixed for `from_str` by
-/// the typed path).
+/// An empty value reads as an empty sequence, an empty map, or a struct
+/// with its defaults. On the typed path an explicit `~` does not; a `Value`
+/// cannot tell the two apart (fixed for `from_str` by the typed path).
 #[test]
-fn v9_empty_values_are_empty_collections() {
+fn empty_values_are_empty_collections() {
     for result in every_path::<Vec<u32>>("") {
         assert_eq!(result, Ok(Vec::new()));
     }
@@ -780,10 +759,10 @@ enum Renamed {
     Plain,
 }
 
-/// V19: a `char` and a unit variant are read from the scalar's text, and an
+/// A `char` and a unit variant are read from the scalar's text, and an
 /// empty value or `~` is an empty `Mapping`.
 #[test]
-fn v19_chars_variants_and_mappings_follow_the_text() {
+fn chars_variants_and_mappings_follow_the_text() {
     for result in every_path::<char>("5\n") {
         assert_eq!(result, Ok('5'));
     }
@@ -811,10 +790,10 @@ fn v19_chars_variants_and_mappings_follow_the_text() {
     }
 }
 
-/// V4: `Number`'s order is total and agrees with `Eq`: NaN sorts after
-/// every other float, and equals itself, as in yaml_serde.
+/// `Number`'s order is total and agrees with `Eq`: NaN sorts after
+/// every other float, and equals itself.
 #[test]
-fn v4_number_order_is_total() {
+fn number_order_is_total() {
     use ayaml::Number;
     let nan = Number::from(f64::NAN);
     let one = Number::from(1.0_f64);
@@ -837,10 +816,10 @@ fn v4_number_order_is_total() {
     assert_eq!(set.len(), 2);
 }
 
-/// V12: an alias refers to the most recent anchor before it, so an anchor
+/// An alias refers to the most recent anchor before it, so an anchor
 /// redefined inside its own anchored collection wins over the collection.
 #[test]
-fn v12_inner_anchor_redefinitions_win() {
+fn inner_anchor_redefinitions_win() {
     for input in ["a: &x {k: &x v}\nb: *x\n", "a: &x\n  k: &x v\nb: *x\n"] {
         assert_eq!(
             parse(input),
@@ -861,12 +840,11 @@ fn v12_inner_anchor_redefinitions_win() {
     );
 }
 
-/// V13: indexing follows yaml_serde. `value[0]` finds an integer key and
-/// looks through tags, an index past the end panics instead of growing the
-/// sequence (or wrapping and clearing it at `usize::MAX`), and writing a key
-/// into a null makes it a mapping.
+/// `value[0]` finds an integer key and looks through tags, an index past the
+/// end panics instead of growing the sequence (or wrapping and clearing it at
+/// `usize::MAX`), and writing a key into a null makes it a mapping.
 #[test]
-fn v13_indexing_matches_yaml_serde() {
+fn indexing_finds_integer_keys_and_does_not_grow_sequences() {
     let mapping = ayaml::parse_value("{0: zero, 1: one}\n").expect("parse");
     assert_eq!(mapping[0], ayaml::Value::from("zero"));
     assert_eq!(mapping.get(1), Some(&ayaml::Value::from("one")));
@@ -895,10 +873,9 @@ fn v13_indexing_matches_yaml_serde() {
     }
 }
 
-/// V14: `as_f64` converts integers, so a `Value` integer equals the same
-/// float, as in yaml_serde.
+/// `as_f64` converts integers, so a `Value` integer equals the same float.
 #[test]
-fn v14_integers_read_as_floats() {
+fn integers_read_as_floats() {
     let five = ayaml::Value::from(5_u64);
     assert_eq!(five.as_f64(), Some(5.0));
     assert_eq!(five, 5.0_f64);
@@ -907,12 +884,12 @@ fn v14_integers_read_as_floats() {
     assert_ne!(ayaml::Value::from(5.0_f64), 5_u64);
 }
 
-/// V5, V6: tags survive `to_value`, `from_value`, and serialization. A
+/// Tags survive `to_value`, `from_value`, and serialization. A
 /// tagged value is a one-entry map from `!` and the tag's Serde name to the
-/// value, as in yaml_serde, and ayaml's serializers turn that map back into
+/// value, and ayaml's serializers turn that map back into
 /// the tag. Core, `%TAG`, and verbatim tags keep their full names.
 #[test]
-fn v5_v6_tags_round_trip_through_serde() {
+fn tags_round_trip_through_serde() {
     for input in [
         "!Foo 1\n",
         "!Foo {a: 1}\n",
@@ -964,10 +941,10 @@ fn v5_v6_tags_round_trip_through_serde() {
     }
 }
 
-/// V10: core collection tags restate the node kind, so every composer drops
-/// them, as yaml_serde does; `!!seq [1, 2]` reads into a `Vec`.
+/// Core collection tags restate the node kind, so every composer drops them;
+/// `!!seq [1, 2]` reads into a `Vec`.
 #[test]
-fn v10_core_collection_tags_are_dropped() {
+fn core_collection_tags_are_dropped() {
     for (input, expected) in [
         ("!!seq [1, 2]\n", json!([1, 2])),
         ("!!map {a: 1}\n", json!({ "a": 1 })),
@@ -987,10 +964,10 @@ fn v10_core_collection_tags_are_dropped() {
     assert!(ayaml::parse_value("!Foo [1]\n").expect("parse").is_tagged());
 }
 
-/// V22 (tags): the typed path keeps tags, so `from_str_borrowed::<Value>`
+/// The typed path keeps tags, so `from_str_borrowed::<Value>`
 /// and the multi-document cursor give the same values as `parse_value`.
 #[test]
-fn v22_the_typed_path_keeps_tags() {
+fn the_typed_path_keeps_tags() {
     for input in ["!Foo 1\n", "a: !Foo [1, !Bar 2]\n", "{!k a: 1}\n"] {
         assert_eq!(
             ayaml::from_str_borrowed::<ayaml::Value>(input).expect("typed"),
@@ -1016,17 +993,15 @@ fn merged_keys(input: &str, path: &str) -> Vec<String> {
         .collect()
 }
 
-/// V11: merging keeps the mapping's own keys in source order and appends the
-/// merged keys, as yaml_serde does when `<<` is last. Chained merges flatten
-/// fully, where yaml_serde leaves the inner `<<` behind.
+/// Merging keeps the mapping's own keys in source order and appends the merged
+/// keys. Chained merges flatten fully.
 #[test]
-fn v11_merge_order_and_chains() {
+fn merge_order_and_chains() {
     let base = "b: &b {y: 1, x: 1}\n";
     assert_eq!(
         merged_keys(&format!("{base}m:\n  z: 0\n  <<: *b\n  x: 2\n"), "m"),
         merged_keys("m: {z: 0, x: 2, y: 1}\n", "m")
     );
-    // yaml_serde moves `w` into the `<<` slot here (`w, z, y, x`).
     assert_eq!(
         merged_keys(&format!("{base}m:\n  <<: *b\n  z: 0\n  w: 0\n"), "m"),
         merged_keys("m: {z: 0, w: 0, y: 1, x: 1}\n", "m")
@@ -1047,10 +1022,10 @@ fn v11_merge_order_and_chains() {
     );
 }
 
-/// V15: integers up to 128 bits are exact. A typed target reads them as
-/// yaml_serde does, and the value model keeps them.
+/// Integers up to 128 bits are exact. A typed target reads them, and the value
+/// model keeps them.
 #[test]
-fn v15_wide_integers() {
+fn wide_integers() {
     let above = "18446744073709551616\n";
     let below = "-9223372036854775809\n";
     for result in every_path::<u128>(above) {
@@ -1064,7 +1039,7 @@ fn v15_wide_integers() {
     }
     assert!(every_path::<u64>(above).iter().all(Result::is_err));
     // The typed path keeps the source text for a string target. The Value
-    // path canonicalizes it (V3).
+    // path canonicalizes it.
     assert_eq!(
         ayaml::from_str_borrowed::<String>("0x10000000000000000\n").expect("typed"),
         "0x10000000000000000"
@@ -1074,7 +1049,7 @@ fn v15_wide_integers() {
     assert_eq!(value[0], ayaml::Value::from(1_u128 << 64));
     assert_eq!(value[1], ayaml::Value::from(-(1_i128 << 64) - 1));
     // Past 128 bits a decimal integer is a float and a radix integer is a
-    // string, as in yaml_serde.
+    // string.
     let value = ayaml::parse_value(
         "[340282366920938463463374607431768211456, 0x100000000000000000000000000000000]\n",
     )
@@ -1083,9 +1058,9 @@ fn v15_wide_integers() {
     assert_eq!(value[1], "0x100000000000000000000000000000000");
 }
 
-/// V16: 128-bit integers serialize as plain integers and read back.
+/// 128-bit integers serialize as plain integers and read back.
 #[test]
-fn v16_wide_integers_serialize() {
+fn wide_integers_serialize() {
     #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
     struct Wide {
         big: u128,
@@ -1109,11 +1084,10 @@ fn v16_wide_integers_serialize() {
     assert_eq!(text, "\"18446744073709551616\"\n");
 }
 
-/// V18: explicit core tags follow the YAML 1.2.2 core schema. `!!float 01` is
-/// 1.0, as in yaml_serde. `!!int 0123` is 123 and `!!null ''` is null, where
-/// yaml_serde rejects both.
+/// Explicit core tags follow the YAML 1.2.2 core schema. `!!float 01` is 1.0,
+/// `!!int 0123` is 123, and `!!null ''` is null.
 #[test]
-fn v18_explicit_core_tags_follow_the_core_schema() {
+fn explicit_core_tags_follow_the_core_schema() {
     let value = ayaml::parse_value(
         "- !!float 01\n- !!float 1\n- !!int 0123\n- !!null ''\n- !!int 18446744073709551616\n",
     )
@@ -1178,9 +1152,9 @@ fn emit_value(value: &ayaml::Value) -> String {
     output
 }
 
-/// E1: integer-like text outside the value model is quoted.
+/// Integer-like text outside the value model is quoted.
 #[test]
-fn e1_out_of_range_integers_are_quoted() {
+fn out_of_range_integers_are_quoted() {
     for text in [
         "18446744073709551616",
         "-9223372036854775809",
@@ -1191,9 +1165,9 @@ fn e1_out_of_range_integers_are_quoted() {
     }
 }
 
-/// E2: `indent` must be between 2 and 9.
+/// `indent` must be between 2 and 9.
 #[test]
-fn e2_indent_is_validated() {
+fn indent_is_validated() {
     let value = ayaml::parse_value("a:\n  b: 1\n").expect("parse");
     for indent in [0, 1, 10] {
         let options = ayaml::EmitterOptions::default().with_indent(indent);
@@ -1202,10 +1176,10 @@ fn e2_indent_is_validated() {
     }
 }
 
-/// E3, E10: the event emitter keeps empty plain scalars and negative
+/// The event emitter keeps empty plain scalars and negative
 /// numbers plain.
 #[test]
-fn e3_e10_event_emitter_keeps_plain_scalars_plain() {
+fn event_emitter_keeps_plain_scalars_plain() {
     assert_eq!(
         emit_events("a:\nb: -1\nc: [-.inf, ~]\n"),
         "a:\nb: -1\nc: [-.inf, ~]\n"
@@ -1215,16 +1189,16 @@ fn e3_e10_event_emitter_keeps_plain_scalars_plain() {
     assert_eq!(emit_events("---\n"), "---\n");
 }
 
-/// E4: keep chomping keeps every trailing line break.
+/// Keep chomping keeps every trailing line break.
 #[test]
-fn e4_event_emitter_keeps_trailing_line_breaks() {
+fn event_emitter_keeps_trailing_line_breaks() {
     assert_eq!(emit_events("- |+\n  a\n\n\n- x\n"), "- |+\n  a\n\n\n- x\n");
     assert_eq!(emit_events("k: |+\n\n"), "k: |+\n\n");
 }
 
-/// E5, E12: multi-line single-quoted values are written double-quoted.
+/// Multi-line single-quoted values are written double-quoted.
 #[test]
-fn e5_e12_single_quotes_never_hold_line_breaks() {
+fn single_quotes_never_hold_line_breaks() {
     assert_eq!(emit_events("'a\n\n  b'\n"), "\"a\\nb\"\n");
     let options =
         ayaml::EmitterOptions::default().with_scalar_style(Some(ayaml::ScalarStyle::SingleQuoted));
@@ -1234,9 +1208,9 @@ fn e5_e12_single_quotes_never_hold_line_breaks() {
     assert_eq!(ayaml::parse_value(&output).expect("reparse"), value);
 }
 
-/// E6: anchored keys and alias keys (suite E76Z, 26DV, F6MC, X38W).
+/// Anchored keys and alias keys (suite E76Z, 26DV, F6MC, X38W).
 #[test]
-fn e6_alias_keys_round_trip() {
+fn alias_keys_round_trip() {
     assert_eq!(
         emit_events("&a a: &b b\n*b : *a\n"),
         "&a a: &b b\n*b : *a\n"
@@ -1244,9 +1218,9 @@ fn e6_alias_keys_round_trip() {
     emit_events("? &a [x]\n: *a\n");
 }
 
-/// E9: the lazy writer lays out block collections like the collected one.
+/// The lazy writer lays out block collections like the collected one.
 #[test]
-fn e9_lazy_writer_layout() {
+fn lazy_writer_layout() {
     assert_eq!(emit_events("- a\n- b\n"), "- a\n- b\n");
     assert_eq!(
         emit_events("a:\n  b: [1, 2]\n  c:\n  - x\n--- |\n  text\n"),
@@ -1254,9 +1228,9 @@ fn e9_lazy_writer_layout() {
     );
 }
 
-/// E11: block-scalar indentation indicators are kept.
+/// Block-scalar indentation indicators are kept.
 #[test]
-fn e11_indentation_indicators_are_kept() {
+fn indentation_indicators_are_kept() {
     assert_eq!(
         emit_events("key: |1\n  explicit\n"),
         "key: |2\n   explicit\n"
@@ -1266,9 +1240,9 @@ fn e11_indentation_indicators_are_kept() {
     assert_eq!(emit_events("- >\n  a\n  b\n"), "- >\n  a b\n");
 }
 
-/// E13: compact entries pad the `-` to the indentation step.
+/// Compact entries pad the `-` to the indentation step.
 #[test]
-fn e13_compact_entries_follow_the_indent() {
+fn compact_entries_follow_the_indent() {
     let value = ayaml::parse_value("- a: 1\n  b: |\n    x\n- - c\n  - d\n").expect("parse");
     let options = ayaml::EmitterOptions::default().with_indent(4);
     let output = ayaml::to_string_value_with_options(&value, &options).expect("emit");
@@ -1276,9 +1250,9 @@ fn e13_compact_entries_follow_the_indent() {
     assert_eq!(ayaml::parse_value(&output).expect("reparse"), value);
 }
 
-/// E14: a tag on a tagged value cannot be written.
+/// A tag on a tagged value cannot be written.
 #[test]
-fn e14_nested_tags_are_an_error() {
+fn nested_tags_are_an_error() {
     let inner = ayaml::Value::from(ayaml::TaggedValue::new(
         ayaml::Tag::local("Y"),
         ayaml::Value::from(1_u64),
@@ -1288,12 +1262,12 @@ fn e14_nested_tags_are_an_error() {
     assert_eq!(error.kind(), ayaml::ErrorKind::Emitter);
 }
 
-/// E28: a directive is written with NEL, LS, or PS in it, since they are
-/// content (P17) and a directive has no escapes. An anchor holding a byte
+/// A directive is written with NEL, LS, or PS in it, since they are
+/// content and a directive has no escapes. An anchor holding a byte
 /// order mark, which the parser rejects, cannot be written. Found by the
 /// emit fuzz target.
 #[test]
-fn e28_directives_keep_nel_ls_and_ps() {
+fn directives_keep_nel_ls_and_ps() {
     for separator in ['\u{85}', '\u{2028}', '\u{2029}'] {
         let output = emit_events(&format!("%FOO a{separator}b\n--- x\n"));
         assert!(
@@ -1315,9 +1289,9 @@ fn e28_directives_keep_nel_ls_and_ps() {
     assert_eq!(error.kind(), ayaml::ErrorKind::Emitter);
 }
 
-/// E15: tag suffixes are %-escaped.
+/// Tag suffixes are %-escaped.
 #[test]
-fn e15_tag_suffixes_are_escaped() {
+fn tag_suffixes_are_escaped() {
     let value = ayaml::Value::from(ayaml::TaggedValue::new(
         ayaml::Tag::local("my variant!%"),
         ayaml::Value::from(1_u64),
@@ -1325,9 +1299,9 @@ fn e15_tag_suffixes_are_escaped() {
     assert_eq!(emit_value(&value), "!my%20variant%21%25 1\n");
 }
 
-/// E16: a tagged null before a flow indicator is followed by a space.
+/// A tagged null before a flow indicator is followed by a space.
 #[test]
-fn e16_tagged_null_in_flow() {
+fn tagged_null_in_flow() {
     let value = ayaml::Value::Sequence(vec![
         ayaml::Value::from(ayaml::TaggedValue::new(
             ayaml::Tag::local("t"),
@@ -1342,9 +1316,9 @@ fn e16_tagged_null_in_flow() {
     assert_eq!(emit_events("[!t , &a ]\n"), "[!t , &a ]\n");
 }
 
-/// E17: text starting with a document marker is quoted.
+/// Text starting with a document marker is quoted.
 #[test]
-fn e17_document_marker_lookalikes_are_quoted() {
+fn document_marker_lookalikes_are_quoted() {
     for text in ["... a", "--- a", "...", "---"] {
         assert_eq!(
             emit_value(&ayaml::Value::from(text)),
@@ -1353,10 +1327,10 @@ fn e17_document_marker_lookalikes_are_quoted() {
     }
 }
 
-/// E18, E19: characters outside YAML's printable set are escaped and never
+/// Characters outside YAML's printable set are escaped and never
 /// written in block scalars.
 #[test]
-fn e18_e19_non_printable_characters_are_escaped() {
+fn non_printable_characters_are_escaped() {
     let output = emit_value(&ayaml::Value::from("a\u{1}\nb\n"));
     assert_eq!(output, "\"a\\x01\\nb\\n\"\n");
     let output = emit_value(&ayaml::Value::from("\u{fffe}\u{ffff}\u{feff}"));
@@ -1364,9 +1338,9 @@ fn e18_e19_non_printable_characters_are_escaped() {
     assert_eq!(emit_events("\"\\x7f\\u0085\"\n"), "\"\\x7F\\N\"\n");
 }
 
-/// E20: long keys use the explicit form.
+/// Long keys use the explicit form.
 #[test]
-fn e20_long_keys_are_explicit() {
+fn long_keys_are_explicit() {
     let key = "k".repeat(200);
     let mut mapping = ayaml::Mapping::new();
     mapping.insert(ayaml::Value::from(key.as_str()), ayaml::Value::from(1_u64));
@@ -1376,18 +1350,18 @@ fn e20_long_keys_are_explicit() {
     assert_eq!(emit_events(&input), format!("? {key}\n: 1\n"));
 }
 
-/// E21: a `:` inside a flow collection is quoted.
+/// A `:` inside a flow collection is quoted.
 #[test]
-fn e21_colons_are_quoted_in_flow() {
+fn colons_are_quoted_in_flow() {
     let value = ayaml::Value::Sequence(vec![ayaml::Value::from("a:?"), ayaml::Value::from("?x")]);
     let options = ayaml::EmitterOptions::default().with_flow(true);
     let output = ayaml::to_string_value_with_options(&value, &options).expect("emit");
     assert_eq!(output, "[\"a:?\", \"?x\"]\n");
 }
 
-/// E22, E23: document streams charge the caller's limits, before writing.
+/// Document streams charge the caller's limits, before writing.
 #[test]
-fn e22_e23_document_streams_use_the_callers_limits() {
+fn document_streams_use_the_callers_limits() {
     let nested = ayaml::parse_value("a: [[1]]\n").expect("parse");
     let shallow = ayaml::Limits::default().with_max_depth(2);
     let error =
@@ -1403,9 +1377,9 @@ fn e22_e23_document_streams_use_the_callers_limits() {
     assert!(output.len() <= 5, "{output:?}");
 }
 
-/// E25: the emitters enforce `max_depth` instead of overflowing the stack.
+/// The emitters enforce `max_depth` instead of overflowing the stack.
 #[test]
-fn e25_emitters_enforce_the_depth_limit() {
+fn emitters_enforce_the_depth_limit() {
     let mut value = ayaml::Value::Null;
     for _ in 0..1_000 {
         value = ayaml::Value::Sequence(vec![value]);
@@ -1433,9 +1407,9 @@ fn e25_emitters_enforce_the_depth_limit() {
     assert_eq!(error.kind(), ayaml::ErrorKind::Limit);
 }
 
-/// E27: per-path styles apply to values, not to the keys of a mapping.
+/// Per-path styles apply to values, not to the keys of a mapping.
 #[test]
-fn e27_styles_do_not_leak_into_keys() {
+fn styles_do_not_leak_into_keys() {
     let value = ayaml::parse_value("a:\n  b: c\n").expect("parse");
     let mut styles = ayaml::EmitterStyles::new();
     styles.set(
@@ -1446,10 +1420,9 @@ fn e27_styles_do_not_leak_into_keys() {
     assert_eq!(output, "a:\n  b: c\n");
 }
 
-/// E26: `f32` values are written in their shortest form, as yaml_serde
-/// writes them.
+/// `f32` values are written in their shortest form.
 #[test]
-fn e26_f32_is_written_in_its_shortest_form() {
+fn f32_is_written_in_its_shortest_form() {
     assert_eq!(ayaml::to_string(&0.1_f32).expect("emit"), "0.1\n");
     assert_eq!(
         ayaml::to_string(&[1.5_f32, f32::INFINITY]).expect("emit"),
@@ -1459,10 +1432,10 @@ fn e26_f32_is_written_in_its_shortest_form() {
     assert_eq!(decoded, 0.1_f32);
 }
 
-/// V22: the default limits read a stream of documents, while the
+/// The default limits read a stream of documents, while the
 /// single-document entry points still reject a second document.
 #[test]
-fn v22_default_limits_read_document_streams() {
+fn default_limits_read_document_streams() {
     let stream = "--- a\n--- b\n--- c\n";
     let documents = ayaml::parse_documents(stream).expect("stream");
     assert_eq!(documents, ["a", "b", "c"].map(ayaml::Value::from));
@@ -1497,7 +1470,7 @@ fn v22_default_limits_read_document_streams() {
 /// the document cursor charges every document's aliases to one budget
 /// for the stream, as `parse_documents` does.
 #[test]
-fn d26_cursor_alias_budget_covers_the_stream() {
+fn cursor_alias_budget_covers_the_stream() {
     let stream = "--- [&a 1, *a]\n--- [&b 2, *b]\n--- [&c 3, *c]\n";
     let limits = ayaml::Limits::default().with_max_alias_dereferences(2);
     assert_eq!(
@@ -1531,27 +1504,30 @@ fn d26_cursor_alias_budget_covers_the_stream() {
     );
 }
 
-/// V1: an alias finds its anchor wherever it sits in the document being
+/// An alias finds its anchor wherever it sits in the document being
 /// built: in an open collection, in a finished sibling, under a tag, or as a
 /// key whose value is still open.
 #[test]
-fn v1_aliases_resolve_through_open_and_finished_collections() {
-    let inputs = [
-        "a: [[&x {k: v}]]\nb: *x\n",
-        "- [&x 1, [*x, [*x]]]\n- *x\n",
-        "x: !t [&a 1]\ny: *a\n",
-        "{&k a: *k}\n",
-        "? &k [x]\n: 1\nother: *k\n",
-        "a: &outer\n  b: &inner [1, 2]\n  c: *inner\nd: *outer\ne: *inner\n",
-        "&r [&e a, *e, {*e : *e}]\n",
+fn aliases_resolve_through_open_and_finished_collections() {
+    // Each input, then the same document with its aliases written out.
+    let cases = [
+        ("a: [[&x {k: v}]]\nb: *x\n", "a: [[{k: v}]]\nb: {k: v}\n"),
+        ("- [&x 1, [*x, [*x]]]\n- *x\n", "- [1, [1, [1]]]\n- 1\n"),
+        ("x: !t [&a 1]\ny: *a\n", "x: !t [1]\ny: 1\n"),
+        ("{&k a: *k}\n", "{a: a}\n"),
+        ("? &k [x]\n: 1\nother: *k\n", "? [x]\n: 1\nother: [x]\n"),
+        (
+            "a: &outer\n  b: &inner [1, 2]\n  c: *inner\nd: *outer\ne: *inner\n",
+            "a:\n  b: [1, 2]\n  c: [1, 2]\nd:\n  b: [1, 2]\n  c: [1, 2]\ne: [1, 2]\n",
+        ),
+        ("&r [&e a, *e, {*e : *e}]\n", "[a, a, {a: a}]\n"),
     ];
-    for input in inputs {
-        let expected = yaml_serde::from_str::<yaml_serde::Value>(input)
-            .unwrap_or_else(|error| panic!("{input:?}: yaml_serde: {error}"));
+    for (input, written_out) in cases {
+        let expected = ayaml::parse_value(written_out).expect("written out");
         let value = ayaml::parse_value(input).unwrap_or_else(|error| panic!("{input:?}: {error}"));
-        // Some keys are collections, so compare through yaml_serde's `Value`.
+        assert_eq!(value, expected, "{input:?}");
         let output = ayaml::to_string_value(&value).expect("emit");
-        let reread = yaml_serde::from_str::<yaml_serde::Value>(&output).expect("reread");
+        let reread = ayaml::parse_value(&output).expect("reread");
         assert_eq!(reread, expected, "{input:?}: {output}");
         let typed: ayaml::Value =
             ayaml::from_str_borrowed(input).unwrap_or_else(|error| panic!("{input:?}: {error}"));
@@ -1572,11 +1548,10 @@ fn alias_keys_duplicate_their_anchor_on_every_path() {
     assert_eq!(typed.kind(), ayaml::ErrorKind::DuplicateKey, "{typed}");
 }
 
-/// a single-document entry point stops at the second document's start,
-/// as yaml_serde does, so an error later in the stream does not hide the
-/// trailing document.
+/// A single-document entry point stops at the second document's start, so an
+/// error later in the stream does not hide the trailing document.
 #[test]
-fn d26_single_document_entry_points_stop_at_the_second_document() {
+fn single_document_entry_points_stop_at_the_second_document() {
     let stream = "a: 1\n---\nb: [1\nc: 2\n";
     for error in [
         ayaml::parse_value(stream).expect_err("parse_value"),
@@ -1592,5 +1567,4 @@ fn d26_single_document_entry_points_stop_at_the_second_document() {
             .to_string(),
         "more than one document in stream"
     );
-    assert!(yaml_serde::from_str::<yaml_serde::Value>(stream).is_err());
 }

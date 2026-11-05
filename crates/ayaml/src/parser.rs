@@ -414,7 +414,7 @@ fn event_capacity(lines: &[Line], tokens: &[Token<'_>]) -> usize {
     emitting.saturating_add(headroom)
 }
 
-/// Parse a UTF-8 input into spanned events for the supported P1 grammar.
+/// Parse a UTF-8 input into spanned events.
 pub(crate) fn parse_events<'a>(input: &'a str, limits: &Limits) -> Result<Vec<Event<'a>>, Error> {
     parse_events_with_compat(input, limits, false, false)
 }
@@ -663,7 +663,7 @@ impl<'a> Parser<'a> {
     /// cost heap, not native stack. Grammar functions may still call
     /// each other directly, but only along an acyclic graph: a direct call
     /// that can lead back to its caller nests a native frame per entry or
-    /// level (L8). Every loop over entries goes through this driver.
+    /// level. Every loop over entries goes through this driver.
     fn run(&mut self, call: Call<'a>) -> Result<usize, Error> {
         let mut stack: Vec<Cont> = Vec::new();
         let mut step = self.call(call, &mut stack)?;
@@ -916,12 +916,12 @@ impl<'a> Parser<'a> {
                 // After a property-only line, a `-` line may start the node's
                 // block sequence down to the parent's bound: a mapping value's
                 // sequence may sit at the key's column, a sequence entry's
-                // must be indented past its `-` (P34).
+                // must be indented past its `-`.
                 let next_is_indentless_sequence = next_indent >= bounds.sequence_indent
                     && self
                         .line_starts_with(next_index, |kind| matches!(kind, TokenKind::BlockEntry));
                 // A block scalar header may sit at any column here, as in
-                // libyaml; YAML 1.2.2 wants `min_indent` (P35).
+                // libyaml; YAML 1.2.2 wants `min_indent`.
                 let next_is_block_scalar = self.line_starts_with(next_index, |kind| {
                     matches!(
                         kind,

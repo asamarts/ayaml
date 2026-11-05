@@ -1,9 +1,7 @@
 //! Scalar resolution for the compatibility profile.
 //!
-//! This is the P2 resolver foundation. It is `pub(crate)` until composition and
-//! the public parser entry point are ready. Parser events retain raw scalar
-//! text, style, tag, anchor, and span; this module turns one scalar into a
-//! `Value` without losing that metadata.
+//! Parser events retain raw scalar text, style, tag, anchor, and span; this
+//! module turns one scalar into a `Value` without losing that metadata.
 
 use crate::error::{Error, ErrorKind};
 use crate::event::ScalarStyle;
@@ -21,8 +19,8 @@ pub(crate) fn resolve_scalar(
         if tag.is_core() {
             return resolve_explicit_core(text, tag.suffix());
         }
-        // A custom tag keeps its payload resolved as if untagged, as
-        // yaml_serde does (V8): `!Flag true` holds a bool. The non-specific
+        // A custom tag keeps its payload resolved as if untagged:
+        // `!Flag true` holds a bool. The non-specific
         // tag `!` makes a scalar a string (YAML 1.2.2 section 6.9.1).
         let payload = if tag.handle() == "!" && tag.suffix().is_empty() {
             Value::String(text.to_owned())
@@ -45,9 +43,8 @@ pub(crate) fn plain_resolves_to_string(text: &str) -> bool {
 }
 
 /// Resolve untagged plain text to a null, bool or number, or `None` when it
-/// is a string. Integers are exact up to 128 bits (V15). A wider decimal
-/// integer is a float, and a wider `0x`/`0o`/`0b` integer is a string, as in
-/// yaml_serde.
+/// is a string. Integers are exact up to 128 bits. A wider decimal
+/// integer is a float, and a wider `0x`/`0o`/`0b` integer is a string.
 fn resolve_plain(text: &str) -> Option<Value> {
     if is_null(text) {
         return Some(Value::Null);
@@ -67,8 +64,8 @@ fn resolve_explicit_core(text: &str, suffix: &str) -> Result<Value, Error> {
         "int" => parse_int_with(text, true)
             .map(Value::Number)
             .ok_or_else(|| resolution_error("invalid !!int scalar")),
-        // The core schema reads `!!float 01` as 1.0, as yaml_serde does
-        // (V18). Untagged, `01` stays a string.
+        // The core schema reads `!!float 01` as 1.0. Untagged, `01` stays a
+        // string.
         "float" => parse_float_with(text, true)
             .map(Value::Number)
             .ok_or_else(|| resolution_error("invalid !!float scalar")),
@@ -222,7 +219,7 @@ mod tests {
         );
         assert_eq!(wide("0x10000000000000000").as_u128(), Some(1 << 64));
         assert_eq!(wide("-0x10000000000000000").as_i128(), Some(-(1 << 64)));
-        // Past 128 bits a radix integer is a string, as in yaml_serde.
+        // Past 128 bits a radix integer is a string.
         assert_eq!(
             plain("0x100000000000000000000000000000000"),
             Value::from("0x100000000000000000000000000000000")

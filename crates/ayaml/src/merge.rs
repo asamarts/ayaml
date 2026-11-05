@@ -7,11 +7,8 @@
 //! earlier mappings take precedence, matching the YAML 1.1 merge rules.
 //!
 //! The result keeps the mapping's own keys in source order and appends the
-//! merged keys after them, in operand order (V11). yaml_serde's
-//! `apply_merge` does the same, except that it removes `<<` by moving the
-//! last key into its place. A merge operand that itself holds `<<` is merged
-//! first, so chained merges flatten fully; yaml_serde copies the inner `<<`
-//! through as a literal key.
+//! merged keys after them, in operand order. A merge operand that itself holds
+//! `<<` is merged first, so chained merges flatten fully.
 
 use crate::error::{Error, ErrorKind};
 use crate::mapping::Mapping;
