@@ -1,17 +1,20 @@
+# Allocation budgets, checked by tools/check_alloc_corpus.sh with a counting allocator.
+# Each is about 1.25 times the measured value, rounded up. Raise one in the change that
+# needs it, and say why.
 # path	parse_peak	emit_peak	parse_allocs	emit_allocs	serialize_peak	serialize_allocs
-tests/fixtures/compat/toolchain-pins.yml	1048576	131072	7000	1200	262144	2000
-tests/fixtures/compat/scalar-tags-merges-aliases.yml	65536	8192	400	100	16384	100
-@tiny	65536	16384	1000	1000	65536	1000
-@large-scalar	2097152	4194304	1000	100	2097152	100
-@flow-depth-64	262144	131072	1000	1000	65536	1000
-@depth-128	524288	131072	500	100	65536	500
-@aliases-1000	2097152	131072	10000	3000	524288	5000
-@mapping-1000	2097152	131072	10000	3000	524288	5000
-@mapping-10000	33554432	1048576	150000	30000	4194304	20000
-fuzz/corpus/parse/basic.yml	65536	16384	1000	1000	65536	1000
-fuzz/corpus/emit/block.yml	65536	16384	1000	1000	65536	1000
-fuzz/corpus/emit/alias.yml	65536	16384	1000	1000	65536	1000
-fuzz/corpus/borrowed/basic.yml	65536	16384	1000	1000	65536	1000
-@short-seq-20000	12582912	262144	25000	100	2097152	25000
-@short-explicit-20000	25165824	1048576	50000	100	4194304	50000
-@short-map-20000	20971520	1048576	50000	100	4194304	50000
+tests/fixtures/compat/toolchain-pins.yml	410000	62000	2100	36	130000	1400
+tests/fixtures/compat/scalar-tags-merges-aliases.yml	18000	450	99	32	4500	60
+@tiny	9000	24	30	17	17	17
+@large-scalar	1300000	3800000	30	18	1300000	17
+@flow-depth-64	88000	490	130	23	5800	80
+@depth-128	180000	970	210	24	12000	160
+@aliases-1000	1100000	16000	5100	1300	350000	3800
+@mapping-1000	980000	31000	1400	1300	230000	1300
+@mapping-10000	9300000	500000	13000	13000	2200000	13000
+fuzz/corpus/parse/basic.yml	10000	64	37	20	640	22
+fuzz/corpus/emit/block.yml	9300	64	41	19	280	20
+fuzz/corpus/emit/alias.yml	11000	64	46	21	970	26
+fuzz/corpus/borrowed/basic.yml	12000	120	48	22	1300	29
+@short-seq-20000	12000000	250000	26000	31	1900000	26000
+@short-explicit-20000	23000000	990000	51000	33	4500000	51000
+@short-map-20000	19000000	990000	51000	33	4500000	51000

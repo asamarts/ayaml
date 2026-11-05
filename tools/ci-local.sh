@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Local mirror of .github/workflows/{ci,fuzz}.yml, so that failures show up before a
-# push. Hosted CI on the pull request is the gate; this script is a convenience.
+# Most of .github/workflows/{ci,fuzz}.yml, run locally so that failures show up before
+# a push. Hosted CI on the pull request is the gate; this script is a convenience.
 #
 # Usage: tools/ci-local.sh [--list] [job ...]
 #
@@ -9,8 +9,13 @@
 # With no job names, every job runs. Commands run under `nice`; the script
 # does not change build parallelism. Logs go to target/ci-local/<sha>/.
 #
-# Every single-line `run:` command in those workflows must appear verbatim in
-# this file (the `sync` job enforces it), so hosted and local CI cannot drift.
+# Only hosted CI runs macOS and Windows, semver checks, minimal versions, the secret
+# scan, and the check of a pull request's title and body. Only this script runs the
+# feature combinations and markdownlint.
+#
+# The `sync` job checks that every single-line `run:` command in those workflows appears
+# in this file, as a command or a `# Mirrors:` comment. That catches a new command with
+# no local counterpart. It can't prove that the local job really runs it.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,13 +23,13 @@ cd "$ROOT" || exit 2
 
 MSRV="1.88.0"
 STABLE="stable"
-ALL_JOBS=(sync quality-msrv quality-stable features policy harness suite docs-lint package cross fuzz-smoke leak-gate)
+ALL_JOBS=(sync quality-msrv quality-stable features policy harness instructions plan suite docs-lint package cross fuzz-smoke leak-gate)
 
 jobs=()
 for arg in "$@"; do
   case "$arg" in
     --list) printf '%s\n' "${ALL_JOBS[@]}"; exit 0 ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     -*) echo "unknown option: $arg" >&2; exit 2 ;;
     *) jobs+=("$arg") ;;
   esac
@@ -41,6 +46,7 @@ mkdir -p "$logdir"
 started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 t0=$SECONDS
 declare -A status
+declare -A skipped
 current=""
 job_failed=0
 
@@ -68,8 +74,10 @@ shstep() {
   step "$name" bash -c "$2"
 }
 
+# skip REASON: part or all of the current job couldn't run. The summary says so, so
+# that a skipped check doesn't read as a passed one.
 skip() {
-  status[$current]="skip($1)"
+  skipped[$current]+="${skipped[$current]:+; }$1"
   printf '  skipped: %s\n' "$1"
 }
 
@@ -82,7 +90,7 @@ job_sync() {
     for wf in .github/workflows/ci.yml .github/workflows/fuzz.yml; do
       while IFS= read -r cmd; do
         case "$cmd" in
-          "cargo install cargo-geiger --locked"|"cargo install cargo-fuzz --locked") continue ;;
+          "cargo install cargo-geiger --locked"|"cargo install cargo-fuzz --locked"|"cargo install aplan --version 0.6.0 --locked"|"sudo apt-get update && sudo apt-get install -y valgrind") continue ;;
         esac
         if ! grep -qF -- "$cmd" tools/ci-local.sh; then
           echo "not mirrored ($wf): $cmd"; missing=1
@@ -99,12 +107,14 @@ quality() {
   step "fmt ($tc)" cargo "+$tc" fmt --all -- --check
   step "clippy ($tc)" cargo "+$tc" clippy --workspace --all-targets --locked --all-features -- -D warnings
   step "test ($tc)" cargo "+$tc" test --workspace --locked --all-features
+  step "test default features ($tc)" cargo "+$tc" test -p ayaml --locked
   # The depth cap is measured in both profiles.
   step "adversarial release ($tc)" cargo "+$tc" test -p ayaml --locked --release --all-features --test adversarial
   step "doc ($tc)" cargo "+$tc" doc --workspace --locked --no-deps --all-features
   # Mirrors: cargo fmt --all -- --check
   # Mirrors: cargo clippy --workspace --all-targets --locked --all-features -- -D warnings
   # Mirrors: cargo test --workspace --locked --all-features
+  # Mirrors: cargo test -p ayaml --locked
   # Mirrors: cargo test -p ayaml --locked --release --all-features --test adversarial
   # Mirrors: cargo doc --workspace --locked --no-deps --all-features
 }
@@ -137,15 +147,27 @@ job_policy() {
     shstep "unsafe census" "cargo geiger --manifest-path \"\$PWD/crates/ayaml/Cargo.toml\" --all-features --output-format Json > \"$TMPDIR/geiger.json\""
     # Mirrors: cargo geiger --manifest-path "$PWD/crates/ayaml/Cargo.toml" --all-features --output-format Json > "$TMPDIR/geiger.json"
   else
-    echo "  cargo-geiger not installed: unsafe census skipped"
+    skip "cargo-geiger not installed: unsafe census"
   fi
 }
 
 job_harness() {
   step "conformance fixtures and pinned suite" cargo run --locked -p ayaml-conformance -- tests/fixtures tests/data/yaml-test-suite/src
-  step "fuzz targets compile" cargo check --manifest-path fuzz/Cargo.toml --locked --target x86_64-unknown-linux-gnu
+  step "fuzz targets compile" cargo check --manifest-path fuzz/Cargo.toml --locked --bins
   step "allocation budgets" tools/check_alloc_corpus.sh
   step "benchmarks compile" cargo bench --locked -p ayaml-bench --no-run
+}
+
+job_instructions() {
+  if ! command -v valgrind >/dev/null; then skip "valgrind not installed"; return; fi
+  if ! git rev-parse --verify --quiet origin/main >/dev/null; then skip "origin/main is not available"; return; fi
+  step "instruction counts against origin/main" python3 tools/check_instructions.py origin/main
+  # Mirrors: python3 tools/check_instructions.py "$BASE_SHA"
+}
+
+job_plan() {
+  if ! command -v aplan >/dev/null; then skip "aplan not installed"; return; fi
+  step "plan check" aplan check
 }
 
 # Strict suite in both parser modes.
@@ -220,7 +242,7 @@ job_cross() {
       step "check --all-features --target $t" cargo "+$STABLE" check --locked --all-features --target "$t"
       # Mirrors: cargo check --locked --all-features --target TARGET
     else
-      echo "  target $t not installed for $STABLE: skipped"
+      skip "target $t not installed for $STABLE"
     fi
   done
 }
@@ -254,6 +276,7 @@ job_leak-gate() {
 }
 
 failed=0
+any_skipped=0
 for job in "${jobs[@]}"; do
   if ! declare -F "job_$job" >/dev/null; then
     echo "unknown job: $job (see --list)" >&2
@@ -264,12 +287,15 @@ for job in "${jobs[@]}"; do
   : >"$logdir/$job.log"
   echo "== $job"
   "job_$job"
-  if [ -z "${status[$job]:-}" ]; then
-    if [ "$job_failed" -eq 0 ]; then status[$job]=pass; else status[$job]=FAIL; failed=1; fi
+  if [ "$job_failed" -eq 0 ]; then status[$job]=pass; else status[$job]=FAIL; failed=1; fi
+  if [ -n "${skipped[$job]:-}" ]; then
+    status[$job]+=" (skipped: ${skipped[$job]})"
+    any_skipped=1
   fi
 done
 
 result=PASS
+[ "$any_skipped" -eq 1 ] && result="PASS, with skipped checks"
 [ "$failed" -eq 1 ] && result=FAIL
 summary="$(
   echo "ci-local: $result"

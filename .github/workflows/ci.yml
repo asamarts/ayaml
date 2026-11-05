@@ -30,6 +30,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked --all-features -- -D warnings
       - name: Test
         run: cargo test --workspace --locked --all-features
+      - name: Test with default features
+        run: cargo test -p ayaml --locked
       - name: Adversarial tests in a release build
         run: cargo test -p ayaml --locked --release --all-features --test adversarial
       - name: Documentation
@@ -58,6 +60,32 @@ jobs:
         run: cargo bench --locked -p ayaml-bench --no-run
       - name: Fuzz targets compile
         run: cargo check --manifest-path fuzz/Cargo.toml --locked --bins
+
+  instructions:
+    name: instruction counts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+      - name: Compare with the base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python3 tools/check_instructions.py "$BASE_SHA"
+
+  plan:
+    name: plan check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install aplan
+        run: cargo install aplan --version 0.6.0 --locked
+      - name: Check the plan
+        run: aplan check
 
   package:
     name: package and downstream smoke
