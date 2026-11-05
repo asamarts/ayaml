@@ -82,6 +82,16 @@ To check a list without printing it:
 python3 tools/leak-scan/gate.py check-list
 ```
 
+## How CI runs it
+
+The `leak scan` job takes `gate.py` and its configuration from the base commit and reads
+the change as data, so a change can't weaken the gate that judges it. A change to the gate
+takes effect once it has landed. The change's own copy of the gate runs only its tests,
+after the scans and with no secret.
+
+GitHub takes the workflow file itself from the change, so an edit to
+`.github/workflows/leak-gate.yml` could still weaken the job. Read any such edit closely.
+
 ## Pull requests from forks and bots
 
 GitHub doesn't give repository secrets to workflows on pull requests from forks or
