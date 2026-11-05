@@ -90,7 +90,7 @@ job_sync() {
     for wf in .github/workflows/ci.yml .github/workflows/fuzz.yml; do
       while IFS= read -r cmd; do
         case "$cmd" in
-          "cargo install cargo-geiger --locked"|"cargo install cargo-fuzz --locked"|"cargo install aplan --version 0.6.0 --locked"|"sudo apt-get update && sudo apt-get install -y valgrind") continue ;;
+          "cargo install cargo-geiger --locked"|"cargo install cargo-fuzz --locked"|"cargo install aplan --version 0.6.0 --locked"|"sudo rm -f /var/lib/man-db/auto-update && sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind") continue ;;
         esac
         if ! grep -qF -- "$cmd" tools/ci-local.sh; then
           echo "not mirrored ($wf): $cmd"; missing=1
