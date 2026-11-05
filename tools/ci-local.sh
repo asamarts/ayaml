@@ -144,6 +144,8 @@ job_policy() {
 job_harness() {
   step "conformance fixtures and pinned suite" cargo run --locked -p ayaml-conformance -- tests/fixtures tests/data/yaml-test-suite/src
   step "fuzz targets compile" cargo check --manifest-path fuzz/Cargo.toml --locked --target x86_64-unknown-linux-gnu
+  step "allocation budgets" tools/check_alloc_corpus.sh
+  step "benchmarks compile" cargo bench --locked -p ayaml-bench --no-run
 }
 
 # Strict suite in both parser modes.

@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/ayaml",
+    "crates/ayaml-bench",
     "crates/ayaml-conformance",
 ]
 default-members = ["crates/ayaml"]
@@ -23,6 +24,7 @@ indexmap = "=2.14.2"
 serde = "=1.0.229"
 serde_json = "=1.0.154"
 proptest = "=1.10.0"
+criterion = "=0.7.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -46,6 +46,17 @@ jobs:
       - name: Compatibility profile
         run: AYAML_STRICT_SUITE=1 cargo run --locked -p ayaml-conformance --features compat -- tests/fixtures tests/data/yaml-test-suite/src
 
+  allocation:
+    name: allocation budgets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Allocation budgets
+        run: tools/check_alloc_corpus.sh
+      - name: Benchmarks compile
+        run: cargo bench --locked -p ayaml-bench --no-run
+
   package:
     name: package and downstream smoke
     runs-on: ubuntu-latest

@@ -10,10 +10,10 @@ The harness measures these layers separately:
 
 - scanner/tokenization;
 - parsing into events;
-- event replay and event emission;
+- event emission;
 - generic `Value` composition;
 - typed Serde decoding; and
-- value and document emission.
+- value emission.
 
 Reporting a single end-to-end number can hide a slow layer, so layer results
 are reported independently.
@@ -34,12 +34,21 @@ The benchmark suite covers:
 All workloads use fixed input bytes and the same build mode when comparing two
 revisions.
 
+## Running them
+
+```sh
+cargo bench -p ayaml-bench          # timing, with criterion
+tools/check_alloc_corpus.sh         # allocation budgets
+```
+
+CI checks the allocation budgets and that the benchmarks compile. It doesn't check
+timing, because a shared runner's timings aren't comparable from run to run.
+
 ## Time and memory
 
 Timing uses repeated samples and reports medians rather than a single run.
-Allocation probes report allocated bytes, allocation count, and peak resident
-memory. Peak memory is measured for parsing, alias materialization, and
-emission separately.
+Allocation probes report allocated bytes, allocation count, and peak allocated
+bytes. Peak memory is measured for parsing, emission, and serialization separately.
 
 The release process keeps comparison results private. This document describes
 the methodology so that absolute or relative measurements can be reviewed on
