@@ -34,4 +34,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "memcount"
+path = "src/bin/memcount.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

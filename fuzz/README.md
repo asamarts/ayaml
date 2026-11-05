@@ -18,3 +18,10 @@ Fuzzing is intentionally not part of the default workspace test gate because it
 requires nightly sanitizer support. Run it with an appropriate time budget and
 record any crash before changing behavior.
 
+`memcount` isn't a fuzz target. It is the allocation counter behind
+`tools/check_alloc_corpus.sh`, which checks the budgets in
+`tools/alloc-corpus.tsv` and runs on stable:
+
+```sh
+tools/check_alloc_corpus.sh
+```
