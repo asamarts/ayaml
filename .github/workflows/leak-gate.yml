@@ -6,7 +6,8 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
   push:
-    branches: ["main"]
+    branches: ["**"]
+    tags: ["v*"]
 
 permissions:
   contents: read
@@ -14,6 +15,7 @@ permissions:
 jobs:
   leak-scan:
     name: leak scan
+    if: github.event.deleted != true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -28,9 +30,12 @@ jobs:
       - name: Scan commits and tree
         env:
           AYAML_LEAK_PATTERNS: ${{ secrets.AYAML_LEAK_PATTERNS }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: python3 tools/leak-scan/gate.py scan --head "$HEAD_SHA" --not "$BASE_SHA"
+          # A tag is scanned by name, so that its message is read. A push to main is
+          # compared with what it replaced, and any other push with main.
+          HEAD_REV: ${{ github.event.pull_request.head.sha || (startsWith(github.ref, 'refs/tags/') && github.ref) || github.sha }}
+          BASE_REV: ${{ github.event.pull_request.base.sha || (github.ref == 'refs/heads/main' && github.event.before) || 'refs/remotes/origin/main' }}
+          REF_NAME: ${{ github.head_ref || github.ref }}
+        run: python3 tools/leak-scan/gate.py scan --head "$HEAD_REV" --not "$BASE_REV" --ref "$REF_NAME"
       - name: Scan the pull request's title and body
         if: github.event_name == 'pull_request'
         env:
