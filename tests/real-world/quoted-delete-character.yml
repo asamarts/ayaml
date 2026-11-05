@@ -1,4 +1,4 @@
-# P32: a quoted scalar holds a raw DEL (U+007F) in the third symbol name.
+# A quoted scalar holds a raw DEL (U+007F) in the third symbol name.
 # Reduced from llvm/test/tools/llvm-dlltool/Inputs/llvm_foo_dll_1.yaml.
 --- !COFF
 header:

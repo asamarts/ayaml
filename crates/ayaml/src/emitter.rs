@@ -33,8 +33,8 @@ pub struct EmitterOptions {
     /// Number of spaces per nested block level, from 2 to 9. Other values
     /// are an emitter error.
     pub indent: usize,
-    /// Indent block sequences beneath a mapping key. The yaml_serde-compatible
-    /// default is `false` (indentless sequences).
+    /// Indent block sequences beneath a mapping key. The default is `false`
+    /// (indentless sequences).
     pub indent_sequences: bool,
 }
 
@@ -591,7 +591,7 @@ fn io_error(error: std::io::Error) -> Error {
 
 /// Implicit keys longer than this many characters are written as explicit
 /// `? ` keys. YAML allows 1024; libyaml's emitter switches at 128, and so do
-/// we, so that the output reads back under yaml_serde as well.
+/// we, for output that libyaml-based readers accept.
 pub(crate) const MAX_IMPLICIT_KEY_CHARS: usize = 128;
 
 /// Bytes collected before a write to the underlying writer.
@@ -808,7 +808,7 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
     }
 
     /// Write a tag token. Fails for a tag whose payload is also tagged, which
-    /// YAML cannot express (yaml_serde rejects nested enums the same way).
+    /// YAML cannot express.
     fn push_tag(&mut self, tagged: &crate::tag::TaggedValue) -> bool {
         if matches!(tagged.value, Value::Tagged(_)) {
             self.fail(nested_tag_error());
@@ -1361,8 +1361,8 @@ fn is_flow_indicator(ch: char) -> bool {
 /// only; callers that write strings must also check how the text resolves.
 ///
 /// Where libyaml's emitter is stricter than the spec, these rules follow it,
-/// so the output also reads back under yaml_serde: a leading `?` or `:`, and
-/// any `:` inside a flow collection, are quoted.
+/// so the output also reads back under libyaml-based readers: a leading `?` or
+/// `:`, and any `:` inside a flow collection, are quoted.
 pub(crate) fn plain_text_ok(value: &str, flow: bool) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {

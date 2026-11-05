@@ -1,4 +1,4 @@
-## P6: two `...` markers end the first document; the second starts no
+## Two `...` markers end the first document; the second starts no
 ## document. Reduced from llvm/test/ObjectYAML/MachO/DWARF-debug_info.yaml.
 --- !mach-o
 FileHeader:

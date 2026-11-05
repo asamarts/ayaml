@@ -50,13 +50,13 @@ impl Tag {
 
     /// Whether this is a core collection tag (`!!seq`, `!!map`, `!!set`,
     /// `!!omap`, or `!!pairs`). It only restates the node kind, so the
-    /// composers drop it, as yaml_serde does (V10).
+    /// composers drop it.
     pub(crate) fn is_core_collection(&self) -> bool {
         self.is_core() && matches!(self.suffix(), "seq" | "map" | "set" | "omap" | "pairs")
     }
 
     /// The tag's name in the Serde data model: a local tag's suffix (`Foo`
-    /// for `!Foo`, as yaml_serde names it) or, for any other tag, its full
+    /// for `!Foo`) or, for any other tag, its full
     /// name in angle brackets (`<tag:yaml.org,2002:set>` for `!!set`). A
     /// local suffix that is empty or starts with `!` or `<` is bracketed too,
     /// so that [`Tag::from_serde_name`] reads every name back.
@@ -69,7 +69,7 @@ impl Tag {
     }
 
     /// The tag a Serde name stands for (see [`Tag::serde_name`]). A bare
-    /// name is a local tag, as in yaml_serde.
+    /// name is a local tag.
     pub(crate) fn from_serde_name(name: &str) -> Self {
         match name
             .strip_prefix('<')

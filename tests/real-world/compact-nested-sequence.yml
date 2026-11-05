@@ -1,4 +1,4 @@
-# P1: a compact nested sequence holds one argument per line. Reduced from
+# A compact nested sequence holds one argument per line. Reduced from
 # rust-lang/stdarch, crates/stdarch-gen-arm/spec/neon/arm_shared.spec.yml.
 intrinsics:
   - name: "vand{neon_type.no}"

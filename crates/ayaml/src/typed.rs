@@ -201,7 +201,7 @@ struct Builder<'de, 'b> {
 }
 
 /// An anchored node, shared with every alias to it, with its size estimate
-/// and nesting height computed once, bottom-up (V1, L3).
+/// and nesting height computed once, bottom-up.
 #[derive(Clone)]
 struct Anchored<'de> {
     node: Arc<Node<'de>>,
@@ -310,7 +310,7 @@ impl<'de> Builder<'de, '_> {
                         .charge(&self.limits, self.input_len, target.size)
                         .map_err(|error| error.with_span(span))?;
                     // The alias nests its target here, so the target's
-                    // collections count toward the depth, as in yaml_serde.
+                    // collections count toward the depth.
                     if target.height > 0 {
                         self.limits
                             .check_depth(stack.len() + target.height)
@@ -436,7 +436,7 @@ impl<'de> Builder<'de, '_> {
 
     /// Finish a node. An anchored node moves into an `Arc` that its aliases
     /// share, and the tree refers to it through the same `Arc`, so the node
-    /// is never copied (V1).
+    /// is never copied.
     fn anchored(
         &mut self,
         anchor: Option<&Anchor<'de>>,
@@ -494,8 +494,8 @@ fn resolve<'a, 'de>(mut node: &'a Node<'de>) -> &'a Node<'de> {
 
 fn apply_tag(tag: Option<Tag>, node: Node<'_>) -> Node<'_> {
     match tag {
-        // Core collection tags restate the node kind; yaml_serde drops them
-        // rather than keeping a tagged wrapper (V10).
+        // Core collection tags restate the node kind, so they're dropped
+        // rather than kept as a tagged wrapper.
         Some(tag) if tag.is_core_collection() => node,
         Some(tag) => {
             let span = node.span;
@@ -645,7 +645,7 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
                 };
                 visitor.visit_seq(&mut access).and_then(|value| {
                     // A visitor that stops early, such as a tuple's, leaves
-                    // elements behind (V7).
+                    // elements behind.
                     check_consumed(access.iter.len(), sequence.len(), "sequence").map(|()| value)
                 })
             }
@@ -658,8 +658,8 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
                     check_consumed(access.iter.len(), entries.len(), "map").map(|()| value)
                 })
             }
-            // A tagged node is an enum whose variant names the tag, as in
-            // yaml_serde, so a `Value` keeps the tag (V5, V22).
+            // A tagged node is an enum whose variant names the tag, so a
+            // `Value` keeps the tag.
             NodeKind::Tagged(tag, value) => {
                 return visitor
                     .visit_enum(NodeEnumAccess {
@@ -798,13 +798,13 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
             .map_err(|error| with_span(error, span))
     }
 
-    /// A field name is the key's text, as in yaml_serde: `1: x` names the
-    /// field `"1"`, not the second field (V2).
+    /// A field name is the key's text: `1: x` names the field `"1"`, not the
+    /// second field.
     fn deserialize_identifier<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         self.deserialize_string(visitor)
     }
 
-    /// A character is read from the scalar's text, so `5` is `'5'` (V19).
+    /// A character is read from the scalar's text, so `5` is `'5'`.
     fn deserialize_char<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         self.deserialize_string(visitor)
     }
@@ -824,7 +824,7 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
                 span,
                 NodeValue::Null(Node::new(NodeKind::Null, span)),
             ),
-            // `true` and `1` name variants renamed to them (V19).
+            // `true` and `1` name variants renamed to them.
             NodeKind::Null | NodeKind::Bool(_) | NodeKind::Number(_) if node.text.is_some() => (
                 node.text.as_deref().unwrap_or_default().to_owned(),
                 span,
@@ -877,9 +877,9 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
             .map_err(|error| with_span(error, span))
     }
 
-    /// Float targets follow yaml_serde (V24): a plain scalar is parsed from
-    /// its source text, so `01` is 1.0 and a radix integer such as `0x1F` is
-    /// rejected. Quoted scalars are strings and are not parsed this way.
+    /// A float target parses a plain scalar from its source text, so `01` is
+    /// 1.0 and a radix integer such as `0x1F` is rejected. Quoted scalars are
+    /// strings and are not parsed this way.
     fn deserialize_f64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         let node = self.target();
         if let NodeKind::Number(number) = &node.kind
@@ -899,8 +899,8 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
                     .map_err(|error| with_span(error, node.span));
             }
             if matches!(node.kind, NodeKind::Number(_)) {
-                // A radix integer is a number to the resolver but not text
-                // yaml_serde parses into a float.
+                // A radix integer is a number to the resolver, but not text that
+                // parses into a float.
                 return Err(crate::Error::new(
                     crate::ErrorKind::Serde,
                     format!("invalid type: integer `{text}`, expected f64"),
@@ -922,14 +922,13 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
 }
 
 /// An empty scalar, such as a missing value, reads as an empty sequence,
-/// map, or struct; an explicit `~` or `null` does not, as in yaml_serde (V9).
+/// map, or struct; an explicit `~` or `null` does not.
 fn is_empty_scalar(node: &Node<'_>) -> bool {
     matches!(node.kind, NodeKind::Null) && node.text.as_deref().is_none_or(str::is_empty)
 }
 
-/// An explicit `~` or `null` is not an empty collection. yaml_serde reports
-/// it before the visitor sees it, so even a visitor that accepts a unit,
-/// such as `yaml_serde::Mapping`'s, fails (V9).
+/// An explicit `~` or `null` is not an empty collection. It's reported before
+/// the visitor sees it, so even a visitor that accepts a unit fails.
 fn null_is_not_a_collection(
     node: &Node<'_>,
     expected: &dyn serde::de::Expected,
@@ -944,7 +943,7 @@ fn null_is_not_a_collection(
     }
 }
 
-/// Fail when a visitor left `remaining` of `total` elements unread (V7).
+/// Fail when a visitor left `remaining` of `total` elements unread.
 fn check_consumed(remaining: usize, total: usize, kind: &str) -> Result<(), Error> {
     if remaining == 0 {
         Ok(())

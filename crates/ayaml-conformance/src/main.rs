@@ -356,7 +356,7 @@ fn json_equal(actual: &serde_json::Value, expected: &serde_json::Value) -> bool 
 }
 
 /// `value` without its tags. The suite's JSON holds only the payloads, and a
-/// tagged `Value` serializes as a one-entry map from the tag (V6).
+/// tagged `Value` serializes as a one-entry map from the tag.
 fn untagged(value: &ayaml::Value) -> ayaml::Value {
     match value {
         ayaml::Value::Tagged(tagged) => untagged(&tagged.value),

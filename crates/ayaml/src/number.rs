@@ -6,7 +6,7 @@ use std::hash::{Hash, Hasher};
 
 /// A YAML number: an integer in the `i128` or `u128` range, or a float.
 ///
-/// Integers wider than 64 bits are kept exactly (V15, V16). The 64-bit
+/// Integers wider than 64 bits are kept exactly. The 64-bit
 /// accessors return `None` for them; use [`Number::as_i128`] and
 /// [`Number::as_u128`].
 #[derive(Clone, Copy, Debug)]
@@ -170,7 +170,7 @@ impl Number {
     }
 
     /// Return the value as `f64`. Integers convert, rounding to the nearest
-    /// float, as in yaml_serde (V14).
+    /// float.
     #[must_use]
     pub const fn as_f64(&self) -> Option<f64> {
         match self.0 {
@@ -310,8 +310,8 @@ impl Eq for Number {}
 impl Hash for Number {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self.0 {
-            // Match yaml_serde: floats are a discouraged key and share one
-            // bucket, which keeps Eq/Hash consistent for NaN and signed zero.
+            // Floats are a discouraged key and share one bucket, which keeps
+            // Eq/Hash consistent for NaN and signed zero.
             Repr::Float(_) => 3_u8.hash(state),
             Repr::PosInt(value) => value.hash(state),
             Repr::NegInt(value) => value.hash(state),
@@ -328,7 +328,7 @@ impl PartialOrd for Number {
 }
 
 /// A total order, consistent with `Eq`: integers by value, then floats,
-/// with NaN after every other float, as yaml_serde sorts them (V4).
+/// with NaN after every other float.
 impl Ord for Number {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self.integer(), other.integer()) {
@@ -482,7 +482,7 @@ mod tests {
     #[test]
     fn wide_integer_storage_keeps_value_compact() {
         // The two-limb representation keeps Number at 24 bytes and
-        // Value at 72, the same size as yaml_serde's Value.
+        // Value at 72.
         assert_eq!(std::mem::size_of::<Number>(), 24);
         assert_eq!(std::mem::size_of::<crate::Value>(), 72);
     }

@@ -1,9 +1,7 @@
-//! Lexical scanner foundation for P1.
+//! Lexical scanner.
 //!
-//! This is an iterative UTF-8 scanner that produces spanned tokens. It does
-//! not yet expose a public parser entry point or parse block structure; those
-//! are P1/P2 work. The token layer is deliberately kept below the public API
-//! until it is complete enough to back `parse_events`.
+//! This is an iterative UTF-8 scanner that produces spanned tokens. The token
+//! layer is deliberately kept below the public API.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -104,10 +102,10 @@ pub(crate) struct Scanner<'a> {
     compat_flow: bool,
     /// Whether a document has started: a `---`, or any node token since the
     /// last `...`. A byte order mark may appear only outside a document or
-    /// right before the next one (P16).
+    /// right before the next one.
     document_open: bool,
     /// Byte offsets of the non-printable characters that only a quoted
-    /// scalar may hold (P32), in order, and the first one not yet checked.
+    /// scalar may hold, in order, and the first one not yet checked.
     quoted_only: Vec<usize>,
     quoted_only_next: usize,
 }
@@ -191,7 +189,7 @@ impl<'a> Scanner<'a> {
             {
                 // libyaml skips a BOM at the start of any line, and the compat
                 // scanner keeps that; YAML 1.2.2 allows one only in a document
-                // prefix (P16).
+                // prefix.
                 if !self.compat_flow && self.document_open && !self.bom_starts_prefix(self.pos) {
                     return Err(
                         self.error_at(self.pos, "a byte order mark can only start a document")
@@ -345,7 +343,7 @@ impl<'a> Scanner<'a> {
     }
 
     /// Every non-printable character the scanner has passed must sit inside
-    /// `quoted`, the quoted scalar being made, if any (P32).
+    /// `quoted`, the quoted scalar being made, if any.
     fn check_quoted_only(&mut self, quoted: Option<std::ops::Range<usize>>) -> Result<(), Error> {
         while let Some(&index) = self.quoted_only.get(self.quoted_only_next) {
             if index >= self.pos {
@@ -662,9 +660,9 @@ impl<'a> Scanner<'a> {
 
     fn scan_document_marker(&mut self) -> Result<Option<Token<'a>>, Error> {
         let start = self.pos;
-        // yaml_serde treats a stream-start BOM as content for marker detection,
-        // so `BOM---` is a plain scalar rather than an explicit document start.
-        // The compat scanner keeps that; by default a BOM is not content (P9).
+        // In compat, a stream-start BOM is content for marker detection, so
+        // `BOM---` is a plain scalar rather than an explicit document start.
+        // By default a BOM is not content.
         if self.compat_flow && start == 3 && self.initial_bom {
             return Ok(None);
         }
@@ -780,7 +778,7 @@ impl<'a> Scanner<'a> {
                 return Err(self.error_at(start, format!("invalid %TAG prefix {prefix}")));
             }
             // The prefix's %-escapes are decoded like a suffix's, as libyaml
-            // does (P33). `uri_text_ok` has checked their syntax.
+            // does. `uri_text_ok` has checked their syntax.
             let prefix = decode_percent_escapes(prefix)
                 .map_err(|_| self.error_at(start, "tag %-escapes do not form valid UTF-8"))?;
             self.pending_tag_handles.push((handle.to_owned(), prefix));
@@ -808,7 +806,7 @@ impl<'a> Scanner<'a> {
             // libyaml stops at `?` and at a `:` followed by more text; the
             // compatibility scanner keeps that. It does not keep libyaml's stop
             // at a `:` before a blank or flow indicator (`&a: b`), which
-            // 2SXE and W5VH rule out (P27).
+            // 2SXE and W5VH rule out.
             if self.compat_flow && ch == '?' {
                 break;
             }
@@ -1264,7 +1262,7 @@ impl<'a> Scanner<'a> {
         // When the indentation is detected, leading empty lines may not be
         // indented more than the first non-empty content line (YAML 1.2.2
         // section 8.1.1.1). With an indentation indicator, a "blank" line
-        // with more spaces than that is content (P14). Tabs on a leading
+        // with more spaces than that is content. Tabs on a leading
         // empty line are ambiguous and rejected as scalar indentation.
         let mut probe = content_start;
         let mut first_content = None;
@@ -1342,7 +1340,7 @@ impl<'a> Scanner<'a> {
                     self.pos = after_spaces;
                 }
                 // Spaces past the indentation are content, on a leading line
-                // too when an indicator fixes the indentation (P14).
+                // too when an indicator fixes the indentation.
                 let text = if (seen_content || explicit_indent.is_some()) && spaces > indent {
                     " ".repeat(spaces - indent)
                 } else {
@@ -1365,9 +1363,9 @@ impl<'a> Scanner<'a> {
                 // `#` line is content in YAML 1.2.2 (DK3J). libyaml indents a
                 // root block scalar by at least one space, so there it is a
                 // comment ending the scalar before any content; the compat
-                // scanner keeps that wherever libyaml accepts the input (P29).
+                // scanner keeps that wherever libyaml accepts the input.
                 // A column-0 byte order mark ends it there the same way, and
-                // libyaml then skips the BOM (P36).
+                // libyaml then skips the BOM.
                 let rest = &self.input[line_start..];
                 if (rest.starts_with("---") && self.marker_follows(line_start, 3))
                     || (rest.starts_with("...") && self.marker_follows(line_start, 3))
@@ -1377,8 +1375,8 @@ impl<'a> Scanner<'a> {
                 }
             }
             if !self.compat_flow && self.input[line_start..].starts_with('\u{feff}') {
-                // A BOM line ends the scalar when it starts a document prefix
-                // (P16); otherwise the BOM is an error below.
+                // A BOM line ends the scalar when it starts a document prefix;
+                // otherwise the BOM is an error below.
                 if self.bom_starts_prefix(line_start) {
                     break;
                 }
@@ -1745,7 +1743,7 @@ impl<'a> Scanner<'a> {
             ),
         };
         // A line starting with a BOM ends the scalar by default; the BOM is
-        // then a document prefix or an error (P16). libyaml continues a
+        // then a document prefix or an error. libyaml continues a
         // scalar onto it only where the indentation allows, as compat does.
         if !allowed
             || (bom_line && !self.compat_flow)
@@ -1931,7 +1929,7 @@ fn find_value_indicator(text: &str, compat: bool) -> Option<usize> {
     let mut index = 0;
     let mut token_start = true;
     // Inside a plain scalar at depth 0, quotes, flow indicators, and
-    // property indicators are content: `a [b: |` has the key `a [b` (P28).
+    // property indicators are content: `a [b: |` has the key `a [b`.
     let mut in_plain = false;
     let mut name_stopped = false;
     while index < bytes.len() {
@@ -2017,7 +2015,7 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
-/// Check the stream's characters (P8, P32). A character outside `nb-json`
+/// Check the stream's characters. A character outside `nb-json`
 /// (a C0 control other than tab, line feed, or carriage return) is an error
 /// anywhere: its offset is the `Err`. A character in `nb-json` but outside
 /// `c-printable` (DEL, a C1 control other than NEL, U+FFFE, or U+FFFF) may
@@ -2262,7 +2260,7 @@ fn is_blank(ch: char) -> bool {
 }
 
 /// Whether `ch` is a YAML 1.2 line break. NEL, LS, and PS were line breaks
-/// in YAML 1.1 and libyaml; in YAML 1.2 they are content (P17).
+/// in YAML 1.1 and libyaml; in YAML 1.2 they are content.
 fn is_line_break(ch: char) -> bool {
     matches!(ch, '\n' | '\r')
 }

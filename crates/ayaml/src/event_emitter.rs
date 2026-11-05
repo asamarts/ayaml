@@ -259,7 +259,7 @@ where
                 Event::Directive { name, value, .. } => {
                     // The parser reads a name up to a space or tab, and
                     // neither may hold a line break or a byte order mark.
-                    // NEL, LS, and PS are content (P17); a directive has no
+                    // NEL, LS, and PS are content; a directive has no
                     // escapes, so they are written as they are.
                     let directive_char =
                         |ch: char| is_printable(ch) && !matches!(ch, '\n' | '\r' | '\u{feff}');

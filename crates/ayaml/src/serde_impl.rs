@@ -30,9 +30,9 @@ impl Serialize for Tag {
     }
 }
 
-/// A tagged value is a one-entry map from the tag to the value, as in
-/// yaml_serde: `{"!Foo": 1}` to a generic serializer such as serde_json.
-/// ayaml's serializers (and yaml_serde's) turn it back into a tag (V6).
+/// A tagged value is a one-entry map from the tag to the value: `{"!Foo": 1}`
+/// to a generic serializer such as serde_json. ayaml's serializers turn it
+/// back into a tag.
 impl Serialize for TaggedValue {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut map = serializer.serialize_map(Some(1))?;
@@ -43,8 +43,7 @@ impl Serialize for TaggedValue {
 
 /// A tag as a map key: `!` and then the tag's Serde name
 /// ([`Tag::serde_name`]), written in two parts so that [`check_for_tag`] can
-/// tell it from a string key that starts with `!`. yaml_serde uses the same
-/// convention.
+/// tell it from a string key that starts with `!`.
 struct TagKey<'a>(&'a Tag);
 
 impl Serialize for TagKey<'_> {
@@ -107,8 +106,7 @@ impl<'de> Deserialize<'de> for Mapping {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         match Value::deserialize(deserializer)? {
             Value::Mapping(mapping) => Ok(mapping),
-            // An empty value or `~` is an empty mapping, as in yaml_serde
-            // (V19).
+            // An empty value or `~` is an empty mapping.
             Value::Null => Ok(Mapping::new()),
             _ => Err(serde::de::Error::custom("expected a YAML mapping")),
         }
@@ -221,7 +219,7 @@ impl<'de> Visitor<'de> for ValueVisitor {
     }
 
     /// A tagged node arrives as an enum whose variant is the tag's Serde
-    /// name, so `!!set` and `%TAG` tags survive (V5).
+    /// name, so `!!set` and `%TAG` tags survive.
     fn visit_enum<A: EnumAccess<'de>>(self, access: A) -> Result<Self::Value, A::Error> {
         let (variant, value) = access.variant::<String>()?;
         let value = value.newtype_variant::<Value>()?;
@@ -271,7 +269,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
                 };
                 let value = visitor.visit_seq(&mut access)?;
                 // A visitor that stops early, such as a tuple's, leaves
-                // elements behind (V7).
+                // elements behind.
                 check_consumed(access.iter.len(), total, "sequence")?;
                 Ok(value)
             }
@@ -342,7 +340,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
     }
 
     /// A null reads as an empty sequence. A `Value` cannot tell an empty
-    /// scalar from `~`, so both are accepted (V9).
+    /// scalar from `~`, so both are accepted.
     fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         match self.value {
             Value::Null => visitor.visit_seq(ValueSeqAccess {
@@ -352,7 +350,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
         }
     }
 
-    /// A null reads as an empty map (V9).
+    /// A null reads as an empty map.
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         match self.value {
             Value::Null => visitor.visit_map(ValueMapAccess {
@@ -363,7 +361,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
         }
     }
 
-    /// A null reads as a struct with no fields, so defaults apply (V9).
+    /// A null reads as a struct with no fields, so defaults apply.
     fn deserialize_struct<V: Visitor<'de>>(
         self,
         _name: &'static str,
@@ -374,12 +372,12 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
     }
 
     /// A field name is the key's text: `1: x` names the field `"1"`, not
-    /// the second field (V2).
+    /// the second field.
     fn deserialize_identifier<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         self.deserialize_string(visitor)
     }
 
-    /// A character is read from the scalar's text, so `5` is `'5'` (V19).
+    /// A character is read from the scalar's text, so `5` is `'5'`.
     fn deserialize_char<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         self.deserialize_string(visitor)
     }
@@ -393,7 +391,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
         let (variant, value) = match self.value {
             Value::Tagged(tagged) => (tagged.tag.suffix().to_owned(), tagged.value),
             Value::String(variant) => (variant, Value::Null),
-            // `true` and `1` name variants renamed to them (V19).
+            // `true` and `1` name variants renamed to them.
             Value::Bool(value) => (value.to_string(), Value::Null),
             Value::Number(value) => (value.to_string(), Value::Null),
             Value::Mapping(mapping) => {
@@ -429,8 +427,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
     }
 
     /// Serde's float visitors take 64-bit integers but not wider ones, so a
-    /// wide integer is handed over as the nearest float, as yaml_serde
-    /// reads it (V15).
+    /// wide integer is handed over as the nearest float.
     fn deserialize_f64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         match self.value {
             Value::Number(number) if number.is_wide() => {
@@ -450,7 +447,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
     }
 }
 
-/// Fail when a visitor left `remaining` of `total` elements unread (V7).
+/// Fail when a visitor left `remaining` of `total` elements unread.
 fn check_consumed(remaining: usize, total: usize, kind: &str) -> Result<(), crate::Error> {
     if remaining == 0 {
         Ok(())
@@ -742,8 +739,8 @@ impl Serializer for ValueSerializer {
         Ok(Value::Number(Number::from_u128(value)))
     }
     fn serialize_f32(self, value: f32) -> Result<Self::Ok, Self::Error> {
-        // Widen through the shortest `f32` text, as yaml_serde does, so
-        // `0.1_f32` is written `0.1` and not `0.10000000149011612` (E26).
+        // Widen through the shortest `f32` text, so `0.1_f32` is written
+        // `0.1` and not `0.10000000149011612`.
         let widened = value.to_string().parse::<f64>().unwrap_or(f64::from(value));
         self.serialize_f64(widened)
     }
@@ -782,8 +779,8 @@ impl Serializer for ValueSerializer {
         _variant_index: u32,
         variant: &'static str,
     ) -> Result<Self::Ok, Self::Error> {
-        // yaml_serde renders unit variants as their scalar name. Newtype,
-        // tuple, and struct variants remain tagged.
+        // A unit variant is rendered as its scalar name. Newtype, tuple, and
+        // struct variants remain tagged.
         Ok(Value::String(variant.to_owned()))
     }
     fn serialize_newtype_struct<T: ?Sized + Serialize>(
@@ -955,7 +952,7 @@ impl SerializeMap for ValueMapSerializer {
 const TAG_KEY_HANDLE: &str = "\u{0}ayaml:tag-key:";
 
 /// Serializes the first key of a one-entry map like [`ValueSerializer`], but
-/// recognizes a [`TagKey`] (V6).
+/// recognizes a [`TagKey`].
 struct KeySerializer;
 
 macro_rules! delegate_to_value_serializer {
@@ -1114,7 +1111,7 @@ mod tests {
     }
 
     #[test]
-    fn scalar_values_deserialize_as_strings_with_yaml_serde_text() {
+    fn scalar_values_deserialize_as_strings_with_their_text() {
         use serde::Deserialize as _;
         assert_eq!(String::deserialize(Value::from(false)).unwrap(), "false");
         assert_eq!(String::deserialize(Value::from(42_u64)).unwrap(), "42");
