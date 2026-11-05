@@ -1,0 +1,13 @@
+root: aplan
+traces_root: .
+require_effort: true
+require_cut_membership: true
+deny_warnings: true
+
+evidence:
+  require_min_strength: [test]
+  exempt_tags: [untestable, milestone]
+
+test:
+  list: [cargo, test, --workspace, --all-features, --, --list]
+  run: [cargo, test, --workspace, --all-features, --, --exact, '{test}']
