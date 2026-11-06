@@ -1534,7 +1534,6 @@ fn only_a_root_flow_node_may_continue_at_column_zero() {
             "k: [\n\ta\n]\n",
             "- [\n\ta\n]\n",
             "k: 'a\nb'\n",
-            "k:\n  'a\n b'\n",
             "---k: 'a\nb'\n",
             "...k: 'a\nb'\n",
         ] {
@@ -1689,6 +1688,13 @@ fn a_bom_before_a_marker_or_directive_starts_a_document() {
         ),
         ("a\n\u{feff}---\nb\n", vec![a.clone(), b.clone()]),
         ("a\n...\n\u{feff}...\n", vec![a.clone()]),
+        ("a\n\u{feff}...\n", vec![a.clone()]),
+        ("a\n\u{feff}...\nb\n", vec![a.clone(), b.clone()]),
+        ("a\n\u{feff}\n...\nb\n", vec![a.clone(), b.clone()]),
+        ("a\n\u{feff}# c\n...\nb\n", vec![a.clone(), b.clone()]),
+        ("--- a\n\u{feff}...\n", vec![a.clone()]),
+        ("---\n\u{feff}...\n", vec![Value::Null]),
+        ("|\n a\n\u{feff}...\n", vec![Value::from("a\n")]),
         (
             "a\n...\n\u{feff}%YAML 1.2\n---\nb\n",
             vec![a.clone(), b.clone()],
@@ -1820,6 +1826,48 @@ fn compat_counts_a_column_for_a_line_start_bom() {
             "{input:?}: {error}"
         );
     }
+}
+
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_counts_that_column_for_block_structure() {
+    let read = ayaml::compat::from_str::<Value>;
+    // The mark makes the block collection one column deeper, so an indent of 1 is its level.
+    assert_eq!(
+        read("# c\n\u{feff}- 1\n - 2\n").expect("two entries"),
+        ayaml::parse_value("- 1\n- 2\n").expect("two entries"),
+    );
+    for input in [
+        "# c\n\u{feff}k: a\n b",
+        "# c\n\u{feff}- a\n b",
+        "# c\n\u{feff}- |\n x",
+        "# c\n\u{feff}k: |\n x",
+        "# c\n\u{feff} k: a\n  b",
+    ] {
+        assert!(read(input).is_err(), "{input:?}");
+    }
+    // A line deeper than that is still a continuation.
+    for (input, expected) in [
+        ("# c\n\u{feff}k: a\n  b", "k: a b\n"),
+        ("# c\n\u{feff}- a\n  b", "- a b\n"),
+        ("# c\n\u{feff}k: |\n  x", "k: \"x\"\n"),
+    ] {
+        let expected = ayaml::parse_value(expected).expect("control");
+        assert_eq!(read(input).expect(input), expected, "{input:?}");
+    }
+    // A comment after a mark on an earlier line owns nothing, so a root scalar stays at the root.
+    for input in ["\u{feff}# c\n\u{feff}a\nb", "\u{feff} # c\n\u{feff}a\nb"] {
+        assert_eq!(read(input).expect(input), Value::from("a b"), "{input:?}");
+    }
+    // The first line's mark takes up no column, and the default mode counts none for any.
+    assert_eq!(
+        read("\u{feff}- 1\n  - 2\n").expect("one entry"),
+        Value::Sequence(vec![Value::from("1 - 2")]),
+    );
+    assert_eq!(
+        ayaml::parse_value("# c\n\u{feff}- 1\n - 2\n").expect("one entry"),
+        Value::Sequence(vec![Value::from("1 - 2")]),
+    );
 }
 
 #[cfg(feature = "libyaml-compat")]

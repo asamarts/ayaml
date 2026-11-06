@@ -89,7 +89,21 @@ not change the root parsing functions; choose the compatibility entry points
 explicitly.
 
 libyaml counts a column for a byte-order mark at the start of a line, so in
-compatibility mode a `---` or `...` right after one is text, not a marker.
+compatibility mode a `---` or `...` right after one is text, not a marker. On a
+later line, the mark's column also counts for block structure, so a block
+collection after it is one column deeper. The stream's first mark takes up no
+column, as when libyaml detects the encoding itself, though a marker after it
+is still text.
+
+A closing `]`, `}`, or quote may sit at any indentation in both modes, including
+under a block collection, where the grammar asks for indentation. libyaml accepts
+these too, and files commonly close a flow collection this way:
+
+```yaml
+key: [
+  a,
+]
+```
 
 The maintained deviation list is
 [`tests/data/yaml-test-suite-deviations.txt`](../tests/data/yaml-test-suite-deviations.txt).
