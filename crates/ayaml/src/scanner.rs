@@ -1364,12 +1364,15 @@ impl<'a> Scanner<'a> {
                 // root block scalar by at least one space, so there it is a
                 // comment ending the scalar before any content; the compat
                 // scanner keeps that wherever libyaml accepts the input.
-                // A column-0 byte order mark ends it there the same way, and
-                // libyaml then skips the BOM.
+                // A column-0 byte order mark always ends it there: libyaml
+                // reads the BOM's line outside the scalar, so what follows
+                // the BOM is a comment or an error, never lost text.
                 let rest = &self.input[line_start..];
                 if (rest.starts_with("---") && self.marker_follows(line_start, 3))
                     || (rest.starts_with("...") && self.marker_follows(line_start, 3))
-                    || (self.compat_flow && !seen_content && rest.starts_with(['#', '\u{feff}']))
+                    || (self.compat_flow
+                        && (rest.starts_with('\u{feff}')
+                            || (!seen_content && rest.starts_with('#'))))
                 {
                     break;
                 }
@@ -1382,13 +1385,7 @@ impl<'a> Scanner<'a> {
                 }
             }
             self.pos = line_start + indent;
-            let mut text_start = self.pos;
-            let bom_stripped =
-                self.compat_flow && indent == 0 && self.input[text_start..].starts_with('\u{feff}');
-            if bom_stripped {
-                text_start += '\u{feff}'.len_utf8();
-                self.pos = text_start;
-            }
+            let text_start = self.pos;
             while let Some(ch) = self.peek() {
                 if is_line_break(ch) {
                     break;
@@ -1400,10 +1397,7 @@ impl<'a> Scanner<'a> {
                 }
                 self.pos += ch.len_utf8();
             }
-            let mut text = self.input[text_start..self.pos].to_owned();
-            if bom_stripped {
-                text.clear();
-            }
+            let text = self.input[text_start..self.pos].to_owned();
             let had_break = self.peek().is_some_and(is_line_break);
             if had_break {
                 self.consume_line_break();
@@ -1743,11 +1737,14 @@ impl<'a> Scanner<'a> {
             ),
         };
         // A line starting with a BOM ends the scalar by default; the BOM is
-        // then a document prefix or an error. libyaml continues a
-        // scalar onto it only where the indentation allows, as compat does.
+        // then a document prefix or an error. libyaml continues a scalar onto
+        // it wherever the indentation allows, whatever the line holds, as
+        // compat does: a colon on the line then makes a multi-line key, which
+        // is an error, and a `#` after the BOM isn't a comment.
         if !allowed
             || (bom_line && !self.compat_flow)
-            || (self.flow_level == 0
+            || (!bom_line
+                && self.flow_level == 0
                 && self.looks_like_block_start(self.pos, allow_block_indicator))
             || self.peek() == Some('#')
         {

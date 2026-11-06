@@ -1214,6 +1214,69 @@ fn compat_line_start_boms_are_ignored_but_same_line_bom_content_is_kept() {
     assert_eq!(compat("a: b\u{feff}c\n")["a"], Value::from("b\u{feff}c"));
 }
 
+/// A byte order mark at the start of a line never costs the text after it in compat:
+/// libyaml either keeps that text or rejects the input, whether or not the line holds a
+/// comment or a colon. Default mode rejects all of these or ends the scalar at the mark.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_never_drops_text_after_a_line_start_bom() {
+    let compat = ayaml::compat::from_str::<Value>;
+
+    // After a root block scalar, the mark's line is outside the scalar.
+    for input in [
+        "|\nx\n\u{feff}y",
+        "|\nx\n\u{feff}y\n",
+        ">\nx\n\u{feff}y\n",
+        "--- |\nx\n\u{feff}y\n",
+        "|\nx\n\u{feff}\ny\n",
+    ] {
+        assert!(compat(input).is_err(), "{input:?}");
+        assert!(ayaml::parse_value(input).is_err(), "{input:?}");
+    }
+    for input in [
+        "|\nx\n\u{feff}\n",
+        "|+\nx\n\u{feff}\n",
+        "|\nx\n\u{feff}#\n",
+        "|\nx\n\u{feff}\n# c\n",
+    ] {
+        assert_eq!(compat(input).unwrap(), Value::from("x\n"), "{input:?}");
+        assert_eq!(
+            ayaml::parse_value(input).unwrap(),
+            Value::from("x\n"),
+            "{input:?}"
+        );
+    }
+
+    // A root plain scalar continues onto the mark's line, whatever the line holds, so a
+    // colon there makes a multi-line key.
+    for input in [
+        "n\n\u{feff}#:",
+        "n\n\u{feff}#: x",
+        "\u{feff}n\n\u{feff}#:",
+        "n\n\n\u{feff}#:",
+        "n\n\u{feff}a: b",
+        "n\n\u{feff}# c:\nm",
+    ] {
+        assert!(compat(input).is_err(), "{input:?}");
+    }
+    for (input, expected) in [
+        ("n\n\u{feff}#", "n \u{feff}#"),
+        ("n\n\u{feff}a", "n \u{feff}a"),
+        ("n\n\u{feff}", "n \u{feff}"),
+        ("n\n\u{feff} #:", "n \u{feff}"),
+        ("n\n\u{feff}\n#:", "n \u{feff}"),
+    ] {
+        assert_eq!(compat(input).unwrap(), Value::from(expected), "{input:?}");
+    }
+
+    // Past the end of a value, the mark's line is still a comment.
+    for input in ["'n'\n\u{feff}#:", "'n'\n\u{feff}#\n"] {
+        assert_eq!(compat(input).unwrap(), Value::from("n"), "{input:?}");
+    }
+    let mapping = compat("n: 1\n\u{feff}# m: 2\n").unwrap();
+    assert_eq!(mapping["n"], Value::from(1_i64));
+}
+
 #[test]
 fn root_block_scalar_bom_lines_are_blank() {
     assert_eq!(ayaml::parse_value(">\n\u{feff} ").unwrap(), Value::from(""));
