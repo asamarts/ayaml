@@ -501,8 +501,8 @@ impl<'a> Scanner<'a> {
     }
 
     /// Whether the byte order mark at `position`, at the start of a line,
-    /// begins a document prefix: everything up to the next `---` line, or to
-    /// the end of the input, is blank lines and comments (YAML 1.2.2
+    /// begins a document prefix: everything up to the next `---` or `...` line,
+    /// or to the end of the input, is blank lines and comments (YAML 1.2.2
     /// productions 202 and 211).
     fn bom_starts_prefix(&mut self, position: usize) -> bool {
         if self.known_prefix.contains(&position) {
@@ -515,7 +515,9 @@ impl<'a> Scanner<'a> {
                 text = rest;
             }
             let content = line_start + (self.input.len() - line_start - text.len());
-            if text.starts_with("---") && self.marker_follows(content, 3) {
+            if (text.starts_with("---") || text.starts_with("..."))
+                && self.marker_follows(content, 3)
+            {
                 self.known_prefix = position..content;
                 return true;
             }
@@ -672,8 +674,9 @@ impl<'a> Scanner<'a> {
         position + rest.len() - rest.trim_start_matches([' ', '\t']).len()
     }
 
-    /// Whether the content after a run of tabs is a block indicator or a key. The last `:` on
-    /// a line answers for every run before it, so a line pays for one scan.
+    /// Whether the content after a run of tabs may be a block indicator or a key. A `:` anywhere
+    /// later on the line counts, even inside a quoted scalar, a flow collection, or a comment. The
+    /// last one answers for every run before it, so a line pays for one scan.
     fn tab_starts_block_structure(&mut self, content: usize) -> bool {
         let rest = &self.input.as_bytes()[content..];
         if matches!(rest.first(), Some(b'-' | b'?'))
@@ -1528,10 +1531,24 @@ impl<'a> Scanner<'a> {
     /// [`Owner`]). Only meaningful in block context.
     fn owner_of(&self, start: usize) -> Owner {
         let line_start = self.line_index.line_start(start);
-        match line_shape(&self.input[line_start..start], self.compat_flow) {
+        match self.shape_of_line(line_start, &self.input[line_start..start]) {
             LineShape::Owner(owner) => owner,
             LineShape::Open => self.owner_from_previous_lines(line_start),
             LineShape::Content => Owner::Unknown,
+        }
+    }
+
+    /// What `text`, which starts the line at `line_start`, says about ownership. In compat, a
+    /// later line's mark takes up a column, as libyaml reads it, so an owner there is one deeper.
+    fn shape_of_line(&self, line_start: usize, text: &str) -> LineShape {
+        let shape = line_shape(text, self.compat_flow);
+        match shape {
+            LineShape::Owner(Owner::Block(indent))
+                if self.compat_flow && line_start > 0 && text.starts_with('\u{feff}') =>
+            {
+                LineShape::Owner(Owner::Block(indent + 1))
+            }
+            shape => shape,
         }
     }
 
@@ -1560,7 +1577,16 @@ impl<'a> Scanner<'a> {
                     .map_or(start, |(offset, ch)| start + offset + ch.len_utf8());
             }
             let previous_start = self.line_index.line_start(previous_end);
-            let code = strip_comment(self.after_line_boms(previous_start, previous_end));
+            let line = self.after_line_boms(previous_start, previous_end);
+            // In compat, the line can still hold its mark, and a comment may follow that.
+            let comment_after_mark = line
+                .strip_prefix('\u{feff}')
+                .is_some_and(|rest| rest.trim_start_matches(is_blank).starts_with('#'));
+            let code = if comment_after_mark {
+                ""
+            } else {
+                strip_comment(line)
+            };
             if code.trim_matches(is_blank).is_empty() {
                 end = previous_start;
                 continue;
@@ -1571,7 +1597,7 @@ impl<'a> Scanner<'a> {
             if code.starts_with("...") && code[3..].trim_matches(is_blank).is_empty() {
                 return Owner::Root;
             }
-            match line_shape(code, self.compat_flow) {
+            match self.shape_of_line(previous_start, code) {
                 LineShape::Owner(owner) => return owner,
                 LineShape::Open => end = previous_start,
                 LineShape::Content => return Owner::Unknown,
@@ -1581,10 +1607,17 @@ impl<'a> Scanner<'a> {
 
     fn line_indent(&self, position: usize) -> usize {
         let line_start = self.line_index.line_start(position);
-        self.after_line_boms(line_start, self.input.len())
-            .chars()
-            .take_while(|ch| *ch == ' ')
-            .count()
+        let text = self.after_line_boms(line_start, self.input.len());
+        let spaces = |text: &str| text.chars().take_while(|ch| *ch == ' ').count();
+        // In compat, a later line's mark takes up a column, as libyaml reads it. The first line's
+        // doesn't, and neither does any mark by default.
+        if self.compat_flow
+            && line_start > 0
+            && let Some(rest) = text.strip_prefix('\u{feff}')
+        {
+            return 1 + spaces(rest);
+        }
+        spaces(text)
     }
 
     /// The text of `start..end`, a line's start onward, past any byte order marks there. They
@@ -1756,8 +1789,8 @@ impl<'a> Scanner<'a> {
         )
     }
 
-    /// The indentation of the next non-blank line after the current position,
-    /// without changing scanner state.
+    /// The indentation of the next line that isn't empty after the current position, without
+    /// changing scanner state. A line of spaces counts as that line.
     fn next_content_indent(&self) -> Option<usize> {
         let mut index = self.pos;
         while index < self.input.len() {

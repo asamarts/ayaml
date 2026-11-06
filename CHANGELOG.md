@@ -22,22 +22,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   breaks, so the key in `{x\n\n: y}` is now `x`, not `x\n`. The change applies with and
   without an explicit `?`.
 - In default mode, a flow collection's or quoted scalar's lines may start at column 0, or be
-  indented with tabs alone, exactly when it's a document's root node or is nested in one. So
+  indented with tabs alone, when it's a document's root node or is nested in one. So
   `[[x\n, y]]`, `!!seq [x\n, y]`, `  'a\nb'`, and `[\n\ta\n]` now parse. Under a block
-  collection those lines have to be indented, wherever the node starts, so `k: {x\n: y}`,
-  `k:\n  [\na\n  ]`, and `---k: 'a\nb'` are now errors. Compat mode still reads the first two.
-  A comment line is exempt in every position, so `k: [\n# c\n  a\n  ]` now parses.
+  collection the indentation of those lines is now checked, wherever the node starts, so
+  `k: {x\n: y}`, `k:\n  [\na\n  ]`, and `---k: 'a\nb'` are now errors. Compat mode still reads
+  the first two. A comment line is exempt in every position, so `k: [\n# c\n  a\n  ]` now
+  parses, and so is a closing `]`, `}`, or quote, as it was before. The check doesn't yet cover a
+  plain scalar's own continuation lines inside a flow collection, or every indentation of a quoted
+  scalar's lines under nested collections.
 - A second tag or anchor on one node is now an error in both modes, so `&a &b c` and
   `!a !b c` are rejected. The second one used to replace the first.
 - An explicit key whose properties are alone on the `?` line may now hold an indentless
   sequence, so `? !t\n- a` parses in both modes.
 - By default, a byte order mark no longer stops a document marker or directive after it from
   being one, so `a\n...\n\u{FEFF}---\nb` is two documents, `a` and `b`. The second used to
-  be the text `--- b`. A block collection may also follow the mark on any line, so
-  `a\n...\n\u{FEFF}b: 1\nc: 2` parses, and a column after it no longer counts the mark. Compat
+  be the text `--- b`. A `...` after a mark now ends a document too, so `a\n\u{FEFF}...\nb` is
+  two documents, where it was an error. A block collection may also follow the mark on any line,
+  so `a\n...\n\u{FEFF}b: 1\nc: 2` parses, and a column after it no longer counts the mark. Compat
   mode keeps its reading of all these, because libyaml counts a column for the mark. A mark
   between a directive and its `---` is now an error, as the grammar has no room for one, so
   `%YAML 1.2\n\u{FEFF}# c\n---\na` is rejected.
+- In compat mode, a byte order mark's column on a later line now counts for block structure, as it
+  already did for error positions. So `# c\n\u{FEFF}- 1\n - 2` is `[1, 2]`, not `["1 - 2"]`,
+  and `# c\n\u{FEFF}k: a\n b` is an error, as in libyaml.
 - The non-specific tag `!` is no longer changed by a `%TAG !` directive, in either mode.
 - A tag whose handle expands to part of a core-schema name is now that core tag, in both
   modes. Under `%TAG !y! tag:yaml.org,2002:i`, `!y!nt 1` is the integer 1 and `!y!nt x` is

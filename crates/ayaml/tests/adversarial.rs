@@ -612,15 +612,19 @@ fn repeated_inputs(length: usize) -> Vec<String> {
 #[test]
 fn scanning_takes_time_linear_in_the_input() {
     in_child!(|| {
-        // Quadruple the length: a linear scan takes about 4 times as long, and a quadratic one
-        // about 16 times, on any host. A scan this quick isn't compared, because the difference
-        // would be noise. Some quadratic scans take only seconds on this length, so a limit on
-        // the time alone misses them. The length stays within the normal peak of memory.
+        // On 8 times the length, a linear scan takes about 8 times as long and a quadratic one
+        // about 64 times, on any host. The limit sits between them, with room for a host's noise
+        // on either side. A scan this quick isn't compared, because the difference would be noise.
+        // Some quadratic scans take only seconds on this length, so a limit on the time alone
+        // misses them. The length stays within the normal peak of memory.
         const LENGTH: usize = 1 << 19;
         const QUICK: Duration = Duration::from_millis(100);
-        const LARGEST_GROWTH: u32 = 8;
+        const LARGEST_GROWTH: u32 = 24;
         const SLOWEST: Duration = Duration::from_secs(20);
-        const TRIES: usize = 3;
+        // On a busy host one run can take 10 times its share, so a scan has to look quadratic
+        // through many runs before it counts. A real quadratic scan spends this budget and fails.
+        const TRIES: usize = 12;
+        const RETRY_BUDGET: Duration = Duration::from_secs(40);
         type Read = fn(&str) -> Result<(), ayaml::Error>;
         let timed = |read: &Read, input: &str| {
             let started = Instant::now();
@@ -635,24 +639,28 @@ fn scanning_takes_time_linear_in_the_input() {
                 ok(ayaml::compat::from_str::<ayaml::Value>(input))
             }),
         ];
-        let shorter = repeated_inputs(LENGTH / 4);
+        let shorter = repeated_inputs(LENGTH / 8);
         for (short, long) in shorter.iter().zip(repeated_inputs(LENGTH)) {
             let name: String = long.chars().take(30).collect();
             for (reader, read) in &readers {
                 let mut short_time = Duration::MAX;
                 let mut long_time = Duration::MAX;
+                let started = Instant::now();
                 // Each best time drops any pause the host took, so it takes a real scan to fail.
                 for _ in 0..TRIES {
                     short_time = short_time.min(timed(read, short));
                     long_time = long_time.min(timed(read, &long));
-                    if long_time < QUICK || long_time < short_time * LARGEST_GROWTH {
+                    if long_time < QUICK
+                        || long_time < short_time * LARGEST_GROWTH
+                        || started.elapsed() > RETRY_BUDGET
+                    {
                         break;
                     }
                 }
                 assert!(long_time < SLOWEST, "{reader}: {name:?}: {long_time:?}");
                 assert!(
                     long_time < QUICK || long_time < short_time * LARGEST_GROWTH,
-                    "{reader}: {name:?}: {short_time:?}, then {long_time:?} on 4 times the length",
+                    "{reader}: {name:?}: {short_time:?}, then {long_time:?} on 8 times the length",
                 );
             }
         }

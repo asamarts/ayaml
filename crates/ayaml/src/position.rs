@@ -87,7 +87,9 @@ impl LineIndex {
         }
     }
 
-    /// Build an index for libyaml's reading, where only the first line's BOM takes up no column.
+    /// Build an index for compat, where a later line's BOM takes up a column, as libyaml reads it.
+    /// The first line's takes up none, as when libyaml detects the encoding itself. The scanner
+    /// still reads a marker after that one as text, as when the encoding was set beforehand.
     #[must_use]
     pub(crate) fn counting_line_boms(input: &str) -> Self {
         Self {
