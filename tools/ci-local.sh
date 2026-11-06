@@ -9,6 +9,11 @@
 # With no job names, every job runs. Commands run under `nice`; the script
 # does not change build parallelism. Logs go to target/ci-local/<sha>/.
 #
+# Test steps get 8 GiB of address space per process and a 30-minute timeout that kills the
+# step's whole process group, and the `bounds` job checks both. Fuzz steps get only the timeout,
+# because a sanitizer build reserves far more address space, and libFuzzer limits their memory.
+# This needs Linux and GNU `timeout`. Elsewhere test steps fail, because they can't be bounded.
+#
 # Only hosted CI runs macOS and Windows, semver checks, minimal versions, the secret
 # scan, and the check of a pull request's title and body. Only this script runs the
 # feature combinations and markdownlint.
@@ -23,13 +28,15 @@ cd "$ROOT" || exit 2
 
 MSRV="1.88.0"
 STABLE="stable"
-ALL_JOBS=(sync quality-msrv quality-stable features policy harness instructions plan suite docs-lint package cross fuzz-smoke leak-gate)
+TEST_ADDRESS_SPACE_KIB=8388608
+TEST_TIMEOUT_SECONDS=1800
+ALL_JOBS=(sync bounds quality-msrv quality-stable features policy harness instructions plan suite docs-lint package cross fuzz-smoke leak-gate)
 
 jobs=()
 for arg in "$@"; do
   case "$arg" in
     --list) printf '%s\n' "${ALL_JOBS[@]}"; exit 0 ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
     -*) echo "unknown option: $arg" >&2; exit 2 ;;
     *) jobs+=("$arg") ;;
   esac
@@ -54,7 +61,7 @@ job_failed=0
 step() {
   local name="$1"
   shift
-  local log="$logdir/$current.log"
+  local log="$logdir/$current.log" why=""
   printf '  %-58s ' "$name"
   local s=$SECONDS
   {
@@ -63,7 +70,11 @@ step() {
   if nice -n 10 "$@" >>"$log" 2>&1; then
     printf 'ok   (%ss)\n' "$((SECONDS - s))"
   else
-    printf 'FAIL (%ss) — see %s\n' "$((SECONDS - s))" "${log#"$ROOT"/}"
+    case $? in
+      124 | 137) why=", timed out" ;;
+      125) why=", couldn't set its bounds" ;;
+    esac
+    printf 'FAIL (%ss%s) — see %s\n' "$((SECONDS - s))" "$why" "${log#"$ROOT"/}"
     job_failed=1
   fi
 }
@@ -72,6 +83,24 @@ step() {
 shstep() {
   local name="$1"
   step "$name" bash -c "$2"
+}
+
+# bound SECONDS: fill BOUNDED with the command that bounds a test step. GNU timeout starts the
+# step in a new process group and signals that whole group, so nothing it started outlives it.
+# A lower address-space limit that's already set stays.
+bound() {
+  BOUNDED=(timeout -k 10 "$1" bash -c '
+    [ "$(ulimit -v)" != unlimited ] && [ "$(ulimit -v)" -le "$1" ] || ulimit -v "$1" || exit 125
+    shift
+    exec "$@"' bound "$TEST_ADDRESS_SPACE_KIB")
+}
+
+# test_step NAME CMD...: like step, for a command that feeds the parser hostile input.
+test_step() {
+  local name="$1"
+  shift
+  bound "$TEST_TIMEOUT_SECONDS"
+  step "$name" "${BOUNDED[@]}" "$@"
 }
 
 # skip REASON: part or all of the current job couldn't run. The summary says so, so
@@ -101,15 +130,33 @@ job_sync() {
     exit $missing'
 }
 
+# The bounds themselves. A timeout that killed only the shell once left a test binary running.
+job_bounds() {
+  test_step "a test step has the ceiling" bash -c '[ "$(ulimit -v)" = "$1" ]' ceiling "$TEST_ADDRESS_SPACE_KIB"
+  bound 2
+  step "a timeout kills the whole process group" bash -c '
+    pid_file="$1"
+    shift
+    "$@" bash -c "sleep 300 & echo \$! >\"$pid_file\"; wait"
+    [ "$?" -eq 124 ] || { echo "the step did not time out"; exit 1; }
+    sleep 1
+    pid="$(cat "$pid_file")"
+    state="$(ps -o stat= -p "$pid")"
+    case "$state" in
+      "" | Z*) ;;
+      *) echo "a process the step started is still running: $state"; kill "$pid"; exit 1 ;;
+    esac' group "$logdir/bounds-sleeper.pid" "${BOUNDED[@]}"
+}
+
 quality() {
   local tc="$1"
   if ! have_toolchain "$tc"; then skip "toolchain $tc missing"; return; fi
   step "fmt ($tc)" cargo "+$tc" fmt --all -- --check
   step "clippy ($tc)" cargo "+$tc" clippy --workspace --all-targets --locked --all-features -- -D warnings
-  step "test ($tc)" cargo "+$tc" test --workspace --locked --all-features
-  step "test default features ($tc)" cargo "+$tc" test -p ayaml --locked
+  test_step "test ($tc)" cargo "+$tc" test --workspace --locked --all-features
+  test_step "test default features ($tc)" cargo "+$tc" test -p ayaml --locked
   # The depth cap is measured in both profiles.
-  step "adversarial release ($tc)" cargo "+$tc" test -p ayaml --locked --release --all-features --test adversarial
+  test_step "adversarial release ($tc)" cargo "+$tc" test -p ayaml --locked --release --all-features --test adversarial
   step "doc ($tc)" cargo "+$tc" doc --workspace --locked --no-deps --all-features
   # Mirrors: cargo fmt --all -- --check
   # Mirrors: cargo clippy --workspace --all-targets --locked --all-features -- -D warnings
@@ -128,9 +175,9 @@ job_features() {
     # shellcheck disable=SC2086
     step "clippy ayaml $f" cargo "+$STABLE" clippy -p ayaml --all-targets --locked $f -- -D warnings
     # shellcheck disable=SC2086
-    step "test ayaml $f" cargo "+$STABLE" test -p ayaml --locked $f
+    test_step "test ayaml $f" cargo "+$STABLE" test -p ayaml --locked $f
   done
-  step "test ayaml --all-features ($MSRV)" cargo "+$MSRV" test -p ayaml --locked --all-features
+  test_step "test ayaml --all-features ($MSRV)" cargo "+$MSRV" test -p ayaml --locked --all-features
   step "doc ayaml --all-features" cargo "+$STABLE" doc -p ayaml --locked --no-deps --all-features
 }
 
@@ -152,9 +199,9 @@ job_policy() {
 }
 
 job_harness() {
-  step "conformance fixtures and pinned suite" cargo run --locked -p ayaml-conformance -- tests/fixtures tests/data/yaml-test-suite/src
+  test_step "conformance fixtures and pinned suite" cargo run --locked -p ayaml-conformance -- tests/fixtures tests/data/yaml-test-suite/src
   step "fuzz targets compile" cargo check --manifest-path fuzz/Cargo.toml --locked --bins
-  step "allocation budgets" tools/check_alloc_corpus.sh
+  test_step "allocation budgets" tools/check_alloc_corpus.sh
   step "benchmarks compile" cargo bench --locked -p ayaml-bench --no-run
 }
 
@@ -172,8 +219,8 @@ job_plan() {
 
 # Strict suite in both parser modes.
 job_suite() {
-  step "strict suite (default mode)" env AYAML_STRICT_SUITE=1 cargo run --locked -p ayaml-conformance -- tests/fixtures tests/data/yaml-test-suite/src
-  step "strict suite (compat mode)" env AYAML_STRICT_SUITE=1 cargo run --locked -p ayaml-conformance --features compat -- tests/fixtures tests/data/yaml-test-suite/src
+  test_step "strict suite (default mode)" env AYAML_STRICT_SUITE=1 cargo run --locked -p ayaml-conformance -- tests/fixtures tests/data/yaml-test-suite/src
+  test_step "strict suite (compat mode)" env AYAML_STRICT_SUITE=1 cargo run --locked -p ayaml-conformance --features compat -- tests/fixtures tests/data/yaml-test-suite/src
   # Mirrors: AYAML_STRICT_SUITE=1 cargo run --locked -p ayaml-conformance -- tests/fixtures tests/data/yaml-test-suite/src
   # Mirrors: AYAML_STRICT_SUITE=1 cargo run --locked -p ayaml-conformance --features compat -- tests/fixtures tests/data/yaml-test-suite/src
 }
@@ -257,7 +304,7 @@ job_fuzz-smoke() {
   fi
   local TARGET
   for TARGET in parse emit borrowed; do
-    step "fuzz $TARGET (60 s)" cargo +nightly fuzz run "$TARGET" --target x86_64-unknown-linux-gnu -- -max_total_time=60
+    step "fuzz $TARGET (60 s)" timeout -k 10 "$TEST_TIMEOUT_SECONDS" cargo +nightly fuzz run "$TARGET" --target x86_64-unknown-linux-gnu -- -max_total_time=60
     # Mirrors: cargo fuzz run TARGET --target x86_64-unknown-linux-gnu -- -max_total_time=60
   done
 }

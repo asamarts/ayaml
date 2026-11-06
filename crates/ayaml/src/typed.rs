@@ -1165,21 +1165,6 @@ mod tests {
     }
 
     #[test]
-    fn alias_size_estimation_handles_nested_replay_without_exponential_walk() {
-        let mut bomb = String::from("a0: &a0 [x, x, x, x, x, x, x, x, x]\n");
-        for i in 1..9 {
-            let previous = format!("*a{}", i - 1);
-            let row = std::iter::repeat_n(previous.as_str(), 9)
-                .collect::<Vec<_>>()
-                .join(", ");
-            bomb.push_str(&format!("a{i}: &a{i} [{row}]\n"));
-        }
-        let limits = Limits::default();
-        let error = from_str::<Value>(&bomb, &limits).expect_err("alias bomb");
-        assert_eq!(error.kind(), ErrorKind::Limit);
-    }
-
-    #[test]
     fn aliases_are_reference_nodes_not_expanded_copies() {
         let node = build("a: &a {x: 1}\nb: *a\n");
         let NodeKind::Mapping(entries) = &node.kind else {

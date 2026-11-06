@@ -2,11 +2,236 @@
 //!
 //! Each test drives every public path that reads YAML, so that no entry
 //! point bypasses a limit that another enforces.
+//!
+//! A test whose input could grow without bound if a limit regressed runs its body in a child
+//! process, through [`in_child`]. On Linux the child has an address-space limit, so running
+//! out of memory aborts that child and fails that test, and the machine stays usable. Every
+//! system has the deadline. A stack overflow also fails one test, not the whole binary.
 
 use std::hash::Hash;
+use std::io::Read;
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use ayaml::{ErrorKind, Limits, MAX_DEPTH, MAX_DEPTH_CAP, Value};
 use serde::de::IgnoredAny;
+
+/// Set in a child process, where a test runs its body instead of starting another child.
+const CHILD: &str = "AYAML_ADVERSARIAL_CHILD";
+
+/// The address space a child may use, in KiB.
+const ADDRESS_SPACE_KIB: u64 = 1 << 20;
+
+/// The most address space a child may have used when its body ends, in KiB. This keeps normal
+/// use well below the limit, and it fails a regression too small to reach the limit.
+const NORMAL_PEAK_KIB: u64 = ADDRESS_SPACE_KIB / 2;
+
+/// How long a child may run. A regression that spins without allocating ends here.
+const CHILD_DEADLINE: Duration = Duration::from_secs(300);
+
+/// Set the limits, then become the test binary, which is `$0`. `$1` is the limit in KiB. A
+/// lower limit that is already set stays, because raising it could fail. Core dumps are off,
+/// because a child that hits the limit aborts with up to `$1` of memory.
+const LIMIT_THEN_RUN: &str = r#"
+[ "$(ulimit -v)" != unlimited ] && [ "$(ulimit -v)" -le "$1" ] || ulimit -v "$1" || exit 125
+ulimit -c 0
+shift
+exec "$0" "$@"
+"#;
+
+/// How one child ended.
+struct ChildRun {
+    /// `None` if the deadline passed and the child was killed.
+    status: Option<ExitStatus>,
+    output: String,
+    elapsed: Duration,
+}
+
+impl ChildRun {
+    /// libtest exits 0 when `--exact` matches nothing, so the test has to be seen passing.
+    fn passed(&self) -> bool {
+        self.status.is_some_and(|status| status.success()) && self.output.contains("1 passed")
+    }
+}
+
+fn read_all(mut pipe: impl Read + Send + 'static) -> JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        // A read error only shortens the output that a failure reports.
+        let _ = pipe.read_to_end(&mut bytes);
+        String::from_utf8_lossy(&bytes).into_owned()
+    })
+}
+
+/// Run one test of this binary in a child process and wait for it, up to `deadline`.
+fn run_child(test: &str, deadline: Duration) -> ChildRun {
+    let binary = std::env::current_exe().expect("the test binary's path");
+    let mut command = if cfg!(target_os = "linux") {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", LIMIT_THEN_RUN])
+            .arg(binary)
+            .arg(ADDRESS_SPACE_KIB.to_string());
+        command
+    } else {
+        Command::new(binary)
+    };
+    let started = Instant::now();
+    let mut child = command
+        .args([test, "--exact", "--nocapture", "--include-ignored"])
+        .env(CHILD, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the child");
+    let stdout = read_all(child.stdout.take().expect("piped stdout"));
+    let stderr = read_all(child.stderr.take().expect("piped stderr"));
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait for the child") {
+            break Some(status);
+        }
+        if started.elapsed() > deadline {
+            child.kill().expect("kill the child");
+            child.wait().expect("wait for the killed child");
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let elapsed = started.elapsed();
+    let output = stdout.join().expect("stdout reader") + &stderr.join().expect("stderr reader");
+    ChildRun {
+        status,
+        output,
+        elapsed,
+    }
+}
+
+/// The first number after `label` in a file under `/proc/self`.
+fn proc_self_number(file: &str, label: &str) -> Option<u64> {
+    std::fs::read_to_string(format!("/proc/self/{file}"))
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix(label))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Fail unless this process really has its address-space limit. Linux only.
+fn assert_limited() {
+    if cfg!(target_os = "linux") {
+        let limit = proc_self_number("limits", "Max address space");
+        assert!(
+            limit.is_some_and(|bytes| bytes <= ADDRESS_SPACE_KIB * 1024),
+            "no address-space limit in this child: {limit:?}"
+        );
+    }
+}
+
+/// Run a test's body in a child process, or directly if this is the child. `test` has to be
+/// the name of the calling test, because the child reruns it by name.
+fn in_child(test: &str, body: impl FnOnce()) {
+    if std::env::var_os(CHILD).is_none() {
+        let run = run_child(test, CHILD_DEADLINE);
+        assert!(
+            run.passed(),
+            "{test}: ended with {:?} after {:?}\n{}",
+            run.status,
+            run.elapsed,
+            run.output
+        );
+        return;
+    }
+    assert_limited();
+    body();
+    if cfg!(target_os = "linux") {
+        let peak = proc_self_number("status", "VmPeak:").expect("VmPeak");
+        println!("{test}: peak address space {peak} KiB");
+        assert!(
+            peak <= NORMAL_PEAK_KIB,
+            "{test} used {peak} KiB of address space, over the {NORMAL_PEAK_KIB} KiB expected"
+        );
+    }
+}
+
+/// Keep allocating and touching memory, as a runaway expansion would, with every real limit
+/// still on. It stops only when the allocator can't get more.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "only for a child of runaway_allocation_fails_quickly_and_cleanly"]
+fn keep_allocating() {
+    if std::env::var_os(CHILD).is_some() {
+        assert_limited();
+        let mut blocks = Vec::new();
+        loop {
+            blocks.push(vec![1_u8; 1 << 20]);
+            std::hint::black_box(&blocks);
+        }
+    }
+}
+
+/// The limit stops a runaway child with Rust's allocation failure, well before the deadline.
+#[cfg(target_os = "linux")]
+#[test]
+fn runaway_allocation_fails_quickly_and_cleanly() {
+    let run = run_child("keep_allocating", CHILD_DEADLINE);
+    assert!(!run.passed(), "{}", run.output);
+    assert!(run.status.is_some(), "hit the deadline: {}", run.output);
+    assert!(
+        run.output.contains("memory allocation of"),
+        "{:?}: {}",
+        run.status,
+        run.output
+    );
+    assert!(run.elapsed < Duration::from_secs(60), "{:?}", run.elapsed);
+}
+
+#[test]
+#[ignore = "only for a child of a_failing_child_fails_its_test"]
+fn fail_in_a_child() {
+    assert!(
+        std::env::var_os(CHILD).is_none(),
+        "deliberate failure in a child"
+    );
+}
+
+/// A failure in the child fails the test that started it.
+#[test]
+#[should_panic(expected = "deliberate failure in a child")]
+fn a_failing_child_fails_its_test() {
+    in_child("fail_in_a_child", || unreachable!("this isn't the child"));
+}
+
+#[test]
+#[ignore = "only for a child of a_child_past_its_deadline_is_killed"]
+fn never_finish() {
+    if std::env::var_os(CHILD).is_some() {
+        std::thread::sleep(Duration::from_secs(3_600));
+    }
+}
+
+#[test]
+fn a_child_past_its_deadline_is_killed() {
+    let run = run_child("never_finish", Duration::from_secs(1));
+    assert!(run.status.is_none(), "{:?}: {}", run.status, run.output);
+    assert!(run.elapsed < Duration::from_secs(60), "{:?}", run.elapsed);
+}
+
+/// A misspelled name runs nothing and exits 0, which must not count as passing.
+#[test]
+fn a_child_that_runs_no_test_does_not_pass() {
+    let run = run_child("no_such_test", CHILD_DEADLINE);
+    assert!(
+        run.status.is_some_and(|status| status.success()),
+        "{:?}: {}",
+        run.status,
+        run.output
+    );
+    assert!(!run.passed(), "{}", run.output);
+}
 
 /// A billion-laughs bomb: nine levels of nine aliases each, 468 bytes
 /// that expand to 9^9 scalars.
@@ -103,28 +328,35 @@ fn entry_points(input: &str) -> Vec<(&'static str, Result<(), ayaml::Error>)> {
 /// Every entry point enforces the alias limits.
 #[test]
 fn alias_bomb_is_rejected_on_every_entry_point() {
-    let bomb = alias_bomb();
-    assert!(bomb.len() < 512, "{} bytes", bomb.len());
-    for (name, result) in entry_points(&bomb) {
-        let error = result.expect_err(name);
-        assert_eq!(error.kind(), ErrorKind::Limit, "{name}: {error}");
-    }
+    in_child("alias_bomb_is_rejected_on_every_entry_point", || {
+        let bomb = alias_bomb();
+        assert!(bomb.len() < 512, "{} bytes", bomb.len());
+        for (name, result) in entry_points(&bomb) {
+            let error = result.expect_err(name);
+            assert_eq!(error.kind(), ErrorKind::Limit, "{name}: {error}");
+        }
+    });
 }
 
 /// The dereference count is enforced on every entry point, even
 /// when the expansion is small.
 #[test]
 fn alias_dereference_limit_is_enforced_on_every_entry_point() {
-    let mut input = String::from("a: &a 1\nb: [");
-    input.push_str(&vec!["*a"; 100_001].join(", "));
-    input.push_str("]\n");
-    for (name, result) in entry_points(&input) {
-        let error = result.expect_err(name);
-        assert!(
-            error.kind() == ErrorKind::Limit || error.to_string().contains("alias"),
-            "{name}: {error}"
-        );
-    }
+    in_child(
+        "alias_dereference_limit_is_enforced_on_every_entry_point",
+        || {
+            let mut input = String::from("a: &a 1\nb: [");
+            input.push_str(&vec!["*a"; 100_001].join(", "));
+            input.push_str("]\n");
+            for (name, result) in entry_points(&input) {
+                let error = result.expect_err(name);
+                assert!(
+                    error.kind() == ErrorKind::Limit || error.to_string().contains("alias"),
+                    "{name}: {error}"
+                );
+            }
+        },
+    );
 }
 
 /// The limits that accept an input on one entry point accept it on all.
@@ -155,39 +387,46 @@ fn alias_chain(links: usize) -> String {
 /// links are accepted and 128 rejected.
 #[test]
 fn alias_nesting_counts_toward_the_depth_limit_on_every_entry_point() {
-    for (name, result) in entry_points(&alias_chain(127)) {
-        result.unwrap_or_else(|error| panic!("{name}: {error}"));
-    }
-    for links in [128, 8_000] {
-        for (name, result) in entry_points(&alias_chain(links)) {
-            let error = result.expect_err(name);
-            // Compat reports its own message for the depth limit.
-            let message = error.to_string();
-            assert!(
-                (error.kind() == ErrorKind::Limit && message.contains("depth"))
-                    || message.contains("recursion limit exceeded"),
-                "{name}: {error}"
-            );
-        }
-    }
+    in_child(
+        "alias_nesting_counts_toward_the_depth_limit_on_every_entry_point",
+        || {
+            for (name, result) in entry_points(&alias_chain(127)) {
+                result.unwrap_or_else(|error| panic!("{name}: {error}"));
+            }
+            for links in [128, 8_000] {
+                for (name, result) in entry_points(&alias_chain(links)) {
+                    let error = result.expect_err(name);
+                    // Compat reports its own message for the depth limit.
+                    let message = error.to_string();
+                    assert!(
+                        (error.kind() == ErrorKind::Limit && message.contains("depth"))
+                            || message.contains("recursion limit exceeded"),
+                        "{name}: {error}"
+                    );
+                }
+            }
+        },
+    );
 }
 
 /// Anchors cost nothing until an alias uses them. A 4 MiB scalar under
 /// 100 nested anchors used to be copied once per anchor.
 #[test]
 fn nested_anchors_are_not_copied() {
-    let mut input = String::new();
-    for level in 0..100 {
-        input.push_str(&format!("&a{level} ["));
-    }
-    input.push_str(&"x".repeat(4 << 20));
-    input.push_str(&"]".repeat(100));
-    let mut value = &ayaml::parse_value(&input).expect("parse");
-    for _ in 0..100 {
-        value = &value[0];
-    }
-    assert_eq!(value.as_str().map(str::len), Some(4 << 20));
-    ayaml::from_str_borrowed::<IgnoredAny>(&input).expect("typed");
+    in_child("nested_anchors_are_not_copied", || {
+        let mut input = String::new();
+        for level in 0..100 {
+            input.push_str(&format!("&a{level} ["));
+        }
+        input.push_str(&"x".repeat(4 << 20));
+        input.push_str(&"]".repeat(100));
+        let mut value = &ayaml::parse_value(&input).expect("parse");
+        for _ in 0..100 {
+            value = &value[0];
+        }
+        assert_eq!(value.as_str().map(str::len), Some(4 << 20));
+        ayaml::from_str_borrowed::<IgnoredAny>(&input).expect("typed");
+    });
 }
 
 /// The nesting shapes the depth tests use, each with a different recursion
@@ -440,60 +679,74 @@ fn max_depth_above_the_cap_is_rejected_on_every_entry_point() {
 /// release builds.
 #[test]
 fn every_entry_point_fits_a_small_stack_at_the_depth_cap() {
-    on_small_stack(|| {
-        let limits = Limits::default().with_max_depth(MAX_DEPTH_CAP);
-        for shape in SHAPES {
-            let input = nested(shape, MAX_DEPTH_CAP);
-            for (name, result) in limited_entry_points(&input, &limits)
-                .into_iter()
-                .chain(value_paths(&input, &limits))
-            {
-                result.unwrap_or_else(|error| panic!("{shape}, {name}: {error}"));
-            }
-            for (name, result) in limited_entry_points(&nested(shape, MAX_DEPTH_CAP + 1), &limits) {
-                assert_depth_error(shape, name, result);
-            }
-        }
-    });
+    in_child(
+        "every_entry_point_fits_a_small_stack_at_the_depth_cap",
+        || {
+            on_small_stack(|| {
+                let limits = Limits::default().with_max_depth(MAX_DEPTH_CAP);
+                for shape in SHAPES {
+                    let input = nested(shape, MAX_DEPTH_CAP);
+                    for (name, result) in limited_entry_points(&input, &limits)
+                        .into_iter()
+                        .chain(value_paths(&input, &limits))
+                    {
+                        result.unwrap_or_else(|error| panic!("{shape}, {name}: {error}"));
+                    }
+                    for (name, result) in
+                        limited_entry_points(&nested(shape, MAX_DEPTH_CAP + 1), &limits)
+                    {
+                        assert_depth_error(shape, name, result);
+                    }
+                }
+            });
+        },
+    );
 }
 
 /// The entry points without a limits parameter, compat included, use the
 /// default depth and fit a 2 MiB thread at it.
 #[test]
 fn default_entry_points_fit_a_small_stack_at_the_default_depth() {
-    on_small_stack(|| {
-        for shape in SHAPES {
-            for (name, result) in entry_points(&nested(shape, MAX_DEPTH)) {
-                result.unwrap_or_else(|error| panic!("{shape}, {name}: {error}"));
-            }
-            for (name, result) in entry_points(&nested(shape, MAX_DEPTH + 1)) {
-                assert_depth_error(shape, name, result);
-            }
-        }
-    });
+    in_child(
+        "default_entry_points_fit_a_small_stack_at_the_default_depth",
+        || {
+            on_small_stack(|| {
+                for shape in SHAPES {
+                    for (name, result) in entry_points(&nested(shape, MAX_DEPTH)) {
+                        result.unwrap_or_else(|error| panic!("{shape}, {name}: {error}"));
+                    }
+                    for (name, result) in entry_points(&nested(shape, MAX_DEPTH + 1)) {
+                        assert_depth_error(shape, name, result);
+                    }
+                }
+            });
+        },
+    );
 }
 
 /// The parser keeps its own stack, so nesting far past any depth limit
 /// is a limit error on a 2 MiB thread, never an abort.
 #[test]
 fn deep_nesting_is_a_limit_error_on_a_small_stack() {
-    on_small_stack(|| {
-        let limits = Limits::default().with_max_depth(MAX_DEPTH_CAP);
-        for shape in SHAPES {
-            // Far past the limit: every path stops at its depth check.
-            let depth = if shape.starts_with("block") {
-                1_000
-            } else {
-                10_000
-            };
-            let input = nested(shape, depth);
-            for (name, result) in limited_entry_points(&input, &limits) {
-                assert_depth_error(shape, name, result);
+    in_child("deep_nesting_is_a_limit_error_on_a_small_stack", || {
+        on_small_stack(|| {
+            let limits = Limits::default().with_max_depth(MAX_DEPTH_CAP);
+            for shape in SHAPES {
+                // Far past the limit: every path stops at its depth check.
+                let depth = if shape.starts_with("block") {
+                    1_000
+                } else {
+                    10_000
+                };
+                let input = nested(shape, depth);
+                for (name, result) in limited_entry_points(&input, &limits) {
+                    assert_depth_error(shape, name, result);
+                }
+                for (name, result) in entry_points(&input) {
+                    assert_depth_error(shape, name, result);
+                }
             }
-            for (name, result) in entry_points(&input) {
-                assert_depth_error(shape, name, result);
-            }
-        }
+        });
     });
 }
 
@@ -529,50 +782,52 @@ fn wide(shape: &str, entries: usize) -> String {
 /// are duplicates) does not matter here, only that nothing aborts.
 #[test]
 fn wide_collections_fit_a_small_stack() {
-    on_small_stack(|| {
-        let limits = Limits::default();
-        for shape in [
-            "empty explicit keys",
-            "explicit pairs",
-            "block keys",
-            "block pairs",
-            "block sequence",
-            "block scalars",
-            "block properties",
-            "empty flow pairs",
-            "flow keys",
-            "flow explicit keys",
-            "flow explicit pairs",
-            "flow sequence",
-            "flow pairs in a sequence",
-            "explicit pairs in a sequence",
-            "empty keys in a sequence",
-        ] {
-            // Per-entry recursion, which this guards against, aborted below
-            // 5,000 entries in a release build and 1,000 in a debug build.
-            // CI runs this file in both builds.
-            let entries = if cfg!(debug_assertions) {
-                3_000
-            } else {
-                10_000
-            };
-            let input = wide(shape, entries);
-            let events = ayaml::parse_events_with_limits(&input, &limits)
-                .and_then(|stream| stream.collect::<Result<Vec<_>, _>>())
-                .unwrap_or_else(|error| panic!("{shape}: {error}"));
-            ayaml::to_string_events_with_limits(&events, &limits)
-                .unwrap_or_else(|error| panic!("{shape}, to_string_events: {error}"));
-            for (name, result) in limited_entry_points(&input, &limits)
-                .into_iter()
-                .chain(entry_points(&input))
-            {
-                if let Err(error) = result {
-                    // Owned decoding reports duplicates through Serde.
-                    let duplicate = error.kind() == ErrorKind::DuplicateKey
-                        || error.to_string().contains("duplicate");
-                    assert!(duplicate, "{shape}, {name}: {error}");
+    in_child("wide_collections_fit_a_small_stack", || {
+        on_small_stack(|| {
+            let limits = Limits::default();
+            for shape in [
+                "empty explicit keys",
+                "explicit pairs",
+                "block keys",
+                "block pairs",
+                "block sequence",
+                "block scalars",
+                "block properties",
+                "empty flow pairs",
+                "flow keys",
+                "flow explicit keys",
+                "flow explicit pairs",
+                "flow sequence",
+                "flow pairs in a sequence",
+                "explicit pairs in a sequence",
+                "empty keys in a sequence",
+            ] {
+                // Per-entry recursion, which this guards against, aborted below
+                // 5,000 entries in a release build and 1,000 in a debug build.
+                // CI runs this file in both builds.
+                let entries = if cfg!(debug_assertions) {
+                    3_000
+                } else {
+                    10_000
+                };
+                let input = wide(shape, entries);
+                let events = ayaml::parse_events_with_limits(&input, &limits)
+                    .and_then(|stream| stream.collect::<Result<Vec<_>, _>>())
+                    .unwrap_or_else(|error| panic!("{shape}: {error}"));
+                ayaml::to_string_events_with_limits(&events, &limits)
+                    .unwrap_or_else(|error| panic!("{shape}, to_string_events: {error}"));
+                for (name, result) in limited_entry_points(&input, &limits)
+                    .into_iter()
+                    .chain(entry_points(&input))
+                {
+                    if let Err(error) = result {
+                        // Owned decoding reports duplicates through Serde.
+                        let duplicate = error.kind() == ErrorKind::DuplicateKey
+                            || error.to_string().contains("duplicate");
+                        assert!(duplicate, "{shape}, {name}: {error}");
+                    }
                 }
             }
-        }
+        });
     });
 }
