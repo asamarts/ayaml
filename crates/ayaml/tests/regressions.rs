@@ -609,6 +609,27 @@ fn compat_owner_heuristic_ends_anchors_like_the_scanner() {
     assert_eq!(compat("&a:b: >\n x\n"), json!({ ":b": "x\n" }));
 }
 
+/// In a flow collection, compat mode keeps a `:` in an anchor or alias name, as default mode
+/// does. Ending the name there read `[&a:b]` as neither mode's grammar nor libyaml does, and
+/// refused an alias to that anchor, which default mode and libyaml both accept.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_keeps_a_colon_in_a_name_in_a_flow_collection() {
+    assert_eq!(compat("[&a:b]"), json!([null]));
+    assert_eq!(compat("[&a:b, *a:b]"), json!([null, null]));
+    for input in ["[&a:b]", "[&a:b, *a:b]", "{&a:!p {x}}", "{&a:b: c}"] {
+        let compat = ayaml::compat::from_str::<ayaml::Value>(input).expect("compat");
+        assert_eq!(
+            compat,
+            ayaml::parse_value(input).expect("default"),
+            "{input:?}"
+        );
+    }
+    // Outside a flow collection, the name still ends there, and what follows is a plain scalar.
+    assert_eq!(compat("&a:b"), json!(":b"));
+    assert_eq!(compat("- &a:b\n"), json!([":b"]));
+}
+
 /// By default, anchor names hold `:` and `?`, so these are anchored
 /// root scalars.
 #[test]

@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- In compat mode, a `:` followed by more text no longer ends an anchor or alias name in a flow
+  collection, which matches default mode. `[&a:b]` read as `[":b"]`, which is neither default
+  mode's reading nor libyaml's, and `[&a:b, *a:b]` was an error, though both of them accept it.
 - An alias now counts the tags of the node it names against the alias budget. It didn't, so an
   alias to a node with a long tag cost far more memory than the budget suggests: about 1 GiB from
   about 1 MiB of input. A document with many aliases to long tags may now need a higher

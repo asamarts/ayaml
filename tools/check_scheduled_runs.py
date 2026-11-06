@@ -29,7 +29,7 @@ WATCHED = ("fuzz.yml", "advisories.yml")
 # this one still reports a single missed run.
 WINDOW_HOURS = 36
 ISSUE_TITLE = "A scheduled workflow failed or stopped running"
-RUN_FIELDS = "conclusion,createdAt,status,url"
+RUN_FIELDS = "conclusion,createdAt,event,status,url"
 
 
 def problems(workflow: str, runs: list[dict], now: datetime) -> list[str]:
@@ -43,7 +43,11 @@ def problems(workflow: str, runs: list[dict], now: datetime) -> list[str]:
     return [
         f"{workflow} ended with {run['conclusion']}: {run['url']}"
         for run in recent
-        if run["status"] == "completed" and run["conclusion"] != "success"
+        # A run started by hand shows that the workflow still runs, but its result says
+        # only what that run was asked to do, so it opens no issue.
+        if run["event"] == "schedule"
+        and run["status"] == "completed"
+        and run["conclusion"] != "success"
     ]
 
 

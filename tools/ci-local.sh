@@ -424,6 +424,7 @@ job_leak-gate() {
 
 job_scheduled() {
   if ! command -v gh >/dev/null; then skip "gh not installed"; return; fi
+  if ! gh auth status >/dev/null 2>&1; then skip "gh not signed in"; return; fi
   step "scheduled workflows are healthy" python3 tools/check_scheduled_runs.py
 }
 

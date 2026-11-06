@@ -634,14 +634,16 @@ fn repeated_inputs(length: usize) -> Vec<String> {
 #[test]
 fn scanning_takes_time_linear_in_the_input() {
     in_child!(|| {
-        // On 8 times the length, a linear scan takes about 8 times as long and a quadratic one
-        // about 64 times, on any host. The limit sits between them, with room for a host's noise
-        // on either side. A scan this quick isn't compared, because the difference would be noise.
-        // Some quadratic scans take only seconds on this length, so a limit on the time alone
-        // misses them. The length stays within the normal peak of memory.
+        // One run on 8 times the length takes about as long as 8 runs on the short one if the scan
+        // is linear, and about 8 times as long if it's quadratic, on any host. Both take long enough
+        // that a busy host interrupts them alike, where a single short run could fit between its
+        // interruptions. The limit sits between those, with room for a host's noise on either
+        // side. A scan this quick isn't compared, because the difference would be noise. Some
+        // quadratic scans take only seconds on this length, so a limit on the time alone misses
+        // them. The length stays within the normal peak of memory.
         const LENGTH: usize = 1 << 19;
         const QUICK: Duration = Duration::from_millis(100);
-        const LARGEST_GROWTH: u32 = 24;
+        const LARGEST_RATIO: u32 = 3;
         const SLOWEST: Duration = Duration::from_secs(20);
         // On a busy host one run can take 10 times its share, so a scan has to look quadratic
         // through many runs before it counts. A real quadratic scan spends this budget and fails.
@@ -665,24 +667,25 @@ fn scanning_takes_time_linear_in_the_input() {
         for (short, long) in shorter.iter().zip(repeated_inputs(LENGTH)) {
             let name: String = long.chars().take(30).collect();
             for (reader, read) in &readers {
-                let mut short_time = Duration::MAX;
+                let mut shorts_time = Duration::MAX;
                 let mut long_time = Duration::MAX;
                 let started = Instant::now();
                 // Each best time drops any pause the host took, so it takes a real scan to fail.
                 for _ in 0..TRIES {
-                    short_time = short_time.min(timed(read, short));
                     long_time = long_time.min(timed(read, &long));
-                    if long_time < QUICK
-                        || long_time < short_time * LARGEST_GROWTH
-                        || started.elapsed() > RETRY_BUDGET
-                    {
+                    if long_time < QUICK {
+                        break;
+                    }
+                    shorts_time = shorts_time.min((0..8).map(|_| timed(read, short)).sum());
+                    if long_time < shorts_time * LARGEST_RATIO || started.elapsed() > RETRY_BUDGET {
                         break;
                     }
                 }
                 assert!(long_time < SLOWEST, "{reader}: {name:?}: {long_time:?}");
                 assert!(
-                    long_time < QUICK || long_time < short_time * LARGEST_GROWTH,
-                    "{reader}: {name:?}: {short_time:?}, then {long_time:?} on 8 times the length",
+                    long_time < QUICK || long_time < shorts_time * LARGEST_RATIO,
+                    "{reader}: {name:?}: {shorts_time:?} for 8 short runs, then {long_time:?} for \
+                     one on 8 times the length",
                 );
             }
         }
