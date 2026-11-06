@@ -50,6 +50,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   flow collection, on a plain scalar with many lines after a long prefix or after a run of byte
   order marks, or on many byte order marks in a document prefix. An 800 KB input of those could take over a minute,
   and the default limit allows 32 MiB.
+- `Limits` now bounds what tag handles expand to. Every tag written with a handle holds its own
+  copy of the handle's prefix, so one long `%TAG` prefix and many short tags could use memory far
+  beyond the input: about 1 MiB of input could reach 2 GiB, with no limit applying. The new
+  `Limits::max_tag_expansion_bytes`, 64 MiB by default, counts each use across a stream, and going
+  over it is `LimitKind::TagExpansion`.
 
 ## [0.1.1] — 2026-11-04
 

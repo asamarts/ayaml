@@ -183,6 +183,10 @@ fn limit_errors_carry_a_source_span() {
         ("a: 1\n", ayaml::Limits::default().with_max_events(1)),
         ("a: &x 1\n", ayaml::Limits::default().with_max_anchors(0)),
         (
+            "!!str a\n",
+            ayaml::Limits::default().with_max_tag_expansion_bytes(1),
+        ),
+        (
             "- a\n- b\n",
             ayaml::Limits::default().with_max_collection_entries(1),
         ),
@@ -1915,4 +1919,53 @@ fn a_handle_expanding_to_a_core_name_is_that_core_tag() {
     assert!(!ayaml::Tag::new("tag:yaml.org,", "2003:str").is_core());
     assert!(!ayaml::Tag::new("tag:", "example.com:x").is_core());
     assert_eq!(ayaml::Tag::new("", "!x"), ayaml::Tag::local("x"));
+}
+
+#[test]
+fn tag_handles_count_against_their_limit_at_each_use() {
+    let prefix = "tag:e.com,2000:";
+    let tags = |count: usize| format!("%TAG !e! {prefix}\n---\n{}", "- !e!x a\n".repeat(count));
+    let at_most = |bytes: usize| Limits::default().with_max_tag_expansion_bytes(bytes);
+    let limit_of = |error: ayaml::Error| {
+        assert_eq!(error.kind(), ErrorKind::Limit, "{error}");
+        assert!(error.span().is_some(), "{error}");
+        let limit = error.limit().expect("a limit");
+        assert_eq!(limit.kind(), ayaml::LimitKind::TagExpansion);
+        (limit.limit(), limit.observed())
+    };
+    let over = |input: &str, limits: &Limits| {
+        limit_of(ayaml::parse_value_with_limits(input, limits).expect_err(input))
+    };
+
+    // Below and at the limit, then one use above it.
+    let three = 3 * prefix.len();
+    ayaml::parse_value_with_limits(&tags(3), &at_most(three + 1)).expect("below");
+    ayaml::parse_value_with_limits(&tags(3), &at_most(three)).expect("at");
+    assert_eq!(
+        over(&tags(4), &at_most(three)),
+        (three as u64, (three + prefix.len()) as u64)
+    );
+
+    // The built-in handles count too, and a verbatim tag doesn't.
+    let core = "tag:yaml.org,2002:".len();
+    over("!!str a\n", &at_most(core - 1));
+    ayaml::parse_value_with_limits("!!str a\n", &at_most(core)).expect("at");
+    over("!x a\n", &at_most(0));
+    ayaml::parse_value_with_limits("!<tag:e.com,2000:x> a\n", &at_most(0)).expect("verbatim");
+    ayaml::parse_value_with_limits("! a\n", &at_most(0)).expect("non-specific");
+
+    // The count covers the stream, not one document.
+    let stream = format!("%TAG !e! {prefix}\n--- !e!x a\n...\n%TAG !e! {prefix}\n--- !e!x a\n");
+    ayaml::parse_documents_with_limits(&stream, &at_most(2 * prefix.len())).expect("at");
+    limit_of(
+        ayaml::parse_documents_with_limits(&stream, &at_most(2 * prefix.len() - 1))
+            .expect_err("over the limit"),
+    );
+
+    // The typed cursor sees it too, and the default leaves room for ordinary use.
+    let input = tags(4);
+    let mut cursor =
+        ayaml::Deserializer::from_str_with_limits(&input, &at_most(three)).expect("start");
+    limit_of(cursor.next::<Value>().expect_err("over the limit"));
+    ayaml::parse_value(&tags(10_000)).expect("default");
 }
