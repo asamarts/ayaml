@@ -10,9 +10,11 @@
 # does not change build parallelism. Logs go to target/ci-local/<sha>/.
 #
 # Test steps get 8 GiB of address space per process and a 30-minute timeout that kills the
-# step's whole process group, and the `bounds` job checks both. Fuzz steps get only the timeout,
-# because a sanitizer build reserves far more address space, and libFuzzer limits their memory.
-# This needs Linux and GNU `timeout`. Elsewhere test steps fail, because they can't be bounded.
+# step's whole process group, and a signal to this script ends the running step too. The
+# `bounds` job checks all of that. Fuzz steps, the instruction counts, and the consumer smoke
+# get only the timeout. A sanitizer build reserves far more address space, and libFuzzer limits
+# its memory; the other two run the parser on small, fixed inputs.
+# This needs Linux and GNU `timeout`. Elsewhere those steps fail, because they can't be bounded.
 #
 # Only hosted CI runs macOS and Windows, semver checks, minimal versions, the secret
 # scan, and the check of a pull request's title and body. Only this script runs the
@@ -36,7 +38,7 @@ jobs=()
 for arg in "$@"; do
   case "$arg" in
     --list) printf '%s\n' "${ALL_JOBS[@]}"; exit 0 ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
     -*) echo "unknown option: $arg" >&2; exit 2 ;;
     *) jobs+=("$arg") ;;
   esac
@@ -56,23 +58,59 @@ declare -A status
 declare -A skipped
 current=""
 job_failed=0
+step_limit=""
+step_pid=""
 
-# step NAME CMD... — run one command, log it, and mark the job failed on error.
+# A timed step runs in the process group that `timeout` starts for it, where Ctrl-C from the
+# terminal can't reach it, so a signal to this script has to be passed on.
+end_on_signal() {
+  if [ -n "$step_pid" ]; then
+    kill -TERM "$step_pid" 2>/dev/null
+    wait "$step_pid" 2>/dev/null
+    kill -KILL -- "-$step_pid" 2>/dev/null
+  fi
+  exit "$1"
+}
+trap 'end_on_signal 129' HUP
+trap 'end_on_signal 130' INT
+trap 'end_on_signal 143' TERM
+
+# step NAME CMD... — run one command, log it, and mark the job failed on error. If step_limit
+# is set, the command starts `timeout` with that many seconds, and it ends the step's process
+# group. It runs in the background so that this script can still take a signal, and whatever
+# it left in that group is killed after it, even if a process there ignored the timeout's TERM.
 step() {
   local name="$1"
   shift
-  local log="$logdir/$current.log" why=""
+  local log="$logdir/$current.log" why="" limit="$step_limit" code=0
+  step_limit=""
   printf '  %-58s ' "$name"
   local s=$SECONDS
   {
     printf '\n### %s\n$ %s\n' "$name" "$*"
   } >>"$log"
-  if nice -n 10 "$@" >>"$log" 2>&1; then
+  if [ -n "$limit" ]; then
+    nice -n 10 "$@" >>"$log" 2>&1 </dev/null &
+    step_pid=$!
+    wait "$step_pid"
+    code=$?
+    kill -KILL -- "-$step_pid" 2>/dev/null
+    step_pid=""
+  else
+    nice -n 10 "$@" >>"$log" 2>&1 || code=$?
+  fi
+  if [ "$code" -eq 0 ]; then
     printf 'ok   (%ss)\n' "$((SECONDS - s))"
   else
-    case $? in
-      124 | 137) why=", timed out" ;;
-      125) why=", couldn't set its bounds" ;;
+    case $code in
+      124 | 137)
+        if [ -n "$limit" ] && [ "$((SECONDS - s))" -ge "$limit" ]; then
+          why=", timed out"
+        elif [ "$code" -eq 137 ]; then
+          why=", killed"
+        fi
+        ;;
+      125) [ -n "$limit" ] && why=", couldn't set its bounds" ;;
     esac
     printf 'FAIL (%ss%s) — see %s\n' "$((SECONDS - s))" "$why" "${log#"$ROOT"/}"
     job_failed=1
@@ -86,8 +124,8 @@ shstep() {
 }
 
 # bound SECONDS: fill BOUNDED with the command that bounds a test step. GNU timeout starts the
-# step in a new process group and signals that whole group, so nothing it started outlives it.
-# A lower address-space limit that's already set stays.
+# step in a new process group and signals that whole group. A lower address-space limit that's
+# already set stays.
 bound() {
   BOUNDED=(timeout -k 10 "$1" bash -c '
     [ "$(ulimit -v)" != unlimited ] && [ "$(ulimit -v)" -le "$1" ] || ulimit -v "$1" || exit 125
@@ -100,7 +138,16 @@ test_step() {
   local name="$1"
   shift
   bound "$TEST_TIMEOUT_SECONDS"
+  step_limit=$TEST_TIMEOUT_SECONDS
   step "$name" "${BOUNDED[@]}" "$@"
+}
+
+# timed_step NAME CMD...: like test_step, with only the timeout.
+timed_step() {
+  local name="$1"
+  shift
+  step_limit=$TEST_TIMEOUT_SECONDS
+  step "$name" timeout -k 10 "$TEST_TIMEOUT_SECONDS" "$@"
 }
 
 # skip REASON: part or all of the current job couldn't run. The summary says so, so
@@ -130,22 +177,51 @@ job_sync() {
     exit $missing'
 }
 
+# Whether process $1 has ended, for the checks in job_bounds.
+GONE='
+gone() {
+  [ -n "$1" ] || { echo "no process id to check"; return 1; }
+  state="$(sed -n "s/^State:[[:space:]]*//p" "/proc/$1/status" 2>/dev/null)"
+  case "$state" in
+    "" | Z*) return 0 ;;
+  esac
+  echo "a process the step started is still running: $state"
+  kill "$1"
+  return 1
+}
+'
+
 # The bounds themselves. A timeout that killed only the shell once left a test binary running.
 job_bounds() {
-  test_step "a test step has the ceiling" bash -c '[ "$(ulimit -v)" = "$1" ]' ceiling "$TEST_ADDRESS_SPACE_KIB"
+  test_step "a test step has the ceiling" bash -c '[ "$(ulimit -v)" -le "$1" ]' ceiling "$TEST_ADDRESS_SPACE_KIB"
   bound 2
-  step "a timeout kills the whole process group" bash -c '
+  step "a timeout kills the whole process group" bash -c "$GONE"'
     pid_file="$1"
     shift
+    rm -f "$pid_file"
     "$@" bash -c "sleep 300 & echo \$! >\"$pid_file\"; wait"
     [ "$?" -eq 124 ] || { echo "the step did not time out"; exit 1; }
     sleep 1
-    pid="$(cat "$pid_file")"
-    state="$(ps -o stat= -p "$pid")"
-    case "$state" in
-      "" | Z*) ;;
-      *) echo "a process the step started is still running: $state"; kill "$pid"; exit 1 ;;
-    esac' group "$logdir/bounds-sleeper.pid" "${BOUNDED[@]}"
+    gone "$(cat "$pid_file")"' group "$logdir/bounds-sleeper.pid" "${BOUNDED[@]}"
+  step "a signal ends a test step and this script" bash -c "$GONE"'
+    pid_file="$2"
+    rm -f "$pid_file"
+    "$1" signal-target >/dev/null 2>&1 &
+    script=$!
+    for _ in $(seq 100); do
+      [ -s "$pid_file" ] && break
+      sleep 0.1
+    done
+    kill -TERM "$script"
+    wait "$script"
+    [ "$?" -eq 143 ] || { echo "this script did not end on the signal"; exit 1; }
+    sleep 1
+    gone "$(cat "$pid_file")"' signal "$0" "$logdir/bounds-signal.pid"
+}
+
+# Not in ALL_JOBS: a test step for job_bounds to end with a signal.
+job_signal-target() {
+  test_step "wait for a signal" bash -c 'sleep 300 & echo $! >"$1"; wait' wait "$logdir/bounds-signal.pid"
 }
 
 quality() {
@@ -208,7 +284,7 @@ job_harness() {
 job_instructions() {
   if ! command -v valgrind >/dev/null; then skip "valgrind not installed"; return; fi
   if ! git rev-parse --verify --quiet origin/main >/dev/null; then skip "origin/main is not available"; return; fi
-  step "instruction counts against origin/main" python3 tools/check_instructions.py origin/main
+  timed_step "instruction counts against origin/main" python3 tools/check_instructions.py origin/main
   # Mirrors: python3 tools/check_instructions.py "$BASE_SHA"
 }
 
@@ -277,7 +353,7 @@ fn main() {
 }
 EOF
   cp Cargo.lock "$work/consumer/Cargo.lock" 2>/dev/null || true
-  step "downstream consumer smoke" cargo run --quiet --offline --manifest-path "$work/consumer/Cargo.toml" --target-dir "$work/target"
+  timed_step "downstream consumer smoke" cargo run --quiet --offline --manifest-path "$work/consumer/Cargo.toml" --target-dir "$work/target"
   rm -rf "$work"
 }
 
@@ -304,7 +380,7 @@ job_fuzz-smoke() {
   fi
   local TARGET
   for TARGET in parse emit borrowed; do
-    step "fuzz $TARGET (60 s)" timeout -k 10 "$TEST_TIMEOUT_SECONDS" cargo +nightly fuzz run "$TARGET" --target x86_64-unknown-linux-gnu -- -max_total_time=60
+    timed_step "fuzz $TARGET (60 s)" cargo +nightly fuzz run "$TARGET" --target x86_64-unknown-linux-gnu -- -max_total_time=60
     # Mirrors: cargo fuzz run TARGET --target x86_64-unknown-linux-gnu -- -max_total_time=60
   done
 }
