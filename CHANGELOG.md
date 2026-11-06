@@ -18,6 +18,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   anchor if there was one, so `a: &x 1\nb: &x [*x]` read `b` as `[1]`. It's also a clearer
   error where it was already one: the message now says the alias refers to a collection that
   contains it, not that the anchor is unknown.
+- A plain flow mapping key followed by blank lines before its `:` no longer keeps line
+  breaks, so the key in `{x\n\n: y}` is now `x`, not `x\n`. The change applies with and
+  without an explicit `?`.
+- In default mode, a flow collection's or quoted scalar's lines may start at column 0, or be
+  indented with tabs alone, exactly when it's a document's root node or is nested in one. So
+  `[[x\n, y]]`, `!!seq [x\n, y]`, `  'a\nb'`, and `[\n\ta\n]` now parse. Under a block
+  collection those lines have to be indented, wherever the node starts, so `k: {x\n: y}`,
+  `k:\n  [\na\n  ]`, and `---k: 'a\nb'` are now errors. Compat mode still reads the first two.
+  A comment line is exempt in every position, so `k: [\n# c\n  a\n  ]` now parses.
 
 ## [0.1.1] — 2026-11-04
 

@@ -1432,3 +1432,127 @@ fn an_alias_refers_to_the_nearest_preceding_anchor() {
         }
     }
 }
+
+/// Line breaks between a plain flow key and its `:` aren't part of the key.
+#[test]
+fn flow_keys_keep_no_line_breaks_before_their_colon() {
+    for (_, read) in value_readers() {
+        for (input, expected) in [
+            ("{x\n\n: y}\n", "{x: y}\n"),
+            ("{x\n\n\n: y}\n", "{x: y}\n"),
+            ("{x \n \n : y}\n", "{x: y}\n"),
+            ("{? x\n\n: y}\n", "{x: y}\n"),
+            ("{x\n\n:}\n", "{x: null}\n"),
+            ("{x\n\n:\n}\n", "{x: null}\n"),
+            ("{x\ny\n\n: z}\n", "{x y: z}\n"),
+            ("{x\n\ny\n\n: z}\n", "{\"x\\ny\": z}\n"),
+            ("{k: {x\n\n : y}}\n", "{k: {x: y}}\n"),
+            // One line break was already right, and a line break inside a key still folds.
+            ("{x\n: y}\n", "{x: y}\n"),
+            ("{? x\n\n  y\n: z}\n", "{\"x\\ny\": z}\n"),
+            // A colon that isn't an indicator continues the scalar.
+            ("{x\n\n:y: z}\n", "{\"x\\n:y\": z}\n"),
+        ] {
+            let expected = ayaml::parse_value(expected).unwrap();
+            assert_eq!(read(input).unwrap(), expected, "{input:?}");
+        }
+    }
+    // A block mapping key can't span lines at all.
+    assert!(ayaml::parse_value("x\n\n: y\n").is_err());
+    assert_eq!(
+        ayaml::parse_value("? x\n\n: y\n").unwrap(),
+        ayaml::parse_value("{x: y}\n").unwrap()
+    );
+}
+
+#[test]
+fn only_a_root_flow_node_may_continue_at_column_zero() {
+    for (name, read) in value_readers() {
+        for (input, expected) in [
+            // Nested in a root flow collection.
+            ("[{x\n: y}]\n", "[{x: y}]\n"),
+            ("{k: {x\n: y}}\n", "{k: {x: y}}\n"),
+            ("[[x\n, y]]\n", "[[x, y]]\n"),
+            ("[[\nx\n]]\n", "[[x]]\n"),
+            // With properties, past column 0, or on a `---` line.
+            ("!!map {x\n: y}\n", "{x: y}\n"),
+            ("&a {x\n: y}\n", "{x: y}\n"),
+            ("!!map &a\n{x\n: y}\n", "{x: y}\n"),
+            ("  {x\n: y}\n", "{x: y}\n"),
+            ("  !!seq [x\n, y]\n", "[x, y]\n"),
+            ("--- !!map {x\n: y}\n", "{x: y}\n"),
+            ("%YAML 1.2\n---\n[\nx\n]\n", "[x]\n"),
+            // Tabs alone.
+            ("{x\n\t: y}\n", "{x: y}\n"),
+            ("{x\n\t, y}\n", "{x: null, y: null}\n"),
+            ("[\n\ta,\n\tb\n]\n", "[a, b]\n"),
+            ("[[\n\ta\n]]\n", "[[a]]\n"),
+            ("!!str 'a\n\tb'\n", "a b\n"),
+            // Quoted scalars.
+            ("'a\nb'\n", "a b\n"),
+            ("  'a\nb'\n", "a b\n"),
+            ("  \"a\nb\"\n", "a b\n"),
+            ("!!str 'a\nb'\n", "a b\n"),
+            ("--- 'a\nb'\n", "a b\n"),
+            ("[ 'a\nb' ]\n", "[a b]\n"),
+            ("{k: \"a\nb\"}\n", "{k: a b}\n"),
+            // Under a block collection, an indented line is still right.
+            ("k: {x\n : y}\n", "{k: {x: y}}\n"),
+            ("k:\n  [\n a\n  ]\n", "{k: [a]}\n"),
+            ("k: [[x\n , y]]\n", "{k: [[x, y]]}\n"),
+            ("k:\n  'a\n  b'\n", "{k: a b}\n"),
+            ("k: 'a\n b'\n", "{k: a b}\n"),
+            // A comment line may start anywhere.
+            ("k:\n  [\n# c\n    a\n  ]\n", "{k: [a]}\n"),
+            ("k:\n  {\n# c\n    a: b\n  }\n", "{k: {a: b}}\n"),
+            ("- \n  [\n# c\n    a\n  ]\n", "[[a]]\n"),
+            ("k:\n  [\n    a\n# c\n  ]\n", "{k: [a]}\n"),
+            ("k:\n  [\n    a, # c\n# d\n    b\n  ]\n", "{k: [a, b]}\n"),
+            ("k: [\n# c\n  a\n  ]\n", "{k: [a]}\n"),
+            ("k: [\n\t# c\n  a\n  ]\n", "{k: [a]}\n"),
+        ] {
+            let expected = ayaml::parse_value(expected).unwrap();
+            assert_eq!(read(input).unwrap(), expected, "{name}: {input:?}");
+        }
+        // Compat keeps libyaml's looser rule for these.
+        if name.starts_with("compat") {
+            continue;
+        }
+        for input in [
+            "k: {x\n: y}\n",
+            "k: [{x\n: y}]\n",
+            "k: !!map {x\n: y}\n",
+            "- {x\n: y}\n",
+            "? {x\n: y}\n",
+            "k:\n  [\na\n  ]\n",
+            "k:\n  {x\n, y}\n",
+            "k:\n  !!seq [\na\n  ]\n",
+            "k: [\n\ta\n]\n",
+            "- [\n\ta\n]\n",
+            "k: 'a\nb'\n",
+            "k:\n  'a\n b'\n",
+            "---k: 'a\nb'\n",
+            "...k: 'a\nb'\n",
+        ] {
+            assert!(read(input).is_err(), "{name}: {input:?}");
+        }
+    }
+    // A document marker starts the rule again, and a later document's root node has it too.
+    let documents =
+        ayaml::parse_documents("k: v\n--- [\nx\n]\n...\n[\ny\n]\n--- 'a\nb'\n").unwrap();
+    assert_eq!(documents.len(), 4, "{documents:?}");
+    assert!(ayaml::parse_documents("[a]\n--- k: {x\n: y}\n").is_err());
+}
+
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_keeps_reading_flow_lines_at_column_zero() {
+    for (input, expected) in [
+        ("k: {x\n: y}\n", "{k: {x: y}}\n"),
+        ("k:\n  [\na\n  ]\n", "{k: [a]}\n"),
+        ("[[x\n, y]]\n", "[[x, y]]\n"),
+    ] {
+        let read: Value = ayaml::compat::from_str(input).unwrap();
+        assert_eq!(read, ayaml::parse_value(expected).unwrap(), "{input:?}");
+    }
+}
