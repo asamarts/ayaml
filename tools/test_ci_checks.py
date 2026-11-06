@@ -4,10 +4,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import io
 import json
 import os
 from pathlib import Path
+import shutil
+import stat
+import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -206,6 +211,136 @@ class ScheduledRuns(unittest.TestCase):
             self.assertEqual(check_scheduled_runs.main([]), 2)
         with mock.patch("builtins.print"):
             self.assertEqual(check_scheduled_runs.main(["--wrong"]), 2)
+
+
+SECRET = "input-only-the-maintainer-should-read"
+
+
+def fake_tool(directory: Path, name: str, body: str) -> None:
+    path = directory / name
+    path.write_text("#!/bin/sh\n" + body)
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+class FuzzHostedTests(unittest.TestCase):
+    """What `tools/fuzz-hosted.sh` lets out of a run, with `cargo` and sometimes `age` faked."""
+
+    def setUp(self) -> None:
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        (self.root / "tools").mkdir()
+        here = Path(__file__).resolve().parent
+        shutil.copy(here / "fuzz-hosted.sh", self.root / "tools")
+        shutil.copy(here / "fuzz-crash-recipient.txt", self.root / "tools")
+        self.output = self.root / "sealed"
+
+    def fuzzer(self, status: int, crash: bool = True) -> None:
+        artifact = (
+            f"mkdir -p fuzz/artifacts/parse; printf %s {SECRET} > fuzz/artifacts/parse/crash-abc\n"
+            if crash
+            else ""
+        )
+        fake_tool(
+            self.bin,
+            "cargo",
+            f"{artifact}echo 'Base64: {SECRET}'\necho 'stat::number_of_executed_units: 123'\n"
+            f"exit {status}\n",
+        )
+
+    def run_script(self) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["bash", str(self.root / "tools/fuzz-hosted.sh"), "parse", "60", str(self.output)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"},
+            check=False,
+        )
+
+    def assert_nothing_plain_left(self, result: subprocess.CompletedProcess) -> None:
+        self.assertNotIn(SECRET, result.stdout + result.stderr)
+        self.assertFalse((self.root / "fuzz/artifacts/parse").exists())
+        for path in self.root.rglob("*"):
+            if path.is_file() and path.parent not in (self.bin, self.root / "tools"):
+                self.assertNotIn(SECRET.encode(), path.read_bytes(), path)
+
+    def test_a_clean_run_reports_its_count_and_keeps_nothing(self) -> None:
+        self.fuzzer(0, crash=False)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "target=parse exit=0 runs=123\n")
+        self.assertFalse(self.output.exists())
+
+    def test_a_crash_keeps_its_exit_status_and_prints_no_input(self) -> None:
+        self.fuzzer(77)
+        fake_tool(self.bin, "age", 'while [ "$1" != -o ]; do shift; done; echo sealed > "$2"\n')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 77)
+        self.assertIn("target=parse exit=77 runs=123\n", result.stdout)
+        self.assertIn("encrypted=fuzz-parse.tar.gz.age sha256=", result.stdout)
+        self.assert_nothing_plain_left(result)
+
+    def test_a_failed_encryption_keeps_nothing(self) -> None:
+        self.fuzzer(77)
+        fake_tool(self.bin, "age", 'while [ "$1" != -o ]; do shift; done; echo part > "$2"; exit 1\n')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 77)
+        self.assertIn("nothing was kept", result.stderr)
+        self.assertEqual(list(self.output.iterdir()), [])
+        self.assert_nothing_plain_left(result)
+
+    def test_a_failure_with_no_crash_file_still_hides_the_log(self) -> None:
+        self.fuzzer(1, crash=False)
+        fake_tool(self.bin, "age", 'while [ "$1" != -o ]; do shift; done; echo sealed > "$2"\n')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue((self.output / "fuzz-parse.tar.gz.age").exists())
+        self.assert_nothing_plain_left(result)
+
+    def test_a_bad_target_name_is_refused(self) -> None:
+        result = subprocess.run(
+            ["bash", str(self.root / "tools/fuzz-hosted.sh"), "../..", "60", str(self.output)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+
+    def test_a_fuzzing_stat_line_cannot_carry_text(self) -> None:
+        fake_tool(
+            self.bin,
+            "cargo",
+            f"echo 'stat::number_of_executed_units: {SECRET}'\nexit 0\n",
+        )
+        result = self.run_script()
+        self.assertEqual(result.stdout, "target=parse exit=0 runs=unknown\n")
+
+    @unittest.skipUnless(shutil.which("age") and shutil.which("age-keygen"), "needs age")
+    def test_the_maintainer_can_read_it_back_with_the_key(self) -> None:
+        self.fuzzer(77)
+        key = self.root / "key.txt"
+        subprocess.run(["age-keygen", "-o", str(key)], capture_output=True, check=True)
+        recipient = subprocess.run(
+            ["age-keygen", "-y", str(key)], capture_output=True, text=True, check=True
+        ).stdout
+        (self.root / "tools/fuzz-crash-recipient.txt").write_text(recipient)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 77)
+        self.assertNotIn(SECRET, result.stdout + result.stderr)
+        plain = subprocess.run(
+            ["age", "-d", "-i", str(key), str(self.output / "fuzz-parse.tar.gz.age")],
+            capture_output=True,
+            check=True,
+        ).stdout
+        with tarfile.open(fileobj=io.BytesIO(plain)) as archive:
+            names = archive.getnames()
+            crash = archive.extractfile("parse/crash-abc").read().decode()
+            log = archive.extractfile("fuzz.log").read().decode()
+        self.assertIn("fuzz.log", names)
+        self.assertEqual(crash, SECRET)
+        self.assertIn(SECRET, log)
 
 
 if __name__ == "__main__":
