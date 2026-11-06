@@ -6,7 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-No changes that users can see yet.
+### Fixed
+
+- In compat mode, a byte order mark at the start of a line no longer loses the text after
+  it. After a root block scalar, the line is now outside the scalar, so `|\nx\n\u{FEFF}y`
+  is an error instead of `"x\n"`, and `|+\nx\n\u{FEFF}\n` keeps one line break, not two.
+  After a root plain scalar, the line continues the scalar whatever it holds, so
+  `n\n\u{FEFF}#:` is an error instead of `n`, and `n\n\u{FEFF} #:` is `"n \u{FEFF}"`.
 
 ## [0.1.1] — 2026-11-04
 
