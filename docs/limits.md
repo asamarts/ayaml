@@ -40,7 +40,9 @@ cannot multiply the alias budget without bound.
 
 Every tag written with a handle holds its own copy of the prefix that handle stands for, so
 `max_tag_expansion_bytes` counts the whole prefix at each use, in `%TAG` handles and the built-in
-`!` and `!!` alike. A tag written verbatim costs what its text costs, so it doesn't count.
+`!` and `!!` alike. A tag written verbatim costs what its text costs, so it doesn't count. An alias
+copies the tags of the node it names, and those bytes count against the alias budget with the rest
+of the copy.
 
 ## Single document versus stream
 

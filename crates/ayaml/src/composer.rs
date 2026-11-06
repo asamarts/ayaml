@@ -74,7 +74,9 @@ fn estimate_size(value: &Value, node_cost: usize) -> usize {
             size.saturating_add(estimate_size(key, node_cost))
                 .saturating_add(estimate_size(value, node_cost))
         }),
-        Value::Tagged(tagged) => node_cost.saturating_add(estimate_size(&tagged.value, node_cost)),
+        Value::Tagged(tagged) => node_cost
+            .saturating_add(tagged.tag.text_len())
+            .saturating_add(estimate_size(&tagged.value, node_cost)),
     }
 }
 
@@ -441,13 +443,14 @@ impl<'a> StreamingComposer<'a> {
         Ok((self.documents, self.budget))
     }
 
-    /// Tag a finished collection; a tag adds one node to its size estimate.
+    /// Tag a finished collection; a tag adds one node and its text to the size estimate.
     fn finish_collection(&self, tag: Option<&Tag>, value: Value, size: usize) -> (Value, usize) {
         let value = apply_tag(tag, value);
-        let size = if value.is_tagged() {
-            size.saturating_add(self.limits.node_cost_bytes)
-        } else {
-            size
+        let size = match &value {
+            Value::Tagged(tagged) => size
+                .saturating_add(self.limits.node_cost_bytes)
+                .saturating_add(tagged.tag.text_len()),
+            _ => size,
         };
         (value, size)
     }

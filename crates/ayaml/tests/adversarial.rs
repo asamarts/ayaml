@@ -702,6 +702,58 @@ fn a_long_tag_prefix_cannot_multiply_memory() {
     });
 }
 
+#[test]
+fn an_alias_cannot_multiply_a_long_tag() {
+    in_child!(|| {
+        // One node with a long tag and many aliases that each copy the tag. If an alias weren't
+        // charged for it, this would reach gigabytes from about 1 MiB of input. The budget is
+        // below the default so that the rejection comes well under this child's peak.
+        const ALIASES: usize = 4_000;
+        let long = "e".repeat(1 << 20);
+        let aliases = "- *x\n".repeat(ALIASES);
+        let limits = Limits::default().with_max_alias_expansion_bytes(8 << 20);
+        let inputs = [
+            format!("%TAG !e! tag:{long}:\n---\n- &x !e!v a\n{aliases}"),
+            format!("---\n- &x !<tag:{long}:v> a\n{aliases}"),
+            format!("---\n- &x !<tag:{long}:v> [a]\n{aliases}"),
+            format!("---\n- &x !<tag:{long}:v> {{a: b}}\n{aliases}"),
+            format!(
+                "---\n- &x {{a: !<tag:{long}:v> b}}\n{}",
+                "- {<<: *x}\n".repeat(ALIASES)
+            ),
+        ];
+        for input in &inputs {
+            let cursor = ayaml::Deserializer::from_str_with_limits(input, &limits)
+                .and_then(|mut cursor| cursor.next::<Value>().map(drop));
+            for (entry_point, result) in [
+                (
+                    "parse_value",
+                    ok(ayaml::parse_value_with_limits(input, &limits)),
+                ),
+                (
+                    "parse_documents",
+                    ok(ayaml::parse_documents_with_limits(input, &limits)),
+                ),
+                (
+                    "from_str_borrowed",
+                    ok(ayaml::from_str_borrowed_with_limits::<Value>(
+                        input, &limits,
+                    )),
+                ),
+                ("Deserializer::next", cursor),
+            ] {
+                let error = result.expect_err(entry_point);
+                let limit = error.limit().map(ayaml::LimitExceeded::kind);
+                assert_eq!(
+                    limit,
+                    Some(ayaml::LimitKind::AliasExpansion),
+                    "{entry_point}: {error}"
+                );
+            }
+        }
+    });
+}
+
 const SHAPES: [&str; 6] = [
     "flow sequence",
     "flow mapping",

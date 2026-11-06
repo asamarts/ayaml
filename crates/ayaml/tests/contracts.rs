@@ -2031,3 +2031,41 @@ fn compat_reports_a_scanner_error_as_itself() {
         assert!(error.message().contains(message), "{input:?}: {error}");
     }
 }
+
+/// A tag that an alias copies counts with the rest of the copy, however the tag is written and
+/// wherever it sits in the node the alias names.
+#[test]
+fn an_alias_is_charged_for_the_tags_it_copies() {
+    let long = "e".repeat(1_000);
+    let tight = Limits::default()
+        .with_max_alias_expansion_bytes(100)
+        .with_alias_bytes_per_input_byte(0);
+    for input in [
+        format!("%TAG !e! tag:{long}:\n---\n- &x !e!v a\n- *x\n"),
+        format!("- &x !<tag:{long}:v> a\n- *x\n"),
+        format!("- &x !<tag:{long}:v> [a]\n- *x\n"),
+        format!("- &x !<tag:{long}:v> {{a: b}}\n- *x\n"),
+        format!("- &x {{a: !<tag:{long}:v> b}}\n- *x\n"),
+        format!("- &x [!<tag:{long}:v> [a]]\n- *x\n"),
+        format!("- &x {{!<tag:{long}:v> k: v}}\n- {{<<: *x}}\n"),
+    ] {
+        let cursor = ayaml::Deserializer::from_str_with_limits(&input, &tight)
+            .and_then(|mut cursor| cursor.next::<Value>().map(drop));
+        for error in [
+            ayaml::parse_value_with_limits(&input, &tight).map(drop),
+            ayaml::from_str_borrowed_with_limits::<Value>(&input, &tight).map(drop),
+            cursor,
+        ]
+        .map(|result| result.expect_err(&input))
+        {
+            let limit = error.limit().expect("a limit");
+            assert_eq!(limit.kind(), ayaml::LimitKind::AliasExpansion, "{error}");
+            assert!(limit.observed() > 1_000, "{error}");
+        }
+        ayaml::parse_value(&input).expect("the default leaves room for this");
+    }
+    assert_eq!(
+        ayaml::MAX_TAG_EXPANSION_BYTES,
+        Limits::default().max_tag_expansion_bytes
+    );
+}

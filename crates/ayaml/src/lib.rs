@@ -123,7 +123,7 @@ pub use event::{Anchor, CollectionStyle, Event, ScalarStyle};
 pub use limits::{
     ALIAS_BYTES_PER_INPUT_BYTE, COMPAT_MAX_DOCUMENTS, DEFAULT_MAX_DOCUMENTS, LimitExceeded,
     LimitKind, Limits, MAX_ALIAS_EXPANSION_BYTES, MAX_DEPTH, MAX_DEPTH_CAP, MAX_INPUT_BYTES,
-    NODE_COST_BYTES,
+    MAX_TAG_EXPANSION_BYTES, NODE_COST_BYTES,
 };
 pub use mapping::{Entry, Mapping};
 pub use number::Number;

@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An alias now counts the tags of the node it names against the alias budget. It didn't, so an
+  alias to a node with a long tag cost far more memory than the budget suggests: about 1 GiB from
+  about 1 MiB of input. A document with many aliases to long tags may now need a higher
+  `max_alias_expansion_bytes`.
 - In compat mode, a scanner error is no longer reported as a recursion limit because the
   input has an anchor followed by an alias of the same name somewhere. `&a *a\n@` now reports
   the `@`, with the scanner's error kind rather than `ErrorKind::Limit`.
