@@ -26,7 +26,7 @@ const CHILD: &str = "AYAML_ADVERSARIAL_CHILD";
 const ADDRESS_SPACE_KIB: u64 = 1 << 20;
 
 /// The most memory a child may have held when its body ends, in KiB. The tests here peak below
-/// 200 MiB, so this catches a regression too small to reach the address-space limit.
+/// 210 MiB, so this catches a regression too small to reach the address-space limit.
 const NORMAL_PEAK_KIB: u64 = ADDRESS_SPACE_KIB / 4;
 
 /// How long a child may run. A regression that spins without allocating ends here.
@@ -560,8 +560,9 @@ fn nested_anchors_are_not_copied() {
     });
 }
 
-/// Inputs that repeat one unit. Each of them once took time quadratic in its length, because
-/// the scanner or the line index read a line again for each unit.
+/// Inputs that repeat one unit. Many of them once took time quadratic in their length, because
+/// the scanner or the line index read a line again for each unit. The rest guard the places where
+/// a scan like that could come back.
 fn repeated_inputs(length: usize) -> Vec<String> {
     let all = |unit: &str| unit.repeat(length / unit.len());
     let half = |unit: &str| unit.repeat(length / 2 / unit.len());
