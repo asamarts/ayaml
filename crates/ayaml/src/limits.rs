@@ -23,9 +23,9 @@ pub const MAX_DEPTH: usize = 128;
 /// [`Value::apply_merge_keys`](crate::Value::apply_merge_keys), and dropping
 /// a [`Value`](crate::Value) recurse once per nesting level. At this depth
 /// they fit a 2 MiB thread, the default for spawned and test threads, in
-/// debug and release builds. The tightest path measured, `from_value` into
-/// a `Value` over nested block mappings in a debug build, overflows at
-/// about 280 levels.
+/// debug and release builds. The tightest paths measured, `from_value`,
+/// `to_value`, and the value emitter over nested flow mappings with tags in a
+/// debug build, need about 1.6 MiB at this depth, so 1.5 MiB overflows.
 pub const MAX_DEPTH_CAP: usize = MAX_DEPTH;
 /// Fixed alias-expansion allowance.
 pub const MAX_ALIAS_EXPANSION_BYTES: usize = 256 * 1024 * 1024;

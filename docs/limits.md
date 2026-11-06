@@ -25,8 +25,9 @@ stream.
 | `max_output_bytes` | 64 MiB | Maximum bytes written by one emitter call. |
 | `max_tag_expansion_bytes` | 64 MiB | Maximum bytes that tag handles expand to in one stream. |
 
-Limits are inclusive at the accepted boundary. Every check has tests just
-below, at, and above its ceiling.
+Limits are inclusive at the accepted boundary. Input size, depth, and alias
+expansion have tests just below, at, and above their ceilings. AY-015 adds the same
+for the other limits.
 
 The alias-expansion allowance is:
 
@@ -80,6 +81,12 @@ structured `LimitExceeded` value with:
 - the `LimitKind`;
 - the configured ceiling; and
 - the observed or attempted value.
+
+There are two exceptions. A configured `max_depth` above `MAX_DEPTH_CAP` is
+`ErrorKind::Limit` with no structured value or span, because no input went over a
+limit. In compat mode a depth failure is `ErrorKind::Serde`, with the message
+`recursion limit exceeded` and no structured value or span, as a libyaml-based reader
+reports it.
 
 Parser, scanner, composer, typed-builder, document-count, and alias-budget
 failures carry a source span when input provides one. Output-emitter limits do

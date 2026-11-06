@@ -97,14 +97,16 @@ Then the marker is text, and the line reads like a later line.
 
 A closing `]`, `}`, or quote may sit at any indentation in both modes, including
 under a block collection, where the grammar asks for indentation. libyaml accepts
-these too, and files commonly close a flow collection this way. The exception is a
-closing quote on a line indented only with tabs, which is still an error:
+these too, and files commonly close a flow collection this way:
 
 ```yaml
 key: [
   a,
 ]
 ```
+
+The exception is a closing quote on a line indented only with tabs, which is still an
+error.
 
 The maintained deviation list is
 [`tests/data/yaml-test-suite-deviations.txt`](../tests/data/yaml-test-suite-deviations.txt).
@@ -129,4 +131,5 @@ Parsing errors use stable categories:
 
 When input provides a location, the error carries a span and `Error::location()`
 returns the one-based line and column. Resource-limit failures expose the
-configured ceiling and observed value through `Error::limit()`.
+configured ceiling and observed value through `Error::limit()`, with the exceptions
+in [`limits.md`](limits.md#errors).
