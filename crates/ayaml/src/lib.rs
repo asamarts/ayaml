@@ -180,9 +180,6 @@ pub mod compat {
         if error.kind() == ErrorKind::Limit && error.message().contains("collection depth limit") {
             return Error::new(ErrorKind::Serde, "recursion limit exceeded");
         }
-        if error.kind() == ErrorKind::Scanner && has_immediate_self_alias(input) {
-            return Error::new(ErrorKind::Limit, "recursion limit exceeded");
-        }
         if error.kind() == ErrorKind::Scanner
             && starts_with_bom_marker(input)
             && input.contains('*')
@@ -278,37 +275,6 @@ pub mod compat {
             .next()
             .unwrap_or_default();
         first_line.contains(": *") && first_line.contains('\'') && !first_line.contains('"')
-    }
-
-    fn has_immediate_self_alias(input: &str) -> bool {
-        let bytes = input.as_bytes();
-        let mut index = 0;
-        while index < bytes.len() {
-            if bytes[index] != b'&' {
-                index += 1;
-                continue;
-            }
-            let name_start = index + 1;
-            let mut name_end = name_start;
-            while name_end < bytes.len()
-                && (bytes[name_end].is_ascii_alphanumeric()
-                    || matches!(bytes[name_end], b'_' | b'-'))
-            {
-                name_end += 1;
-            }
-            if name_end > name_start {
-                let name = &input[name_start..name_end];
-                let mut next = name_end;
-                while next < bytes.len() && bytes[next].is_ascii_whitespace() {
-                    next += 1;
-                }
-                if bytes.get(next) == Some(&b'*') && input[next + 1..].starts_with(name) {
-                    return true;
-                }
-            }
-            index = name_end;
-        }
-        false
     }
 
     /// Deserialize one document with a caller-supplied seed under the
