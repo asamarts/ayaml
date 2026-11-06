@@ -2069,3 +2069,53 @@ fn an_alias_is_charged_for_the_tags_it_copies() {
         Limits::default().max_tag_expansion_bytes
     );
 }
+
+/// A `---` or `...` after a mark is text in compat, and the rest of its line reads that way. A
+/// quoted scalar's lines aren't held to a mark's column, because libyaml has no such check.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_reads_a_marks_line_as_libyaml_does() {
+    let read = ayaml::compat::from_str::<Value>;
+    for (input, expected) in [
+        ("\n\u{feff}--- k: |\n  # c\n", "'--- k': \"# c\\n\""),
+        ("\n\u{feff}--- k: |1\n       b\n", "'--- k': \"     b\\n\""),
+        ("\n\u{feff}--- k: |\n  b\n", "'--- k': \"b\\n\""),
+        ("\n\u{feff}--- k: |1\n  b\n", "'--- k': \"b\\n\""),
+        ("\n\u{feff}--- k: a\n  b", "'--- k': a b"),
+        ("\u{feff}--- k: |\n  # c\n", "'--- k': \"# c\\n\""),
+        ("\u{feff}--- k: |1\n  b\n", "'--- k': \"b\\n\""),
+        ("\u{feff}--- k: a\n  b", "'--- k': a b"),
+        ("\u{feff}... k: |1\n  b\n", "'... k': \"b\\n\""),
+        ("k:\n\u{feff}'a\n b'", "k: a b"),
+        ("k:\n\u{feff}\"a\n b\"", "k: a b"),
+        ("k:\n\u{feff} 'a\n  b'", "k: a b"),
+        ("k:\n\u{feff}'a\nb'", "k: a b"),
+        ("-\n\u{feff}'a\n b'", "- a b"),
+        ("?\n\u{feff}'a\n b'", "? a b"),
+        ("k: [\n\u{feff}'a\n b']", "k: [a b]"),
+        ("# c\n\u{feff}k: 'a\n b'", "k: a b"),
+        ("# c\n\u{feff}- 'a\n b'", "- a b"),
+        ("\n\u{feff}- \"a\n b\"", "- a b"),
+        ("\n\u{feff}k: 'a\n b'", "k: a b"),
+    ] {
+        assert_eq!(
+            read(input).expect(input),
+            ayaml::parse_value(expected).expect(expected),
+            "{input:?}"
+        );
+    }
+    for input in [
+        "\u{feff}--- k: a\n b",
+        "\u{feff}--- k: a\nz: 1",
+        "\u{feff}... k: a\n b",
+        "\u{feff}... k: a\nz: 1",
+        "\n\u{feff}--- k: a\nz: 1",
+    ] {
+        read(input).expect_err(input);
+    }
+    // Without a marker, the first mark still takes up no column.
+    assert_eq!(
+        read("\u{feff}k: a\n b").expect("no column"),
+        ayaml::parse_value("k: a b").expect("spelled out"),
+    );
+}
