@@ -104,6 +104,9 @@ pub(crate) struct Scanner<'a> {
     /// last `...`. A byte order mark may appear only outside a document or
     /// right before the next one.
     document_open: bool,
+    /// Whether this document has a token other than its `---` and the root node's properties.
+    /// Until it does, the next node is the root node.
+    node_seen: bool,
     /// Byte offsets of the non-printable characters that only a quoted
     /// scalar may hold, in order, and the first one not yet checked.
     quoted_only: Vec<usize>,
@@ -157,6 +160,7 @@ impl<'a> Scanner<'a> {
             initial_bom,
             compat_flow,
             document_open: false,
+            node_seen: false,
             quoted_only,
             quoted_only_next: 0,
         })
@@ -218,7 +222,8 @@ impl<'a> Scanner<'a> {
                             _ => unreachable!("flow stack checked"),
                         };
                         if content == self.pos
-                            && next.is_some_and(|ch| !is_line_break(ch) && ch != closing)
+                            && next
+                                .is_some_and(|ch| !is_line_break(ch) && ch != closing && ch != '#')
                         {
                             return Err(
                                 self.error_at(content, "flow collection entries must be indented")
@@ -261,12 +266,8 @@ impl<'a> Scanner<'a> {
             '[' => {
                 self.flow_level += 1;
                 self.flow_stack.push('[');
-                let line_start = self.input[..start]
-                    .rfind(['\n', '\r'])
-                    .map_or(0, |index| index + 1);
-                let prefix = self.input[line_start..start].trim_matches(is_blank);
                 self.flow_allow_zero_indent
-                    .push(prefix.is_empty() || prefix.starts_with("---"));
+                    .push(self.may_continue_at_column_zero());
                 self.limits
                     .check_depth(self.flow_level)
                     .map_err(|error| self.limit_at(start, error))?;
@@ -283,12 +284,8 @@ impl<'a> Scanner<'a> {
             '{' => {
                 self.flow_level += 1;
                 self.flow_stack.push('{');
-                let line_start = self.input[..start]
-                    .rfind(['\n', '\r'])
-                    .map_or(0, |index| index + 1);
-                let prefix = self.input[line_start..start].trim_matches(is_blank);
                 self.flow_allow_zero_indent
-                    .push(prefix.is_empty() || prefix.starts_with("---"));
+                    .push(self.may_continue_at_column_zero());
                 self.limits
                     .check_depth(self.flow_level)
                     .map_err(|error| self.limit_at(start, error))?;
@@ -378,6 +375,7 @@ impl<'a> Scanner<'a> {
         }
         self.previous_flow_end = false;
         self.document_open = true;
+        self.node_seen = true;
         let span = self.span(start, end)?;
         Ok(Some(Token { kind, span }))
     }
@@ -435,12 +433,23 @@ impl<'a> Scanner<'a> {
                 }
         );
         match kind {
-            TokenKind::DocumentEnd => self.document_open = false,
+            TokenKind::DocumentEnd => {
+                self.document_open = false;
+                self.node_seen = false;
+            }
+            TokenKind::DocumentStart { .. } => {
+                self.document_open = true;
+                self.node_seen = false;
+            }
+            TokenKind::Tag(_) | TokenKind::Anchor(_) => self.document_open = true,
             TokenKind::StreamStart
             | TokenKind::StreamEnd
             | TokenKind::LineBreak
             | TokenKind::Directive { .. } => {}
-            _ => self.document_open = true,
+            _ => {
+                self.document_open = true;
+                self.node_seen = true;
+            }
         }
         let span = self.span(start, end)?;
         Ok(Some(Token { kind, span }))
@@ -564,7 +573,10 @@ impl<'a> Scanner<'a> {
                             "tab cannot separate a block structural indicator",
                         ));
                     }
-                    if self.flow_level > 0 && self.tab_only_flow_indentation(self.pos) {
+                    if self.flow_level > 0
+                        && !self.may_continue_at_column_zero()
+                        && self.tab_only_flow_indentation(self.pos)
+                    {
                         return Err(self.error_at(
                             self.pos,
                             "tabs cannot be the only flow-collection indentation",
@@ -605,7 +617,7 @@ impl<'a> Scanner<'a> {
             content += 1;
         }
         let next = self.input[content..].chars().next();
-        next.is_some_and(|ch| !matches!(ch, ']' | '}') && !is_line_break(ch))
+        next.is_some_and(|ch| !matches!(ch, ']' | '}' | '#') && !is_line_break(ch))
     }
 
     fn tab_starts_block_structure(&self, position: usize) -> bool {
@@ -935,8 +947,7 @@ impl<'a> Scanner<'a> {
 
     fn scan_single_quoted(&mut self) -> Result<Option<Token<'a>>, Error> {
         let start = self.pos;
-        let start_indent = self.line_indent(start);
-        let allow_same_indent = self.quoted_allows_same_indent(start);
+        let (start_indent, allow_same_indent) = self.quoted_indent(start);
         self.pos += 1;
         let mut value = String::new();
         loop {
@@ -987,12 +998,26 @@ impl<'a> Scanner<'a> {
         )
     }
 
-    fn quoted_allows_same_indent(&self, start: usize) -> bool {
+    /// Whether the lines of a flow node starting here may start at column 0. That holds in a
+    /// document's root node and whatever it nests. Under a block collection they must be
+    /// indented (YAML 1.2.2 productions 69, 137, and 141).
+    fn may_continue_at_column_zero(&self) -> bool {
+        self.flow_allow_zero_indent
+            .last()
+            .copied()
+            .unwrap_or(!self.node_seen)
+    }
+
+    /// The indent a quoted scalar's lines are held to, and whether they may sit at exactly it.
+    fn quoted_indent(&self, start: usize) -> (usize, bool) {
+        if self.may_continue_at_column_zero() {
+            return (0, true);
+        }
         let line_start = self.input[..start]
             .rfind(['\n', '\r'])
             .map_or(0, |index| index + 1);
         let prefix = self.input[line_start..start].trim_matches(is_blank);
-        prefix.is_empty() || prefix.starts_with("---") || prefix.starts_with("...")
+        (self.line_indent(start), prefix.is_empty())
     }
 
     fn scan_quoted_line_break(
@@ -1066,8 +1091,7 @@ impl<'a> Scanner<'a> {
 
     fn scan_double_quoted(&mut self) -> Result<Option<Token<'a>>, Error> {
         let start = self.pos;
-        let start_indent = self.line_indent(start);
-        let allow_same_indent = self.quoted_allows_same_indent(start);
+        let (start_indent, allow_same_indent) = self.quoted_indent(start);
         self.pos += 1;
         let mut value = String::new();
         let mut protected_len = 0;
@@ -1710,7 +1734,12 @@ impl<'a> Scanner<'a> {
             self.pos = saved;
             return None;
         }
-        if self.flow_level > 0 && matches!(self.peek(), Some(',' | ']' | '}')) {
+        // In a flow collection, an indicator on the next line ends the scalar, and the line
+        // breaks before it aren't part of the value.
+        if self.flow_level > 0
+            && (matches!(self.peek(), Some(',' | ']' | '}'))
+                || (self.peek() == Some(':') && self.colon_indicator(self.pos)))
+        {
             self.pos = saved;
             return None;
         }
