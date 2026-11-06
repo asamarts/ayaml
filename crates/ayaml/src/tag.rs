@@ -23,27 +23,34 @@ pub struct Tag {
 impl Tag {
     /// Create a tag from its handle prefix and suffix.
     ///
-    /// A verbatim tag (empty `handle`) that starts with the core prefix
-    /// `tag:yaml.org,2002:` or with `!` is split into that prefix and the
-    /// rest, so `Tag::new("", "tag:yaml.org,2002:str")` is the core tag
-    /// `!!str` and `Tag::new("", "!x")` is the local tag `!x`.
+    /// A full name that starts with the core prefix `tag:yaml.org,2002:` is
+    /// split at that prefix whatever `handle` holds, so
+    /// `Tag::new("", "tag:yaml.org,2002:str")` and
+    /// `Tag::new("tag:yaml.org,2002:s", "tr")` are both the core tag `!!str`.
+    /// A verbatim tag (empty `handle`) that starts with `!` is split there,
+    /// so `Tag::new("", "!x")` is the local tag `!x`.
     #[must_use]
     pub fn new(handle: impl Into<String>, suffix: impl Into<String>) -> Self {
         let handle = handle.into();
         let suffix = suffix.into();
-        if handle.is_empty() {
-            if let Some(rest) = suffix.strip_prefix(CORE_PREFIX) {
+        if handle != CORE_PREFIX
+            && (CORE_PREFIX.starts_with(handle.as_str()) || handle.starts_with(CORE_PREFIX))
+        {
+            let full = format!("{handle}{suffix}");
+            if let Some(rest) = full.strip_prefix(CORE_PREFIX) {
                 return Self {
                     handle: CORE_PREFIX.to_owned(),
                     suffix: rest.to_owned(),
                 };
             }
-            if let Some(rest) = suffix.strip_prefix('!') {
-                return Self {
-                    handle: "!".to_owned(),
-                    suffix: rest.to_owned(),
-                };
-            }
+        }
+        if handle.is_empty()
+            && let Some(rest) = suffix.strip_prefix('!')
+        {
+            return Self {
+                handle: "!".to_owned(),
+                suffix: rest.to_owned(),
+            };
         }
         Self { handle, suffix }
     }

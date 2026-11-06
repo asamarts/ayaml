@@ -27,6 +27,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   collection those lines have to be indented, wherever the node starts, so `k: {x\n: y}`,
   `k:\n  [\na\n  ]`, and `---k: 'a\nb'` are now errors. Compat mode still reads the first two.
   A comment line is exempt in every position, so `k: [\n# c\n  a\n  ]` now parses.
+- A second tag or anchor on one node is now an error in both modes, so `&a &b c` and
+  `!a !b c` are rejected. The second one used to replace the first.
+- An explicit key whose properties are alone on the `?` line may now hold an indentless
+  sequence, so `? !t\n- a` parses in both modes.
+- By default, a byte order mark no longer stops a document marker or directive after it from
+  being one, so `a\n...\n\u{FEFF}---\nb` is two documents, `a` and `b`. The second used to
+  be the text `--- b`. A block collection may also follow the mark on any line, so
+  `a\n...\n\u{FEFF}b: 1\nc: 2` parses, and a column after it no longer counts the mark. Compat
+  mode keeps its reading of all these, because libyaml counts a column for the mark. A mark
+  between a directive and its `---` is now an error, as the grammar has no room for one, so
+  `%YAML 1.2\n\u{FEFF}# c\n---\na` is rejected.
+- The non-specific tag `!` is no longer changed by a `%TAG !` directive, in either mode.
+- A tag whose handle expands to part of a core-schema name is now that core tag, in both
+  modes. Under `%TAG !y! tag:yaml.org,2002:i`, `!y!nt 1` is the integer 1 and `!y!nt x` is
+  an error. `Tag::new` splits such a name at the core prefix, so `handle()` and `suffix()`
+  return the core parts. A name the core schema doesn't define now reads as it does when
+  written with `!!`: under `%TAG !y! tag:yaml.org,2002:app/`, `!y!Foo 1` is the string `1`,
+  and `!y!Foo [1]` selects the enum variant `app/Foo`, not `Foo`.
 
 ## [0.1.1] — 2026-11-04
 

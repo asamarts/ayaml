@@ -165,7 +165,8 @@ pub mod compat {
     fn map_error(input: &str, error: Error) -> Error {
         if error.kind() == ErrorKind::Parser
             && error.message().contains("unterminated flow")
-            && let Some(marker) = crate::position::LineIndex::new(input).marker(input, input.len())
+            && let Some(marker) =
+                crate::position::LineIndex::counting_line_boms(input).marker(input, input.len())
         {
             return Error::new(ErrorKind::Parser, error.message())
                 .with_span(crate::span::Span::empty(marker));
@@ -224,7 +225,7 @@ pub mod compat {
         let start = input[..index.min(input.len())]
             .rfind(['[', '{'])
             .unwrap_or(index);
-        let line_index = crate::position::LineIndex::new(input);
+        let line_index = crate::position::LineIndex::counting_line_boms(input);
         let start_marker = line_index.marker(input, start)?;
         let error_marker = span.start();
         Some(

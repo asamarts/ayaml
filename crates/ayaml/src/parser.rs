@@ -568,7 +568,7 @@ impl<'a> Parser<'a> {
                     index += 1;
                 } else {
                     let line = self.line_run(index);
-                    let (_, _, rest_start) = self.properties(line);
+                    let (_, _, rest_start) = self.properties(line)?;
                     if rest_start > 0 && is_mapping_line(self.tokens(line.from(rest_start))) {
                         return Err(self.error(
                             self.token(line, 0).span,
@@ -903,13 +903,18 @@ impl<'a> Parser<'a> {
             .map_err(|error| self.limit_at(span, error))?;
         loop {
             let line = self.line_run(index);
-            let (line_tag, line_anchor, rest_start) = self.properties(line);
+            let (line_tag, line_anchor, rest_start) = self.properties(line)?;
             let inherited_tag = tag.clone();
             let inherited_anchor = anchor.clone();
             tag = line_tag.clone().or(tag);
             anchor = line_anchor.clone().or(anchor);
             let rest = line.from(rest_start);
+            let duplicate = (inherited_tag.is_some() && line_tag.is_some())
+                || (inherited_anchor.is_some() && line_anchor.is_some());
             if rest.is_empty() {
+                if duplicate {
+                    return Err(self.error(self.token(line, 0).span, DUPLICATE_PROPERTIES));
+                }
                 let next_index = index + 1;
                 let has_properties = tag.is_some() || anchor.is_some();
                 let next_indent = self.lines.get(next_index).map_or(0, |line| line.indent);
@@ -993,13 +998,8 @@ impl<'a> Parser<'a> {
                     anchor,
                 }));
             }
-            if (inherited_tag.is_some() && line_tag.is_some())
-                || (inherited_anchor.is_some() && line_anchor.is_some())
-            {
-                return Err(self.error(
-                    self.token(rest, 0).span,
-                    "a node cannot have duplicate tag or anchor properties",
-                ));
+            if duplicate {
+                return Err(self.error(self.token(rest, 0).span, DUPLICATE_PROPERTIES));
             }
             stack.push(Cont::NodeInline { rest, index });
             return Ok(Step::Call(Call::Inline {
@@ -1134,7 +1134,7 @@ impl<'a> Parser<'a> {
             self.emit(self.null_scalar(span))?;
             return Ok(Step::Return(next_index));
         }
-        let (tag, anchor, rest_start) = self.properties(rest);
+        let (tag, anchor, rest_start) = self.properties(rest)?;
         let content = rest.from(rest_start);
         if content.is_empty() {
             if tag.is_some() || anchor.is_some() {
@@ -1330,6 +1330,26 @@ impl<'a> Parser<'a> {
                     self.emit(self.null_scalar(span))?;
                     return self.mapping_after_explicit_key(state, stack);
                 }
+                // Properties alone on the `?` line may be followed by an indentless
+                // sequence, as on a mapping value's line.
+                let (tag, anchor, rest_start) = self.properties(key_rest)?;
+                if rest_start == key_rest.len()
+                    && current_index < self.lines.len()
+                    && self.lines[current_index].indent == indent
+                    && self.line_starts_with(current_index, |kind| {
+                        matches!(kind, TokenKind::BlockEntry)
+                    })
+                {
+                    stack.push(Cont::MappingExplicitKey(state));
+                    return Ok(Step::Call(Call::Node {
+                        index: current_index,
+                        indent,
+                        depth: depth + 1,
+                        tag,
+                        anchor,
+                        bounds: NodeBounds::block_out(indent),
+                    }));
+                }
                 stack.push(Cont::MappingExplicitKey(state));
                 return Ok(Step::Call(Call::SequenceItem {
                     rest: key_rest,
@@ -1457,7 +1477,7 @@ impl<'a> Parser<'a> {
         allow_compact: bool,
         stack: &mut Vec<Cont>,
     ) -> Result<Step<'a>, Error> {
-        let (tag, anchor, rest_start) = self.properties(value);
+        let (tag, anchor, rest_start) = self.properties(value)?;
         let content = value.from(rest_start);
         if content.is_empty() {
             let next_indent = self.lines.get(current_index).map_or(0, |line| line.indent);
@@ -1538,13 +1558,11 @@ impl<'a> Parser<'a> {
         mut anchor: Option<Anchor<'a>>,
     ) -> Result<Step<'a>, Error> {
         let mut index = 0;
-        while index < tokens.len() {
-            match &self.token(tokens, index).kind {
-                TokenKind::Tag(value) => tag = Some(value.clone()),
-                TokenKind::Anchor(value) => anchor = Some(Anchor::new(value.clone())),
-                _ => break,
-            }
-            index += 1;
+        if self.starts_with_property(tokens) {
+            let (own_tag, own_anchor, count) = self.read_properties(tokens)?;
+            tag = own_tag.or(tag);
+            anchor = own_anchor.or(anchor);
+            index = count;
         }
         if index >= tokens.len() {
             if index > 0 {
@@ -2055,19 +2073,41 @@ impl<'a> Parser<'a> {
         Err(self.error(self.empty_span(0), "unterminated flow collection"))
     }
 
-    fn properties(&self, run: Run) -> (Option<Tag>, Option<Anchor<'a>>, usize) {
+    /// A node's properties at the start of `run`, and how many tokens they are. A node
+    /// has at most one tag and one anchor, in either order.
+    #[inline]
+    fn properties(&self, run: Run) -> Result<Properties<'a>, Error> {
+        // Most nodes have none.
+        if !self.starts_with_property(run) {
+            return Ok((None, None, 0));
+        }
+        self.read_properties(run)
+    }
+
+    #[inline]
+    fn starts_with_property(&self, run: Run) -> bool {
+        matches!(
+            self.tokens(run).first().map(|token| &token.kind),
+            Some(TokenKind::Tag(_) | TokenKind::Anchor(_))
+        )
+    }
+
+    fn read_properties(&self, run: Run) -> Result<Properties<'a>, Error> {
         let mut tag = None;
         let mut anchor = None;
         let mut index = 0;
         for token in self.tokens(run) {
-            match &token.kind {
-                TokenKind::Tag(value) => tag = Some(value.clone()),
-                TokenKind::Anchor(value) => anchor = Some(Anchor::new(value.clone())),
+            let duplicate = match &token.kind {
+                TokenKind::Tag(value) => tag.replace(value.clone()).is_some(),
+                TokenKind::Anchor(value) => anchor.replace(Anchor::new(value.clone())).is_some(),
                 _ => break,
+            };
+            if duplicate {
+                return Err(self.error(token.span, DUPLICATE_PROPERTIES));
             }
             index += 1;
         }
-        (tag, anchor, index)
+        Ok((tag, anchor, index))
     }
 
     /// All of line `index`'s tokens.
@@ -2257,6 +2297,11 @@ impl NodeBounds {
         }
     }
 }
+
+const DUPLICATE_PROPERTIES: &str = "a node cannot have duplicate tag or anchor properties";
+
+/// A node's tag and anchor, and how many tokens they take up.
+type Properties<'a> = (Option<Tag>, Option<Anchor<'a>>, usize);
 
 /// A run of one logical line's tokens in the shared token arena.
 /// Every token slice the grammar works on is one; a flow collection is

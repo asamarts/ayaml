@@ -1,8 +1,8 @@
 //! Byte-offset to line/column mapping for scanner positions.
 //!
 //! The mapping is built once per input. It understands LF, CR, CRLF, and a
-//! leading UTF-8 BOM. NEL (U+0085), LS (U+2028), and PS (U+2029) are content
-//! in YAML 1.2, not line breaks.
+//! UTF-8 BOM at the start of a line, which takes up no column. NEL (U+0085),
+//! LS (U+2028), and PS (U+2029) are content in YAML 1.2, not line breaks.
 
 use std::cell::Cell;
 
@@ -13,6 +13,9 @@ use crate::span::Marker;
 pub(crate) struct LineIndex {
     starts: Vec<usize>,
     content_start: usize,
+    /// Whether a BOM at the start of a later line takes up no column, as one on the first line
+    /// does. Compat counts one, as libyaml does.
+    skip_line_boms: bool,
     len: usize,
     ascii: bool,
     last_line: Cell<usize>,
@@ -45,6 +48,7 @@ impl LineIndex {
             return Self {
                 starts,
                 content_start: 0,
+                skip_line_boms: false,
                 len: input.len(),
                 ascii: true,
                 last_line: Cell::new(0),
@@ -71,10 +75,39 @@ impl LineIndex {
         Self {
             starts,
             content_start,
+            skip_line_boms: true,
             len: input.len(),
             ascii: input.is_ascii(),
             last_line: Cell::new(0),
         }
+    }
+
+    /// Build an index for libyaml's reading, where only the first line's BOM takes up no column.
+    #[must_use]
+    pub(crate) fn counting_line_boms(input: &str) -> Self {
+        Self {
+            skip_line_boms: false,
+            ..Self::new(input)
+        }
+    }
+
+    /// Where a line's columns start.
+    #[inline]
+    fn line_content_start(&self, input: &str, line: usize) -> usize {
+        let mut start = self.starts[line];
+        // ASCII input has no BOM.
+        if self.ascii {
+            return start;
+        }
+        if line == 0 {
+            start = start.max(self.content_start);
+        }
+        if self.skip_line_boms {
+            while input[start..].starts_with('\u{feff}') {
+                start += '\u{feff}'.len_utf8();
+            }
+        }
+        start
     }
 
     /// Return the marker at `index`, or `None` if it is out of bounds or not a
@@ -96,12 +129,7 @@ impl LineIndex {
             }
         }
         self.last_line.set(line);
-        let line_start = self.starts[line];
-        let content_start = if line == 0 {
-            line_start.max(self.content_start)
-        } else {
-            line_start
-        };
+        let content_start = self.line_content_start(input, line);
         let column = if index < content_start {
             1
         } else if self.ascii {
@@ -129,12 +157,7 @@ impl LineIndex {
         let line = self.last_line.get();
         let next_start = self.starts.get(line + 1).copied().unwrap_or(self.len);
         if end < next_start || (end == next_start && line + 1 == self.starts.len()) {
-            let line_start = self.starts[line];
-            let content_start = if line == 0 {
-                line_start.max(self.content_start)
-            } else {
-                line_start
-            };
+            let content_start = self.line_content_start(input, line);
             let column = if end < content_start {
                 1
             } else if self.ascii {
@@ -214,6 +237,17 @@ mod tests {
         let index = LineIndex::new(input);
         assert_eq!(index.marker(input, 3), Some(Marker::new(3, 1, 1)));
         assert_eq!(index.marker(input, 4), Some(Marker::new(4, 1, 2)));
+    }
+
+    #[test]
+    fn a_later_lines_bom_is_not_a_column() {
+        let input = "a\n\u{feff}\u{feff}k: v\n";
+        let index = LineIndex::new(input);
+        let marker = index.marker(input, input.find('k').unwrap()).unwrap();
+        assert_eq!((marker.line(), marker.column()), (2, 1));
+        let index = LineIndex::counting_line_boms(input);
+        let marker = index.marker(input, input.find('k').unwrap()).unwrap();
+        assert_eq!((marker.line(), marker.column()), (2, 3));
     }
 
     #[test]
