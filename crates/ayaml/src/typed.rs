@@ -13,6 +13,7 @@ use std::sync::Arc;
 use serde::de::{DeserializeSeed, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
+use crate::composer::Anchors;
 use crate::error::{Error, ErrorKind};
 use crate::event::{Anchor, Event, ScalarStyle};
 use crate::limits::{AliasBudget, Limits};
@@ -183,7 +184,7 @@ fn build<'de>(
         index: 0,
         limits: limits.clone(),
         input_len,
-        anchors: HashMap::new(),
+        anchors: Anchors::new(),
         budget,
         options,
     }
@@ -195,7 +196,7 @@ struct Builder<'de, 'b> {
     index: usize,
     limits: Limits,
     input_len: usize,
-    anchors: HashMap<String, (usize, Anchored<'de>)>,
+    anchors: Anchors<Anchored<'de>>,
     budget: &'b mut AliasBudget,
     options: NodeOptions,
 }
@@ -298,14 +299,14 @@ impl<'de> Builder<'de, '_> {
                         .map_err(|error| error.with_span(span))?;
                     let node = node_from_value(resolved, &value, &raw, style, span);
                     let size = estimate_size(&node, self.limits.node_cost_bytes);
-                    self.anchored(anchor.as_ref(), node, size, 0)
+                    self.anchored(anchor.as_ref(), node, size, 0, Anchors::define)
                 }
                 Event::Alias { anchor, span } => {
                     let target = self
                         .anchors
-                        .get(anchor.as_str())
-                        .map(|(_, anchored)| anchored.clone())
-                        .ok_or_else(|| self.error_at(span, "unknown anchor"))?;
+                        .resolve(anchor.as_str())
+                        .cloned()
+                        .map_err(|message| self.error_at(span, message))?;
                     self.budget
                         .charge(&self.limits, self.input_len, target.size)
                         .map_err(|error| error.with_span(span))?;
@@ -328,6 +329,9 @@ impl<'de> Builder<'de, '_> {
                     self.limits
                         .check_depth(stack.len() + 1)
                         .map_err(|error| Error::from(error).with_span(span))?;
+                    if let Some(anchor) = &anchor {
+                        self.anchors.open(anchor.as_str());
+                    }
                     stack.push(Frame::Sequence {
                         tag,
                         anchor,
@@ -344,6 +348,9 @@ impl<'de> Builder<'de, '_> {
                     self.limits
                         .check_depth(stack.len() + 1)
                         .map_err(|error| Error::from(error).with_span(span))?;
+                    if let Some(anchor) = &anchor {
+                        self.anchors.open(anchor.as_str());
+                    }
                     stack.push(Frame::Mapping {
                         tag,
                         anchor,
@@ -366,7 +373,7 @@ impl<'de> Builder<'de, '_> {
                         height,
                     }) => {
                         let node = apply_tag(tag, Node::new(NodeKind::Sequence(items), span));
-                        self.anchored(anchor.as_ref(), node, size, height + 1)
+                        self.anchored(anchor.as_ref(), node, size, height + 1, Anchors::close)
                     }
                     _ => return Err(self.error_at(span, "unexpected sequence end")),
                 },
@@ -382,7 +389,7 @@ impl<'de> Builder<'de, '_> {
                         ..
                     }) => {
                         let node = apply_tag(tag, Node::new(NodeKind::Mapping(entries), span));
-                        self.anchored(anchor.as_ref(), node, size, height + 1)
+                        self.anchored(anchor.as_ref(), node, size, height + 1, Anchors::close)
                     }
                     _ => return Err(self.error_at(span, "unexpected mapping end")),
                 },
@@ -443,17 +450,19 @@ impl<'de> Builder<'de, '_> {
         node: Node<'de>,
         size: usize,
         height: usize,
+        record: fn(&mut Anchors<Anchored<'de>>, &str, Anchored<'de>),
     ) -> Built<'de> {
         let Some(anchor) = anchor else {
             return Built { node, size, height };
         };
         let span = node.span;
         let shared = Arc::new(node);
-        crate::composer::define_anchor(&mut self.anchors, anchor.as_str(), span, || Anchored {
+        let target = Anchored {
             node: Arc::clone(&shared),
             size,
             height,
-        });
+        };
+        record(&mut self.anchors, anchor.as_str(), target);
         Built {
             node: Node::new(NodeKind::Alias(shared), span),
             size,

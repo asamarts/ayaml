@@ -13,6 +13,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is an error instead of `"x\n"`, and `|+\nx\n\u{FEFF}\n` keeps one line break, not two.
   After a root plain scalar, the line continues the scalar whatever it holds, so
   `n\n\u{FEFF}#:` is an error instead of `n`, and `n\n\u{FEFF} #:` is `"n \u{FEFF}"`.
+- An alias inside a collection with the alias's own anchor is now an error, unless a node
+  closer to the alias defines that anchor again. It used to read an earlier node with that
+  anchor if there was one, so `a: &x 1\nb: &x [*x]` read `b` as `[1]`. It's also a clearer
+  error where it was already one: the message now says the alias refers to a collection that
+  contains it, not that the anchor is unknown.
 
 ## [0.1.1] — 2026-11-04
 

@@ -1351,3 +1351,84 @@ fn generic_value_and_mapping_lookup_accept_compatible_keys() {
         let _ = item;
     }
 }
+
+type ValueReader = fn(&str) -> Result<Value, ayaml::Error>;
+
+/// Each way to read a document into a value, with its name.
+fn value_readers() -> Vec<(&'static str, ValueReader)> {
+    vec![
+        ("parse_value", ayaml::parse_value),
+        ("from_str", ayaml::from_str::<Value>),
+        ("from_str_borrowed", |input| {
+            ayaml::from_str_borrowed::<Value>(input)
+        }),
+        ("parse_documents", |input| {
+            ayaml::parse_documents(input).map(|mut documents| documents.remove(0))
+        }),
+        #[cfg(feature = "libyaml-compat")]
+        ("compat::from_str", |input| {
+            ayaml::compat::from_str::<Value>(input)
+        }),
+    ]
+}
+
+/// An alias inside a collection refers to that collection when the collection has the
+/// alias's anchor, whether or not an earlier node has the anchor too. A finished value
+/// can't hold itself, so all of these are errors, not a read of the earlier node.
+#[test]
+fn an_alias_inside_a_collection_with_its_anchor_is_rejected() {
+    for input in [
+        "b: &x [*x]\n",
+        "a: &x 1\nb: &x [*x]\n",
+        "b: &x {k: *x}\n",
+        "a: &x 1\nb: &x {k: *x}\n",
+        "a: &x 1\nb: &x {*x : v}\n",
+        "a: &x 1\nb: &x [[*x]]\n",
+        "a: &x 1\nb: &x\n  - *x\n",
+        "a: &x 1\nb: &x\n  k: *x\n",
+        "a: &x 1\nb: &x\n  ? *x\n",
+        "a: &x 1\nb: &x [*x, &x 2, *x]\n",
+        "&x [*x]\n",
+    ] {
+        for (reader, read) in value_readers() {
+            let error = read(input).expect_err(&format!("{reader}: {input:?}"));
+            assert_eq!(
+                error.message(),
+                "an alias cannot refer to a collection that contains it",
+                "{reader}: {input:?}"
+            );
+        }
+    }
+}
+
+/// An alias refers to the nearest node before it with its anchor, which may be a sibling
+/// or a node inside a collection with the same anchor.
+#[test]
+fn an_alias_refers_to_the_nearest_preceding_anchor() {
+    let cases = [
+        (
+            "a: &x 1\nb: *x\nc: &x 2\nd: *x\n",
+            "{a: 1, b: 1, c: 2, d: 2}\n",
+        ),
+        (
+            "a: &x [1]\nb: &x [2]\nc: *x\n",
+            "{a: [1], b: [2], c: [2]}\n",
+        ),
+        ("a: &x 1\nb: [*x, &x 2, *x]\n", "{a: 1, b: [1, 2, 2]}\n"),
+        ("a: &x {k: 1}\nb: *x\n", "{a: {k: 1}, b: {k: 1}}\n"),
+        ("b: &x [&x 2, *x]\nc: *x\n", "{b: [2, 2], c: 2}\n"),
+        ("&x {k: &x v, j: *x}\n", "{k: v, j: v}\n"),
+        ("&x\n- &x\n- *x\n", "[null, null]\n"),
+        ("&x [&x [1], *x]\n", "[[1], [1]]\n"),
+        (
+            "a: &x [&y 1, *y]\nb: *x\nc: *y\n",
+            "{a: [1, 1], b: [1, 1], c: 1}\n",
+        ),
+    ];
+    for (input, expected) in cases {
+        let expected = ayaml::parse_value(expected).unwrap();
+        for (reader, read) in value_readers() {
+            assert_eq!(read(input).unwrap(), expected, "{reader}: {input:?}");
+        }
+    }
+}

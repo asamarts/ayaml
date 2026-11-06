@@ -78,23 +78,70 @@ fn estimate_size(value: &Value, node_cost: usize) -> usize {
     }
 }
 
-/// Record `value` as the definition of `anchor` for a node whose span is
-/// `span`. An alias refers to the most recent anchor before it in the
-/// document. A collection is registered when it ends, after any anchor
-/// inside it, so it must not replace a definition that starts at or after
-/// its own start: in `&x {k: &x v}`, `*x` is `v`.
-pub(crate) fn define_anchor<T>(
-    anchors: &mut HashMap<String, (usize, T)>,
-    anchor: &str,
-    span: Span,
-    value: impl FnOnce() -> T,
-) {
-    let start = span.start().index();
-    match anchors.get_mut(anchor) {
-        Some((defined, _)) if *defined >= start => {}
-        Some(entry) => *entry = (start, value()),
-        None => {
-            anchors.insert(anchor.to_owned(), (start, value()));
+/// The anchors of the document being read, each with the nearest preceding node that
+/// has it. A collection's anchor comes before its content, so from its start until its
+/// end the collection is the nearest node for that anchor. No finished value can stand
+/// for it yet, so an alias there is rejected, even when an earlier node has the anchor.
+#[derive(Debug)]
+pub(crate) struct Anchors<T> {
+    nodes: HashMap<String, AnchorNode<T>>,
+}
+
+#[derive(Debug)]
+enum AnchorNode<T> {
+    /// A collection with this anchor hasn't ended.
+    Open,
+    Finished(T),
+}
+
+impl<T> Anchors<T> {
+    pub(crate) fn new() -> Self {
+        Self {
+            nodes: HashMap::new(),
+        }
+    }
+
+    /// Forget every anchor at the start of a document.
+    pub(crate) fn clear(&mut self) {
+        self.nodes.clear();
+    }
+
+    fn set(&mut self, anchor: &str, node: AnchorNode<T>) {
+        match self.nodes.get_mut(anchor) {
+            Some(entry) => *entry = node,
+            None => {
+                self.nodes.insert(anchor.to_owned(), node);
+            }
+        }
+    }
+
+    /// A collection with this anchor has started.
+    pub(crate) fn open(&mut self, anchor: &str) {
+        self.set(anchor, AnchorNode::Open);
+    }
+
+    /// A scalar with this anchor has been read.
+    pub(crate) fn define(&mut self, anchor: &str, value: T) {
+        self.set(anchor, AnchorNode::Finished(value));
+    }
+
+    /// A collection with this anchor has ended. A node inside it with the same anchor
+    /// comes later in the document, so it stays the nearest: in `&x {k: &x v}`, `*x` is
+    /// `v`.
+    pub(crate) fn close(&mut self, anchor: &str, value: T) {
+        if let Some(entry) = self.nodes.get_mut(anchor)
+            && matches!(entry, AnchorNode::Open)
+        {
+            *entry = AnchorNode::Finished(value);
+        }
+    }
+
+    /// The node an alias at this point refers to, or the message to reject it with.
+    pub(crate) fn resolve(&self, anchor: &str) -> Result<&T, &'static str> {
+        match self.nodes.get(anchor) {
+            Some(AnchorNode::Finished(value)) => Ok(value),
+            Some(AnchorNode::Open) => Err("an alias cannot refer to a collection that contains it"),
+            None => Err("unknown anchor"),
         }
     }
 }
@@ -211,7 +258,7 @@ fn value_height(value: &Value) -> usize {
 pub(crate) struct StreamingComposer<'a> {
     limits: Limits,
     input_len: usize,
-    anchors: HashMap<String, (usize, AnchorDef)>,
+    anchors: Anchors<AnchorDef>,
     documents: Vec<Value>,
     document: Option<Value>,
     stack: Vec<Frame<'a>>,
@@ -227,7 +274,7 @@ impl<'a> StreamingComposer<'a> {
         Self {
             limits,
             input_len,
-            anchors: HashMap::new(),
+            anchors: Anchors::new(),
             documents: Vec::new(),
             document: None,
             stack: Vec::new(),
@@ -269,15 +316,15 @@ impl<'a> StreamingComposer<'a> {
                     .map_err(|error| error.with_span(span))?;
                 let size = estimate_size(&resolved, self.limits.node_cost_bytes);
                 let height = value_height(&resolved);
-                self.register_anchor(anchor.as_ref(), span, size, height);
+                self.record_anchor(anchor.as_ref(), size, height, Anchors::define);
                 self.feed(resolved, span, size, height)?;
             }
             Event::Alias { anchor, span } => {
                 let definition = self
                     .anchors
-                    .get(anchor.as_str())
-                    .map(|(_, definition)| definition.clone())
-                    .ok_or_else(|| self.error_at(span, "unknown anchor"))?;
+                    .resolve(anchor.as_str())
+                    .cloned()
+                    .map_err(|message| self.error_at(span, message))?;
                 // Charge before cloning: the clone is the allocation this
                 // budget exists to bound.
                 self.budget
@@ -302,6 +349,9 @@ impl<'a> StreamingComposer<'a> {
                 self.limits
                     .check_depth(self.stack.len() + 1)
                     .map_err(Error::from)?;
+                if let Some(anchor) = &anchor {
+                    self.anchors.open(anchor.as_str());
+                }
                 self.stack.push(Frame::Sequence {
                     tag,
                     anchor,
@@ -325,7 +375,7 @@ impl<'a> StreamingComposer<'a> {
                 };
                 let (value, size) =
                     self.finish_collection(tag.as_ref(), Value::Sequence(items), size);
-                self.register_anchor(anchor.as_ref(), start_span, size, height + 1);
+                self.record_anchor(anchor.as_ref(), size, height + 1, Anchors::close);
                 self.feed(value, start_span, size, height + 1)?;
             }
             Event::MappingStart {
@@ -334,6 +384,9 @@ impl<'a> StreamingComposer<'a> {
                 self.limits
                     .check_depth(self.stack.len() + 1)
                     .map_err(Error::from)?;
+                if let Some(anchor) = &anchor {
+                    self.anchors.open(anchor.as_str());
+                }
                 self.stack.push(Frame::Mapping {
                     tag,
                     anchor,
@@ -366,7 +419,7 @@ impl<'a> StreamingComposer<'a> {
                 }
                 let (value, size) =
                     self.finish_collection(tag.as_ref(), Value::Mapping(mapping), size);
-                self.register_anchor(anchor.as_ref(), start_span, size, height + 1);
+                self.record_anchor(anchor.as_ref(), size, height + 1, Anchors::close);
                 self.feed(value, start_span, size, height + 1)?;
             }
         }
@@ -443,22 +496,19 @@ impl<'a> StreamingComposer<'a> {
         Ok(())
     }
 
-    /// Record an anchor for the node about to be fed: its position is where
-    /// each open collection will put its next child.
-    fn register_anchor(
+    /// Note an anchored node about to be fed: its position is where each open collection
+    /// will put its next child.
+    fn record_anchor(
         &mut self,
         anchor: Option<&Anchor<'a>>,
-        span: Span,
         size: usize,
         height: usize,
+        record: fn(&mut Anchors<AnchorDef>, &str, AnchorDef),
     ) {
         if let Some(anchor) = anchor {
-            let stack = &self.stack;
-            define_anchor(&mut self.anchors, anchor.as_str(), span, || AnchorDef {
-                path: stack.iter().map(Frame::position).collect(),
-                size,
-                height,
-            });
+            let path = self.stack.iter().map(Frame::position).collect();
+            let definition = AnchorDef { path, size, height };
+            record(&mut self.anchors, anchor.as_str(), definition);
         }
     }
 
