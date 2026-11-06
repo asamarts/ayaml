@@ -11,7 +11,7 @@ permissions:
 jobs:
   quality:
     name: quality (${{ matrix.toolchain }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -19,7 +19,7 @@ jobs:
           - "1.88.0"
           - stable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
@@ -35,13 +35,15 @@ jobs:
       - name: Adversarial tests in a release build
         run: cargo test -p ayaml --locked --release --all-features --test adversarial
       - name: Documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --locked --no-deps --all-features
 
   suite:
     name: YAML Test Suite
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Default profile
         run: AYAML_STRICT_SUITE=1 cargo run --locked -p ayaml-conformance -- tests/fixtures tests/data/yaml-test-suite/src
@@ -50,9 +52,9 @@ jobs:
 
   allocation:
     name: allocation budgets
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Allocation budgets
         run: tools/check_alloc_corpus.sh
@@ -63,9 +65,9 @@ jobs:
 
   instructions:
     name: instruction counts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -78,9 +80,9 @@ jobs:
 
   plan:
     name: plan check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Install aplan
         run: cargo install aplan --version 0.6.0 --locked
@@ -89,9 +91,9 @@ jobs:
 
   package:
     name: package and downstream smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Package
         run: cargo package -p ayaml --locked
@@ -108,7 +110,7 @@ jobs:
 
   cross:
     name: cross (${{ matrix.target }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -118,7 +120,7 @@ jobs:
           - x86_64-pc-windows-msvc
           - x86_64-pc-windows-gnu
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -133,21 +135,25 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - name: Test
         run: cargo test --workspace --locked --all-features
       - name: Documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --locked --no-deps --all-features
 
   policy:
     name: dependency policy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - name: Test the checks
+        run: python3 tools/test_ci_checks.py
       - name: Classify dependencies
         run: python3 tools/check_deps.py
       - name: cargo-deny
@@ -158,12 +164,14 @@ jobs:
         run: cargo install cargo-geiger --locked
       - name: Unsafe census
         run: cargo geiger --manifest-path "$GITHUB_WORKSPACE/crates/ayaml/Cargo.toml" --all-features --output-format Json > "${RUNNER_TEMP}/geiger.json"
+      - name: Evaluate the census
+        run: python3 tools/check_unsafe_census.py "${RUNNER_TEMP}/geiger.json"
 
   semver:
     name: semver checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: cargo-semver-checks
         uses: obi1kenobi/cargo-semver-checks-action@v2
@@ -172,9 +180,9 @@ jobs:
 
   minimal-versions:
     name: minimal versions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
       - name: Select minimal versions
         run: cargo update -Z minimal-versions
@@ -183,9 +191,9 @@ jobs:
 
   secrets:
     name: secret scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: TruffleHog

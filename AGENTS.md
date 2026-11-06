@@ -11,8 +11,8 @@ is ignored by Git and can hold notes specific to one machine.
 - `crates/ayaml-bench`: timing benchmarks.
 - `tests/`: fixtures, the pinned suite, and real-world files.
 - `fuzz/`: `cargo-fuzz` targets and seeds.
-- `tools/`: local CI, allocation and instruction checks, the dependency policy check,
-  and the leak gate.
+- `tools/`: local CI, allocation and instruction checks, the dependency and unsafe-code
+  checks, the check of scheduled workflows, and the leak gate.
 - `aplan/tasks/`: the task plan.
 - `docs/`: design, limits, compatibility, and decisions.
 

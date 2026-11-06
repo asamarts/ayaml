@@ -1,0 +1,25 @@
+name: scheduled watch
+
+# A scheduled run that fails tells only whoever last edited its schedule, and one that never
+# starts tells nobody. See tools/check_scheduled_runs.py.
+on:
+  # Late in the day, because a daily schedule has run up to 8 hours late.
+  schedule:
+    - cron: "43 14 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    name: scheduled watch
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the scheduled workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/check_scheduled_runs.py --open-issue

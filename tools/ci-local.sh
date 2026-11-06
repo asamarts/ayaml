@@ -2,9 +2,11 @@
 # Most of .github/workflows/{ci,fuzz}.yml, run locally so that failures show up before
 # a push. Hosted CI on the pull request is the gate; this script is a convenience.
 #
-# Usage: tools/ci-local.sh [--list] [job ...]
+# Usage: tools/ci-local.sh [--list] [--release] [job ...]
 #
-#   --list    print the job names and exit
+#   --list     print the job names and exit
+#   --release  fail if any check was skipped, such as for a tool that isn't installed.
+#              Use this for a release; otherwise the summary only says what was skipped
 #
 # With no job names, every job runs. Commands run under `nice`; the script
 # does not change build parallelism. Logs go to target/ci-local/<sha>/.
@@ -23,6 +25,10 @@
 # The `sync` job checks that every single-line `run:` command in those workflows appears
 # in this file, as a command or a `# Mirrors:` comment. That catches a new command with
 # no local counterpart. It can't prove that the local job really runs it.
+#
+# Hosted CI has no counterpart to the `scheduled` job. It asks whether the scheduled workflows
+# are healthy, because GitHub turns their schedules off after 60 days with no activity, and then
+# nothing hosted would report that.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -32,13 +38,15 @@ MSRV="1.88.0"
 STABLE="stable"
 TEST_ADDRESS_SPACE_KIB=8388608
 TEST_TIMEOUT_SECONDS=1800
-ALL_JOBS=(sync bounds quality-msrv quality-stable features policy harness instructions plan suite docs-lint package cross fuzz-smoke leak-gate)
+ALL_JOBS=(sync bounds release-mode quality-msrv quality-stable features policy harness instructions plan suite docs-lint package cross fuzz-smoke leak-gate scheduled)
 
+release=0
 jobs=()
 for arg in "$@"; do
   case "$arg" in
     --list) printf '%s\n' "${ALL_JOBS[@]}"; exit 0 ;;
-    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+    --release) release=1 ;;
+    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
     -*) echo "unknown option: $arg" >&2; exit 2 ;;
     *) jobs+=("$arg") ;;
   esac
@@ -224,6 +232,17 @@ job_signal-target() {
   test_step "wait for a signal" bash -c 'sleep 300 & echo $! >"$1"; wait' wait "$logdir/bounds-signal.pid"
 }
 
+# A release run can't pass on a check that didn't run.
+job_release-mode() {
+  step "a skipped check doesn't fail an ordinary run" "$0" skip-target
+  step "a skipped check fails a release run" bash -c '
+    "$1" --release skip-target
+    [ "$?" -eq 1 ] || { echo "the release run did not fail"; exit 1; }' release "$0"
+}
+
+# Not in ALL_JOBS: a job with nothing but a skip, for job_release-mode.
+job_skip-target() { skip "a check that can't run"; }
+
 quality() {
   local tc="$1"
   if ! have_toolchain "$tc"; then skip "toolchain $tc missing"; return; fi
@@ -233,7 +252,7 @@ quality() {
   test_step "test default features ($tc)" cargo "+$tc" test -p ayaml --locked
   # The depth cap is measured in both profiles.
   test_step "adversarial release ($tc)" cargo "+$tc" test -p ayaml --locked --release --all-features --test adversarial
-  step "doc ($tc)" cargo "+$tc" doc --workspace --locked --no-deps --all-features
+  step "doc ($tc)" env RUSTDOCFLAGS="-D warnings" cargo "+$tc" doc --workspace --locked --no-deps --all-features
   # Mirrors: cargo fmt --all -- --check
   # Mirrors: cargo clippy --workspace --all-targets --locked --all-features -- -D warnings
   # Mirrors: cargo test --workspace --locked --all-features
@@ -254,10 +273,12 @@ job_features() {
     test_step "test ayaml $f" cargo "+$STABLE" test -p ayaml --locked $f
   done
   test_step "test ayaml --all-features ($MSRV)" cargo "+$MSRV" test -p ayaml --locked --all-features
-  step "doc ayaml --all-features" cargo "+$STABLE" doc -p ayaml --locked --no-deps --all-features
+  step "doc ayaml --all-features" env RUSTDOCFLAGS="-D warnings" cargo "+$STABLE" doc -p ayaml --locked --no-deps --all-features
 }
 
 job_policy() {
+  step "test the checks" python3 tools/test_ci_checks.py
+  # Mirrors: python3 tools/test_ci_checks.py
   step "classify dependencies" python3 tools/check_deps.py
   # Mirrors: python3 tools/check_deps.py
   if command -v cargo-deny >/dev/null; then
@@ -267,8 +288,11 @@ job_policy() {
   fi
   if cargo geiger --version >/dev/null 2>&1; then
     local TMPDIR="$logdir"
-    shstep "unsafe census" "cargo geiger --manifest-path \"\$PWD/crates/ayaml/Cargo.toml\" --all-features --output-format Json > \"$TMPDIR/geiger.json\""
+    # Its own target directory, because the census also reads what other builds left in one.
+    shstep "unsafe census" "CARGO_TARGET_DIR=\"\$PWD/target/geiger\" cargo geiger --manifest-path \"\$PWD/crates/ayaml/Cargo.toml\" --all-features --output-format Json > \"$TMPDIR/geiger.json\""
     # Mirrors: cargo geiger --manifest-path "$PWD/crates/ayaml/Cargo.toml" --all-features --output-format Json > "$TMPDIR/geiger.json"
+    step "evaluate the census" python3 tools/check_unsafe_census.py "$TMPDIR/geiger.json"
+    # Mirrors: python3 tools/check_unsafe_census.py "$TMPDIR/geiger.json"
   else
     skip "cargo-geiger not installed: unsafe census"
   fi
@@ -398,6 +422,11 @@ job_leak-gate() {
   fi
 }
 
+job_scheduled() {
+  if ! command -v gh >/dev/null; then skip "gh not installed"; return; fi
+  step "scheduled workflows are healthy" python3 tools/check_scheduled_runs.py
+}
+
 failed=0
 any_skipped=0
 for job in "${jobs[@]}"; do
@@ -417,6 +446,7 @@ for job in "${jobs[@]}"; do
   fi
 done
 
+[ "$release" -eq 1 ] && [ "$any_skipped" -eq 1 ] && failed=1
 result=PASS
 [ "$any_skipped" -eq 1 ] && result="PASS, with skipped checks"
 [ "$failed" -eq 1 ] && result=FAIL
