@@ -527,14 +527,7 @@ fn alias_nesting_counts_toward_the_depth_limit_on_every_entry_point() {
         }
         for links in [128, 8_000] {
             for (name, result) in entry_points(&alias_chain(links)) {
-                let error = result.expect_err(name);
-                // Compat reports its own message for the depth limit.
-                let message = error.to_string();
-                assert!(
-                    (error.kind() == ErrorKind::Limit && message.contains("depth"))
-                        || message.contains("recursion limit exceeded"),
-                    "{name}: {error}"
-                );
+                assert_depth_error_kind(name, &result.expect_err(name));
             }
         }
     },);
@@ -693,6 +686,68 @@ fn scanning_takes_time_linear_in_the_input() {
 }
 
 #[test]
+fn many_keys_take_time_linear_in_their_number() {
+    in_child!(|| {
+        // Keys that all land in one hash bucket take quadratic time, and that's a few seconds here
+        // at most, so only the ratio can tell. See `scanning_takes_time_linear_in_the_input` for
+        // how it's compared.
+        const KEYS: usize = 40_000;
+        const QUICK: Duration = Duration::from_millis(100);
+        const LARGEST_RATIO: u32 = 3;
+        const TRIES: usize = 12;
+        const RETRY_BUDGET: Duration = Duration::from_secs(40);
+        type Read = fn(&str) -> Result<(), ayaml::Error>;
+        let timed = |read: &Read, input: &str| {
+            let started = Instant::now();
+            read(input).expect("distinct keys parse");
+            started.elapsed()
+        };
+        let readers: Vec<(&str, Read)> = vec![
+            ("parse_value", |input| ok(ayaml::parse_value(input))),
+            ("from_str", |input| {
+                ok(ayaml::from_str::<ayaml::Value>(input))
+            }),
+            #[cfg(feature = "libyaml-compat")]
+            ("compat", |input| {
+                ok(ayaml::compat::from_str::<ayaml::Value>(input))
+            }),
+        ];
+        type Key = fn(usize) -> String;
+        let shapes: [(&str, Key); 5] = [
+            ("floats", |key| format!("{key}.5: x\n")),
+            ("exponents", |key| format!("{key}e3: x\n")),
+            ("integers", |key| format!("{key}: x\n")),
+            ("strings", |key| format!("k{key}: x\n")),
+            ("mappings", |key| format!("? {{k{key}: x}}\n: x\n")),
+        ];
+        for (shape, key) in shapes {
+            let keys = |count: usize| (0..count).map(key).collect::<String>();
+            let (short, long) = (keys(KEYS / 8), keys(KEYS));
+            for (reader, read) in &readers {
+                let mut shorts_time = Duration::MAX;
+                let mut long_time = Duration::MAX;
+                let started = Instant::now();
+                for _ in 0..TRIES {
+                    long_time = long_time.min(timed(read, &long));
+                    if long_time < QUICK {
+                        break;
+                    }
+                    shorts_time = shorts_time.min((0..8).map(|_| timed(read, &short)).sum());
+                    if long_time < shorts_time * LARGEST_RATIO || started.elapsed() > RETRY_BUDGET {
+                        break;
+                    }
+                }
+                assert!(
+                    long_time < QUICK || long_time < shorts_time * LARGEST_RATIO,
+                    "{reader}: {shape}: {shorts_time:?} for 8 short runs, then {long_time:?} for \
+                     one on 8 times the keys",
+                );
+            }
+        }
+    });
+}
+
+#[test]
 fn a_long_tag_prefix_cannot_multiply_memory() {
     in_child!(|| {
         // One long prefix and many short tags that each hold a copy of it. Without the limit,
@@ -779,7 +834,8 @@ fn an_alias_cannot_multiply_a_long_tag() {
 /// The nesting shapes the depth tests use, each with a different recursion
 /// profile in Serde (sequences, mappings) or the parser (block, flow,
 /// compact, aliases).
-const SHAPES: [&str; 6] = [
+const SHAPES: [&str; 7] = [
+    "tagged flow mapping",
     "flow sequence",
     "flow mapping",
     "block sequence",
@@ -798,6 +854,7 @@ fn nested(shape: &str, depth: usize) -> String {
         text
     };
     match shape {
+        "tagged flow mapping" => format!("{}0{}", "!t {a: ".repeat(depth), "}".repeat(depth)),
         "flow sequence" => format!("{}0{}", "[".repeat(depth), "]".repeat(depth)),
         "flow mapping" => format!("{}0{}", "{a: ".repeat(depth), "}".repeat(depth)),
         "block sequence" => lines("-"),
@@ -950,18 +1007,31 @@ fn value_paths(input: &str, limits: &Limits) -> Vec<(&'static str, Result<(), ay
 /// `shape`. The event stream leaves aliases unexpanded, so an alias chain
 /// stays shallow there.
 fn assert_depth_error(shape: &str, name: &str, result: Result<(), ayaml::Error>) {
+    if stopped_at_a_tag(shape, &result) {
+        return;
+    }
     if shape == "alias chain" && name == "parse_events_with_limits" {
         result.unwrap_or_else(|error| panic!("{shape}, {name}: {error}"));
         return;
     }
-    let error = result.expect_err(name);
-    let message = error.to_string();
-    // Compat reports its own message for the depth limit.
-    assert!(
-        (error.kind() == ErrorKind::Limit && message.contains("depth"))
-            || message.contains("recursion limit exceeded"),
-        "{shape}, {name}: {error}"
-    );
+    assert_depth_error_kind(name, &result.expect_err(name));
+}
+
+/// Compat's readers that build values report the depth limit as a libyaml-based reader does.
+fn assert_depth_error_kind(name: &str, error: &ayaml::Error) {
+    if name.starts_with("compat") {
+        assert_eq!(error.kind(), ErrorKind::Serde, "{name}: {error}");
+        assert_eq!(error.message(), "recursion limit exceeded", "{name}");
+        assert_eq!(error.limit(), None, "{name}");
+    } else {
+        assert_eq!(error.kind(), ErrorKind::Limit, "{name}: {error}");
+        assert!(error.to_string().contains("depth"), "{name}: {error}");
+        assert_eq!(
+            error.limit().map(|limit| limit.kind()),
+            Some(ayaml::LimitKind::Depth),
+            "{name}"
+        );
+    }
 }
 
 /// a `max_depth` above the cap is a configuration error on every path
@@ -1037,7 +1107,7 @@ fn every_entry_point_fits_a_small_stack_at_the_depth_cap() {
                     .into_iter()
                     .chain(value_paths(&input, &limits))
                 {
-                    result.unwrap_or_else(|error| panic!("{shape}, {name}: {error}"));
+                    assert_fits(shape, name, result);
                 }
                 for (name, result) in
                     limited_entry_points(&nested(shape, MAX_DEPTH_CAP + 1), &limits)
@@ -1049,6 +1119,21 @@ fn every_entry_point_fits_a_small_stack_at_the_depth_cap() {
     },);
 }
 
+/// JSON has no form for a tag, so a reader into JSON stops at the first one. All that counts for
+/// it is not overflowing the stack.
+fn stopped_at_a_tag(shape: &str, result: &Result<(), ayaml::Error>) -> bool {
+    shape == "tagged flow mapping"
+        && result
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("expected any valid JSON value"))
+}
+
+fn assert_fits(shape: &str, name: &str, result: Result<(), ayaml::Error>) {
+    if !stopped_at_a_tag(shape, &result) {
+        result.unwrap_or_else(|error| panic!("{shape}, {name}: {error}"));
+    }
+}
+
 /// The entry points without a limits parameter, compat included, use the
 /// default depth and fit a 2 MiB thread at it.
 #[test]
@@ -1057,7 +1142,7 @@ fn default_entry_points_fit_a_small_stack_at_the_default_depth() {
         on_small_stack(|| {
             for shape in SHAPES {
                 for (name, result) in entry_points(&nested(shape, MAX_DEPTH)) {
-                    result.unwrap_or_else(|error| panic!("{shape}, {name}: {error}"));
+                    assert_fits(shape, name, result);
                 }
                 for (name, result) in entry_points(&nested(shape, MAX_DEPTH + 1)) {
                     assert_depth_error(shape, name, result);

@@ -19,13 +19,13 @@ pub const MAX_DEPTH: usize = 128;
 ///
 /// Parsing, composing, and the event writer keep their own stacks, but
 /// Serde deserialization, [`from_value`](crate::from_value),
-/// [`to_value`](crate::to_value), the value emitter,
+/// [`to_value`](crate::to_value), [`to_string`](crate::to_string),
 /// [`Value::apply_merge_keys`](crate::Value::apply_merge_keys), and dropping
 /// a [`Value`](crate::Value) recurse once per nesting level. At this depth
 /// they fit a 2 MiB thread, the default for spawned and test threads, in
 /// debug and release builds. The tightest paths measured, `from_value`,
-/// `to_value`, and the value emitter over nested flow mappings with tags in a
-/// debug build, need about 1.6 MiB at this depth, so 1.5 MiB overflows.
+/// `to_value`, and `to_string` over nested flow mappings with tags in a debug
+/// build, need about 1.6 MiB at this depth, so 1.5 MiB overflows.
 pub const MAX_DEPTH_CAP: usize = MAX_DEPTH;
 /// Fixed alias-expansion allowance.
 pub const MAX_ALIAS_EXPANSION_BYTES: usize = 256 * 1024 * 1024;
@@ -472,6 +472,7 @@ mod tests {
     #[test]
     fn input_boundary_is_inclusive() {
         let limits = Limits::default();
+        assert!(limits.check_input(MAX_INPUT_BYTES - 1).is_ok());
         assert!(limits.check_input(MAX_INPUT_BYTES).is_ok());
         let error = limits.check_input(MAX_INPUT_BYTES + 1).unwrap_err();
         assert_eq!(error.kind(), LimitKind::InputBytes);
@@ -510,6 +511,7 @@ mod tests {
     fn alias_expansion_boundary_is_inclusive() {
         let limits = Limits::default();
         let budget = limits.expansion_budget(0);
+        assert!(limits.check_alias_expansion(0, budget - 1).is_ok());
         assert!(limits.check_alias_expansion(0, budget).is_ok());
         assert_eq!(
             limits

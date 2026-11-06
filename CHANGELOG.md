@@ -8,6 +8,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A mapping can no longer be written so that its hash collides with those of other mappings. The
+  entries' hashes combine by XOR under a key anyone could compute, so entries could be chosen to
+  cancel out, and 2 MiB of mappings used as keys took 30 seconds to read. The key is now random
+  for each process, so a `Value`'s `Hash` differs from one run to the next.
+- Floats now hash by value, so many float keys no longer take quadratic time. They used to share
+  one bucket, and 40,000 of them, in 0.3 MiB, took 19 seconds to read.
+- A depth limit on a collection used as a key now gives its location on `parse_value`,
+  `parse_documents`, and `Deserializer`, as it does elsewhere.
+- In compat mode, `from_str` no longer reports "more than one document" for a type error on a
+  scalar that holds the words `trailing documents`.
 - In compat mode, a `:` followed by more text no longer ends an anchor or alias name in a flow
   collection, which matches default mode. `[&a:b]` read as `[":b"]`, which is neither default
   mode's reading nor libyaml's, and `[&a:b, *a:b]` was an error, though both of them accept it.
@@ -35,8 +45,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   indented with tabs alone, when it's a document's root node or is nested in one. So
   `[[x\n, y]]`, `!!seq [x\n, y]`, `  'a\nb'`, and `[\n\ta\n]` now parse. Under a block
   collection the indentation of those lines is now checked, wherever the node starts, so
-  `k: {x\n: y}`, `k:\n  [\na\n  ]`, and `---k: 'a\nb'` are now errors. Compat mode still reads
-  the first two. A comment line is exempt in every position, so `k: [\n# c\n  a\n  ]` now
+  `k:\n  [\na\n  ]` and `---k: 'a\nb'` are now errors. Compat mode still reads the first.
+  A comment line is exempt in every position, so `k: [\n# c\n  a\n  ]` now
   parses, and so is a closing `]`, `}`, or quote, as it was before, unless tabs alone indent a
   quote. The check doesn't yet cover a plain scalar's own continuation lines inside a flow
   collection, or every indentation of a quoted scalar's lines under nested collections.

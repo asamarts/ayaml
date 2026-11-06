@@ -310,9 +310,18 @@ impl Eq for Number {}
 impl Hash for Number {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self.0 {
-            // Floats are a discouraged key and share one bucket, which keeps
-            // Eq/Hash consistent for NaN and signed zero.
-            Repr::Float(_) => 3_u8.hash(state),
+            // Every NaN is one value to Eq, and so are both zeros, so each has to hash as one.
+            Repr::Float(value) => {
+                3_u8.hash(state);
+                let bits = if value.is_nan() {
+                    f64::NAN.to_bits()
+                } else if value == 0.0 {
+                    0
+                } else {
+                    value.to_bits()
+                };
+                bits.hash(state);
+            }
             Repr::PosInt(value) => value.hash(state),
             Repr::NegInt(value) => value.hash(state),
             Repr::PosWide(high, low) => wide_u128(high, low).hash(state),
@@ -417,9 +426,38 @@ mod tests {
     }
 
     #[test]
-    fn all_floats_share_a_bucket() {
-        assert_eq!(hash(Number::from(1.0)), hash(Number::from(2.0)));
-        assert_eq!(hash(Number::from(f64::NAN)), hash(Number::from(-0.0)));
+    fn equal_numbers_hash_alike() {
+        let quiet = f64::NAN;
+        let other_nan = f64::from_bits(quiet.to_bits() | 1);
+        let negative_nan = -quiet;
+        assert!(other_nan.is_nan() && negative_nan.is_nan());
+        for (left, right) in [
+            (quiet, other_nan),
+            (quiet, negative_nan),
+            (0.0, -0.0),
+            (1.5, 1.5),
+            (f64::INFINITY, f64::INFINITY),
+        ] {
+            let (left, right) = (Number::from(left), Number::from(right));
+            assert_eq!(left, right);
+            assert_eq!(hash(left), hash(right));
+        }
+    }
+
+    #[test]
+    fn different_floats_hash_differently() {
+        assert_ne!(hash(Number::from(1.0)), hash(Number::from(2.0)));
+        assert_ne!(hash(Number::from(f64::NAN)), hash(Number::from(0.0)));
+        assert_ne!(
+            hash(Number::from(f64::INFINITY)),
+            hash(Number::from(f64::NEG_INFINITY))
+        );
+    }
+
+    #[test]
+    fn integers_and_floats_stay_distinct() {
+        assert_ne!(Number::from(1_u64), Number::from(1.0));
+        assert_ne!(Number::from(0_u64), Number::from(0.0));
     }
 
     #[test]

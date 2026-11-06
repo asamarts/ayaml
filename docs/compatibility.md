@@ -105,8 +105,8 @@ key: [
 ]
 ```
 
-The exception is a closing quote on a line indented only with tabs, which is still an
-error.
+The exception is a closing quote on a line indented only with tabs, when the quoted scalar
+starts on its key's or `-`'s line, which is still an error.
 
 Compatibility mode isn't an exact copy of libyaml. It follows YAML 1.2.2 instead in
 these places, on purpose:
