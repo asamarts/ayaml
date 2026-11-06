@@ -22,6 +22,8 @@ pub(crate) struct Token<'a> {
     pub span: Span,
 }
 
+/// The prefix the built-in handle `!!` stands for.
+const CORE_TAG_PREFIX: &str = "tag:yaml.org,2002:";
 /// The first byte of a byte order mark in UTF-8. Other characters start with it too.
 const BOM_FIRST_BYTE: u8 = 0xEF;
 
@@ -98,6 +100,8 @@ pub(crate) struct Scanner<'a> {
     flow_allow_zero_indent: Vec<bool>,
     previous_flow_end: bool,
     yaml_directive_seen: bool,
+    /// The handles this document's `%TAG` directives define. `!` and `!!` otherwise have their
+    /// built-in prefixes, so most documents pay nothing here.
     tag_handles: HashMap<String, String>,
     /// The bytes that tag handles have expanded to in this stream.
     tag_expansion_bytes: usize,
@@ -184,7 +188,7 @@ impl<'a> Scanner<'a> {
             flow_allow_zero_indent: Vec::new(),
             previous_flow_end: false,
             yaml_directive_seen: false,
-            tag_handles: default_tag_handles(),
+            tag_handles: HashMap::new(),
             tag_expansion_bytes: 0,
             pending_tag_handles: Vec::new(),
             started: false,
@@ -742,7 +746,7 @@ impl<'a> Scanner<'a> {
         if rest.starts_with("---") && self.marker_follows(start, 3) {
             self.pos += 3;
             self.yaml_directive_seen = false;
-            self.tag_handles = default_tag_handles();
+            self.tag_handles.clear();
             for (handle, prefix) in self.pending_tag_handles.drain(..) {
                 self.tag_handles.insert(handle, prefix);
             }
@@ -751,7 +755,7 @@ impl<'a> Scanner<'a> {
         if rest.starts_with("...") && self.marker_follows(start, 3) {
             self.pos += 3;
             self.yaml_directive_seen = false;
-            self.tag_handles = default_tag_handles();
+            self.tag_handles.clear();
             self.pending_tag_handles.clear();
             return self.make(TokenKind::DocumentEnd, start, self.pos);
         }
@@ -919,15 +923,19 @@ impl<'a> Scanner<'a> {
     /// prefix, because every tag holds its own copy, so one long prefix would otherwise make each
     /// short tag cost that much memory.
     fn expand_tag_handle(&mut self, start: usize, handle: &str) -> Result<Option<String>, Error> {
-        let Some(prefix) = self.tag_handles.get(handle) else {
-            return Ok(None);
+        let prefix = match (self.tag_handles.get(handle), handle) {
+            (Some(prefix), _) => prefix.as_str(),
+            (None, "!") => "!",
+            (None, "!!") => CORE_TAG_PREFIX,
+            (None, _) => return Ok(None),
         };
         let total = self.tag_expansion_bytes.saturating_add(prefix.len());
         self.limits
             .check_tag_expansion(total)
             .map_err(|error| self.limit_at(start, error))?;
+        let prefix = prefix.to_owned();
         self.tag_expansion_bytes = total;
-        Ok(Some(prefix.clone()))
+        Ok(Some(prefix))
     }
 
     fn scan_tag(&mut self) -> Result<Option<Token<'a>>, Error> {
@@ -2371,13 +2379,6 @@ fn build_block_scalar(lines: &[(String, bool)], literal: bool, chomping: Chompin
         Chomping::Keep => {}
     }
     value
-}
-
-fn default_tag_handles() -> HashMap<String, String> {
-    let mut handles = HashMap::new();
-    handles.insert("!".to_owned(), "!".to_owned());
-    handles.insert("!!".to_owned(), "tag:yaml.org,2002:".to_owned());
-    handles
 }
 
 /// A URI character (production 39, `ns-uri-char`), counting `%` alone; the
