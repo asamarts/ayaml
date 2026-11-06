@@ -6,7 +6,7 @@
 //!
 //! - the composed documents, serialized with serde_json, against the
 //!   fixture's `.json` file (set `AYAML_BLESS=1` to rewrite them, then review
-//!   the diff by hand);
+//!   the diff by hand; `0` or leaving it unset doesn't, and any other value fails);
 //! - the typed path and the document cursor against the composed documents;
 //! - the compat path, for single-document fixtures;
 //! - value and event round trips through both emitters.
@@ -29,6 +29,16 @@ const FIXTURES: &[&str] = &[
     // An empty stream holds no documents.
     "empty-file",
 ];
+
+/// Whether to rewrite the goldens. A value that means neither yes nor no must not rewrite them,
+/// and treating it as no would hide the mistake.
+fn bless_requested(value: Option<&std::ffi::OsStr>) -> bool {
+    match value.map(std::ffi::OsStr::to_str) {
+        None | Some(Some("0")) => false,
+        Some(Some("1")) => true,
+        Some(other) => panic!("AYAML_BLESS must be 0 or 1, or unset, not {other:?}"),
+    }
+}
 
 fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/real-world")
@@ -53,7 +63,7 @@ fn check(name: &str) {
     // Golden documents.
     let golden_path = dir.join(format!("{name}.json"));
     let actual = json(&documents);
-    if std::env::var_os("AYAML_BLESS").is_some() {
+    if bless_requested(std::env::var_os("AYAML_BLESS").as_deref()) {
         std::fs::write(&golden_path, &actual).expect("bless");
     }
     let golden = std::fs::read_to_string(&golden_path)
@@ -105,6 +115,18 @@ fn check(name: &str) {
 fn real_world_fixtures() {
     for name in FIXTURES {
         check(name);
+    }
+}
+
+#[test]
+fn bless_takes_only_its_documented_values() {
+    use std::ffi::OsStr;
+    assert!(!bless_requested(None));
+    assert!(!bless_requested(Some(OsStr::new("0"))));
+    assert!(bless_requested(Some(OsStr::new("1"))));
+    for wrong in ["", "2", "true", "no"] {
+        let outcome = std::panic::catch_unwind(|| bless_requested(Some(OsStr::new(wrong))));
+        assert!(outcome.is_err(), "{wrong:?}");
     }
 }
 

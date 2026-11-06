@@ -24,12 +24,22 @@
 //! the mode-independent emitter checks are skipped.
 //!
 //! Known deviations are listed in `tests/data/yaml-test-suite-deviations.txt`
-//! as `<case>#<index> <default|compat|all> <check> <reason>`. With
-//! `AYAML_STRICT_SUITE=1`, any unlisted deviation fails the run, and so does
-//! any listed one that no longer occurs. `AYAML_SUITE_SHOW=<n>` limits how
-//! many deviations are printed (default 40).
+//! as `<case>#<index> <default|compat|all> <check> <reason>`.
+//!
+//! `AYAML_STRICT_SUITE=1` makes the run strict: any unlisted deviation fails it, and so does any
+//! listed one that no longer occurs. It also fails unless the suite matches its `REVISION` file,
+//! and the run saw exactly the `EXPECTED` fixtures, cases, and checks below. `0` or leaving it
+//! unset means not strict.
+//!
+//! `AYAML_SUITE_SHOW=<n>` limits how many deviations are printed (default 40).
+//!
+//! A flag with any other value, or a fourth argument, exits with status 2. In every mode, a
+//! fixture or suite directory that can't be read fails the run.
+
+mod pin;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -50,15 +60,110 @@ const CHECKS: [&str; 7] = [
     "emit-value",
 ];
 
-fn walk(root: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    let mut entries: Vec<_> = entries.flatten().map(|entry| entry.path()).collect();
-    entries.sort();
-    for path in entries {
+/// What a strict run has to have seen. The runner reads the suite with the parser it's testing,
+/// so a parser bug could lose a case or a field and leave nothing to fail. A new fixture, or a
+/// fix that closes a listed deviation, changes these in the same change.
+struct Seen<'a> {
+    fixtures: u32,
+    cases: u32,
+    expected_errors: u32,
+    /// How many times each check ran.
+    runs: &'a [(&'a str, usize)],
+}
+
+#[cfg(not(feature = "compat"))]
+const EXPECTED: Seen = Seen {
+    fixtures: 5,
+    cases: 405,
+    expected_errors: 94,
+    runs: &[
+        ("class", 405),
+        ("tree", 311),
+        ("tree-eager", 311),
+        ("json", 282),
+        ("emit-events", 311),
+        ("emit-stream", 311),
+        ("emit-value", 309),
+    ],
+};
+
+#[cfg(feature = "compat")]
+const EXPECTED: Seen = Seen {
+    fixtures: 5,
+    cases: 405,
+    expected_errors: 94,
+    runs: &[("class", 405), ("tree", 311), ("json", 264)],
+};
+
+/// How `seen` differs from `want`, one line for each difference.
+fn count_differences(seen: &Seen, want: &Seen) -> Vec<String> {
+    let mut out = Vec::new();
+    for (name, got, wanted) in [
+        ("fixtures", seen.fixtures, want.fixtures),
+        ("suite cases", seen.cases, want.cases),
+        (
+            "expected errors",
+            seen.expected_errors,
+            want.expected_errors,
+        ),
+    ] {
+        if got != wanted {
+            out.push(format!("saw {got} {name}, expected {wanted}"));
+        }
+    }
+    for check in CHECKS {
+        let count = |runs: &[(&str, usize)]| {
+            runs.iter()
+                .find(|(name, _)| *name == check)
+                .map_or(0, |(_, count)| *count)
+        };
+        let (got, wanted) = (count(seen.runs), count(want.runs));
+        if got != wanted {
+            out.push(format!(
+                "the {check} check ran {got} times, expected {wanted}"
+            ));
+        }
+    }
+    out
+}
+
+/// A yes-or-no environment flag. A value that means neither is an error rather than a guess,
+/// because either guess could quietly change what a gate does.
+fn parse_flag(name: &str, value: Option<&OsStr>) -> Result<bool, String> {
+    match value.map(OsStr::to_str) {
+        None | Some(Some("0")) => Ok(false),
+        Some(Some("1")) => Ok(true),
+        Some(other) => Err(format!(
+            "{name} must be 0 or 1, or unset, not {:?}",
+            other.unwrap_or("something that isn't UTF-8")
+        )),
+    }
+}
+
+fn parse_show(value: Option<&OsStr>) -> Result<usize, String> {
+    let Some(value) = value else { return Ok(40) };
+    value
+        .to_str()
+        .and_then(|text| text.parse().ok())
+        .ok_or_else(|| format!("AYAML_SUITE_SHOW must be a whole number, not {value:?}"))
+}
+
+/// Exit with the status for a command line or flag that can't be right.
+fn usage_error(message: &str) -> ! {
+    eprintln!("{message}");
+    std::process::exit(2);
+}
+
+fn walk(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let describe = |error: std::io::Error| format!("read {}: {error}", root.display());
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(root).map_err(describe)? {
+        paths.push(entry.map_err(describe)?.path());
+    }
+    paths.sort();
+    for path in paths {
         if path.is_dir() {
-            walk(&path, out);
+            walk(&path, out)?;
         } else if path
             .extension()
             .is_some_and(|ext| ext == "yml" || ext == "yaml")
@@ -66,6 +171,7 @@ fn walk(root: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+    Ok(())
 }
 
 fn is_expected_error(path: &Path) -> bool {
@@ -531,8 +637,11 @@ impl Report {
 
 fn check_fixtures(root: &Path) -> (u32, u32) {
     let mut paths = Vec::new();
-    walk(root, &mut paths);
     let (mut fixtures, mut failures) = (0, 0);
+    if let Err(error) = walk(root, &mut paths) {
+        eprintln!("FAIL {error}");
+        failures += 1;
+    }
     for path in &paths {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
@@ -580,7 +689,21 @@ fn main() {
         || PathBuf::from("tests/data/yaml-test-suite-deviations.txt"),
         PathBuf::from,
     );
-    let strict = std::env::var_os("AYAML_STRICT_SUITE").is_some();
+    if let Some(extra) = args.next() {
+        usage_error(&format!("unexpected argument: {extra}"));
+    }
+    let strict = parse_flag(
+        "AYAML_STRICT_SUITE",
+        std::env::var_os("AYAML_STRICT_SUITE").as_deref(),
+    )
+    .unwrap_or_else(|message| usage_error(&message));
+    let show = parse_show(std::env::var_os("AYAML_SUITE_SHOW").as_deref())
+        .unwrap_or_else(|message| usage_error(&message));
+
+    if strict && let Err(error) = pin::verify(&suite_root) {
+        eprintln!("FAIL {error}");
+        std::process::exit(1);
+    }
 
     let (fixtures, mut failures) = check_fixtures(&fixture_root);
 
@@ -592,17 +715,17 @@ fn main() {
         }
     };
     let mut report = Report {
-        show: std::env::var("AYAML_SUITE_SHOW")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(40),
+        show,
         shown: 0,
         observed: BTreeMap::new(),
         runs: BTreeMap::new(),
     };
 
     let mut suite_paths = Vec::new();
-    walk(&suite_root, &mut suite_paths);
+    if let Err(error) = walk(&suite_root, &mut suite_paths) {
+        eprintln!("FAIL {error}");
+        failures += 1;
+    }
     let (mut cases, mut expected_errors) = (0_u32, 0_u32);
     let mut known_cases = BTreeSet::new();
     for path in &suite_paths {
@@ -750,7 +873,123 @@ fn main() {
         summary.join(" "),
         listed.len()
     );
-    if failures != 0 || (strict && (unexpected != 0 || stale != 0)) {
+    let mut differences = Vec::new();
+    if strict {
+        let runs: Vec<(&str, usize)> = report
+            .runs
+            .iter()
+            .map(|(check, (run, _))| (*check, *run))
+            .collect();
+        let seen = Seen {
+            fixtures,
+            cases,
+            expected_errors,
+            runs: &runs,
+        };
+        differences = count_differences(&seen, &EXPECTED);
+        for difference in &differences {
+            eprintln!("FAIL {difference}");
+        }
+    }
+    if failures != 0 || !differences.is_empty() || (strict && (unexpected != 0 || stale != 0)) {
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use super::{Seen, count_differences, parse_flag, parse_show};
+
+    const WANT: Seen = Seen {
+        fixtures: 2,
+        cases: 3,
+        expected_errors: 1,
+        runs: &[("class", 3), ("tree", 2)],
+    };
+
+    fn differences(seen: &Seen) -> Vec<String> {
+        count_differences(seen, &WANT)
+    }
+
+    #[test]
+    fn the_expected_counts_pass() {
+        assert_eq!(differences(&WANT), Vec::<String>::new());
+    }
+
+    #[test]
+    fn each_count_is_compared_in_both_directions() {
+        for (seen, line) in [
+            (
+                Seen {
+                    fixtures: 1,
+                    ..WANT
+                },
+                "saw 1 fixtures, expected 2",
+            ),
+            (
+                Seen {
+                    fixtures: 3,
+                    ..WANT
+                },
+                "saw 3 fixtures, expected 2",
+            ),
+            (Seen { cases: 2, ..WANT }, "saw 2 suite cases, expected 3"),
+            (Seen { cases: 4, ..WANT }, "saw 4 suite cases, expected 3"),
+            (
+                Seen {
+                    expected_errors: 0,
+                    ..WANT
+                },
+                "saw 0 expected errors, expected 1",
+            ),
+            (
+                Seen {
+                    runs: &[("class", 3), ("tree", 1)],
+                    ..WANT
+                },
+                "the tree check ran 1 times, expected 2",
+            ),
+            // A check that never ran has no entry at all.
+            (
+                Seen {
+                    runs: &[("class", 3)],
+                    ..WANT
+                },
+                "the tree check ran 0 times, expected 2",
+            ),
+            (
+                Seen {
+                    runs: &[("class", 3), ("tree", 2), ("json", 1)],
+                    ..WANT
+                },
+                "the json check ran 1 times, expected 0",
+            ),
+        ] {
+            assert_eq!(differences(&seen), [line]);
+        }
+    }
+
+    #[test]
+    fn a_flag_takes_only_its_documented_values() {
+        let flag = |value: Option<&str>| parse_flag("FLAG", value.map(OsStr::new));
+        assert_eq!(flag(None), Ok(false));
+        assert_eq!(flag(Some("0")), Ok(false));
+        assert_eq!(flag(Some("1")), Ok(true));
+        for wrong in ["", "2", "true", "yes", "on", "off", " 1", "01"] {
+            assert!(flag(Some(wrong)).is_err(), "{wrong:?}");
+        }
+    }
+
+    #[test]
+    fn a_limit_on_what_is_shown_has_to_be_a_number() {
+        let show = |value: Option<&str>| parse_show(value.map(OsStr::new));
+        assert_eq!(show(None), Ok(40));
+        assert_eq!(show(Some("0")), Ok(0));
+        assert_eq!(show(Some("7")), Ok(7));
+        for wrong in ["", "-1", "many", "4 0"] {
+            assert!(show(Some(wrong)).is_err(), "{wrong:?}");
+        }
     }
 }
