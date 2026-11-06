@@ -33,6 +33,8 @@ pub const MAX_ALIAS_EXPANSION_BYTES: usize = 256 * 1024 * 1024;
 pub const ALIAS_BYTES_PER_INPUT_BYTE: usize = 16;
 /// Estimated cost of one composed node.
 pub const NODE_COST_BYTES: usize = 256;
+/// Maximum bytes that tag handles expand to in one stream.
+pub const MAX_TAG_EXPANSION_BYTES: usize = 64 * 1024 * 1024;
 /// Default maximum documents in one stream. Single-document entry
 /// points reject a second document regardless.
 pub const DEFAULT_MAX_DOCUMENTS: usize = 10_000;
@@ -63,6 +65,8 @@ pub enum LimitKind {
     AliasDereferences,
     /// Bytes written by an emitter call.
     OutputBytes,
+    /// Bytes that tag handles expand to in a stream.
+    TagExpansion,
 }
 
 impl fmt::Display for LimitKind {
@@ -78,6 +82,7 @@ impl fmt::Display for LimitKind {
             Self::Anchors => "anchors",
             Self::AliasDereferences => "alias dereferences",
             Self::OutputBytes => "output bytes",
+            Self::TagExpansion => "tag expansion bytes",
         };
         formatter.write_str(name)
     }
@@ -167,6 +172,9 @@ pub struct Limits {
     pub max_alias_dereferences: usize,
     /// Maximum bytes written by one emitter call.
     pub max_output_bytes: usize,
+    /// Maximum bytes that tag handles expand to in one stream. Each use of a handle counts the
+    /// whole prefix it stands for, so a long `%TAG` prefix can't multiply the cost of short tags.
+    pub max_tag_expansion_bytes: usize,
 }
 
 impl Default for Limits {
@@ -196,6 +204,7 @@ impl Limits {
             max_anchors: 100_000,
             max_alias_dereferences: 100_000,
             max_output_bytes: 64 * 1024 * 1024,
+            max_tag_expansion_bytes: MAX_TAG_EXPANSION_BYTES,
         }
     }
 
@@ -283,6 +292,13 @@ impl Limits {
         self
     }
 
+    /// Set the maximum bytes that tag handles expand to in one stream.
+    #[must_use]
+    pub const fn with_max_tag_expansion_bytes(mut self, value: usize) -> Self {
+        self.max_tag_expansion_bytes = value;
+        self
+    }
+
     /// The alias-expansion budget for an input of `input_len` bytes.
     ///
     /// The input contribution is capped at `max_input_bytes`, so padding a
@@ -323,6 +339,15 @@ impl Limits {
     /// Check the number of documents.
     pub fn check_documents(&self, observed: usize) -> Result<(), LimitExceeded> {
         check(LimitKind::Documents, self.max_documents, observed)
+    }
+
+    /// Check the bytes that tag handles have expanded to so far.
+    pub fn check_tag_expansion(&self, observed: usize) -> Result<(), LimitExceeded> {
+        check(
+            LimitKind::TagExpansion,
+            self.max_tag_expansion_bytes,
+            observed,
+        )
     }
 
     /// Check a scalar's byte length.

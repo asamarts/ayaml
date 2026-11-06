@@ -662,6 +662,38 @@ fn scanning_takes_time_linear_in_the_input() {
 /// The nesting shapes the depth tests use, each with a different recursion
 /// profile in Serde (sequences, mappings) or the parser (block, flow,
 /// compact, aliases).
+#[test]
+fn a_long_tag_prefix_cannot_multiply_memory() {
+    in_child!(|| {
+        // One long prefix and many short tags that each hold a copy of it. Without the limit,
+        // this reaches gigabytes from about 1 MiB of input, well past this child's peak.
+        const PREFIX: usize = 1 << 20;
+        const TAGS: usize = 4_000;
+        let long = "e".repeat(PREFIX);
+        let inputs = [
+            format!("%TAG !e! tag:{long}:\n---\n{}", "- !e!x a\n".repeat(TAGS)),
+            format!("%TAG !! tag:{long}:\n---\n{}", "- !!x a\n".repeat(TAGS)),
+            format!("%TAG ! tag:{long}:\n---\n{}", "- !x a\n".repeat(TAGS)),
+            // A handle that expands to a core name splits at the core prefix, which copies too.
+            format!(
+                "%TAG !e! tag:yaml.org,2002:{long}:\n---\n{}",
+                "- !e!x a\n".repeat(TAGS)
+            ),
+        ];
+        for input in &inputs {
+            for (entry_point, result) in entry_points(input) {
+                let error = result.expect_err(entry_point);
+                let limit = error.limit().map(ayaml::LimitExceeded::kind);
+                assert_eq!(
+                    limit,
+                    Some(ayaml::LimitKind::TagExpansion),
+                    "{entry_point}: {error}"
+                );
+            }
+        }
+    });
+}
+
 const SHAPES: [&str; 6] = [
     "flow sequence",
     "flow mapping",

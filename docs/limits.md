@@ -23,6 +23,7 @@ stream.
 | `max_anchors` | 100,000 | Maximum anchors in one document. |
 | `max_alias_dereferences` | 100,000 | Maximum alias dereferences in one stream. |
 | `max_output_bytes` | 64 MiB | Maximum bytes written by one emitter call. |
+| `max_tag_expansion_bytes` | 64 MiB | Maximum bytes that tag handles expand to in one stream. |
 
 Limits are inclusive at the accepted boundary. Every check has tests just
 below, at, and above its ceiling.
@@ -36,6 +37,10 @@ max_alias_expansion_bytes
 
 The input contribution is capped at `max_input_bytes`, so padding a document
 cannot multiply the alias budget without bound.
+
+Every tag written with a handle holds its own copy of the prefix that handle stands for, so
+`max_tag_expansion_bytes` counts the whole prefix at each use, in `%TAG` handles and the built-in
+`!` and `!!` alike. A tag written verbatim costs what its text costs, so it doesn't count.
 
 ## Single document versus stream
 

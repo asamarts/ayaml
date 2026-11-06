@@ -99,6 +99,8 @@ pub(crate) struct Scanner<'a> {
     previous_flow_end: bool,
     yaml_directive_seen: bool,
     tag_handles: HashMap<String, String>,
+    /// The bytes that tag handles have expanded to in this stream.
+    tag_expansion_bytes: usize,
     pending_tag_handles: Vec<(String, String)>,
     started: bool,
     finished: bool,
@@ -183,6 +185,7 @@ impl<'a> Scanner<'a> {
             previous_flow_end: false,
             yaml_directive_seen: false,
             tag_handles: default_tag_handles(),
+            tag_expansion_bytes: 0,
             pending_tag_handles: Vec::new(),
             started: false,
             finished: false,
@@ -909,6 +912,21 @@ impl<'a> Scanner<'a> {
         }
     }
 
+    /// The prefix `handle` stands for, or `None` if nothing defines it. Each use counts the whole
+    /// prefix, because every tag holds its own copy, so one long prefix would otherwise make each
+    /// short tag cost that much memory.
+    fn expand_tag_handle(&mut self, start: usize, handle: &str) -> Result<Option<String>, Error> {
+        let Some(prefix) = self.tag_handles.get(handle) else {
+            return Ok(None);
+        };
+        let total = self.tag_expansion_bytes.saturating_add(prefix.len());
+        self.limits
+            .check_tag_expansion(total)
+            .map_err(|error| self.limit_at(start, error))?;
+        self.tag_expansion_bytes = total;
+        Ok(Some(prefix.clone()))
+    }
+
     fn scan_tag(&mut self) -> Result<Option<Token<'a>>, Error> {
         let start = self.pos;
         self.pos += 1;
@@ -917,9 +935,7 @@ impl<'a> Scanner<'a> {
             let suffix_start = self.pos;
             self.consume_tag_suffix();
             let prefix = self
-                .tag_handles
-                .get("!!")
-                .cloned()
+                .expand_tag_handle(start, "!!")?
                 .ok_or_else(|| self.error_at(start, "undefined secondary tag handle"))?;
             Tag::new(prefix, self.decode_tag_suffix(suffix_start)?)
         } else if self.peek() == Some('<') {
@@ -956,18 +972,16 @@ impl<'a> Scanner<'a> {
                 let suffix_start = self.pos;
                 self.consume_tag_suffix();
                 let handle = &self.input[handle_start - 1..suffix_start];
-                let prefix = self.tag_handles.get(handle).ok_or_else(|| {
+                let prefix = self.expand_tag_handle(start, handle)?.ok_or_else(|| {
                     self.error_at(start, format!("undefined tag handle {handle:?}"))
                 })?;
-                Tag::new(prefix.clone(), self.decode_tag_suffix(suffix_start)?)
+                Tag::new(prefix, self.decode_tag_suffix(suffix_start)?)
             } else {
                 // `!` alone is the non-specific tag, which no `%TAG !` changes.
                 let prefix = if self.pos == handle_start {
                     "!".to_owned()
                 } else {
-                    self.tag_handles
-                        .get("!")
-                        .cloned()
+                    self.expand_tag_handle(start, "!")?
                         .ok_or_else(|| self.error_at(start, "undefined primary tag handle"))?
                 };
                 Tag::new(prefix, self.decode_tag_suffix(handle_start)?)
