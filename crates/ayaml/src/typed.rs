@@ -373,6 +373,7 @@ impl<'de> Builder<'de, '_> {
                         height,
                     }) => {
                         let node = apply_tag(tag, Node::new(NodeKind::Sequence(items), span));
+                        let size = size.saturating_add(tag_text_len(&node));
                         self.anchored(anchor.as_ref(), node, size, height + 1, Anchors::close)
                     }
                     _ => return Err(self.error_at(span, "unexpected sequence end")),
@@ -389,6 +390,7 @@ impl<'de> Builder<'de, '_> {
                         ..
                     }) => {
                         let node = apply_tag(tag, Node::new(NodeKind::Mapping(entries), span));
+                        let size = size.saturating_add(tag_text_len(&node));
                         self.anchored(anchor.as_ref(), node, size, height + 1, Anchors::close)
                     }
                     _ => return Err(self.error_at(span, "unexpected mapping end")),
@@ -501,6 +503,14 @@ fn resolve<'a, 'de>(mut node: &'a Node<'de>) -> &'a Node<'de> {
     node
 }
 
+/// What a collection's tag adds to the size of an alias to it.
+fn tag_text_len(node: &Node<'_>) -> usize {
+    match &node.kind {
+        NodeKind::Tagged(tag, _) => tag.text_len(),
+        _ => 0,
+    }
+}
+
 fn apply_tag(tag: Option<Tag>, node: Node<'_>) -> Node<'_> {
     match tag {
         // Core collection tags restate the node kind, so they're dropped
@@ -607,7 +617,9 @@ fn estimate_size(node: &Node<'_>, node_cost: usize) -> usize {
             size.saturating_add(estimate_size(key, node_cost))
                 .saturating_add(estimate_size(value, node_cost))
         }),
-        NodeKind::Tagged(_, value) => estimate_size(value, node_cost),
+        NodeKind::Tagged(tag, value) => tag
+            .text_len()
+            .saturating_add(estimate_size(value, node_cost)),
         NodeKind::Alias(target) => estimate_size(target, node_cost),
     }
 }

@@ -159,8 +159,9 @@ fail for anyone who lowered that budget to forbid aliases. Cap the length of a `
 leaves about 100 times the input at a 1 KiB cap. Share one prefix among tags, which stops the copies
 held by tags but not the copies that Serde names and the split at the core prefix make.
 
-**Why.** A count of expansions bounds both memory and time on every path, and it can't reject a
-document for anything but this cost. 64 MiB holds 640,000 uses of a 100-byte prefix, more than any
+**Why.** A count of expansions bounds what handles cost on every path, and it can't reject a
+document for anything but this cost. A tag that an alias copies counts against the alias budget, with
+the rest of what the alias copies. 64 MiB holds 640,000 uses of a 100-byte prefix, more than any
 real document needs, and it stays below the hostile tests' 256 MiB peak.
 
 **Consequences.** `Limits` and `LimitKind` each gain a member. Both are `#[non_exhaustive]`, so this

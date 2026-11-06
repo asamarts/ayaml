@@ -110,6 +110,11 @@ impl Tag {
         &self.handle
     }
 
+    /// The bytes of text this tag holds, which every copy of it holds too.
+    pub(crate) fn text_len(&self) -> usize {
+        self.handle.len().saturating_add(self.suffix.len())
+    }
+
     /// The tag suffix.
     #[must_use]
     pub fn suffix(&self) -> &str {
