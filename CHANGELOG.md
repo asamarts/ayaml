@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- In compat mode, a scanner error is no longer reported as a recursion limit because the
+  input has an anchor followed by an alias of the same name somewhere. `&a *a\n@` now reports
+  the `@`, with the scanner's error kind rather than `ErrorKind::Limit`.
 - In compat mode, a byte order mark at the start of a line no longer loses the text after
   it. After a root block scalar, the line is now outside the scalar, so `|\nx\n\u{FEFF}y`
   is an error instead of `"x\n"`, and `|+\nx\n\u{FEFF}\n` keeps one line break, not two.

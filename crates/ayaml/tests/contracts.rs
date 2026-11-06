@@ -2017,3 +2017,17 @@ fn tag_handles_count_against_their_limit_at_each_use() {
     limit_of(cursor.next::<Value>().expect_err("over the limit"));
     ayaml::parse_value(&tags(10_000)).expect("default");
 }
+
+/// An error elsewhere in the input isn't a limit because of what the input's text happens to hold.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_reports_a_scanner_error_as_itself() {
+    for (input, message) in [
+        ("&a *a\n@", "'@' is a reserved indicator"),
+        ("!~!&-*-", "undefined tag handle"),
+    ] {
+        let error = ayaml::compat::from_str::<Value>(input).expect_err(input);
+        assert_eq!(error.kind(), ayaml::ErrorKind::Scanner, "{input:?}");
+        assert!(error.message().contains(message), "{input:?}: {error}");
+    }
+}
