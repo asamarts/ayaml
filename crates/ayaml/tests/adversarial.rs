@@ -26,7 +26,7 @@ const CHILD: &str = "AYAML_ADVERSARIAL_CHILD";
 const ADDRESS_SPACE_KIB: u64 = 1 << 20;
 
 /// The most memory a child may have held when its body ends, in KiB. The tests here peak below
-/// 90 MiB, so this catches a regression too small to reach the address-space limit.
+/// 200 MiB, so this catches a regression too small to reach the address-space limit.
 const NORMAL_PEAK_KIB: u64 = ADDRESS_SPACE_KIB / 4;
 
 /// How long a child may run. A regression that spins without allocating ends here.
@@ -667,9 +667,6 @@ fn scanning_takes_time_linear_in_the_input() {
     });
 }
 
-/// The nesting shapes the depth tests use, each with a different recursion
-/// profile in Serde (sequences, mappings) or the parser (block, flow,
-/// compact, aliases).
 #[test]
 fn a_long_tag_prefix_cannot_multiply_memory() {
     in_child!(|| {
@@ -754,6 +751,9 @@ fn an_alias_cannot_multiply_a_long_tag() {
     });
 }
 
+/// The nesting shapes the depth tests use, each with a different recursion
+/// profile in Serde (sequences, mappings) or the parser (block, flow,
+/// compact, aliases).
 const SHAPES: [&str; 6] = [
     "flow sequence",
     "flow mapping",

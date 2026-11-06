@@ -92,12 +92,13 @@ libyaml counts a column for a byte-order mark at the start of a line, so in
 compatibility mode a `---` or `...` right after one is text, not a marker. On a
 later line, the mark's column also counts for block structure, so a block
 collection after it is one column deeper. The stream's first mark takes up no
-column, as when libyaml detects the encoding itself, though a marker after it
-is still text.
+column, as when libyaml detects the encoding itself, unless a marker follows it.
+Then the marker is text, and the line reads like a later line.
 
 A closing `]`, `}`, or quote may sit at any indentation in both modes, including
 under a block collection, where the grammar asks for indentation. libyaml accepts
-these too, and files commonly close a flow collection this way:
+these too, and files commonly close a flow collection this way. The exception is a
+closing quote on a line indented only with tabs, which is still an error:
 
 ```yaml
 key: [

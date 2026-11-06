@@ -11,7 +11,7 @@ use std::fmt;
 use crate::error::{Error, ErrorKind};
 use crate::event::ScalarStyle;
 use crate::limits::Limits;
-use crate::position::LineIndex;
+use crate::position::{LineIndex, starts_with_document_marker};
 use crate::span::Span;
 use crate::tag::Tag;
 
@@ -1098,9 +1098,12 @@ impl<'a> Scanner<'a> {
         }
         let line_start = self.line_index.line_start(start);
         let prefix = self.input[line_start..start].trim_end_matches(is_blank);
+        let prefix = prefix.strip_prefix('\u{feff}').unwrap_or(prefix);
         let (counted_line, mut indent) = self.counted_indent;
         if counted_line != line_start {
-            indent = self.line_indent(start);
+            // A mark's column doesn't count. libyaml has no such check, so it shouldn't get
+            // stricter because of a mark.
+            indent = leading_spaces(self.after_line_boms(line_start, self.input.len()));
             self.counted_indent = (line_start, indent);
         }
         (indent, prefix.is_empty())
@@ -1546,18 +1549,28 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// What `text`, which starts the line at `line_start`, says about ownership. In compat, a
-    /// later line's mark takes up a column, as libyaml reads it, so an owner there is one deeper.
+    /// What `text`, which starts the line at `line_start`, says about ownership. An owner after
+    /// a mark that takes up a column is one deeper.
     fn shape_of_line(&self, line_start: usize, text: &str) -> LineShape {
         let shape = line_shape(text, self.compat_flow);
         match shape {
             LineShape::Owner(Owner::Block(indent))
-                if self.compat_flow && line_start > 0 && text.starts_with('\u{feff}') =>
+                if text
+                    .strip_prefix('\u{feff}')
+                    .is_some_and(|rest| self.mark_takes_column(line_start, rest)) =>
             {
                 LineShape::Owner(Owner::Block(indent + 1))
             }
             shape => shape,
         }
+    }
+
+    /// Whether the mark that `after_mark` follows, at the start of the line at `line_start`,
+    /// takes up a column. In compat a later line's does, as libyaml reads it. The first line's
+    /// doesn't, unless a document marker follows: that's text only because the mark counts, so
+    /// the rest of the line reads that way too. No mark takes up a column by default.
+    fn mark_takes_column(&self, line_start: usize, after_mark: &str) -> bool {
+        self.compat_flow && (line_start > 0 || starts_with_document_marker(after_mark))
     }
 
     /// For a node that starts its line (after optional properties), the
@@ -1616,16 +1629,12 @@ impl<'a> Scanner<'a> {
     fn line_indent(&self, position: usize) -> usize {
         let line_start = self.line_index.line_start(position);
         let text = self.after_line_boms(line_start, self.input.len());
-        let spaces = |text: &str| text.chars().take_while(|ch| *ch == ' ').count();
-        // In compat, a later line's mark takes up a column, as libyaml reads it. The first line's
-        // doesn't, and neither does any mark by default.
-        if self.compat_flow
-            && line_start > 0
-            && let Some(rest) = text.strip_prefix('\u{feff}')
-        {
-            return 1 + spaces(rest);
+        // The spaces after a mark count only if it takes up a column. Otherwise, in compat, this
+        // stops at the mark. By default, no mark is left here.
+        match text.strip_prefix('\u{feff}') {
+            Some(rest) if self.mark_takes_column(line_start, rest) => 1 + leading_spaces(rest),
+            _ => leading_spaces(text),
         }
-        spaces(text)
     }
 
     /// The text of `start..end`, a line's start onward, past any byte order marks there. They
@@ -2025,15 +2034,22 @@ enum LineShape {
     Content,
 }
 
+/// The number of spaces that `text` starts with.
+fn leading_spaces(text: &str) -> usize {
+    text.len() - text.trim_start_matches(' ').len()
+}
+
 /// Classify `text`, which starts at a line start: leading spaces, an optional
 /// `---`, block indicators (`- `, `? `, `: `), an optional implicit key with
 /// its `:`, and node properties. The last indicator or key decides the owner.
 /// `compat` ends anchor and alias names where the compat scanner does.
 fn line_shape(text: &str, compat: bool) -> LineShape {
-    let text = if compat {
-        text.strip_prefix('\u{feff}').unwrap_or(text)
+    // In compat, a `---` after a mark is text, as the scanner reads it.
+    let (text, marker_possible) = if compat {
+        text.strip_prefix('\u{feff}')
+            .map_or((text, true), |rest| (rest, false))
     } else {
-        text.trim_start_matches('\u{feff}')
+        (text.trim_start_matches('\u{feff}'), true)
     };
     let bytes = text.as_bytes();
     let separator = |index: usize| index >= bytes.len() || matches!(bytes[index], b' ' | b'\t');
@@ -2048,7 +2064,7 @@ fn line_shape(text: &str, compat: bool) -> LineShape {
         index += 1;
     }
     let mut owner = None;
-    if index == 0 && text.starts_with("---") && separator(3) {
+    if marker_possible && index == 0 && text.starts_with("---") && separator(3) {
         owner = Some(Owner::Root);
         index = skip_blanks(3);
     }

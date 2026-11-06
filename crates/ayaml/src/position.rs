@@ -24,6 +24,16 @@ pub(crate) struct LineIndex {
     counted_column: Cell<(usize, usize, usize)>,
 }
 
+/// Whether `text` starts with a document marker: `---` or `...` and then a blank, a line break, or
+/// its end.
+pub(crate) fn starts_with_document_marker(text: &str) -> bool {
+    (text.starts_with("---") || text.starts_with("..."))
+        && text[3..]
+            .chars()
+            .next()
+            .is_none_or(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r'))
+}
+
 impl LineIndex {
     /// Build an index for `input`.
     #[must_use]
@@ -88,13 +98,24 @@ impl LineIndex {
     }
 
     /// Build an index for compat, where a later line's BOM takes up a column, as libyaml reads it.
-    /// The first line's takes up none, as when libyaml detects the encoding itself. The scanner
-    /// still reads a marker after that one as text, as when the encoding was set beforehand.
+    /// The first line's takes up none, as when libyaml detects the encoding itself, unless a
+    /// document marker follows it. The scanner reads that marker as text, as when the encoding was
+    /// set beforehand, so the rest of the line reads that way too.
     #[must_use]
     pub(crate) fn counting_line_boms(input: &str) -> Self {
+        let index = Self::new(input);
+        let content_start = if input
+            .strip_prefix('\u{feff}')
+            .is_some_and(starts_with_document_marker)
+        {
+            0
+        } else {
+            index.content_start
+        };
         Self {
             skip_line_boms: false,
-            ..Self::new(input)
+            content_start,
+            ..index
         }
     }
 

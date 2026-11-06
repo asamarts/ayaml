@@ -34,9 +34,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   collection the indentation of those lines is now checked, wherever the node starts, so
   `k: {x\n: y}`, `k:\n  [\na\n  ]`, and `---k: 'a\nb'` are now errors. Compat mode still reads
   the first two. A comment line is exempt in every position, so `k: [\n# c\n  a\n  ]` now
-  parses, and so is a closing `]`, `}`, or quote, as it was before. The check doesn't yet cover a
-  plain scalar's own continuation lines inside a flow collection, or every indentation of a quoted
-  scalar's lines under nested collections.
+  parses, and so is a closing `]`, `}`, or quote, as it was before, unless tabs alone indent a
+  quote. The check doesn't yet cover a plain scalar's own continuation lines inside a flow
+  collection, or every indentation of a quoted scalar's lines under nested collections.
 - A second tag or anchor on one node is now an error in both modes, so `&a &b c` and
   `!a !b c` are rejected. The second one used to replace the first.
 - An explicit key whose properties are alone on the `?` line may now hold an indentless
@@ -51,7 +51,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `%YAML 1.2\n\u{FEFF}# c\n---\na` is rejected.
 - In compat mode, a byte order mark's column on a later line now counts for block structure, as it
   already did for error positions. So `# c\n\u{FEFF}- 1\n - 2` is `[1, 2]`, not `["1 - 2"]`,
-  and `# c\n\u{FEFF}k: a\n b` is an error, as in libyaml.
+  and `# c\n\u{FEFF}k: a\n b` is an error, as in libyaml. A quoted scalar's lines aren't held to
+  that column, because libyaml has no such check.
+- In compat mode, what follows a `---` or `...` after a byte order mark now reads the way the
+  marker does, as text, so the block scalar in `\n\u{FEFF}--- k: |\n  # c\n` holds `# c\n` instead
+  of being empty, and `\n\u{FEFF}--- k: a\n  b` is `a b` instead of an error. The stream's first
+  mark now takes up a column when a marker follows it, as a later line's does, so
+  `\u{FEFF}--- k: a\nz: 1` is an error, as in libyaml.
 - The non-specific tag `!` is no longer changed by a `%TAG !` directive, in either mode.
 - A tag whose handle expands to part of a core-schema name is now that core tag, in both
   modes. Under `%TAG !y! tag:yaml.org,2002:i`, `!y!nt 1` is the integer 1 and `!y!nt x` is
