@@ -110,6 +110,7 @@ def run(hours_ago: float, conclusion: str = "success", status: str = "completed"
     return {
         "conclusion": conclusion,
         "createdAt": created.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "event": "schedule",
         "status": status,
         "url": "https://example.invalid/run",
     }
@@ -141,6 +142,13 @@ class ScheduledRuns(unittest.TestCase):
 
     def test_an_old_failure_is_forgotten(self) -> None:
         self.assertEqual(self.problems(run(3), run(37, "failure")), [])
+
+    def test_a_failed_run_started_by_hand_is_not_a_problem(self) -> None:
+        by_hand = run(3, "failure") | {"event": "workflow_dispatch"}
+        self.assertEqual(self.problems(by_hand), [])
+
+    def test_a_run_started_by_hand_still_counts_as_a_run(self) -> None:
+        self.assertEqual(self.problems(run(3) | {"event": "workflow_dispatch"}), [])
 
     def test_a_run_still_going_counts_as_a_run_and_not_as_a_failure(self) -> None:
         self.assertEqual(self.problems(run(1, "", "in_progress")), [])

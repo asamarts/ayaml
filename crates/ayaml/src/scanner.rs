@@ -882,11 +882,13 @@ impl<'a> Scanner<'a> {
             // libyaml stops at `?` and at a `:` followed by more text; the
             // compatibility scanner keeps that. It does not keep libyaml's stop
             // at a `:` before a blank or flow indicator (`&a: b`), which
-            // 2SXE and W5VH rule out.
+            // 2SXE and W5VH rule out. Nor does it stop at a `:` in a flow
+            // collection: libyaml reads that `:` as a value indicator, which
+            // this scanner wouldn't, so stopping would match neither reading.
             if self.compat_flow && ch == '?' {
                 break;
             }
-            if self.compat_flow && ch == ':' && self.pos > name_start {
+            if self.compat_flow && self.flow_level == 0 && ch == ':' && self.pos > name_start {
                 let after = self.input[self.pos + 1..].chars().next();
                 if after.is_some_and(|next| {
                     !is_blank(next) && !matches!(next, '[' | ']' | '{' | '}' | ',')

@@ -83,10 +83,10 @@ assert_eq!(value["key"].as_str(), Some("value"));
 # }
 ```
 
-The compatibility module reproduces the observable behavior of a
-libyaml-compatible stack for callers that need it. Enabling the feature does
-not change the root parsing functions; choose the compatibility entry points
-explicitly.
+The compatibility module reads YAML the way a libyaml-compatible stack does, for
+callers that need it, apart from the differences listed below. Enabling the
+feature does not change the root parsing functions; choose the compatibility
+entry points explicitly.
 
 libyaml counts a column for a byte-order mark at the start of a line, so in
 compatibility mode a `---` or `...` right after one is text, not a marker. On a
@@ -107,6 +107,33 @@ key: [
 
 The exception is a closing quote on a line indented only with tabs, which is still an
 error.
+
+Compatibility mode isn't an exact copy of libyaml. It follows YAML 1.2.2 instead in
+these places, on purpose:
+
+- NEL, LS, and PS are content; libyaml reads them as line breaks.
+- A byte-order mark past the start of the stream behaves as described above.
+- Anchor and alias names may hold any `ns-anchor-char`, where libyaml takes only
+  alphanumerics, `_`, and `-`, so `&a: b` differs.
+- Global, verbatim, and non-specific tags are kept, with their escapes as written.
+  Tag forms that YAML 1.2.2 allows and libyaml's scanner refuses are accepted, such as
+  `!#`, `!<a#>`, or `!` right before a flow indicator. `!` isn't a tag character, so
+  `!.!` and `!!!` are errors.
+- In a flow collection, `[:a]` holds a plain scalar starting with `:`, `a:]` holds a key,
+  and `a:?` is a plain scalar. `{?:{}}` is an error because `?:` starts a plain scalar, and
+  `{?\n:{}}` because only a JSON-like key allows an adjacent value. A flow mapping key may
+  span lines or have a line break before its `:`. `[-]` is an error.
+- An empty implicit key, such as `: a`, is valid.
+- Tabs are separation wherever they aren't indentation. A nested flow collection's or
+  quoted scalar's lines still need space indentation, so `a: [\n\tb]` is an error.
+- A top-level block scalar may hold content at column 0, and a `#` line after a longer
+  blank line in a block scalar is content.
+- A block scalar or a quoted scalar's continuation must be indented past its parent, so
+  `a:\n|` and `a: "b\nc"` are errors.
+- A comment must be separated from what precedes it, so `""#` and `|#` are errors.
+- An unknown directive is ignored, and a stream may start with `...`.
+- Integers are exact up to 128 bits.
+- A quoted scalar may hold any `nb-json` character, such as DEL.
 
 The maintained deviation list is
 [`tests/data/yaml-test-suite-deviations.txt`](../tests/data/yaml-test-suite-deviations.txt).
