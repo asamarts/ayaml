@@ -19,6 +19,9 @@ pub(crate) struct LineIndex {
     len: usize,
     ascii: bool,
     last_line: Cell<usize>,
+    /// The last column counted outside ASCII: its line, byte index, and column. Tokens come in
+    /// order, so counting on from it keeps a long line from being read again for each token.
+    counted_column: Cell<(usize, usize, usize)>,
 }
 
 impl LineIndex {
@@ -52,6 +55,7 @@ impl LineIndex {
                 len: input.len(),
                 ascii: true,
                 last_line: Cell::new(0),
+                counted_column: Cell::new((usize::MAX, 0, 0)),
             };
         }
         let mut starts = vec![0];
@@ -79,6 +83,7 @@ impl LineIndex {
             len: input.len(),
             ascii: input.is_ascii(),
             last_line: Cell::new(0),
+            counted_column: Cell::new((usize::MAX, 0, 0)),
         }
     }
 
@@ -91,14 +96,33 @@ impl LineIndex {
         }
     }
 
-    /// Where a line's columns start.
+    /// The column of `index` on `line`.
     #[inline]
+    fn column(&self, input: &str, line: usize, index: usize) -> usize {
+        if self.ascii {
+            return index - self.starts[line] + 1;
+        }
+        self.counted_column_of(input, line, index)
+    }
+
+    fn counted_column_of(&self, input: &str, line: usize, index: usize) -> usize {
+        let (counted_line, counted_index, counted) = self.counted_column.get();
+        let column = if counted_line == line && counted_index <= index {
+            counted + input[counted_index..index].chars().count()
+        } else {
+            let start = self.line_content_start(input, line);
+            if index < start {
+                return 1;
+            }
+            input[start..index].chars().count() + 1
+        };
+        self.counted_column.set((line, index, column));
+        column
+    }
+
+    /// Where a line's columns start.
     fn line_content_start(&self, input: &str, line: usize) -> usize {
         let mut start = self.starts[line];
-        // ASCII input has no BOM.
-        if self.ascii {
-            return start;
-        }
         if line == 0 {
             start = start.max(self.content_start);
         }
@@ -129,15 +153,11 @@ impl LineIndex {
             }
         }
         self.last_line.set(line);
-        let content_start = self.line_content_start(input, line);
-        let column = if index < content_start {
-            1
-        } else if self.ascii {
-            index - content_start + 1
-        } else {
-            input[content_start..index].chars().count() + 1
-        };
-        Some(Marker::new(index, line + 1, column))
+        Some(Marker::new(
+            index,
+            line + 1,
+            self.column(input, line, index),
+        ))
     }
 
     /// Return a span for `start..end`, reusing the start line for the common
@@ -157,15 +177,7 @@ impl LineIndex {
         let line = self.last_line.get();
         let next_start = self.starts.get(line + 1).copied().unwrap_or(self.len);
         if end < next_start || (end == next_start && line + 1 == self.starts.len()) {
-            let content_start = self.line_content_start(input, line);
-            let column = if end < content_start {
-                1
-            } else if self.ascii {
-                end - content_start + 1
-            } else {
-                input[content_start..end].chars().count() + 1
-            };
-            let end_marker = crate::span::Marker::new(end, line + 1, column);
+            let end_marker = crate::span::Marker::new(end, line + 1, self.column(input, line, end));
             return Some(crate::span::Span::new(start_marker, end_marker));
         }
         self.marker(input, end)
@@ -248,6 +260,22 @@ mod tests {
         let index = LineIndex::counting_line_boms(input);
         let marker = index.marker(input, input.find('k').unwrap()).unwrap();
         assert_eq!((marker.line(), marker.column()), (2, 3));
+    }
+
+    #[test]
+    fn columns_are_right_in_any_order() {
+        let input = "é\u{feff}x é y\n\u{feff}\u{feff}é z\n";
+        let index = LineIndex::new(input);
+        let at = |needle: &str| input.find(needle).unwrap();
+        let column = |offset| index.marker(input, offset).unwrap().column();
+        // Forward, backward, into the marks at a line's start, and forward again.
+        assert_eq!(column(at("x")), 3);
+        assert_eq!(column(at("y")), 7);
+        assert_eq!(column(at("x")), 3);
+        assert_eq!(column(at("z")), 3);
+        assert_eq!(column(input.find('\n').unwrap() + 1), 1);
+        assert_eq!(column(at("z")), 3);
+        assert_eq!(column(at("x")), 3);
     }
 
     #[test]
