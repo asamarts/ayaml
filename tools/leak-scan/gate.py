@@ -306,6 +306,23 @@ def changed_paths(sha: str) -> list[str]:
     return [name.decode("utf-8", "replace") for name in names.split(b"\0") if name]
 
 
+def without_signature(raw: bytes) -> bytes:
+    """Return a commit's raw text without its signature.
+
+    GitHub signs the commits it writes, and base64 can look like anything, so a signature
+    matched a short pattern by chance on `main`. It holds nothing anyone wrote.
+    """
+    headers, separator, message = raw.partition(b"\n\n")
+    kept = []
+    in_signature = False
+    for line in headers.split(b"\n"):
+        if not line.startswith(b" "):
+            in_signature = line.startswith((b"gpgsig ", b"gpgsig-sha256 "))
+        if not in_signature:
+            kept.append(line)
+    return b"\n".join(kept) + separator + message
+
+
 def scan_commits(shas: list[str], patterns: list[Pattern], findings: Findings) -> bytes:
     """Scan each commit and return what it adds, as text for gitleaks.
 
@@ -315,7 +332,7 @@ def scan_commits(shas: list[str], patterns: list[Pattern], findings: Findings) -
     text = bytearray()
     for sha in shas:
         short = sha[:12]
-        raw = git("cat-file", "commit", sha)
+        raw = without_signature(git("cat-file", "commit", sha))
         text += b"\n".join(variants(raw)) + b"\n"
         findings.scan(f"commit {short} message or metadata", raw, patterns)
         for path in changed_paths(sha):

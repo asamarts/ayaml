@@ -170,6 +170,43 @@ class Classes(GateCase):
                 self.commit(f"Change\n\n{content}")
                 self.assert_rejected(self.scan(), "message or metadata")
 
+    def signed_commit(self, signature: str, message: str, after: str = "") -> None:
+        """Make HEAD a commit whose signature header holds `signature`, as GitHub's commits do."""
+        tree = self.git("rev-parse", "HEAD^{tree}").stdout.strip()
+        raw = (
+            f"tree {tree}\nparent {self.base}\n"
+            "author Test <test@example.invalid> 1 +0000\n"
+            "committer GitHub <noreply@example.invalid> 1 +0000\n"
+            f"gpgsig -----BEGIN PGP SIGNATURE-----\n \n {signature}\n -----END PGP SIGNATURE-----\n"
+            f"{after}\n{message}\n"
+        )
+        sha = subprocess.run(
+            ["git", "hash-object", "-t", "commit", "-w", "--stdin", "--literally"],
+            cwd=self.repo,
+            env=self.env,
+            input=raw,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        self.git("reset", "-q", "--hard", sha)
+
+    def test_a_signature_is_not_read_as_text(self) -> None:
+        self.signed_commit(LEAKS["host"].strip(), "Change")
+        result = self.scan()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_signed_commit_message_is_still_scanned(self) -> None:
+        for name, content in LEAKS.items():
+            with self.subTest(name):
+                self.git("checkout", "-q", "-B", name, self.base)
+                self.signed_commit("wsFcBAABCAAQ", f"Change\n\n{content}")
+                self.assert_rejected(self.scan(), "message or metadata")
+
+    def test_a_header_after_a_signature_is_still_scanned(self) -> None:
+        self.signed_commit("wsFcBAABCAAQ", "Change", after="mergetag object fake-person\n")
+        self.assert_rejected(self.scan(), "message or metadata")
+
     def test_identity_in_commit_metadata_is_rejected(self) -> None:
         self.env["GIT_AUTHOR_EMAIL"] = "fake-person@example.invalid"
         self.commit()
