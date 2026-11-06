@@ -560,6 +560,105 @@ fn nested_anchors_are_not_copied() {
     });
 }
 
+/// Inputs that repeat one unit. Each of them once took time quadratic in its length, because
+/// the scanner or the line index read a line again for each unit.
+fn repeated_inputs(length: usize) -> Vec<String> {
+    let all = |unit: &str| unit.repeat(length / unit.len());
+    let half = |unit: &str| unit.repeat(length / 2 / unit.len());
+    vec![
+        // Byte order marks in a document prefix.
+        format!("a\n{}", all("\u{feff}#\n")),
+        format!("a\n{}", all("\u{feff}\n")),
+        format!("a\n{}---\nb\n", all("\u{feff}#\n")),
+        format!("|\n a\n{}", all("\u{feff}#\n")),
+        // A run of them on one line, before a marker, and before a scalar with many lines.
+        format!("a\n{}---\nb\n", all("\u{feff}")),
+        format!("{}k: a{}", half("\u{feff}"), half("\n b")),
+        format!("a\n...\n{}k: a{}", half("\u{feff}"), half("\n b")),
+        format!("{}- a{}", half("\u{feff}"), half("\n b")),
+        // Quoted scalars on one line, and on a line with a long indent.
+        format!("k: [{}]\n", all("'a',")),
+        format!("k: [{}]\n", all("\"a\",")),
+        format!("[{}]\n", all("'a',")),
+        format!("k: [\n{}{}]\n", half(" "), half("'a',")),
+        // Runs of tabs, and many runs on one line.
+        format!("k: [\n{}]\n", all("\t")),
+        format!("[\n{}]\n", all("\t")),
+        format!("{}x\n", all("\t")),
+        format!("{}#\nx\n", all("\t")),
+        format!("k: [{}a]\n", all("a\t,\t")),
+        format!("k: [{}]\n", all("'a'\t,")),
+        all("[]\t"),
+        all("{}\t"),
+        all("'a'\t"),
+        all("!t\t"),
+        format!("k: {}", all("[]\t")),
+        // Flow collections on one line.
+        format!("[{}]\n", all("[],")),
+        format!("[{}]\n", all("{},")),
+        format!("k: [{}]\n", all("[],")),
+        // Non-ASCII text on a long line, and before one.
+        format!("[{}]\n", all("é,")),
+        format!("# é\n[{}]\n", all("a,")),
+        format!("{{\"name\":\"é\",\"items\":[{}]}}\n", all("{\"a\":1},")),
+        // Marks before a long line.
+        format!("{}[{}]\n", half("\u{feff}"), half("a,")),
+        // A long prefix before a plain scalar with many lines.
+        format!("{}a{}", half(" "), half("\n b")),
+        format!("{}: a{}", half("x"), half("\n  b")),
+    ]
+}
+
+#[test]
+fn scanning_takes_time_linear_in_the_input() {
+    in_child!(|| {
+        // Quadruple the length: a linear scan takes about 4 times as long, and a quadratic one
+        // about 16 times, on any host. A scan this quick isn't compared, because the difference
+        // would be noise. Some quadratic scans take only seconds on this length, so a limit on
+        // the time alone misses them. The length stays within the normal peak of memory.
+        const LENGTH: usize = 1 << 19;
+        const QUICK: Duration = Duration::from_millis(100);
+        const LARGEST_GROWTH: u32 = 8;
+        const SLOWEST: Duration = Duration::from_secs(20);
+        const TRIES: usize = 3;
+        type Read = fn(&str) -> Result<(), ayaml::Error>;
+        let timed = |read: &Read, input: &str| {
+            let started = Instant::now();
+            // Some of these are errors in one mode or the other. What counts is the time.
+            let _ = read(input);
+            started.elapsed()
+        };
+        let readers: Vec<(&str, Read)> = vec![
+            ("parse_documents", |input| ok(ayaml::parse_documents(input))),
+            #[cfg(feature = "libyaml-compat")]
+            ("compat", |input| {
+                ok(ayaml::compat::from_str::<ayaml::Value>(input))
+            }),
+        ];
+        let shorter = repeated_inputs(LENGTH / 4);
+        for (short, long) in shorter.iter().zip(repeated_inputs(LENGTH)) {
+            let name: String = long.chars().take(30).collect();
+            for (reader, read) in &readers {
+                let mut short_time = Duration::MAX;
+                let mut long_time = Duration::MAX;
+                // Each best time drops any pause the host took, so it takes a real scan to fail.
+                for _ in 0..TRIES {
+                    short_time = short_time.min(timed(read, short));
+                    long_time = long_time.min(timed(read, &long));
+                    if long_time < QUICK || long_time < short_time * LARGEST_GROWTH {
+                        break;
+                    }
+                }
+                assert!(long_time < SLOWEST, "{reader}: {name:?}: {long_time:?}");
+                assert!(
+                    long_time < QUICK || long_time < short_time * LARGEST_GROWTH,
+                    "{reader}: {name:?}: {short_time:?}, then {long_time:?} on 4 times the length",
+                );
+            }
+        }
+    });
+}
+
 /// The nesting shapes the depth tests use, each with a different recursion
 /// profile in Serde (sequences, mappings) or the parser (block, flow,
 /// compact, aliases).

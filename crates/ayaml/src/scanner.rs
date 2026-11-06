@@ -4,6 +4,7 @@
 //! layer is deliberately kept below the public API.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -20,6 +21,9 @@ pub(crate) struct Token<'a> {
     pub kind: TokenKind<'a>,
     pub span: Span,
 }
+
+/// The first byte of a byte order mark in UTF-8. Other characters start with it too.
+const BOM_FIRST_BYTE: u8 = 0xEF;
 
 /// The token vocabulary the scanner currently produces.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,6 +116,18 @@ pub(crate) struct Scanner<'a> {
     node_seen: bool,
     /// Whether a directive is waiting for its `---`, with no byte order mark allowed between.
     directive_pending: bool,
+    /// Lines known to be a document prefix, so that a mark on any of them needs no new scan.
+    known_prefix: std::ops::Range<usize>,
+    /// The start of the last line that began with byte order marks, and where its marks end.
+    bom_run: Cell<(usize, usize)>,
+    /// Where the last checked run of blanks ends. Its later tabs get the first one's answer.
+    tab_run_end: usize,
+    /// The start of the plain scalar last checked for a block prefix, and the answer.
+    block_prefix: (usize, bool),
+    /// Where the last line checked for a `:` ends, and its last `:` indicator.
+    line_colon: (usize, Option<usize>),
+    /// The last line a quoted scalar's indent was counted on, and that indent.
+    counted_indent: (usize, usize),
     /// Byte offsets of the non-printable characters that only a quoted
     /// scalar may hold, in order, and the first one not yet checked.
     quoted_only: Vec<usize>,
@@ -176,6 +192,12 @@ impl<'a> Scanner<'a> {
             document_open: false,
             node_seen: false,
             directive_pending: false,
+            known_prefix: 0..0,
+            bom_run: Cell::new((usize::MAX, 0)),
+            tab_run_end: 0,
+            block_prefix: (usize::MAX, false),
+            line_colon: (0, None),
+            counted_indent: (usize::MAX, 0),
             quoted_only,
             quoted_only_next: 0,
         })
@@ -479,7 +501,10 @@ impl<'a> Scanner<'a> {
     /// begins a document prefix: everything up to the next `---` line, or to
     /// the end of the input, is blank lines and comments (YAML 1.2.2
     /// productions 202 and 211).
-    fn bom_starts_prefix(&self, position: usize) -> bool {
+    fn bom_starts_prefix(&mut self, position: usize) -> bool {
+        if self.known_prefix.contains(&position) {
+            return true;
+        }
         let mut line_start = position;
         loop {
             let mut text = &self.input[line_start..];
@@ -488,6 +513,7 @@ impl<'a> Scanner<'a> {
             }
             let content = line_start + (self.input.len() - line_start - text.len());
             if text.starts_with("---") && self.marker_follows(content, 3) {
+                self.known_prefix = position..content;
                 return true;
             }
             let line_end = text.find(['\n', '\r']).unwrap_or(text.len());
@@ -496,6 +522,7 @@ impl<'a> Scanner<'a> {
                 return false;
             }
             if line_end == text.len() {
+                self.known_prefix = position..self.input.len();
                 return true;
             }
             line_start = content + line_end + 1;
@@ -587,15 +614,18 @@ impl<'a> Scanner<'a> {
             match ch {
                 ' ' => self.pos += 1,
                 '\t' => {
-                    if self.flow_level == 0 && self.tab_starts_block_structure(self.pos) {
-                        return Err(self.error_at(
-                            self.pos,
-                            "tab cannot separate a block structural indicator",
-                        ));
+                    if self.flow_level == 0 && self.pos >= self.tab_run_end {
+                        self.tab_run_end = self.end_of_blanks(self.pos);
+                        if self.tab_starts_block_structure(self.tab_run_end) {
+                            return Err(self.error_at(
+                                self.pos,
+                                "tab cannot separate a block structural indicator",
+                            ));
+                        }
                     }
                     if self.flow_level > 0
                         && !self.may_continue_at_column_zero()
-                        && self.tab_only_flow_indentation(self.pos)
+                        && self.tab_only_flow_indentation()
                     {
                         return Err(self.error_at(
                             self.pos,
@@ -624,44 +654,47 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    fn tab_only_flow_indentation(&self, position: usize) -> bool {
-        let line_start = self.input[..position]
-            .rfind(['\n', '\r'])
-            .map_or(0, |index| index + 1);
-        let prefix = &self.input[line_start..position];
-        if !prefix.chars().all(|ch| ch == '\t') {
+    /// Whether the tab here is a line's first character with only blanks before its content.
+    /// The first tab answers for the rest of its run, so a line pays for one scan.
+    fn tab_only_flow_indentation(&self) -> bool {
+        if !self.at_line_start() {
             return false;
         }
-        let mut content = position;
-        while matches!(self.input[content..].chars().next(), Some(' ' | '\t')) {
-            content += 1;
-        }
-        let next = self.input[content..].chars().next();
+        let next = self.input[self.end_of_blanks(self.pos)..].chars().next();
         next.is_some_and(|ch| !matches!(ch, ']' | '}' | '#') && !is_line_break(ch))
     }
 
-    fn tab_starts_block_structure(&self, position: usize) -> bool {
-        let mut content = position;
-        while matches!(self.input[content..].chars().next(), Some(' ' | '\t')) {
-            content += 1;
-        }
-        let line_end = self.input[content..]
-            .find(['\n', '\r'])
-            .map_or(self.input.len(), |offset| content + offset);
-        let rest = &self.input[content..line_end];
-        if rest == "-" || rest == "?" || rest == ":" {
+    fn end_of_blanks(&self, position: usize) -> usize {
+        let rest = &self.input[position..];
+        position + rest.len() - rest.trim_start_matches([' ', '\t']).len()
+    }
+
+    /// Whether the content after a run of tabs is a block indicator or a key. The last `:` on
+    /// a line answers for every run before it, so a line pays for one scan.
+    fn tab_starts_block_structure(&mut self, content: usize) -> bool {
+        let rest = &self.input.as_bytes()[content..];
+        if matches!(rest.first(), Some(b'-' | b'?'))
+            && rest
+                .get(1)
+                .is_none_or(|next| matches!(next, b' ' | b'\n' | b'\r'))
+        {
             return true;
         }
-        if rest.starts_with("- ") || rest.starts_with("? ") || rest.starts_with(": ") {
-            return true;
+        if content >= self.line_colon.0 {
+            let line_end = rest
+                .iter()
+                .position(|byte| matches!(byte, b'\n' | b'\r'))
+                .unwrap_or(rest.len());
+            let line = &rest[..line_end];
+            let colon = (0..line_end).rev().find(|&index| {
+                line[index] == b':'
+                    && line
+                        .get(index + 1)
+                        .is_none_or(|next| matches!(next, b' ' | b'\t'))
+            });
+            self.line_colon = (content + line_end, colon.map(|index| content + index));
         }
-        let mut chars = rest.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch == ':' && chars.peek().is_none_or(|next| is_blank(*next)) {
-                return true;
-            }
-        }
-        false
+        self.line_colon.1.is_some_and(|colon| colon >= content)
     }
 
     fn comment_is_legal(&self) -> bool {
@@ -1034,15 +1067,18 @@ impl<'a> Scanner<'a> {
     }
 
     /// The indent a quoted scalar's lines are held to, and whether they may sit at exactly it.
-    fn quoted_indent(&self, start: usize) -> (usize, bool) {
+    fn quoted_indent(&mut self, start: usize) -> (usize, bool) {
         if self.may_continue_at_column_zero() {
             return (0, true);
         }
-        let line_start = self.input[..start]
-            .rfind(['\n', '\r'])
-            .map_or(0, |index| index + 1);
-        let prefix = self.input[line_start..start].trim_matches(is_blank);
-        (self.line_indent(start), prefix.is_empty())
+        let line_start = self.line_index.line_start(start);
+        let prefix = self.input[line_start..start].trim_end_matches(is_blank);
+        let (counted_line, mut indent) = self.counted_indent;
+        if counted_line != line_start {
+            indent = self.line_indent(start);
+            self.counted_indent = (line_start, indent);
+        }
+        (indent, prefix.is_empty())
     }
 
     fn scan_quoted_line_break(
@@ -1540,12 +1576,26 @@ impl<'a> Scanner<'a> {
     /// The text of `start..end`, a line's start onward, past any byte order marks there. They
     /// take up no column, except in compat, which keeps libyaml's reading of them as a column.
     fn after_line_boms(&self, start: usize, end: usize) -> &'a str {
-        let text = &self.input[start..end];
-        if self.compat_flow {
-            text
-        } else {
-            text.trim_start_matches('\u{feff}')
+        // Most lines hold no mark, and this runs for many of them, so the rest stays out of line.
+        if !self.compat_flow && self.input.as_bytes().get(start) == Some(&BOM_FIRST_BYTE) {
+            return self.after_bom_run(start, end);
         }
+        &self.input[start..end]
+    }
+
+    /// The same for a line that may start with marks, reading a run of them once.
+    #[cold]
+    fn after_bom_run(&self, start: usize, end: usize) -> &'a str {
+        let (known_start, known_content) = self.bom_run.get();
+        let content = if known_start == start {
+            known_content
+        } else {
+            let trimmed = self.input[start..].trim_start_matches('\u{feff}');
+            let content = self.input.len() - trimmed.len();
+            self.bom_run.set((start, content));
+            content
+        };
+        &self.input[content.min(end)..end]
     }
 
     fn count_spaces(&self, position: usize) -> usize {
@@ -1600,26 +1650,29 @@ impl<'a> Scanner<'a> {
         let mut value: Option<String> = None;
         loop {
             let content_start = self.pos;
-            while let Some(ch) = self.peek() {
-                if is_line_break(ch) {
-                    break;
-                }
-                if ch == '#' && self.previous_is_whitespace() {
-                    break;
-                }
-                if self.flow_level > 0 && matches!(ch, '[' | ']' | '{' | '}' | ',') {
-                    break;
-                }
-                if ch == ':' && self.colon_indicator(self.pos) {
+            // This loop runs for every character of a plain scalar, so it walks the text once
+            // rather than slicing the input again for each character.
+            let text = &self.input[content_start..];
+            let in_flow = self.flow_level > 0;
+            let mut content_end = self.input.len();
+            for (offset, ch) in text.char_indices() {
+                let position = content_start + offset;
+                if is_line_break(ch)
+                    || (ch == '#' && self.is_blank_before(position))
+                    || (in_flow && matches!(ch, '[' | ']' | '{' | '}' | ','))
+                    || (ch == ':' && self.colon_indicator(position))
+                {
+                    content_end = position;
                     break;
                 }
                 if ch == '\u{feff}' && !self.compat_flow {
+                    self.pos = position;
                     return Err(
-                        self.error_at(self.pos, "a byte order mark can only start a document")
+                        self.error_at(position, "a byte order mark can only start a document")
                     );
                 }
-                self.pos += ch.len_utf8();
             }
+            self.pos = content_end;
             if let Some(value) = value.as_mut() {
                 value.push_str(&self.input[content_start..self.pos]);
                 while value.ends_with([' ', '\t']) {
@@ -1632,21 +1685,12 @@ impl<'a> Scanner<'a> {
             // A scalar that starts after a block prefix cannot continue on a
             // line at or below the prefix's indentation. Reject that common
             // case before scanning the line prefix for an owner.
-            let line_start = self.line_index.line_start(start);
-            if !self.compat_flow && self.flow_level == 0 && start > line_start {
-                let prefix = &self.input[line_start..start];
-                let trimmed = prefix.trim_start_matches([' ', '\t']);
-                let has_block_prefix = trimmed.starts_with("- ")
-                    || trimmed.starts_with("? ")
-                    || trimmed.starts_with(": ")
-                    || prefix.contains(": ");
-                if has_block_prefix
-                    && self
-                        .next_content_indent()
-                        .is_some_and(|indent| indent <= self.line_indent(start))
-                {
-                    break;
-                }
+            if self.has_block_prefix(start)
+                && self
+                    .next_content_indent()
+                    .is_some_and(|indent| indent <= self.line_indent(start))
+            {
+                break;
             }
             let continuation = match continuation {
                 Some(continuation) => continuation,
@@ -1749,6 +1793,24 @@ impl<'a> Scanner<'a> {
         }
     }
 
+    /// Whether a block indicator or a `: ` comes before `start` on its line, outside compat and
+    /// flow collections. A scalar asks once for each of its lines, and this reads the text once.
+    fn has_block_prefix(&mut self, start: usize) -> bool {
+        if self.compat_flow || self.flow_level > 0 {
+            return false;
+        }
+        if self.block_prefix.0 != start {
+            let prefix = &self.input[self.line_index.line_start(start)..start];
+            let trimmed = prefix.trim_start_matches([' ', '\t']);
+            let found = trimmed.starts_with("- ")
+                || trimmed.starts_with("? ")
+                || trimmed.starts_with(": ")
+                || prefix.contains(": ");
+            self.block_prefix = (start, found);
+        }
+        self.block_prefix.1
+    }
+
     fn try_plain_continuation(&mut self, continuation: Continuation) -> Option<usize> {
         let saved = self.pos;
         let mut breaks = 0;
@@ -1842,8 +1904,8 @@ impl<'a> Scanner<'a> {
         false
     }
 
-    fn previous_is_whitespace(&self) -> bool {
-        self.input[..self.pos]
+    fn is_blank_before(&self, position: usize) -> bool {
+        self.input[..position]
             .chars()
             .next_back()
             .is_some_and(is_blank)

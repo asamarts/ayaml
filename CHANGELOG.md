@@ -45,6 +45,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   return the core parts. A name the core schema doesn't define now reads as it does when
   written with `!!`: under `%TAG !y! tag:yaml.org,2002:app/`, `!y!Foo 1` is the string `1`,
   and `!y!Foo [1]` selects the enum variant `app/Foo`, not `Foo`.
+- Scanning no longer takes time quadratic in the input on a long line holding any non-ASCII
+  text, on long runs of tabs or many runs on one line, on many quoted scalars on one line of a
+  flow collection, on a plain scalar with many lines after a long prefix or after a run of byte
+  order marks, or on many byte order marks in a document prefix. An 800 KB input of those could take over a minute,
+  and the default limit allows 32 MiB.
 
 ## [0.1.1] — 2026-11-04
 
