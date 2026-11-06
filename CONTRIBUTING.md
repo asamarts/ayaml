@@ -60,10 +60,17 @@ Two bounds also apply on their own:
   `timeout`, and those steps fail where it can't set these bounds. The `bounds` job checks that
   they work.
 
+## Scheduled checks
+
+Fuzzing and an advisory scan of the dependencies run every day. `tools/check_scheduled_runs.py`
+runs later each day, and it opens an issue if either workflow failed or didn't run, and closes the
+issue once both are healthy again. GitHub turns off every schedule in a repository after 60 days
+with no activity, the check's own included, so run `tools/ci-local.sh scheduled` before a release.
+
 ## Checks that run before a release
 
-Maintainers run two further sets of checks before a release, and tasks in `aplan/tasks/`
-refer to them:
+Maintainers run `tools/ci-local.sh --release`, which fails if any of its checks had to be
+skipped, and two further sets of checks, which tasks in `aplan/tasks/` refer to:
 
 - The **performance gates** compare timing and peak memory with earlier measurements.
   They need a machine with nothing else running, called a quiet host in the tasks.

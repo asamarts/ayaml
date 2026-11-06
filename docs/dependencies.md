@@ -21,9 +21,13 @@ normal dependency graph.
 - The YAML-specific parser and composer code is written in safe Rust and does
   not use FFI.
 - `serde` and `indexmap` contain reviewed implementations with internal
-  `unsafe`; both are allowlisted runtime dependencies.
+  `unsafe`, as do `serde_core` and `hashbrown`, which they bring in. All four are
+  allowlisted runtime dependencies.
 - A new dependency with unsafe code requires a measured need, a safety review,
   and an explicit policy update.
+- CI runs an unsafe census with `cargo-geiger`, and `tools/check_unsafe_census.py` holds the
+  allowlist. It fails if ayaml has any unsafe code or stops forbidding it, or if any other crate
+  in the census has unsafe code.
 - Dev-only differential, property-test, fuzzing, and benchmark dependencies are
   not part of the shipped graph.
 
