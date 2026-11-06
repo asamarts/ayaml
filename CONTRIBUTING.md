@@ -46,6 +46,17 @@ parser, so bound them on a shared machine:
 Don't run an experiment that disables or zeroes an alias, depth, or expansion limit
 without a memory bound. It can turn those tests into real memory exhaustion.
 
+Two bounds also apply on their own:
+
+- `crates/ayaml/tests/adversarial.rs` runs each hostile test in a child process with a 300 s
+  deadline and, on Linux, 1 GiB of address space. A runaway test fails instead of exhausting
+  the machine. These tests normally peak near 220 MiB, and one that passes 512 MiB fails. macOS
+  and Windows don't get the address-space limit.
+- `tools/ci-local.sh` runs test steps with 8 GiB of address space per process and a 30-minute
+  timeout that kills the step's whole process group. A cold `cargo test --workspace
+  --all-features` passes with 4 GiB. The script needs Linux and GNU `timeout`, and its test
+  steps fail where it can't set these bounds. The `bounds` job checks that they work.
+
 ## Checks that run before a release
 
 Maintainers run two further sets of checks before a release, and tasks in `aplan/tasks/`
