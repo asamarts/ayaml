@@ -593,6 +593,27 @@ fn repeated_inputs(length: usize) -> Vec<String> {
         all("'a'\t"),
         all("!t\t"),
         format!("k: {}", all("[]\t")),
+        // Blank lines, lines of spaces, and runs of spaces.
+        format!("a{}b\n", all("\n")),
+        format!("a{}b\n", all(" \n")),
+        format!("k: a{}  b\n", all("\r\n")),
+        format!("k: [{}]\n", all(" \n")),
+        format!("[a{}]\n", all(" ")),
+        format!("k: 'a{}b'\n", all(" \n")),
+        format!("{}#\na\n", all(" \n")),
+        format!("k: |\n{}  a\n", all(" \n")),
+        // One scalar over many lines, and many directives, anchors, and aliases.
+        format!("k: '{}b'\n", all("a\n  ")),
+        format!("k: \"{}b\"\n", all("a\n  ")),
+        format!("k: |\n{}", all("  a\n")),
+        format!("k: >\n{}", all("  a\n")),
+        format!("{}---\na\n", all("%X a\n")),
+        all("- &a a\n"),
+        format!("- &a a\n{}", all("- *a\n")),
+        format!("- &a a\n- [{}]\n", all("*a, ")),
+        // Flow collections nested around a long line.
+        format!("[[[{}]]]\n", all("a,")),
+        format!("k: [{{a: [{}]}}]\n", all("'a',")),
         // Flow collections on one line.
         format!("[{}]\n", all("[],")),
         format!("[{}]\n", all("{},")),
