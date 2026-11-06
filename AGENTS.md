@@ -59,10 +59,10 @@ limit regresses, so always bound them:
 ( ulimit -v 8388608; timeout -k 5 300 nice -n 10 cargo test -p ayaml --all-features --locked )
 ```
 
-- `crates/ayaml/tests/adversarial.rs` runs its hostile tests in child processes with 1 GiB of
-  address space on Linux and a deadline everywhere, and `tools/ci-local.sh` bounds its test
-  steps. `CONTRIBUTING.md` has the numbers. Other test files have no such bound, so a new test
-  whose input could grow without limit belongs in `adversarial.rs`, using `in_child`.
+- `crates/ayaml/tests/adversarial.rs` runs its tests in child processes with 1 GiB of address
+  space on Linux and a deadline everywhere, and `tools/ci-local.sh` bounds its test steps.
+  `CONTRIBUTING.md` has the numbers. Other test files have no such bound, so a new test whose
+  input could grow without limit belongs in `adversarial.rs`, using `in_child!`.
 - A sanitizer build can't run under `ulimit -v`, because it reserves a huge address
   space. Bound a fuzz run with libFuzzer's `-rss_limit_mb=2048`, plus `timeout` and
   `nice`.
