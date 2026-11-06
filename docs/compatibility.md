@@ -48,14 +48,22 @@ An invalid explicit core scalar is a resolution error.
   explicit `Value::apply_merge_keys` operation, not an implicit parser effect.
 - Tags, anchors, aliases, directives, and document markers are preserved in the
   event stream.
+- A node has at most one tag and one anchor; a second one is an error, in both
+  modes.
+- An explicit key's properties may be followed by an indentless sequence, in both
+  modes.
+- The non-specific tag `!` isn't changed by a `%TAG !` directive, and a tag whose
+  handle expands to part of a core-schema name is that core tag, in both modes.
 
 ### Unicode and line breaks
 
 Valid UTF-8 is required. LF, CR, and CRLF are accepted as line breaks. NEL,
 line separator, and paragraph separator are content under YAML 1.2.2. A UTF-8
-byte-order mark is handled according to the specification. Raw C0 control
-characters are rejected; quoted scalars accept the printable characters that
-YAML permits, including DEL, C1 controls, U+FFFE, and U+FFFF.
+byte-order mark is handled according to the specification: it may start any
+document prefix, and it takes up no column, so a document marker or directive
+right after one is still a marker or directive. Raw C0 control characters are
+rejected; quoted scalars accept the printable characters that YAML permits,
+including DEL, C1 controls, U+FFFE, and U+FFFF.
 
 ## Compatibility mode
 
@@ -79,6 +87,9 @@ The compatibility module reproduces the observable behavior of a
 libyaml-compatible stack for callers that need it. Enabling the feature does
 not change the root parsing functions; choose the compatibility entry points
 explicitly.
+
+libyaml counts a column for a byte-order mark at the start of a line, so in
+compatibility mode a `---` or `...` right after one is text, not a marker.
 
 The maintained deviation list is
 [`tests/data/yaml-test-suite-deviations.txt`](../tests/data/yaml-test-suite-deviations.txt).

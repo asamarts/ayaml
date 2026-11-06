@@ -1556,3 +1556,363 @@ fn compat_keeps_reading_flow_lines_at_column_zero() {
         assert_eq!(read, ayaml::parse_value(expected).unwrap(), "{input:?}");
     }
 }
+
+/// A node has at most one tag and one anchor, wherever they're written. A second one
+/// used to replace the first without an error.
+#[test]
+fn a_second_tag_or_anchor_on_a_node_is_an_error() {
+    for input in [
+        "! !\n",
+        "! ! a\n",
+        "!a !b c\n",
+        "!a !a c\n",
+        "&a &b c\n",
+        "&a &a c\n",
+        "&a !t &b c\n",
+        "!t &a !u c\n",
+        "&a &b\n",
+        "--- &a &b\nc\n",
+        "&a &b\nc: d\n",
+        "&a &b [c]\n",
+        "&a &b {c: d}\n",
+        "[&a &b c]\n",
+        "[!a !b c]\n",
+        "[&a &b c: d]\n",
+        "[? &a &b c : d]\n",
+        "{&a &b c: d}\n",
+        "{k: &a &b c}\n",
+        "{? &a &b c : d}\n",
+        "- &a &b c\n",
+        "- &a &b\n  - c\n",
+        "k: &a &b c\n",
+        "k: !a !b c\n",
+        "k: &a &b\n  c\n",
+        "? &a &b c\n: d\n",
+        "&a &b c: d\n",
+        "!a !b c: d\n",
+        "&a\n&b c\n",
+        "k: &a\n  &b [c]\n",
+        "!\n!\n",
+        "&a\n&b\n",
+        "!a\n&b\n!c d\n",
+        "&a\n&b\nc: d\n",
+        "k: !a\n  !b\n  c\n",
+        "- !a\n  !b\n  c\n",
+        "? !a\n  !b\n  c\n",
+    ] {
+        for (reader, read) in value_readers() {
+            let error = read(input).expect_err(&format!("{reader}: {input:?}"));
+            assert_eq!(
+                error.message(),
+                "a node cannot have duplicate tag or anchor properties",
+                "{reader}: {input:?}"
+            );
+        }
+    }
+    // Each of these has one tag and one anchor per node.
+    for input in [
+        "&a !t c\n",
+        "!t &a c\n",
+        "&a\n!t c\n",
+        "&a\n&b c: 1\n",
+        "!a\n!b c: 1\n",
+        "k: &a\n  &b c: d\n",
+        "- &a\n  &b c: d\n",
+        "[&a a, &b b]\n",
+    ] {
+        for (reader, read) in value_readers() {
+            read(input).unwrap_or_else(|error| panic!("{reader}: {input:?}: {error}"));
+        }
+    }
+}
+
+/// An explicit key's properties may come before an indentless sequence, as a mapping
+/// value's may.
+#[test]
+fn an_explicit_key_with_properties_may_hold_an_indentless_sequence() {
+    let sequence_key = |value: &Value| {
+        let Value::Mapping(mapping) = value else {
+            panic!("{value:?} isn't a mapping");
+        };
+        let (key, value) = mapping.iter().next().expect("one entry");
+        (key.clone(), value.clone())
+    };
+    let items = ayaml::parse_value("[a]\n").unwrap();
+    let tagged = Value::from(ayaml::TaggedValue::new(
+        ayaml::Tag::local("t"),
+        items.clone(),
+    ));
+    for (input, key, value) in [
+        ("? &x\n- a\n", &items, Value::Null),
+        ("? &x\n- a\n: b\n", &items, Value::from("b")),
+        ("? !t\n- a\n", &tagged, Value::Null),
+        ("? !t\n- a\n: b\n", &tagged, Value::from("b")),
+        ("? !t &x\n- a\n: b\n", &tagged, Value::from("b")),
+        ("? &x !t\n- a\n: b\n", &tagged, Value::from("b")),
+        ("? !t\n  - a\n: b\n", &tagged, Value::from("b")),
+    ] {
+        for (reader, read) in value_readers() {
+            let read = read(input).unwrap_or_else(|error| panic!("{reader}: {input:?}: {error}"));
+            assert_eq!(
+                sequence_key(&read),
+                (key.clone(), value.clone()),
+                "{input:?}"
+            );
+        }
+    }
+    // The sequence ends at the next key, and its anchor can be used there.
+    let value = ayaml::parse_value("? &x\n- a\n: b\nc: *x\n").unwrap();
+    assert_eq!(value["c"], items);
+    // It works inside a compact mapping too.
+    let value = ayaml::parse_value("- ? &x\n  - a\n  : b\n").unwrap();
+    assert_eq!(sequence_key(&value[0]), (items, Value::from("b")));
+}
+
+/// A byte order mark takes up no column by default, so a marker or directive after one
+/// starts a document. libyaml counts a column for it, so compat reads `---` as text there.
+#[test]
+fn a_bom_before_a_marker_or_directive_starts_a_document() {
+    let limits = ayaml::Limits::default().with_max_documents(8);
+    let documents = |input| ayaml::parse_documents_with_limits(input, &limits);
+    let a = Value::from("a");
+    let b = Value::from("b");
+    let cases = [
+        ("a\n...\n\u{feff}---\nb\n", vec![a.clone(), b.clone()]),
+        ("a\n...\n\u{feff}--- b\n", vec![a.clone(), b.clone()]),
+        (
+            "a\n---\n\u{feff}---\nb\n",
+            vec![a.clone(), Value::Null, b.clone()],
+        ),
+        ("a\n\u{feff}---\nb\n", vec![a.clone(), b.clone()]),
+        ("a\n...\n\u{feff}...\n", vec![a.clone()]),
+        (
+            "a\n...\n\u{feff}%YAML 1.2\n---\nb\n",
+            vec![a.clone(), b.clone()],
+        ),
+        ("a\n...\n\u{feff}# c\n---\nb\n", vec![a.clone(), b.clone()]),
+        ("a\n...\n\u{feff}\n---\nb\n", vec![a.clone(), b.clone()]),
+        ("a\n...\n\u{feff}b\n", vec![a.clone(), b.clone()]),
+        ("\u{feff}---\na\n", vec![a.clone()]),
+        // The mark takes up no column, wherever it is.
+        (
+            "a\n...\n\u{feff}--- 'b\nc'\n",
+            vec![a.clone(), Value::from("b c")],
+        ),
+        ("\u{feff}--- 'b\nc'\n", vec![Value::from("b c")]),
+        ("\u{feff}'b\nc'\n", vec![Value::from("b c")]),
+        ("\u{feff}# c\n  b\n  c\n", vec![Value::from("b c")]),
+        // Its text is the same with any number of marks.
+        ("\u{feff}\u{feff}--- b\nc\n", vec![Value::from("b c")]),
+        ("\u{feff}\u{feff}--- |\nb\n", vec![Value::from("b\n")]),
+        ("\u{feff}\u{feff}---\n |\nb\n", vec![Value::from("b\n")]),
+        (
+            "a\n...\n\u{feff}...\n |\nb\n",
+            vec![a.clone(), Value::from("b\n")],
+        ),
+        ("\u{feff}...\n    b\n   c\n", vec![Value::from("b c")]),
+        ("\u{feff}# c\n  b\n c\n", vec![Value::from("b c")]),
+        ("\u{feff}\n\u{feff}\u{feff}# c\n", vec![]),
+        // A prefix may repeat its mark.
+        ("\u{feff}\u{feff}---\na\n", vec![a.clone()]),
+        ("\u{feff}\n\u{feff}---\na\n", vec![a.clone()]),
+        ("a\n\u{feff}\u{feff}---\nb\n", vec![a.clone(), b.clone()]),
+        (
+            "a\n...\n\u{feff}--- [\nb\n]\n",
+            vec![a.clone(), Value::Sequence(vec![b.clone()])],
+        ),
+        (
+            "k:\n\u{feff}---\nb\n",
+            vec![ayaml::parse_value("{k: null}\n").unwrap(), b.clone()],
+        ),
+        (
+            "-\n\u{feff}---\nb\n",
+            vec![Value::Sequence(vec![Value::Null]), b.clone()],
+        ),
+        (
+            "a\n...\n\u{feff}b: 1\nc: 2\n",
+            vec![a.clone(), ayaml::parse_value("{b: 1, c: 2}\n").unwrap()],
+        ),
+        (
+            "a\n...\n\u{feff}  b: 1\n  c: 2\n",
+            vec![a.clone(), ayaml::parse_value("{b: 1, c: 2}\n").unwrap()],
+        ),
+        (
+            "a\n...\n\u{feff}- b\n- c\n",
+            vec![a.clone(), ayaml::parse_value("[b, c]\n").unwrap()],
+        ),
+        (
+            "\u{feff}\u{feff}b: 1\nc: 2\n",
+            vec![ayaml::parse_value("{b: 1, c: 2}\n").unwrap()],
+        ),
+    ];
+    for (input, expected) in cases {
+        assert_eq!(documents(input).unwrap(), expected, "{input:?}");
+        // Each way to read a stream agrees.
+        let mut stream = ayaml::Deserializer::from_str(input).unwrap();
+        let mut read = vec![];
+        while let Some(value) = stream.next::<Value>().unwrap() {
+            read.push(value);
+        }
+        assert_eq!(read, expected, "{input:?}");
+    }
+    // Indentation is the same with any number of marks.
+    for (with_marks, without) in [
+        ("\u{feff}  k: 'a\n b'\n", "  k: 'a\n b'\n"),
+        ("\u{feff}\u{feff}  k: 'a\n b'\n", "  k: 'a\n b'\n"),
+        ("  \n\u{feff}\u{feff} b: 1\n a]\n", "  \n b: 1\n a]\n"),
+        ("...\r\u{feff}\u{feff}  k: a\r  b", "...\r  k: a\r  b"),
+        (
+            "--- >\n...\n\u{feff}\u{feff}  - |\n a\n",
+            "--- >\n...\n  - |\n a\n",
+        ),
+    ] {
+        assert!(documents(without).is_err(), "{without:?}");
+        assert!(documents(with_marks).is_err(), "{with_marks:?}");
+    }
+    // A column doesn't count them either, in default mode.
+    let error = ayaml::parse_value("# c\n\u{feff}k: [\n").unwrap_err();
+    let start = error.span().unwrap().start();
+    assert_eq!((start.line(), start.column()), (2, 4), "{error}");
+    // A directive's document has no room for a mark before its `---`.
+    for input in [
+        "%YAML 1.2\n\u{feff}---\na\n",
+        "%YAML 1.2\n# c\n\u{feff}---\na\n",
+        "%YAML 1.2\n\u{feff}# c\n---\na\n",
+        "%YAML 1.2\n\u{feff}%TAG !e! tag:e.com,2000:\n---\na\n",
+    ] {
+        assert!(documents(input).is_err(), "{input:?}");
+        assert!(
+            ayaml::parse_events(input)
+                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                .is_err(),
+            "{input:?}"
+        );
+    }
+    // Inside a flow collection, a marker is still an error.
+    assert!(ayaml::parse_value("[\n\u{feff}---\n]\n").is_err());
+    // A mark that isn't first on its line isn't a document prefix.
+    assert!(documents("a\n...\n \u{feff}---\nb\n").is_err());
+}
+
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_counts_a_column_for_a_line_start_bom() {
+    for (input, column) in [
+        ("# c\n\u{feff}[a b", 6),
+        ("# c\n\u{feff}k: [", 6),
+        ("# c\n\u{feff}\u{1}", 2),
+        ("# c\n\u{feff}a\u{1}", 3),
+        ("# c\n\u{feff}a: b: c", 6),
+        ("# c\n\u{feff}[a]]", 5),
+    ] {
+        let error = ayaml::compat::from_str::<Value>(input).unwrap_err();
+        let start = error
+            .span()
+            .unwrap_or_else(|| panic!("{input:?}: {error}"))
+            .start();
+        assert_eq!(
+            (start.line(), start.column()),
+            (2, column),
+            "{input:?}: {error}"
+        );
+    }
+}
+
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_reads_a_marker_after_a_bom_as_text() {
+    let events = ayaml::compat::parse_events_with_limits(
+        "a\n...\n\u{feff}---\nb\n",
+        &ayaml::Limits::default(),
+    )
+    .unwrap();
+    let scalars: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            ayaml::Event::Scalar { value, .. } => Some(value.as_ref()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(scalars, ["a", "--- b"]);
+}
+
+/// The non-specific tag `!` isn't a shorthand, so `%TAG !` leaves it alone.
+#[test]
+fn the_non_specific_tag_ignores_a_primary_handle_directive() {
+    let non_specific = |text: &str| {
+        Value::from(ayaml::TaggedValue::new(
+            ayaml::Tag::local(""),
+            Value::from(text),
+        ))
+    };
+    for (reader, read) in value_readers() {
+        for input in ["%TAG ! tag:example.com,2000:\n---\n! 1\n", "! 1\n"] {
+            assert_eq!(
+                read(input).unwrap(),
+                non_specific("1"),
+                "{reader}: {input:?}"
+            );
+        }
+        // A shorthand with the primary handle does expand.
+        let value = read("%TAG ! tag:example.com,2000:\n---\n!x 1\n").unwrap();
+        let Value::Tagged(tagged) = value else {
+            panic!("{reader}: not tagged");
+        };
+        assert_eq!(tagged.tag, ayaml::Tag::new("tag:example.com,2000:", "x"));
+    }
+}
+
+/// A tag is a core tag by its full name, however a handle splits that name.
+#[test]
+fn a_handle_expanding_to_a_core_name_is_that_core_tag() {
+    for (reader, read) in value_readers() {
+        // A name the core schema doesn't define reads as it does when written with `!!`.
+        for (input, same) in [
+            (
+                "%TAG !y! tag:yaml.org,2002:app/\n---\n!y!Foo 1\n",
+                "!!app/Foo 1\n",
+            ),
+            (
+                "%TAG !y! tag:yaml.org,2002:app/\n---\n!y!Foo [1]\n",
+                "!!app/Foo [1]\n",
+            ),
+        ] {
+            assert_eq!(
+                read(input).unwrap(),
+                read(same).unwrap(),
+                "{reader}: {input:?}"
+            );
+        }
+        for input in [
+            "%TAG !y! tag:yaml.org,2002:i\n---\n!y!nt 1\n",
+            "%TAG !y! tag:yaml.org,2002:\n---\n!y!int 1\n",
+            "%TAG ! tag:yaml.org,2002:i\n---\n!nt 1\n",
+            "!<tag:yaml.org,2002:int> 1\n",
+        ] {
+            assert_eq!(
+                read(input).unwrap(),
+                Value::from(1_i64),
+                "{reader}: {input:?}"
+            );
+        }
+        for input in [
+            "%TAG !y! tag:yaml.org,2002:i\n---\n!y!nt x\n",
+            "%TAG !y! tag:yaml.org,2002:\n---\n!y!int x\n",
+            "%TAG ! tag:yaml.org,2002:i\n---\n!nt x\n",
+        ] {
+            let error = read(input).expect_err(&format!("{reader}: {input:?}"));
+            assert!(
+                error.message().contains("invalid !!int"),
+                "{reader}: {input:?}: {error}"
+            );
+        }
+    }
+    let tag = ayaml::Tag::new("tag:yaml.org,2002:s", "tr");
+    assert!(tag.is_core());
+    assert_eq!((tag.handle(), tag.suffix()), ("tag:yaml.org,2002:", "str"));
+    assert_eq!(tag, ayaml::Tag::core("str"));
+    // Near the core prefix isn't the core prefix.
+    assert!(!ayaml::Tag::new("tag:yaml.org,", "2003:str").is_core());
+    assert!(!ayaml::Tag::new("tag:", "example.com:x").is_core());
+    assert_eq!(ayaml::Tag::new("", "!x"), ayaml::Tag::local("x"));
+}

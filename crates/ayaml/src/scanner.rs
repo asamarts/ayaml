@@ -99,6 +99,9 @@ pub(crate) struct Scanner<'a> {
     started: bool,
     finished: bool,
     initial_bom: bool,
+    /// Where the text after a line's byte order mark starts, outside compat. A BOM takes up
+    /// no column there, so document markers and directives may start at this position.
+    after_line_bom: usize,
     compat_flow: bool,
     /// Whether a document has started: a `---`, or any node token since the
     /// last `...`. A byte order mark may appear only outside a document or
@@ -107,6 +110,8 @@ pub(crate) struct Scanner<'a> {
     /// Whether this document has a token other than its `---` and the root node's properties.
     /// Until it does, the next node is the root node.
     node_seen: bool,
+    /// Whether a directive is waiting for its `---`, with no byte order mark allowed between.
+    directive_pending: bool,
     /// Byte offsets of the non-printable characters that only a quoted
     /// scalar may hold, in order, and the first one not yet checked.
     quoted_only: Vec<usize>,
@@ -131,7 +136,11 @@ impl<'a> Scanner<'a> {
         let quoted_only = match non_printable_characters(input) {
             Ok(quoted_only) => quoted_only,
             Err(index) => {
-                let marker = LineIndex::new(input).marker(input, index);
+                let marker = if compat_flow {
+                    LineIndex::counting_line_boms(input).marker(input, index)
+                } else {
+                    LineIndex::new(input).marker(input, index)
+                };
                 let error = non_printable_error(input, index);
                 return Err(match marker {
                     Some(marker) => error.with_span(Span::empty(marker)),
@@ -144,7 +153,11 @@ impl<'a> Scanner<'a> {
         Ok(Self {
             input,
             pos,
-            line_index: LineIndex::new(input),
+            line_index: if compat_flow {
+                LineIndex::counting_line_boms(input)
+            } else {
+                LineIndex::new(input)
+            },
             limits,
             tokens: 0,
             anchors: 0,
@@ -158,9 +171,11 @@ impl<'a> Scanner<'a> {
             started: false,
             finished: false,
             initial_bom,
+            after_line_bom: if initial_bom && !compat_flow { pos } else { 0 },
             compat_flow,
             document_open: false,
             node_seen: false,
+            directive_pending: false,
             quoted_only,
             quoted_only_next: 0,
         })
@@ -194,12 +209,18 @@ impl<'a> Scanner<'a> {
                 // libyaml skips a BOM at the start of any line, and the compat
                 // scanner keeps that; YAML 1.2.2 allows one only in a document
                 // prefix.
-                if !self.compat_flow && self.document_open && !self.bom_starts_prefix(self.pos) {
+                if !self.compat_flow
+                    && (self.directive_pending
+                        || (self.document_open && !self.bom_starts_prefix(self.pos)))
+                {
                     return Err(
                         self.error_at(self.pos, "a byte order mark can only start a document")
                     );
                 }
                 self.pos += '\u{feff}'.len_utf8();
+                if !self.compat_flow {
+                    self.after_line_bom = self.pos;
+                }
                 continue;
             }
             if self.peek().is_some_and(is_line_break) {
@@ -440,12 +461,11 @@ impl<'a> Scanner<'a> {
             TokenKind::DocumentStart { .. } => {
                 self.document_open = true;
                 self.node_seen = false;
+                self.directive_pending = false;
             }
+            TokenKind::Directive { .. } => self.directive_pending = true,
             TokenKind::Tag(_) | TokenKind::Anchor(_) => self.document_open = true,
-            TokenKind::StreamStart
-            | TokenKind::StreamEnd
-            | TokenKind::LineBreak
-            | TokenKind::Directive { .. } => {}
+            TokenKind::StreamStart | TokenKind::StreamEnd | TokenKind::LineBreak => {}
             _ => {
                 self.document_open = true;
                 self.node_seen = true;
@@ -521,7 +541,7 @@ impl<'a> Scanner<'a> {
     }
 
     fn at_line_start(&self) -> bool {
-        if self.pos == 0 || (!self.compat_flow && self.pos == 3 && self.initial_bom) {
+        if self.pos == 0 || self.pos == self.after_line_bom {
             return true;
         }
         let previous = self.input.as_bytes().get(self.pos - 1).copied();
@@ -651,10 +671,11 @@ impl<'a> Scanner<'a> {
         let previous = self.input[..self.pos].chars().next_back();
         // A BOM at the start of a line leaves the comment at the start of
         // the line too (YAML 1.2.2 example 5.1).
-        let after_line_start_bom = previous == Some('\u{feff}') && {
-            let bom = self.pos - '\u{feff}'.len_utf8();
-            bom == 0 || self.input[..bom].ends_with(['\n', '\r'])
-        };
+        let after_line_start_bom = previous == Some('\u{feff}')
+            && (self.pos == self.after_line_bom || {
+                let bom = self.pos - '\u{feff}'.len_utf8();
+                bom == 0 || self.input[..bom].ends_with(['\n', '\r'])
+            });
         previous.is_none_or(is_blank)
             || after_line_start_bom
             || (self.compat_flow
@@ -907,11 +928,15 @@ impl<'a> Scanner<'a> {
                 })?;
                 Tag::new(prefix.clone(), self.decode_tag_suffix(suffix_start)?)
             } else {
-                let prefix = self
-                    .tag_handles
-                    .get("!")
-                    .cloned()
-                    .ok_or_else(|| self.error_at(start, "undefined primary tag handle"))?;
+                // `!` alone is the non-specific tag, which no `%TAG !` changes.
+                let prefix = if self.pos == handle_start {
+                    "!".to_owned()
+                } else {
+                    self.tag_handles
+                        .get("!")
+                        .cloned()
+                        .ok_or_else(|| self.error_at(start, "undefined primary tag handle"))?
+                };
                 Tag::new(prefix, self.decode_tag_suffix(handle_start)?)
             }
         };
@@ -1485,7 +1510,7 @@ impl<'a> Scanner<'a> {
                     .map_or(start, |(offset, ch)| start + offset + ch.len_utf8());
             }
             let previous_start = self.line_index.line_start(previous_end);
-            let code = strip_comment(&self.input[previous_start..previous_end]);
+            let code = strip_comment(self.after_line_boms(previous_start, previous_end));
             if code.trim_matches(is_blank).is_empty() {
                 end = previous_start;
                 continue;
@@ -1506,10 +1531,21 @@ impl<'a> Scanner<'a> {
 
     fn line_indent(&self, position: usize) -> usize {
         let line_start = self.line_index.line_start(position);
-        self.input[line_start..]
+        self.after_line_boms(line_start, self.input.len())
             .chars()
             .take_while(|ch| *ch == ' ')
             .count()
+    }
+
+    /// The text of `start..end`, a line's start onward, past any byte order marks there. They
+    /// take up no column, except in compat, which keeps libyaml's reading of them as a column.
+    fn after_line_boms(&self, start: usize, end: usize) -> &'a str {
+        let text = &self.input[start..end];
+        if self.compat_flow {
+            text
+        } else {
+            text.trim_start_matches('\u{feff}')
+        }
     }
 
     fn count_spaces(&self, position: usize) -> usize {
@@ -1877,7 +1913,11 @@ enum LineShape {
 /// its `:`, and node properties. The last indicator or key decides the owner.
 /// `compat` ends anchor and alias names where the compat scanner does.
 fn line_shape(text: &str, compat: bool) -> LineShape {
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let text = if compat {
+        text.strip_prefix('\u{feff}').unwrap_or(text)
+    } else {
+        text.trim_start_matches('\u{feff}')
+    };
     let bytes = text.as_bytes();
     let separator = |index: usize| index >= bytes.len() || matches!(bytes[index], b' ' | b'\t');
     let skip_blanks = |mut index: usize| {
