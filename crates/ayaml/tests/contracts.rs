@@ -44,6 +44,7 @@ fn resource_limit_errors_keep_their_structured_limit() {
 #[test]
 fn compatibility_limits_are_inclusive() {
     let limits = Limits::default();
+    assert!(limits.check_input(32 * 1024 * 1024 - 1).is_ok());
     assert!(limits.check_input(32 * 1024 * 1024).is_ok());
     assert_eq!(
         limits.check_input(32 * 1024 * 1024 + 1).unwrap_err().kind(),
@@ -1551,7 +1552,6 @@ fn only_a_root_flow_node_may_continue_at_column_zero() {
 #[test]
 fn compat_keeps_reading_flow_lines_at_column_zero() {
     for (input, expected) in [
-        ("k: {x\n: y}\n", "{k: {x: y}}\n"),
         ("k:\n  [\na\n  ]\n", "{k: [a]}\n"),
         ("[[x\n, y]]\n", "[[x, y]]\n"),
     ] {

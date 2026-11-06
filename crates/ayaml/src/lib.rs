@@ -203,8 +203,10 @@ pub mod compat {
                 mapped
             };
         }
-        if error.message().contains("trailing documents")
-            || error.message().contains("documents limit exceeded")
+        // By kind as well: a Serde error can quote a scalar that holds these words.
+        if (error.kind() == ErrorKind::Parser && error.message().contains("trailing documents"))
+            || (error.kind() == ErrorKind::Limit
+                && error.message().contains("documents limit exceeded"))
         {
             return Error::new(ErrorKind::Parser, "more than one document in stream");
         }

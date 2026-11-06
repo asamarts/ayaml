@@ -609,6 +609,62 @@ fn compat_owner_heuristic_ends_anchors_like_the_scanner() {
     assert_eq!(compat("&a:b: >\n x\n"), json!({ ":b": "x\n" }));
 }
 
+/// A closing quote may sit at any indentation, on a line of its own, so only the lines with
+/// text in them count.
+#[test]
+fn a_closing_quote_may_sit_at_the_parents_indentation() {
+    assert_eq!(parse("k: 'a\n'\n"), json!({"k": "a "}));
+    assert_eq!(parse("k: \"a\n\"\n"), json!({"k": "a "}));
+    assert_eq!(parse("- k: 'a\n  '\n"), json!([{"k": "a "}]));
+    rejects("k: 'a\nb'\n");
+}
+
+/// Mappings used as keys report the depth limit with a location, on every value path.
+#[test]
+fn a_depth_limit_in_a_key_has_a_location() {
+    let located = |error: ayaml::Error| {
+        assert_eq!(error.kind(), ayaml::ErrorKind::Limit, "{error}");
+        assert!(error.span().is_some(), "{error}");
+    };
+    for (open, close) in [("[", "]"), ("{", "}")] {
+        let input = format!("{}{}: a\n", open.repeat(128), close.repeat(128));
+        located(ayaml::parse_value(&input).unwrap_err());
+        located(ayaml::parse_documents(&input).unwrap_err());
+        located(ayaml::from_str::<ayaml::Value>(&input).unwrap_err());
+    }
+}
+
+/// Compat mode reads the error's kind, not just its words.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_does_not_mistake_a_scalar_for_a_document_error() {
+    for input in ["trailing documents\n", "documents limit exceeded\n"] {
+        let error = ayaml::compat::from_str::<u32>(input).unwrap_err();
+        assert_eq!(error.kind(), ayaml::ErrorKind::Serde, "{error}");
+        assert!(error.span().is_some(), "{error}");
+    }
+    let error = ayaml::compat::from_str::<ayaml::Value>("a\n---\nb\n").unwrap_err();
+    assert_eq!(error.message(), "more than one document in stream");
+}
+
+/// The exceptions `docs/limits.md` lists, and that compat's event reader isn't one of them.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_reports_limits_as_the_docs_say() {
+    let limits = ayaml::Limits::default();
+    let deep = format!("{}{}", "[".repeat(129), "]".repeat(129));
+    let error = ayaml::compat::parse_events_with_limits(&deep, &limits).unwrap_err();
+    assert_eq!(error.kind(), ayaml::ErrorKind::Limit, "{error}");
+    assert!(error.limit().is_some() && error.span().is_some(), "{error}");
+    let error = ayaml::compat::from_str::<ayaml::Value>(&deep).unwrap_err();
+    assert_eq!(error.kind(), ayaml::ErrorKind::Serde, "{error}");
+    assert!(error.limit().is_none() && error.span().is_none(), "{error}");
+    let many = "---\na\n".repeat(10_001);
+    let error = ayaml::compat::from_str::<ayaml::Value>(&many).unwrap_err();
+    assert_eq!(error.kind(), ayaml::ErrorKind::Parser, "{error}");
+    assert!(error.limit().is_none() && error.span().is_none(), "{error}");
+}
+
 /// In a flow collection, compat mode keeps a `:` in an anchor or alias name, as default mode
 /// does. Ending the name there read `[&a:b]` as neither mode's grammar nor libyaml does, and
 /// refused an alias to that anchor, which default mode and libyaml both accept.

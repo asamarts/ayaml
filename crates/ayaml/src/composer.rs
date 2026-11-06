@@ -350,7 +350,7 @@ impl<'a> StreamingComposer<'a> {
             } => {
                 self.limits
                     .check_depth(self.stack.len() + 1)
-                    .map_err(Error::from)?;
+                    .map_err(|error| Error::from(error).with_span(span))?;
                 if let Some(anchor) = &anchor {
                     self.anchors.open(anchor.as_str());
                 }
@@ -385,7 +385,7 @@ impl<'a> StreamingComposer<'a> {
             } => {
                 self.limits
                     .check_depth(self.stack.len() + 1)
-                    .map_err(Error::from)?;
+                    .map_err(|error| Error::from(error).with_span(span))?;
                 if let Some(anchor) = &anchor {
                     self.anchors.open(anchor.as_str());
                 }

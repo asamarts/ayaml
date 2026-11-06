@@ -1,8 +1,8 @@
 //! An insertion-ordered YAML mapping backed by `indexmap`.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher, RandomState};
 use std::ops::Index as OpsIndex;
+use std::sync::OnceLock;
 
 use indexmap::IndexMap;
 
@@ -183,10 +183,14 @@ impl std::fmt::Debug for Mapping {
 
 impl Hash for Mapping {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Eq is order-insensitive for a YAML mapping, so Hash must be too.
+        // Eq is order-insensitive for a YAML mapping, so Hash must be too. XOR gives that, but
+        // whoever can compute an entry's hash can solve for entries that cancel out, and so write
+        // many mappings with one hash, as keys that take quadratic time. So the key is random.
+        static ENTRY_HASH: OnceLock<RandomState> = OnceLock::new();
+        let entry_hash = ENTRY_HASH.get_or_init(RandomState::new);
         let mut xor = 0_u64;
         for (key, value) in &self.map {
-            let mut hasher = DefaultHasher::new();
+            let mut hasher = entry_hash.build_hasher();
             key.hash(&mut hasher);
             value.hash(&mut hasher);
             xor ^= hasher.finish();
@@ -466,6 +470,54 @@ mod tests {
             format!("{map:?}"),
             "Mapping {String(\"a\"): Number(Number(PosInt(1)))}"
         );
+    }
+
+    /// Any 65 values of 64 bits have a subset whose XOR is zero. Found by elimination under a
+    /// key anyone can compute, the subset splits into two mappings that would hash alike, and
+    /// enough of those are keys that take quadratic time.
+    #[test]
+    fn entries_cannot_be_chosen_to_cancel_out() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash as _, Hasher as _};
+        let entry = |index: u32| {
+            let mut hasher = DefaultHasher::new();
+            key(&format!("e{index}")).hash(&mut hasher);
+            Value::Null.hash(&mut hasher);
+            hasher.finish()
+        };
+        let mut basis: Vec<(u64, u128)> = Vec::new();
+        let mut subset = None;
+        for index in 0..65 {
+            let (mut value, mut members) = (entry(index), 1_u128 << index);
+            for (reduced, its_members) in &basis {
+                if value ^ reduced < value {
+                    value ^= reduced;
+                    members ^= its_members;
+                }
+            }
+            if value == 0 {
+                subset = Some(members);
+                break;
+            }
+            basis.push((value, members));
+            basis.sort_unstable_by_key(|(reduced, _)| std::cmp::Reverse(*reduced));
+        }
+        let subset = subset.expect("65 values are dependent");
+        let mut sides = [Mapping::new(), Mapping::new()];
+        let mut count = 0;
+        for index in 0..65 {
+            if subset & (1 << index) != 0 {
+                sides[count % 2].insert(key(&format!("e{index}")), Value::Null);
+                count += 1;
+            }
+        }
+        let hash = |map: &Mapping| {
+            let mut hasher = DefaultHasher::new();
+            map.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_ne!(sides[0], sides[1]);
+        assert_ne!(hash(&sides[0]), hash(&sides[1]));
     }
 
     #[test]

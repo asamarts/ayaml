@@ -162,9 +162,9 @@ held by tags but not the copies that Serde names and the split at the core prefi
 **Why.** A count of expansions bounds what handles cost on every path, and it can't reject a
 document for anything but this cost. A tag that an alias copies counts against the alias budget, with
 the rest of what the alias copies. `max_events` stops a stream first, at about 250,000 tagged block
-entries or 330,000 flow entries, so 64 MiB holds every use it allows of a prefix up to about 200
-bytes, more than any real document needs. A stream at both limits peaks at about 330 MiB from 2 MiB
-of input, where about 220 MiB is what the same stream costs with a short prefix.
+entries or 499,000 flow entries, so 64 MiB holds every use it allows of a prefix up to about 134
+bytes, more than any real document needs. A stream at both limits peaks at about 590 MiB from 4 MiB
+of input, where about 510 MiB is what the same stream costs with a short prefix.
 
 **Consequences.** `Limits` and `LimitKind` each gain a member. Both are `#[non_exhaustive]`, so this
 isn't a breaking change. A document with more expansions than this needs a higher limit.
