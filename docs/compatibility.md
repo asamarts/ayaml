@@ -114,7 +114,9 @@ these places, on purpose:
 - NEL, LS, and PS are content; libyaml reads them as line breaks.
 - A byte-order mark past the start of the stream behaves as described above.
 - Anchor and alias names may hold any `ns-anchor-char`, where libyaml takes only
-  alphanumerics, `_`, and `-`, so `&a: b` differs.
+  alphanumerics, `_`, and `-`, so `&a: b` differs. As in libyaml, though, a `?` ends a
+  name, and outside a flow collection so does a `:` followed by more text, so `&a:b` is
+  the string `:b` here and an empty node in default mode.
 - Global, verbatim, and non-specific tags are kept, with their escapes as written.
   Tag forms that YAML 1.2.2 allows and libyaml's scanner refuses are accepted, such as
   `!#`, `!<a#>`, or `!` right before a flow indicator. `!` isn't a tag character, so
