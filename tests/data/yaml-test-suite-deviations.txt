@@ -7,6 +7,10 @@
 #
 # The default profile follows YAML 1.2.2. `compat` entries describe intentional
 # libyaml-compatible behavior in the optional compatibility mode.
+#
+# 2SXE and W5VH aren't deviations. Their anchor names end in `:`, and compat's alias keeps such a
+# colon when an anchor earlier in the same document has that exact name. Any other alias directly
+# followed by `:` is a key there, as in libyaml.
 652Z#0   compat  json         compatibility mode: libyaml-compatible behavior
 652Z#0   compat  tree         compatibility mode: libyaml-compatible behavior
 9C9N#0   compat  class        compatibility mode: zero-indented flow continuation lines are accepted

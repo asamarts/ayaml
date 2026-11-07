@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::error::{Error, ErrorKind};
@@ -113,6 +113,9 @@ pub(crate) struct Scanner<'a> {
     /// no column there, so document markers and directives may start at this position.
     after_line_bom: usize,
     compat_flow: bool,
+    /// In compat, the anchor names ending in `:` defined so far in this document. An alias keeps
+    /// such a colon only if one of these has that exact name.
+    colon_anchors: Option<HashSet<&'a str>>,
     /// Whether a document has started: a `---`, or any node token since the
     /// last `...`. A byte order mark may appear only outside a document or
     /// right before the next one.
@@ -196,6 +199,7 @@ impl<'a> Scanner<'a> {
             initial_bom,
             after_line_bom: if initial_bom && !compat_flow { pos } else { 0 },
             compat_flow,
+            colon_anchors: None,
             document_open: false,
             node_seen: false,
             directive_pending: false,
@@ -746,6 +750,7 @@ impl<'a> Scanner<'a> {
         if rest.starts_with("---") && self.marker_follows(start, 3) {
             self.pos += 3;
             self.yaml_directive_seen = false;
+            self.colon_anchors = None;
             self.tag_handles.clear();
             for (handle, prefix) in self.pending_tag_handles.drain(..) {
                 self.tag_handles.insert(handle, prefix);
@@ -755,6 +760,7 @@ impl<'a> Scanner<'a> {
         if rest.starts_with("...") && self.marker_follows(start, 3) {
             self.pos += 3;
             self.yaml_directive_seen = false;
+            self.colon_anchors = None;
             self.tag_handles.clear();
             self.pending_tag_handles.clear();
             return self.make(TokenKind::DocumentEnd, start, self.pos);
@@ -901,6 +907,17 @@ impl<'a> Scanner<'a> {
         if self.pos == name_start {
             return Err(self.error_at(start, "anchor/alias name must not be empty"));
         }
+        // libyaml ends a name at any `:`, so `*a: b` has the key `*a`. Compat follows it for an
+        // alias, unless an anchor in this document has that exact name, as `&a: b` does (2SXE, W5VH).
+        if alias
+            && self.pos > name_start + 1
+            && self.input[..self.pos].ends_with(':')
+            && !self
+                .names()
+                .alias_keeps_colon(&self.input[name_start..self.pos])
+        {
+            self.pos -= 1;
+        }
         // A node's properties are separated from its content (production
         // 96), so `&a[b]` is not an anchored sequence; libyaml rejects it too.
         if matches!(self.peek(), Some('[' | '{')) {
@@ -917,7 +934,20 @@ impl<'a> Scanner<'a> {
             self.limits
                 .check_anchors(self.anchors)
                 .map_err(|error| self.limit_at(start, error))?;
+            if self.compat_flow && name.ends_with(':') {
+                self.colon_anchors
+                    .get_or_insert_with(HashSet::new)
+                    .insert(&self.input[name_start..self.pos]);
+            }
             self.make(TokenKind::Anchor(name), start, self.pos)
+        }
+    }
+
+    /// What decides where a name ends, for reading a line without scanning it.
+    fn names(&self) -> NameRules<'_, 'a> {
+        NameRules {
+            compat: self.compat_flow,
+            colon_anchors: self.colon_anchors.as_ref(),
         }
     }
 
@@ -1554,7 +1584,7 @@ impl<'a> Scanner<'a> {
     /// What `text`, which starts the line at `line_start`, says about ownership. An owner after
     /// a mark that takes up a column is one deeper.
     fn shape_of_line(&self, line_start: usize, text: &str) -> LineShape {
-        let shape = line_shape(text, self.compat_flow);
+        let shape = line_shape(text, self.names());
         match shape {
             LineShape::Owner(Owner::Block(indent))
                 if text
@@ -1608,7 +1638,7 @@ impl<'a> Scanner<'a> {
             let code = if comment_after_mark {
                 ""
             } else {
-                strip_comment(line, self.compat_flow)
+                strip_comment(line, self.names())
             };
             if code.trim_matches(is_blank).is_empty() {
                 end = previous_start;
@@ -2080,22 +2110,37 @@ fn block_prefix(text: &str, compat: bool) -> (&str, usize, Option<Owner>) {
 }
 
 /// Classify `text`, which starts at a line start: what `block_prefix` reads, an optional implicit
-/// key with its `:`, and node properties. The last indicator or key decides the owner. `compat`
-/// ends anchor and alias names where the compat scanner does.
-fn line_shape(text: &str, compat: bool) -> LineShape {
-    let (text, index, owner) = block_prefix(text, compat);
+/// key with its `:`, and node properties. The last indicator or key decides the owner. `names`
+/// ends anchor and alias names where the scanner does.
+fn line_shape(text: &str, names: NameRules<'_, '_>) -> LineShape {
+    let (text, index, owner) = block_prefix(text, names.compat);
     let rest = &text[index..];
-    if let LineStop::Value(colon) = walk_line(rest, compat) {
-        return if only_properties(&rest[colon + 1..], compat) {
+    if let LineStop::Value(colon) = walk_line(rest, names) {
+        return if only_properties(&rest[colon + 1..], names.compat) {
             LineShape::Owner(Owner::Block(text[..index].chars().count()))
         } else {
             LineShape::Content
         };
     }
-    if only_properties(rest, compat) {
+    if only_properties(rest, names.compat) {
         owner.map_or(LineShape::Open, LineShape::Owner)
     } else {
         LineShape::Content
+    }
+}
+
+/// What decides where an anchor or alias name ends on a line that isn't being scanned.
+#[derive(Clone, Copy)]
+struct NameRules<'s, 'a> {
+    compat: bool,
+    colon_anchors: Option<&'s HashSet<&'a str>>,
+}
+
+impl NameRules<'_, '_> {
+    /// Whether an alias whose name ends in `:` keeps it. By default every name does. In compat,
+    /// only one that an anchor already has does.
+    fn alias_keeps_colon(self, name: &str) -> bool {
+        !self.compat || self.colon_anchors.is_some_and(|names| names.contains(name))
     }
 }
 
@@ -2141,7 +2186,7 @@ enum LineStop {
 
 /// Walk `text` from the start of a token to its first value indicator or comment, skipping quoted
 /// scalars and flow collections.
-fn walk_line(text: &str, compat: bool) -> LineStop {
+fn walk_line(text: &str, names: NameRules<'_, '_>) -> LineStop {
     let bytes = text.as_bytes();
     let mut index = 0;
     // Inside a plain scalar, quotes, flow indicators, and property indicators are content:
@@ -2167,13 +2212,24 @@ fn walk_line(text: &str, compat: bool) -> LineStop {
             b'!' | b'&' | b'*' => {
                 let name_start = index + 1;
                 while index + 1 < bytes.len() && !matches!(bytes[index + 1], b' ' | b'\t') {
-                    if compat && byte != b'!' && compat_name_stop(bytes, index + 1, name_start) {
+                    if names.compat
+                        && byte != b'!'
+                        && compat_name_stop(bytes, index + 1, name_start)
+                    {
                         break;
                     }
                     index += 1;
                 }
+                // An alias that gives up its last `:` leaves it as this line's indicator.
+                if byte == b'*'
+                    && index > name_start
+                    && bytes[index] == b':'
+                    && !names.alias_keeps_colon(&text[name_start..=index])
+                {
+                    return LineStop::Value(index);
+                }
             }
-            b'[' | b'{' => match flow_collection_end(bytes, index, compat) {
+            b'[' | b'{' => match flow_collection_end(bytes, index, names.compat) {
                 Some(end) => index = end,
                 None => return LineStop::End,
             },
@@ -2279,11 +2335,11 @@ fn closing_quote(bytes: &[u8], open: usize) -> usize {
 }
 
 /// `line` without a trailing comment.
-fn strip_comment(line: &str, compat: bool) -> &str {
-    let (text, mut from, _) = block_prefix(line, compat);
+fn strip_comment<'t>(line: &'t str, names: NameRules<'_, '_>) -> &'t str {
+    let (text, mut from, _) = block_prefix(line, names.compat);
     let mark = line.len() - text.len();
     loop {
-        match walk_line(&text[from..], compat) {
+        match walk_line(&text[from..], names) {
             LineStop::Value(colon) => from += colon + 1,
             LineStop::Comment(comment) => return &line[..mark + from + comment],
             LineStop::End => return line,
@@ -2536,7 +2592,12 @@ fn is_line_break(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{LineStop, Scanner, TokenKind, closing_quote, strip_comment, walk_line};
+    use std::collections::HashSet;
+
+    use super::{
+        LineShape, LineStop, NameRules, Owner, Scanner, TokenKind, closing_quote, line_shape,
+        strip_comment, walk_line,
+    };
     use crate::event::ScalarStyle;
     use crate::limits::Limits;
     use crate::tag::Tag;
@@ -2558,6 +2619,68 @@ mod tests {
             }
         }
         panic!("no scalar in {input:?}");
+    }
+
+    /// The anchor names `input` leaves for its aliases to match, sorted.
+    fn colon_anchors(input: &str, compat: bool) -> Option<Vec<String>> {
+        let mut scanner = Scanner::with_compat(input, Limits::default(), compat).expect("scanner");
+        while scanner.next_token().expect("token").is_some() {}
+        let mut names: Vec<String> = scanner
+            .colon_anchors?
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        names.sort();
+        Some(names)
+    }
+
+    fn rules(compat: bool) -> NameRules<'static, 'static> {
+        NameRules {
+            compat,
+            colon_anchors: None,
+        }
+    }
+
+    #[test]
+    fn a_line_ends_an_alias_name_as_the_scanner_does() {
+        let known = HashSet::from(["a:"]);
+        let none = NameRules {
+            compat: true,
+            colon_anchors: None,
+        };
+        let anchored = NameRules {
+            compat: true,
+            colon_anchors: Some(&known),
+        };
+        let default = NameRules {
+            compat: false,
+            colon_anchors: None,
+        };
+        let owner = LineShape::Owner(Owner::Block(0));
+        // The colon is this line's indicator, unless an anchor has the whole name.
+        assert_eq!(line_shape("*a:", none), owner);
+        assert_eq!(line_shape("*a:", anchored), LineShape::Content);
+        assert_eq!(line_shape("*b:", anchored), owner);
+        assert_eq!(line_shape("*a:", default), LineShape::Content);
+        // No colon to give up, or none but the name.
+        assert_eq!(line_shape("*ab", none), LineShape::Content);
+        assert_eq!(line_shape("*:", none), LineShape::Content);
+        // Only an alias gives one up, and a flow key's alias is inside its key.
+        assert_eq!(line_shape("&a:", none), LineShape::Open);
+        assert_eq!(line_shape("!a:", none), LineShape::Open);
+        assert_eq!(line_shape("{*a: 1}:", none), owner);
+    }
+
+    #[test]
+    fn only_compat_keeps_anchor_names_and_only_those_ending_in_a_colon() {
+        assert_eq!(
+            colon_anchors("x: &a: 1\ny: &b 2\nz: &c:d: 3\n", true),
+            Some(vec!["a:".to_owned()])
+        );
+        assert_eq!(colon_anchors("x: &a 1\ny: &b 2\n", true), None);
+        assert_eq!(colon_anchors("x: &a: 1\ny: &b 2\n", false), None);
+        assert_eq!(colon_anchors("x: &a: 1\n---\ny: 2\n", true), None);
+        assert_eq!(colon_anchors("x: &a: 1\n...\n", true), None);
     }
 
     #[test]
@@ -2608,7 +2731,7 @@ mod tests {
         ] {
             for compat in [false, true] {
                 assert_eq!(
-                    walk_line(text, compat),
+                    walk_line(text, rules(compat)),
                     LineStop::Value(text.rfind(':').unwrap()),
                     "{text:?} compat={compat}"
                 );
@@ -2625,7 +2748,7 @@ mod tests {
         ] {
             for compat in [false, true] {
                 assert_eq!(
-                    walk_line(text, compat),
+                    walk_line(text, rules(compat)),
                     LineStop::Comment(text.find('#').unwrap()),
                     "{text:?} compat={compat}"
                 );
@@ -2656,7 +2779,7 @@ mod tests {
         ] {
             for compat in [false, true] {
                 assert_eq!(
-                    walk_line(text, compat),
+                    walk_line(text, rules(compat)),
                     LineStop::End,
                     "{text:?} compat={compat}"
                 );
@@ -2666,7 +2789,7 @@ mod tests {
 
     #[test]
     fn a_line_walk_reads_names_and_a_flow_question_mark_by_mode() {
-        let walk = |text: &str| (walk_line(text, false), walk_line(text, true));
+        let walk = |text: &str| (walk_line(text, rules(false)), walk_line(text, rules(true)));
         let last = |text: &str| LineStop::Value(text.rfind(':').unwrap());
         for text in ["&a:b: c", "*a:b: c", "&a?b: c", "&a?b \"c: d"] {
             assert_eq!(
@@ -2721,7 +2844,7 @@ mod tests {
                 ("[a, # b", "[a, # b"),
             ] {
                 assert_eq!(
-                    strip_comment(line, compat),
+                    strip_comment(line, rules(compat)),
                     code,
                     "{line:?} compat={compat}"
                 );
