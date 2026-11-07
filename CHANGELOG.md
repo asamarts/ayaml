@@ -44,8 +44,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   about a node itself keeps its wording and names no opening, as `aliases cannot carry tags or
   anchors` does in `{!t *a`.
 
+- Every entry point that takes limits, the emitters included, now refuses a `node_cost_bytes` of
+  0, which made each node an alias copies free and so turned the alias budget off. The least cost
+  is 1. As for a `max_depth` above `MAX_DEPTH_CAP`, the error is `ErrorKind::Limit` with no
+  structured value or span. `docs/limits.md` now says what a read holds in memory, and that a
+  block scalar's size, for `max_scalar_bytes`, counts its header and indentation.
+
 ### Fixed
 
+- A block scalar is now built as it is read. Its lines were listed first, so a read of a 4 MiB
+  block scalar of short or blank lines held 25 to 42 times its size at its peak, where it now
+  holds about 5 to 10 times. The index of line starts is sized before it is built, at 8 bytes
+  for each CR or LF, so it no longer grows by doubling.
+- The scanner's token arena now grows by a sixteenth of itself once it holds more than 16 chunks.
+  Growing by a fixed chunk alone copied it a number of times quadratic in its length wherever
+  `realloc` copies, as for a flow collection of a million tokens.
 - An error's text is no longer read to decide whether it says where the error is. A message that
   quoted a value holding the words `at line`, as in `a: "at line 9"` read into a number, lost
   its location.

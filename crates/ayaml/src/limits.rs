@@ -156,7 +156,9 @@ pub struct Limits {
     pub max_alias_expansion_bytes: usize,
     /// Additional alias allowance per input byte.
     pub alias_bytes_per_input_byte: usize,
-    /// Estimated cost of one composed node.
+    /// Estimated cost of one composed node, at least 1. Each alias is charged this much for every
+    /// node it copies, on top of the text it copies, so a small cost lets more nodes through the
+    /// alias budget.
     pub node_cost_bytes: usize,
     /// Maximum documents in one stream.
     pub max_documents: usize,
@@ -236,7 +238,8 @@ impl Limits {
         self
     }
 
-    /// Set the estimated cost of one composed node.
+    /// Set the estimated cost of one composed node. Every entry point rejects 0, which would make
+    /// a copied collection of nulls free and so turn the alias budget off.
     #[must_use]
     pub const fn with_node_cost_bytes(mut self, value: usize) -> Self {
         self.node_cost_bytes = value;
@@ -311,8 +314,9 @@ impl Limits {
             .saturating_add(self.alias_bytes_per_input_byte.saturating_mul(input))
     }
 
-    /// Reject limits no entry point can honour: a `max_depth` above
-    /// [`MAX_DEPTH_CAP`].
+    /// Reject settings no entry point can honour, a `max_depth` above [`MAX_DEPTH_CAP`], and
+    /// settings that would turn a budget off: a `node_cost_bytes` of 0 makes every node an alias
+    /// copies free, so a nest of aliases to collections of nulls could grow without bound.
     pub(crate) fn validate(&self) -> Result<(), Error> {
         if self.max_depth > MAX_DEPTH_CAP {
             return Err(Error::new(
@@ -321,6 +325,13 @@ impl Limits {
                     "max_depth {} is above the supported maximum of {MAX_DEPTH_CAP}",
                     self.max_depth
                 ),
+            ));
+        }
+        if self.node_cost_bytes == 0 {
+            return Err(Error::new(
+                ErrorKind::Limit,
+                "node_cost_bytes 0 would make the nodes an alias copies free, which turns off the \
+                 alias budget; the least accepted cost is 1",
             ));
         }
         Ok(())
