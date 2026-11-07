@@ -62,10 +62,12 @@ Two bounds also apply on their own:
 
 ## Scheduled checks
 
-Fuzzing and an advisory scan of the dependencies run every day. `tools/check_scheduled_runs.py`
-runs later each day, and it opens an issue if either workflow failed or didn't run, and closes the
-issue once both are healthy again. GitHub turns off every schedule in a repository after 60 days
-with no activity, the check's own included, so run `tools/ci-local.sh scheduled` before a release.
+Fuzzing and an advisory scan of the dependencies run every day. A fuzz run prints no input, and
+what it finds uploads encrypted (D74). `tools/check_scheduled_runs.py`
+runs later each day, and it opens an issue if either workflow failed or didn't run. Close that issue
+by hand after reading what the failed run sealed, since a later green run doesn't read it. GitHub
+turns off every schedule in a repository after 60 days with no activity, the check's own included,
+so run `tools/ci-local.sh scheduled` before a release.
 
 ## Checks that run before a release
 

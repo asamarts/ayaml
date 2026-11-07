@@ -31,12 +31,17 @@ jobs:
           restore-keys: |
             fuzz-corpus-${{ matrix.target }}-
             fuzz-corpus-
+      # Installed before the run, so that a crash can't be lost to a failed install. See D74.
+      - name: Install age
+        run: sudo apt-get update -q && sudo apt-get install -y -q age
+      - name: Build fuzzer
+        run: cargo fuzz build ${{ matrix.target }} --target x86_64-unknown-linux-gnu
       - name: Run fuzzer
-        run: cargo fuzz run ${{ matrix.target }} --target x86_64-unknown-linux-gnu -- -max_total_time=60
-      - name: Upload crashes
-        if: failure()
+        run: tools/fuzz-hosted.sh ${{ matrix.target }} 60 "$RUNNER_TEMP/fuzz-encrypted"
+      - name: Upload what it found, encrypted
+        if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-${{ matrix.target }}-artifacts
-          path: fuzz/artifacts/${{ matrix.target }}
+          name: fuzz-${{ matrix.target }}-encrypted
+          path: ${{ runner.temp }}/fuzz-encrypted
           if-no-files-found: ignore

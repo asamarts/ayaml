@@ -4,10 +4,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import io
 import json
 import os
 from pathlib import Path
+import shutil
+import stat
+import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -182,30 +187,196 @@ class ScheduledRuns(unittest.TestCase):
         self.assertIn("fuzz.yml has had no run", calls[-1][-1])
         self.assertIn("advisories.yml has had no run", calls[-1][-1])
 
-    def test_an_open_issue_is_not_repeated(self) -> None:
-        issues = json.dumps([{"number": 7, "title": check_scheduled_runs.ISSUE_TITLE}])
-        status, calls = self.with_gh("[]", "[]", issues, arguments=["--open-issue"])
-        self.assertEqual(status, 1)
-        self.assertEqual(calls[-1][:2], ["issue", "list"])
+    OPEN_ISSUES = json.dumps(
+        [
+            {"number": 7, "title": check_scheduled_runs.ISSUE_TITLE},
+            {"number": 8, "title": "Something else"},
+        ]
+    )
 
-    def test_an_issue_is_closed_once_nothing_is_wrong(self) -> None:
-        good = json.dumps([run(3)])
-        issues = json.dumps(
-            [
-                {"number": 7, "title": check_scheduled_runs.ISSUE_TITLE},
-                {"number": 8, "title": "Something else"},
-            ]
+    def test_a_problem_already_in_the_open_issue_is_not_repeated(self) -> None:
+        body = "- fuzz.yml has had no run in the last 36 hours"
+        comment = "- advisories.yml has had no run in the last 36 hours"
+        issue = json.dumps({"body": body, "comments": [{"body": comment}]})
+        status, calls = self.with_gh(
+            "[]", "[]", self.OPEN_ISSUES, issue, arguments=["--open-issue"]
         )
-        status, calls = self.with_gh(good, good, issues, "", arguments=["--open-issue"])
+        self.assertEqual(status, 1)
+        self.assertEqual(calls[-1][:3], ["issue", "view", "7"])
+
+    def test_a_new_problem_adds_to_the_open_issue(self) -> None:
+        issue = json.dumps(
+            {"body": "- fuzz.yml has had no run in the last 36 hours", "comments": []}
+        )
+        status, calls = self.with_gh(
+            "[]", "[]", self.OPEN_ISSUES, issue, "", arguments=["--open-issue"]
+        )
+        self.assertEqual(status, 1)
+        self.assertEqual(calls[-1][:3], ["issue", "comment", "7"])
+        self.assertIn("advisories.yml has had no run", calls[-1][-1])
+        self.assertNotIn("fuzz.yml", calls[-1][-1])
+
+    def test_a_green_check_leaves_an_open_issue_for_a_person_to_close(self) -> None:
+        # What the failed run found stays sealed until someone reads it.
+        good = json.dumps([run(3)])
+        status, calls = self.with_gh(good, good, self.OPEN_ISSUES, arguments=["--open-issue"])
         self.assertEqual(status, 0)
-        self.assertEqual(calls[-1][:3], ["issue", "close", "7"])
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(calls[-1][:2], ["issue", "list"])
+        self.assertEqual(len(calls), 3)
 
     def test_a_check_that_cannot_run_says_so(self) -> None:
         with mock.patch("subprocess.run", side_effect=FileNotFoundError("gh")), mock.patch("builtins.print"):
             self.assertEqual(check_scheduled_runs.main([]), 2)
         with mock.patch("builtins.print"):
             self.assertEqual(check_scheduled_runs.main(["--wrong"]), 2)
+
+
+SECRET = "input-only-the-maintainer-should-read"
+
+
+def fake_tool(directory: Path, name: str, body: str) -> None:
+    path = directory / name
+    path.write_text("#!/bin/sh\n" + body)
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+class FuzzHostedTests(unittest.TestCase):
+    """What `tools/fuzz-hosted.sh` lets out of a run, with `cargo` and sometimes `age` faked."""
+
+    def setUp(self) -> None:
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        (self.root / "tools").mkdir()
+        here = Path(__file__).resolve().parent
+        shutil.copy(here / "fuzz-hosted.sh", self.root / "tools")
+        shutil.copy(here / "fuzz-crash-recipient.txt", self.root / "tools")
+        self.output = self.root / "sealed"
+
+    def fuzzer(self, status: int, crash: bool = True) -> None:
+        artifact = (
+            f"mkdir -p fuzz/artifacts/parse; printf %s {SECRET} > fuzz/artifacts/parse/crash-abc\n"
+            if crash
+            else ""
+        )
+        fake_tool(
+            self.bin,
+            "cargo",
+            f"{artifact}echo 'Base64: {SECRET}'\necho 'stat::number_of_executed_units: 123'\n"
+            f"exit {status}\n",
+        )
+
+    def run_script(self) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["bash", str(self.root / "tools/fuzz-hosted.sh"), "parse", "60", str(self.output)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"},
+            check=False,
+        )
+
+    def assert_nothing_plain_left(self, result: subprocess.CompletedProcess) -> None:
+        self.assertNotIn(SECRET, result.stdout + result.stderr)
+        self.assertFalse((self.root / "fuzz/artifacts/parse").exists())
+        for path in self.root.rglob("*"):
+            if path.is_file() and path.parent not in (self.bin, self.root / "tools"):
+                self.assertNotIn(SECRET.encode(), path.read_bytes(), path)
+
+    def test_a_clean_run_reports_its_count_and_keeps_nothing(self) -> None:
+        self.fuzzer(0, crash=False)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "target=parse exit=0 runs=123\n")
+        self.assertFalse(self.output.exists())
+
+    def test_a_crash_keeps_its_exit_status_and_prints_no_input(self) -> None:
+        self.fuzzer(77)
+        fake_tool(self.bin, "age", 'while [ "$1" != -o ]; do shift; done; echo sealed > "$2"\n')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 77)
+        self.assertIn("target=parse exit=77 runs=123\n", result.stdout)
+        self.assertIn("encrypted=fuzz-parse.tar.gz.age sha256=", result.stdout)
+        self.assert_nothing_plain_left(result)
+
+    def test_a_failed_encryption_keeps_nothing(self) -> None:
+        self.fuzzer(77)
+        fake_tool(self.bin, "age", 'while [ "$1" != -o ]; do shift; done; echo part > "$2"; exit 1\n')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 77)
+        self.assertIn("nothing was kept", result.stderr)
+        self.assertEqual(list(self.output.iterdir()), [])
+        self.assert_nothing_plain_left(result)
+
+    def test_a_green_run_that_left_a_file_seals_it_and_stays_green(self) -> None:
+        self.fuzzer(0)
+        fake_tool(self.bin, "age", 'while [ "$1" != -o ]; do shift; done; echo sealed > "$2"\n')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("::warning::the parse fuzzer passed and left 1 files\n", result.stdout)
+        self.assertTrue((self.output / "fuzz-parse.tar.gz.age").exists())
+        self.assert_nothing_plain_left(result)
+
+    def test_a_failed_pack_does_not_show_a_file_name(self) -> None:
+        self.fuzzer(77)
+        fake_tool(self.bin, "tar", 'echo "tar: crash-abc: Cannot open" >&2; exit 2\n')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 77)
+        self.assertIn("nothing was kept", result.stderr)
+        self.assertNotIn("crash-abc", result.stdout + result.stderr)
+        self.assert_nothing_plain_left(result)
+
+    def test_a_failure_with_no_crash_file_still_hides_the_log(self) -> None:
+        self.fuzzer(1, crash=False)
+        fake_tool(self.bin, "age", 'while [ "$1" != -o ]; do shift; done; echo sealed > "$2"\n')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue((self.output / "fuzz-parse.tar.gz.age").exists())
+        self.assert_nothing_plain_left(result)
+
+    def test_a_bad_target_name_is_refused(self) -> None:
+        result = subprocess.run(
+            ["bash", str(self.root / "tools/fuzz-hosted.sh"), "../..", "60", str(self.output)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+
+    def test_a_fuzzing_stat_line_cannot_carry_text(self) -> None:
+        fake_tool(
+            self.bin,
+            "cargo",
+            f"echo 'stat::number_of_executed_units: {SECRET}'\nexit 0\n",
+        )
+        result = self.run_script()
+        self.assertEqual(result.stdout, "target=parse exit=0 runs=unknown\n")
+
+    @unittest.skipUnless(shutil.which("age") and shutil.which("age-keygen"), "needs age")
+    def test_the_maintainer_can_read_it_back_with_the_key(self) -> None:
+        self.fuzzer(77)
+        key = self.root / "key.txt"
+        subprocess.run(["age-keygen", "-o", str(key)], capture_output=True, check=True)
+        recipient = subprocess.run(
+            ["age-keygen", "-y", str(key)], capture_output=True, text=True, check=True
+        ).stdout
+        (self.root / "tools/fuzz-crash-recipient.txt").write_text(recipient)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 77)
+        self.assertNotIn(SECRET, result.stdout + result.stderr)
+        plain = subprocess.run(
+            ["age", "-d", "-i", str(key), str(self.output / "fuzz-parse.tar.gz.age")],
+            capture_output=True,
+            check=True,
+        ).stdout
+        with tarfile.open(fileobj=io.BytesIO(plain)) as archive:
+            names = archive.getnames()
+            crash = archive.extractfile("parse/crash-abc").read().decode()
+            log = archive.extractfile("fuzz.log").read().decode()
+        self.assertIn("fuzz.log", names)
+        self.assertEqual(crash, SECRET)
+        self.assertIn(SECRET, log)
 
 
 if __name__ == "__main__":

@@ -168,3 +168,36 @@ of input, where about 510 MiB is what the same stream costs with a short prefix.
 
 **Consequences.** `Limits` and `LimitKind` each gain a member. Both are `#[non_exhaustive]`, so this
 isn't a breaking change. A document with more expansions than this needs a higher limit.
+
+## D74 — A hosted fuzz run publishes no input
+
+**Date:** 2026-11-06
+**Status:** Accepted
+
+**Decision.** `tools/fuzz-hosted.sh` keeps a hosted fuzz run's output off the public log, which shows
+only the target, the exit status, the run count, how many files a green run left, and the hash of an
+encrypted file. On a failure, or a green run that left files such as a slow unit, the fuzzer's log and
+those files upload encrypted to the key in `tools/fuzz-crash-recipient.txt`, and only the maintainer
+holds the private key. If encrypting fails, nothing is kept.
+
+**Alternatives.** Filter the log and upload nothing, which needs no key but can lose a rare crash for
+good. Fuzz on a private host, which gives up free hosted runs. Publish the inputs on the grounds that
+anyone can run the same fuzzer, which publishes a reproduction before a fix exists.
+
+**Why.** `CONTRIBUTING.md` keeps reproduction inputs for an unfixed resource or correctness problem out
+of public text, and a crash would otherwise break that by itself: libFuzzer and `cargo-fuzz` both
+print the input, and the artifact held it. Hosted runs cost nothing and catch regressions every day.
+A crash file's name, and any hash of its contents, isn't published either, because a short input could
+be guessed from it.
+
+**Consequences.** A failed run shows that a target failed, and no more. Reading what it found takes the
+key: `gh run download RUN_ID`, then `age -d -i KEY FILE | tar -xz`. Losing the key loses access to past
+crashes only: generate another and replace the recipient file. Local fuzz runs still print everything.
+The scheduled watch leaves its issue open until someone closes it, because a later green run doesn't
+read what an earlier failed one sealed, and the artifact expires.
+
+The corpus cache stays plain text, and a fork's workflow can restore it. It holds only inputs that
+didn't stop the fuzzer, and anyone can grow the same corpus by running the same fuzzer, so encrypting
+it would add a secret and more steps for little gain. One run from before this decision printed an
+input, and its log and artifact were deleted on 2026-11-06.
+

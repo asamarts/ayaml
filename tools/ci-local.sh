@@ -46,7 +46,7 @@ for arg in "$@"; do
   case "$arg" in
     --list) printf '%s\n' "${ALL_JOBS[@]}"; exit 0 ;;
     --release) release=1 ;;
-    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
     -*) echo "unknown option: $arg" >&2; exit 2 ;;
     *) jobs+=("$arg") ;;
   esac
@@ -405,7 +405,10 @@ job_fuzz-smoke() {
   local TARGET
   for TARGET in parse emit borrowed; do
     timed_step "fuzz $TARGET (60 s)" cargo +nightly fuzz run "$TARGET" --target x86_64-unknown-linux-gnu -- -max_total_time=60
-    # Mirrors: cargo fuzz run TARGET --target x86_64-unknown-linux-gnu -- -max_total_time=60
+    # Hosted runs keep this output off the public log, which a local run needn't. See D74.
+    # Mirrors: sudo apt-get update -q && sudo apt-get install -y -q age
+    # Mirrors: cargo fuzz build TARGET --target x86_64-unknown-linux-gnu
+    # Mirrors: tools/fuzz-hosted.sh TARGET 60 "$RUNNER_TEMP/fuzz-encrypted"
   done
 }
 
