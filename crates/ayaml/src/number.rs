@@ -309,6 +309,9 @@ impl Eq for Number {}
 
 impl Hash for Number {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        // Eq keeps the kinds apart, so each writes its own mark. Without it, `-1` and `u64::MAX`
+        // write the same bytes, and mappings holding both cancel out in `Mapping`'s hash under any
+        // key. A wide integer could also read as a narrow one and the value after it.
         match self.0 {
             // Every NaN is one value to Eq, and so are both zeros, so each has to hash as one.
             Repr::Float(value) => {
@@ -322,10 +325,22 @@ impl Hash for Number {
                 };
                 bits.hash(state);
             }
-            Repr::PosInt(value) => value.hash(state),
-            Repr::NegInt(value) => value.hash(state),
-            Repr::PosWide(high, low) => wide_u128(high, low).hash(state),
-            Repr::NegWide(high, low) => wide_i128(high, low).hash(state),
+            Repr::PosInt(value) => {
+                0_u8.hash(state);
+                value.hash(state);
+            }
+            Repr::NegInt(value) => {
+                1_u8.hash(state);
+                value.hash(state);
+            }
+            Repr::PosWide(high, low) => {
+                2_u8.hash(state);
+                wide_u128(high, low).hash(state);
+            }
+            Repr::NegWide(high, low) => {
+                4_u8.hash(state);
+                wide_i128(high, low).hash(state);
+            }
         }
     }
 }

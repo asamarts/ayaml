@@ -609,6 +609,183 @@ fn compat_owner_heuristic_ends_anchors_like_the_scanner() {
     assert_eq!(compat("&a:b: >\n x\n"), json!({ ":b": "x\n" }));
 }
 
+/// What a block scalar in a one-entry mapping under a sequence reads as, in both modes.
+#[cfg(feature = "libyaml-compat")]
+fn block_scalar_under_key(input: &str) -> [ayaml::Value; 2] {
+    let read = |value: ayaml::Value| {
+        value[0]
+            .as_mapping()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .clone()
+    };
+    [
+        read(ayaml::parse_value(input).unwrap_or_else(|error| panic!("{input:?}: {error}"))),
+        read(ayaml::compat::from_str(input).unwrap_or_else(|error| panic!("{input:?}: {error}"))),
+    ]
+}
+
+#[cfg(feature = "libyaml-compat")]
+fn rejected_in_both_modes(input: &str) {
+    rejects(input);
+    assert!(
+        ayaml::compat::from_str::<ayaml::Value>(input).is_err(),
+        "{input:?} should be rejected in compat mode"
+    );
+}
+
+/// In a flow collection a `:` doesn't end a name, as it does in block context, so the check on a
+/// block scalar's parent has to read the name to the same place.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_owner_heuristic_keeps_a_colon_in_a_flow_name() {
+    let text = ayaml::Value::String("x\n".into());
+    assert_eq!(
+        block_scalar_under_key("- [&a:\"b]: |1\n   x\n"),
+        [text.clone(), text]
+    );
+    rejected_in_both_modes("- [&a:\"b]: |\n  x\n");
+}
+
+/// Past the first plain text in a flow collection, a quote is content, so it can't hide the key
+/// that a block scalar belongs to.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn a_quote_inside_flow_plain_text_opens_nothing() {
+    let text = ayaml::Value::String("x\n".into());
+    let keys = [
+        "[a\"b]",
+        "[a'b]",
+        "[a b\"c]",
+        "[a, b\"c]",
+        "{a\"b: c}",
+        "[? \"\": :\"]",
+        // A quoted scalar in a flow collection still hides what it holds.
+        "{\"a\":\"b]c\"}",
+        "['a]']",
+        "[a, \"b]c\"]",
+        // And so does one after a `:`, a `,`, a `?`, or the start or end of a collection, past
+        // plain text.
+        "{\"a\":\"]: \"}",
+        "[a, \"]: \"]",
+        "{a: [\"]: \"]}",
+        "{[a]: \"]: \"}",
+        "[a: \"]: \"]",
+        "{a: \"b # c\"}",
+        "{a: 'b # c'}",
+        "{a: \"[x\"}",
+        "{a: \"x, \"}",
+        "{? \"]: \": b}",
+        // A property between them changes nothing.
+        "{\"a\":!t \"]: \"}",
+        "{\"a\":&b \"]: \"}",
+        "{a: !t \"b # c\"}",
+    ];
+    for key in keys {
+        assert_eq!(
+            block_scalar_under_key(&format!("- {key}: |1\n   x\n")),
+            [text.clone(), text.clone()],
+            "{key}"
+        );
+        rejected_in_both_modes(&format!("- {key}: |\n  x\n"));
+    }
+}
+
+/// Valid forms next to known wrong rejections, each read as what it means in both modes. A fix that
+/// goes too far, or a new check that catches one of these, fails here.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn valid_forms_beside_wrong_rejections_keep_their_reading() {
+    for (input, meaning) in [
+        // A block scalar past its parent.
+        ("a:\n |\n  x", "a: \"x\""),
+        ("b: 1\na:\n >\n  x", "{b: 1, a: \"x\"}"),
+        // A tab before a plain key's `:`, or with no `: ` after it.
+        ("a\t: 1", "{a: 1}"),
+        ("b: 1\na\t: 1", "{b: 1, a: 1}"),
+        ("k:\t\"a:b\"", "{k: \"a:b\"}"),
+        ("k:\t[a:b]", "{k: [\"a:b\"]}"),
+        ("k:\t{a:b}", "{k: {\"a:b\": ~}}"),
+        ("---\tb", "b"),
+        ("--- a\t# c", "a"),
+        // A flow mapping's empty key.
+        ("{? ,}", "{~: ~}"),
+        // A comment's colon on a flow scalar's line.
+        ("[a\n b # c: d\n]", "[\"a b\"]"),
+        ("{a: b\n c # d: e\n}", "{a: \"b c\"}"),
+        // Text like a marker on a flow scalar's line.
+        ("[a\n---b]", "[\"a ---b\"]"),
+        ("k: [a\n  ...b]", "{k: [\"a ...b\"]}"),
+        ("{a\n  ---b\n}", "{\"a ---b\": ~}"),
+        // These lines are past the scalar's parent.
+        ("- \"a\n b\"", "[\"a b\"]"),
+        ("k: \"a\n b\"", "{k: \"a b\"}"),
+        // Characters that YAML 1.2 doesn't break a line on.
+        ("'a\u{2028}b'", "\"a\\Lb\""),
+        ("'a\u{2029}b'", "\"a\\Pb\""),
+        ("'a\u{85}b'", "\"a\\Nb\""),
+        ("k: 'a\u{2028}b'", "{k: \"a\\Lb\"}"),
+        ("k: \"a\u{2028}b\"", "{k: \"a\\Lb\"}"),
+        // A comment with nothing before it.
+        ("# c\na: 1", "{a: 1}"),
+        ("#", "~"),
+    ] {
+        let expected =
+            ayaml::parse_value(meaning).unwrap_or_else(|error| panic!("{meaning:?}: {error}"));
+        assert_eq!(
+            ayaml::parse_value(input).unwrap_or_else(|error| panic!("{input:?}: {error}")),
+            expected,
+            "{input:?}"
+        );
+        assert_eq!(
+            ayaml::compat::from_str::<ayaml::Value>(input)
+                .unwrap_or_else(|error| panic!("{input:?} in compat: {error}")),
+            expected,
+            "{input:?} in compat"
+        );
+    }
+}
+
+/// Two keys that differ only in the order of their entries are one key, whatever the target.
+#[test]
+fn keys_that_differ_only_in_order_are_duplicates_in_a_typed_map() {
+    use std::collections::{BTreeMap, HashMap};
+
+    type Keyed = HashMap<BTreeMap<String, u32>, String>;
+    let input = "? {a: 1, b: 2}\n: x\n? {b: 2, a: 1}\n: y\n";
+    let duplicate = ayaml::from_str::<Keyed>(input).unwrap_err();
+    assert_eq!(
+        duplicate.kind(),
+        ayaml::ErrorKind::DuplicateKey,
+        "{duplicate}"
+    );
+    assert!(duplicate.span().is_some(), "{duplicate}");
+    for input in [
+        input,
+        "? [{a: 1, b: 2}]\n: x\n? [{b: 2, a: 1}]\n: y\n",
+        "? &k {a: 1, b: 2}\n: x\n? {b: 2, a: 1}\n: y\n",
+        "? {a: 1, b: 2}\n: x\n? &k {b: 2, a: 1}\n: y\n",
+        "? &k {a: 1, b: 2}\n: x\n? {c: 3}\n: y\n? *k\n: z\n",
+    ] {
+        let error = ayaml::from_str::<ayaml::Value>(input).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            ayaml::ErrorKind::DuplicateKey,
+            "{input:?}: {error}"
+        );
+        let error = ayaml::parse_value(input).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            ayaml::ErrorKind::DuplicateKey,
+            "{input:?}: {error}"
+        );
+    }
+    let distinct = "? {a: 1, b: 2}\n: x\n? {a: 2, b: 1}\n: y\n? {a: 1}\n: z\n";
+    assert_eq!(ayaml::from_str::<Keyed>(distinct).unwrap().len(), 3);
+}
+
 /// A closing quote may sit at any indentation, on a line of its own, so only the lines with
 /// text in them count.
 #[test]

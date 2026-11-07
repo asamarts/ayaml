@@ -50,6 +50,7 @@ fn compatibility_limits_are_inclusive() {
         limits.check_input(32 * 1024 * 1024 + 1).unwrap_err().kind(),
         LimitKind::InputBytes
     );
+    assert!(limits.check_depth(127).is_ok());
     assert!(limits.check_depth(128).is_ok());
     assert_eq!(
         limits.check_depth(129).unwrap_err().kind(),

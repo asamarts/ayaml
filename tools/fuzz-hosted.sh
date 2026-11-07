@@ -8,7 +8,7 @@
 # count, how many files the run left, and the hash of the encrypted file. On a failure, or a green
 # run that left files such as a slow unit, the fuzzer's log and those files go to OUTPUT_DIRECTORY,
 # encrypted to tools/fuzz-crash-recipient.txt. If that fails, nothing is kept, because a lost input
-# is better than a published one. See D74.
+# is better than a published one, and the run fails, because nothing else would say so. See D74.
 set -uo pipefail
 
 if [[ $# -ne 3 || ! "$1" =~ ^[a-z_]+$ || ! "$2" =~ ^[0-9]+$ ]]; then
@@ -31,6 +31,10 @@ status=$?
 runs="$(sed -n 's/^stat::number_of_executed_units: *\([0-9]*\)$/\1/p' "$work/fuzz.log" | tail -n1)"
 printf 'target=%s exit=%s runs=%s\n' "$target" "$status" "${runs:-unknown}"
 found="$(find "$artifacts/$target" -type f 2>/dev/null | wc -l)"
+# A slow unit stays in the corpus too, named by its hash, and the corpus goes to a plain-text cache.
+while IFS= read -r -d '' file; do
+    rm -f "$root/fuzz/corpus/$target/$(sha1sum "$file" | cut -d' ' -f1)"
+done < <(find "$artifacts/$target" -type f -print0 2>/dev/null)
 if [[ "$status" -eq 0 && "$found" -eq 0 ]]; then
     exit 0
 fi
@@ -49,6 +53,7 @@ if mkdir -p "$output" &&
 else
     rm -f "$sealed"
     echo "could not encrypt what the fuzzer found, so nothing was kept" >&2
+    [[ "$status" -eq 0 ]] && status=1
 fi
 # Leave no plain copy for a later step to pick up.
 rm -rf "${artifacts:?}/$target"

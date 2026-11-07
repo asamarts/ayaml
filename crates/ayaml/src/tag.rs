@@ -139,8 +139,11 @@ impl Eq for Tag {}
 
 impl Hash for Tag {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write(self.handle.as_bytes());
-        state.write(self.suffix.as_bytes());
+        // Equal tags can split their text differently, and not every hasher reads two writes as
+        // one, so the split can't show.
+        for byte in self.full() {
+            state.write_u8(byte);
+        }
         state.write_u8(0xff);
     }
 }
@@ -190,6 +193,31 @@ impl TaggedValue {
 mod tests {
     use super::{Tag, TaggedValue};
     use crate::value::Value;
+
+    /// Equal tags hash alike under any hasher, including one that reads each write on its own.
+    #[test]
+    fn a_tags_hash_does_not_show_where_its_text_splits() {
+        use std::hash::{Hash, Hasher};
+
+        #[derive(Default)]
+        struct Writes(Vec<Vec<u8>>);
+        impl Hasher for Writes {
+            fn write(&mut self, bytes: &[u8]) {
+                self.0.push(bytes.to_vec());
+            }
+            fn finish(&self) -> u64 {
+                0
+            }
+        }
+        let writes = |tag: Tag| {
+            let mut writes = Writes::default();
+            tag.hash(&mut writes);
+            writes.0
+        };
+        let (split, other) = (Tag::new("!ab", "c"), Tag::new("!", "abc"));
+        assert_eq!(split, other);
+        assert_eq!(writes(split), writes(other));
+    }
 
     #[test]
     fn local_and_core_tags_display_canonically() {

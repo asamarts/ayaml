@@ -239,8 +239,10 @@ def resolves(rev: str) -> bool:
     )
 
 
-# A signature's armor or base64. Anything else in a signature header is read as text.
-SIGNATURE_LINE = re.compile(rb"-----(?:BEGIN|END) (?:PGP|SSH) SIGNATURE-----|[A-Za-z0-9+/=]*")
+# A signature's armor, and the base64 between. Anything else in a signature header is read as text.
+ARMOR_BEGIN = re.compile(rb"-----BEGIN (?:PGP|SSH) SIGNATURE-----")
+ARMOR_END = re.compile(rb"-----END (?:PGP|SSH) SIGNATURE-----")
+BASE64_LINE = re.compile(rb"[A-Za-z0-9+/=]*")
 HUNK = re.compile(rb"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
@@ -312,19 +314,24 @@ def without_signature(raw: bytes) -> bytes:
     """Return a commit's raw text without its signature.
 
     GitHub signs the commits it writes, and base64 can look like anything, so a signature
-    matched a short pattern by chance on `main`. It holds nothing anyone wrote. Only armor and
-    base64 are left out, so any other text in that header is still read.
+    matched a short pattern by chance on `main`. It holds nothing anyone wrote. Only armor and the
+    base64 inside it are left out, so any other text in that header is still read.
     """
     headers, separator, message = raw.partition(b"\n\n")
     kept = []
-    in_signature = False
+    in_signature = in_armor = False
     for line in headers.split(b"\n"):
         if line.startswith(b" "):
             text = line[1:]
         else:
             name, _, text = line.partition(b" ")
             in_signature = name in (b"gpgsig", b"gpgsig-sha256")
-        if not (in_signature and SIGNATURE_LINE.fullmatch(text)):
+            in_armor = False
+        if in_signature and not in_armor and ARMOR_BEGIN.fullmatch(text):
+            in_armor = True
+        elif in_armor and ARMOR_END.fullmatch(text):
+            in_armor = False
+        elif not (in_armor and BASE64_LINE.fullmatch(text)):
             kept.append(line)
     return b"\n".join(kept) + separator + message
 

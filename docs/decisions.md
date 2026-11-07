@@ -161,10 +161,11 @@ held by tags but not the copies that Serde names and the split at the core prefi
 
 **Why.** A count of expansions bounds what handles cost on every path, and it can't reject a
 document for anything but this cost. A tag that an alias copies counts against the alias budget, with
-the rest of what the alias copies. `max_events` stops a stream first, at about 250,000 tagged block
-entries or 499,000 flow entries, so 64 MiB holds every use it allows of a prefix up to about 134
-bytes, more than any real document needs. A stream at both limits peaks at about 590 MiB from 4 MiB
-of input, where about 510 MiB is what the same stream costs with a short prefix.
+the rest of what the alias copies. `max_events` stops a stream first, at between 250,000 and 500,000
+tagged nodes depending on how they're written, so 64 MiB holds every use it allows of a prefix up to
+about 134 bytes, more than any real document needs. A stream at both limits peaks at about 470 MiB
+from less than 4 MiB of input on `next_borrowed`, the costliest reader, where the same stream costs
+about 365 MiB with a short prefix. On `parse_value` the two are about 370 and 260 MiB.
 
 **Consequences.** `Limits` and `LimitKind` each gain a member. Both are `#[non_exhaustive]`, so this
 isn't a breaking change. A document with more expansions than this needs a higher limit.
@@ -194,10 +195,12 @@ be guessed from it.
 key: `gh run download RUN_ID`, then `age -d -i KEY FILE | tar -xz`. Losing the key loses access to past
 crashes only: generate another and replace the recipient file. Local fuzz runs still print everything.
 The scheduled watch leaves its issue open until someone closes it, because a later green run doesn't
-read what an earlier failed one sealed, and the artifact expires.
+read what an earlier failed one sealed, and the artifact expires. It also reports a green run that
+left a sealed file, and a green run whose file couldn't be sealed fails.
 
 The corpus cache stays plain text, and a fork's workflow can restore it. It holds only inputs that
-didn't stop the fuzzer, and anyone can grow the same corpus by running the same fuzzer, so encrypting
-it would add a secret and more steps for little gain. One run from before this decision printed an
+didn't stop the fuzzer, without any file the run left, such as a slow unit, and anyone can grow the
+same corpus by running the same fuzzer, so encrypting it would add a secret and more steps for little
+gain. One run from before this decision printed an
 input, and its log and artifact were deleted on 2026-11-06.
 

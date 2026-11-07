@@ -5,6 +5,9 @@
 /fuzz/corpus/**/*
 !/fuzz/corpus/parse/
 !/fuzz/corpus/parse/basic.yml
+!/fuzz/corpus/parse/core-*.yml
+!/fuzz/corpus/parse/comment-colon-*.yml
+!/fuzz/corpus/parse/marker-in-*.yml
 !/fuzz/corpus/emit/
 !/fuzz/corpus/emit/block.yml
 !/fuzz/corpus/emit/alias.yml
