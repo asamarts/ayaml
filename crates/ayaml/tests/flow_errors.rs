@@ -46,6 +46,15 @@ fn location(error: &Error) -> At {
     (location.line(), location.column())
 }
 
+/// What `message()` gives for an error that displays as `shown` at `failure`: the same text
+/// without the failure's location, which is the first one in it.
+fn without_location(shown: &str, failure: At) -> String {
+    let (line, column) = failure;
+    let location = format!(" at line {line} column {column}");
+    assert!(shown.contains(&location), "{shown:?}");
+    shown.replacen(&location, "", 1)
+}
+
 /// In both modes, `input` fails at `failure`, in the collection opened at `opening`.
 #[track_caller]
 fn failure_is(input: &str, failure: At, opening: At, sequence: bool, ended: bool) {
@@ -69,6 +78,11 @@ fn failure_is(input: &str, failure: At, opening: At, sequence: bool, ended: bool
     };
     for (reader, error) in default_errors(input) {
         assert_eq!(error.to_string(), default, "{reader}, {input:?}");
+        assert_eq!(
+            error.message(),
+            without_location(&default, failure),
+            "{reader}, {input:?}"
+        );
         assert_eq!(location(&error), failure, "{reader}, {input:?}");
     }
     #[cfg(feature = "libyaml-compat")]
@@ -110,7 +124,11 @@ fn compat_failure_is(input: &str, message: &str, failure: At) {
     for (reader, result) in errors {
         let error = result.expect_err(reader);
         assert_eq!(error.to_string(), message, "{reader}, {input:?}");
-        assert_eq!(error.message(), message, "{reader}, {input:?}");
+        assert_eq!(
+            error.message(),
+            without_location(message, failure),
+            "{reader}, {input:?}"
+        );
         assert_eq!(location(&error), failure, "{reader}, {input:?}");
     }
 }
@@ -168,7 +186,7 @@ fn input_that_ends_inside_a_mapping_names_the_end_and_the_opening() {
     mapping_ends("{? a : ", (1, 8), (1, 1));
     mapping_ends("{&a", (1, 4), (1, 1));
     mapping_ends("{a: 1, # c\n\n", (3, 1), (1, 1));
-    mapping_ends("x: {a\n...\n", (3, 1), (1, 4));
+    mapping_ends("x: {a\n b\n", (3, 1), (1, 4));
 }
 
 #[test]
@@ -179,8 +197,6 @@ fn a_token_where_a_separator_belongs_names_itself_and_the_opening() {
     sequence_fails("[{a: 1} b]", (1, 9), (1, 1));
     mapping_fails("{a]", (1, 3), (1, 1));
     mapping_fails("{a: 1]", (1, 6), (1, 1));
-    mapping_fails("{a: 1, ]", (1, 8), (1, 1));
-    mapping_fails("{]", (1, 2), (1, 1));
     mapping_fails("{a: 1 b: 2}", (1, 8), (1, 1));
     mapping_fails("{a: 1, b: 2 c: 3}", (1, 14), (1, 1));
     mapping_fails("{\"a\" b: 1}", (1, 6), (1, 1));
@@ -253,8 +269,9 @@ fn line_endings_and_marks_and_wide_characters_count_as_they_do_elsewhere() {
     sequence_ends("😀: [😀", (1, 6), (1, 4));
 }
 
-/// A node is what's missing: default mode says what stands there instead, with both locations, and
-/// compat says what libyaml says of a missing node.
+/// A node is what's missing: default mode says what stands there instead, with both locations.
+/// Compat gives libyaml's problem for a missing node, and the collection's opening as its context
+/// where libyaml names the node.
 #[track_caller]
 fn node_fails(input: &str, problem: &str, name: &str, failure: At, opening: At) {
     let (line, column) = failure;
@@ -265,6 +282,11 @@ fn node_fails(input: &str, problem: &str, name: &str, failure: At, opening: At) 
     );
     for (reader, error) in default_errors(input) {
         assert_eq!(error.to_string(), default, "{reader}, {input:?}");
+        assert_eq!(
+            error.message(),
+            without_location(&default, failure),
+            "{reader}, {input:?}"
+        );
         assert_eq!(location(&error), failure, "{reader}, {input:?}");
     }
     #[cfg(feature = "libyaml-compat")]
@@ -301,6 +323,10 @@ fn a_stray_bracket_where_a_mapping_value_belongs_names_itself_and_the_opening() 
     node_fails("{a: ]}", problem, "mapping", (1, 5), (1, 1));
     node_fails("[{a: ]", problem, "mapping", (1, 6), (1, 2));
     node_fails("a: 1\nb: 2\nc: {d: ]\n", problem, "mapping", (3, 8), (3, 4));
+    // Where a key belongs, too: nothing stands for it.
+    node_fails("{]", problem, "mapping", (1, 2), (1, 1));
+    node_fails("{a: 1, ]", problem, "mapping", (1, 8), (1, 1));
+    node_fails("{? ]", problem, "mapping", (1, 4), (1, 1));
 }
 
 /// A key on two lines is refused where it starts, unless its brackets don't match: that's the
@@ -362,6 +388,27 @@ fn outside_a_flow_collection_an_error_stays_as_it_was() {
     }
 }
 
+/// An error about a node itself keeps its wording inside a collection too, and names no opening.
+#[test]
+fn an_error_about_a_node_names_no_opening() {
+    for (input, at) in [
+        ("{!t *a", (1, 5)),
+        ("[!t *a", (1, 5)),
+        ("{a: &x *a}", (1, 8)),
+    ] {
+        let (line, column) = at;
+        let want = format!("aliases cannot carry tags or anchors at line {line} column {column}");
+        for (reader, error) in default_errors(input) {
+            assert_eq!(error.to_string(), want, "{reader}, {input:?}");
+        }
+        #[cfg(feature = "libyaml-compat")]
+        {
+            let error = ayaml::compat::from_str::<Value>(input).expect_err("compat");
+            assert_eq!(error.to_string(), want, "{input:?}");
+        }
+    }
+}
+
 #[test]
 fn a_scalar_that_never_ends_reports_itself_and_not_the_collection() {
     for input in ["[\"a", "['a", "{a: \"b"] {
@@ -377,7 +424,7 @@ fn a_scalar_that_never_ends_reports_itself_and_not_the_collection() {
 #[cfg(feature = "libyaml-compat")]
 #[test]
 fn compat_gives_the_wording_libyaml_gives_for_an_unclosed_sequence() {
-    let input = "title: x\ntasks: [a, b\n";
+    let input = "name: x\nitems: [a, b\n";
     compat_failure_is(
         input,
         "did not find expected ',' or ']' at line 3 column 1, \

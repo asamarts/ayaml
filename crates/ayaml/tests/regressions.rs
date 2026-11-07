@@ -805,6 +805,15 @@ fn a_line_break_character_is_content_where_it_is_written() {
                 format!("- a b{character}c: d"),
                 format!("- \"a b{escape}c\": d"),
             ),
+            // The name doesn't end there, so the alias names the anchor, and no text is left.
+            (
+                format!("k: &a{character}b x\nj: *a{character}b"),
+                "k: x\nj: x".to_owned(),
+            ),
+            (
+                format!("[&a{character}b x, *a{character}b]"),
+                "[x, x]".to_owned(),
+            ),
         ] {
             let expected = ayaml::parse_value(&meaning).unwrap();
             let read =
@@ -840,9 +849,12 @@ fn a_name_before_a_separator_and_a_verbatim_tag_read_alike_in_both_modes() {
         ayaml::Value::Tagged(tagged) => tagged.tag.to_string(),
         other => panic!("{other:?}"),
     };
+    // Valid forms only: AY-025 will reject a verbatim tag that is neither a local nor a global
+    // tag, such as `!<Foo>`.
     for (input, tag) in [
-        ("!<Foo> x", "Foo"),
-        ("!<a#b> x", "a#b"),
+        ("!<tag:Example.com,1:Foo> v", "tag:Example.com,1:Foo"),
+        ("!<!A> x", "!A"),
+        ("!<!a#b> x", "!a#b"),
         ("!<tag:x,1:y#z> v", "tag:x,1:y#z"),
     ] {
         assert_eq!(tag_of(ayaml::parse_value(input).unwrap()), tag, "{input:?}");

@@ -69,6 +69,8 @@ pub struct Error {
     kind: ErrorKind,
     /// How much of `message` is the path to what a typed reader rejected, with the `: ` after it.
     path_len: u32,
+    /// How much of the end of `message` is context that the error's location goes before.
+    context_len: u32,
     span: Option<Span>,
     message: String,
     limit: Option<Box<crate::limits::LimitExceeded>>,
@@ -82,6 +84,7 @@ impl Error {
         Self {
             kind,
             path_len: 0,
+            context_len: 0,
             span: None,
             message: message.into(),
             limit: None,
@@ -93,6 +96,14 @@ impl Error {
     #[must_use]
     pub fn with_span(mut self, span: Span) -> Self {
         self.span = Some(span);
+        self
+    }
+
+    /// End the message with `context`, which follows the location when the error is displayed.
+    #[cold]
+    pub(crate) fn with_context(mut self, context: &str) -> Self {
+        self.message.push_str(context);
+        self.context_len = context.len() as u32;
         self
     }
 
@@ -135,6 +146,10 @@ impl Error {
     }
 
     /// The human-readable message without location decoration.
+    ///
+    /// A flow collection's error ends with where the collection opened, as in
+    /// `unterminated flow sequence, opened at line 1 column 1`. That is part of the message, and
+    /// the error's own location goes before it when the error is displayed.
     ///
     /// When a typed reader rejects something below the document's root, the message starts with
     /// the path to it, as in `tasks[0].limits.cpu: invalid type: string "x", expected u32`. A
@@ -237,7 +252,8 @@ fn hides_text(character: char) -> bool {
     character.is_control()
         || matches!(
             character,
-            '\u{200e}'
+            '\u{61c}'
+                | '\u{200e}'
                 | '\u{200f}'
                 | '\u{2028}'
                 | '\u{2029}'
@@ -249,20 +265,19 @@ fn hides_text(character: char) -> bool {
 
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.message)?;
-        // A key in the path isn't a location the message already gives.
-        if let Some(span) = self.span
-            && !self.message[self.path_len as usize..].contains("at line ")
-        {
-            let location = span.start().location();
-            write!(
-                formatter,
-                " at line {} column {}",
-                location.line(),
-                location.column()
-            )?;
-        }
-        Ok(())
+        let Some(span) = self.span else {
+            return formatter.write_str(&self.message);
+        };
+        let (problem, context) = self
+            .message
+            .split_at(self.message.len() - self.context_len as usize);
+        let location = span.start().location();
+        write!(
+            formatter,
+            "{problem} at line {} column {}{context}",
+            location.line(),
+            location.column()
+        )
     }
 }
 
@@ -348,6 +363,7 @@ mod tests {
             ("a\nb\u{1b}", "[\"a\\u{a}b\\u{1b}\"]"),
             ("\u{85}\u{2028}\u{2029}", "[\"\\u{85}\\u{2028}\\u{2029}\"]"),
             ("\u{200e}\u{200f}", "[\"\\u{200e}\\u{200f}\"]"),
+            ("a\u{61c}b", "[\"a\\u{61c}b\"]"),
             (
                 "\u{202e}\u{2066}\u{feff}",
                 "[\"\\u{202e}\\u{2066}\\u{feff}\"]",
@@ -383,17 +399,49 @@ mod tests {
         assert!(error.message().starts_with("…["), "{}", error.message());
     }
 
+    /// Text that reads like a location, in a key or in the message, never stands for the error's.
     #[test]
-    fn a_location_in_a_key_does_not_stand_for_the_message_s() {
+    fn a_location_in_the_text_does_not_stand_for_the_error_s() {
         let span = Span::new(Marker::new(4, 2, 3), Marker::new(5, 2, 4));
         let error = Error::new(ErrorKind::Serde, "bad")
             .with_span(span)
             .inside_key("at line 9");
         assert_eq!(error.to_string(), "[\"at line 9\"]: bad at line 2 column 3");
-        let error = Error::new(ErrorKind::Serde, "bad at line 1 column 1")
+        let error = Error::new(ErrorKind::Serde, "invalid type: string \"at line 9\"")
             .with_span(span)
             .inside_key("a");
-        assert_eq!(error.to_string(), "a: bad at line 1 column 1");
+        assert_eq!(
+            error.to_string(),
+            "a: invalid type: string \"at line 9\" at line 2 column 3"
+        );
+    }
+
+    #[test]
+    fn the_location_goes_before_the_context() {
+        let span = Span::new(Marker::new(4, 2, 3), Marker::new(5, 2, 4));
+        let error = Error::new(ErrorKind::Parser, "unterminated flow sequence")
+            .with_context(", opened at line 1 column 1")
+            .with_span(span);
+        assert_eq!(
+            error.message(),
+            "unterminated flow sequence, opened at line 1 column 1"
+        );
+        assert_eq!(
+            error.to_string(),
+            "unterminated flow sequence at line 2 column 3, opened at line 1 column 1"
+        );
+        let error = error.inside_index(0).inside_key("k");
+        assert_eq!(
+            error.to_string(),
+            "k[0]: unterminated flow sequence at line 2 column 3, opened at line 1 column 1"
+        );
+        // With no location, the context follows the problem.
+        let error = Error::new(ErrorKind::Parser, "unterminated flow sequence")
+            .with_context(", opened at line 1 column 1");
+        assert_eq!(
+            error.to_string(),
+            "unterminated flow sequence, opened at line 1 column 1"
+        );
     }
 
     #[test]

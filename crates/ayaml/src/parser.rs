@@ -1958,6 +1958,23 @@ impl<'a> Parser<'a> {
         let key = tokens.slice(index, key_end);
         state.index = key_end;
         if key.is_empty() {
+            // Where a key starts, after `{`, `,` or `?`, nothing stands for it, so a `]` is where a
+            // node belongs, as in a sequence. After an entry with no `,`, a separator is missing.
+            if index > 0
+                && matches!(
+                    self.token(tokens, index - 1).kind,
+                    TokenKind::FlowMappingStart | TokenKind::FlowEntry | TokenKind::Key
+                )
+                && self
+                    .token_at(tokens, key_end)
+                    .is_some_and(|token| matches!(token.kind, TokenKind::FlowSequenceEnd))
+            {
+                return Err(self.flow_error(
+                    tokens,
+                    key_end,
+                    FlowLack::Node("unexpected ] in node position".to_owned()),
+                ));
+            }
             let span = Span::empty(self.token(tokens, index.saturating_sub(1)).span.end());
             self.emit(self.null_scalar(span))?;
             return self.flow_mapping_after_key(state, stack);
@@ -2141,27 +2158,29 @@ impl<'a> Parser<'a> {
         } else {
             ("mapping", '}')
         };
-        let (at, from) = (span.start(), opening.start());
-        let here = format!("at line {} column {}", at.line(), at.column());
+        let from = opening.start();
         let there = format!("at line {} column {}", from.line(), from.column());
-        let message = match lack {
-            FlowLack::Separator if self.compat => format!(
-                "did not find expected ',' or '{closing}' {here}, while parsing a flow {name} {there}"
+        // The failure's location goes between the two when the error is displayed.
+        let (problem, context) = match lack {
+            FlowLack::Separator if self.compat => (
+                format!("did not find expected ',' or '{closing}'"),
+                format!(", while parsing a flow {name} {there}"),
             ),
-            FlowLack::Node(_) if self.compat => format!(
-                "did not find expected node content {here}, while parsing a flow {name} {there}"
+            FlowLack::Node(_) if self.compat => (
+                "did not find expected node content".to_owned(),
+                format!(", while parsing a flow {name} {there}"),
             ),
-            FlowLack::Separator if failure.is_none() => {
-                format!("unterminated flow {name} {here}, opened {there}")
-            }
-            FlowLack::Separator => {
-                format!("expected ',' or '{closing}' {here}, in the flow {name} opened {there}")
-            }
-            FlowLack::Node(problem) => {
-                format!("{problem} {here}, in the flow {name} opened {there}")
-            }
+            FlowLack::Separator if failure.is_none() => (
+                format!("unterminated flow {name}"),
+                format!(", opened {there}"),
+            ),
+            FlowLack::Separator => (
+                format!("expected ',' or '{closing}'"),
+                format!(", in the flow {name} opened {there}"),
+            ),
+            FlowLack::Node(problem) => (problem, format!(", in the flow {name} opened {there}")),
         };
-        self.error(span, message)
+        self.error(span, problem).with_context(&context)
     }
 
     /// The innermost flow collection still open before `index` of `tokens`: its opening token's

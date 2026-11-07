@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 
 use crate::error::{Error, ErrorKind};
@@ -113,9 +113,10 @@ pub(crate) struct Scanner<'a> {
     /// no column there, so document markers and directives may start at this position.
     after_line_bom: usize,
     compat_flow: bool,
-    /// In compat, the anchor names ending in `:` defined so far in this document. An alias keeps
-    /// such a colon only if one of these has that exact name.
-    colon_anchors: Option<HashSet<&'a str>>,
+    /// In compat, the anchor names ending in `:` defined so far in this document, each with the
+    /// offset of its first definition. An alias keeps such a colon only if an anchor before it has
+    /// that exact name.
+    colon_anchors: Option<HashMap<&'a str, usize>>,
     /// Whether a document has started: a `---`, or any node token since the
     /// last `...`. A byte order mark may appear only outside a document or
     /// right before the next one.
@@ -936,8 +937,9 @@ impl<'a> Scanner<'a> {
                 .map_err(|error| self.limit_at(start, error))?;
             if self.compat_flow && name.ends_with(':') {
                 self.colon_anchors
-                    .get_or_insert_with(HashSet::new)
-                    .insert(&self.input[name_start..self.pos]);
+                    .get_or_insert_with(HashMap::new)
+                    .entry(&self.input[name_start..self.pos])
+                    .or_insert(start);
             }
             self.make(TokenKind::Anchor(name), start, self.pos)
         }
@@ -948,6 +950,7 @@ impl<'a> Scanner<'a> {
         NameRules {
             compat: self.compat_flow,
             colon_anchors: self.colon_anchors.as_ref(),
+            input: self.input,
         }
     }
 
@@ -2133,14 +2136,26 @@ fn line_shape(text: &str, names: NameRules<'_, '_>) -> LineShape {
 #[derive(Clone, Copy)]
 struct NameRules<'s, 'a> {
     compat: bool,
-    colon_anchors: Option<&'s HashSet<&'a str>>,
+    colon_anchors: Option<&'s HashMap<&'a str, usize>>,
+    /// The text the names are part of, so a name's place in it says which anchors come before it.
+    input: &'a str,
 }
 
 impl NameRules<'_, '_> {
     /// Whether an alias whose name ends in `:` keeps it. By default every name does. In compat,
-    /// only one that an anchor already has does.
+    /// only one that an anchor before it already has does. `name` is part of the input: a line is
+    /// read again after anchors later on it, or on later lines, have been scanned, and those
+    /// don't count.
     fn alias_keeps_colon(self, name: &str) -> bool {
-        !self.compat || self.colon_anchors.is_some_and(|names| names.contains(name))
+        !self.compat
+            || self.colon_anchors.is_some_and(|names| {
+                names.get(name).is_some_and(|&defined| {
+                    name.as_ptr()
+                        .addr()
+                        .checked_sub(self.input.as_ptr().addr())
+                        .is_some_and(|at| at <= self.input.len() && defined < at)
+                })
+            })
     }
 }
 
@@ -2592,7 +2607,7 @@ fn is_line_break(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::HashMap;
 
     use super::{
         LineShape, LineStop, NameRules, Owner, Scanner, TokenKind, closing_quote, line_shape,
@@ -2627,7 +2642,7 @@ mod tests {
         while scanner.next_token().expect("token").is_some() {}
         let mut names: Vec<String> = scanner
             .colon_anchors?
-            .into_iter()
+            .into_keys()
             .map(str::to_owned)
             .collect();
         names.sort();
@@ -2638,30 +2653,38 @@ mod tests {
         NameRules {
             compat,
             colon_anchors: None,
+            input: "",
         }
     }
 
     #[test]
     fn a_line_ends_an_alias_name_as_the_scanner_does() {
-        let known = HashSet::from(["a:"]);
+        // The anchor `a:` is defined on the second line, after the first.
+        let input = "*a:\n&a: 1\n*a:\n*b:";
+        let known = HashMap::from([("a:", 4)]);
         let none = NameRules {
             compat: true,
             colon_anchors: None,
+            input,
         };
         let anchored = NameRules {
             compat: true,
             colon_anchors: Some(&known),
+            input,
         };
         let default = NameRules {
             compat: false,
             colon_anchors: None,
+            input,
         };
+        let (before, after, other) = (&input[..3], &input[10..13], &input[14..]);
         let owner = LineShape::Owner(Owner::Block(0));
-        // The colon is this line's indicator, unless an anchor has the whole name.
-        assert_eq!(line_shape("*a:", none), owner);
-        assert_eq!(line_shape("*a:", anchored), LineShape::Content);
-        assert_eq!(line_shape("*b:", anchored), owner);
-        assert_eq!(line_shape("*a:", default), LineShape::Content);
+        // The colon is this line's indicator, unless an anchor before it has the whole name.
+        assert_eq!(line_shape(after, none), owner);
+        assert_eq!(line_shape(after, anchored), LineShape::Content);
+        assert_eq!(line_shape(before, anchored), owner);
+        assert_eq!(line_shape(other, anchored), owner);
+        assert_eq!(line_shape(after, default), LineShape::Content);
         // No colon to give up, or none but the name.
         assert_eq!(line_shape("*ab", none), LineShape::Content);
         assert_eq!(line_shape("*:", none), LineShape::Content);

@@ -279,6 +279,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
                 let mut access = ValueMapAccess {
                     iter: mapping.into_iter(),
                     key: None,
+                    plain_key: None,
                     value: None,
                 };
                 let value = visitor.visit_map(&mut access)?;
@@ -360,6 +361,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
             Value::Null => visitor.visit_map(ValueMapAccess {
                 iter: crate::mapping::Mapping::new().into_iter(),
                 key: None,
+                plain_key: None,
                 value: None,
             }),
             value => ValueDeserializer { value }.deserialize_any(visitor),
@@ -578,8 +580,11 @@ impl<'de> SeqAccess<'de> for ValueSeqAccess {
 
 struct ValueMapAccess {
     iter: indexmap::map::IntoIter<Value, Value>,
-    /// The text of the key just read, for a path, or `None` if the key is a collection.
+    /// The text of the key just read, for a path, if it is a string.
     key: Option<String>,
+    /// The key just read, if it is another scalar. Its text is written only for a path. A key
+    /// that is neither is a collection.
+    plain_key: Option<PlainKey>,
     value: Option<Value>,
 }
 
@@ -602,7 +607,7 @@ impl<'de> MapAccess<'de> for ValueMapAccess {
                 })
                 .map(Some),
             key => {
-                self.key = scalar_key_text(&key);
+                (self.key, self.plain_key) = key_name(&key);
                 seed.deserialize(ValueDeserializer { value: key }).map(Some)
             }
         }
@@ -616,9 +621,10 @@ impl<'de> MapAccess<'de> for ValueMapAccess {
             crate::Error::new(crate::ErrorKind::Serde, "map value requested before key")
         })?;
         seed.deserialize(ValueDeserializer { value })
-            .map_err(|error| match &self.key {
-                Some(key) => error.inside_key(key),
-                None => error.inside_collection_key(),
+            .map_err(|error| match (&self.key, self.plain_key) {
+                (Some(key), _) => error.inside_key(key),
+                (None, Some(key)) => error.inside_key(&key.to_string()),
+                (None, None) => error.inside_collection_key(),
             })
     }
 
@@ -627,19 +633,39 @@ impl<'de> MapAccess<'de> for ValueMapAccess {
     }
 }
 
-/// A scalar key's text as its value reads, or `None` for a key that is a collection.
-fn scalar_key_text(key: &Value) -> Option<String> {
-    match key {
-        Value::Null => Some("null".to_owned()),
-        Value::Bool(value) => Some(value.to_string()),
-        Value::Number(value) => Some(value.to_string()),
-        Value::String(text) => Some(text.clone()),
-        Value::Tagged(tagged) => scalar_key_text(&tagged.value),
-        Value::Sequence(_) | Value::Mapping(_) => None,
+/// A key that is a null, a boolean or a number, kept without writing its text.
+#[derive(Clone, Copy)]
+enum PlainKey {
+    Null,
+    Bool(bool),
+    Number(Number),
+}
+
+impl fmt::Display for PlainKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null => formatter.write_str("null"),
+            Self::Bool(value) => fmt::Display::fmt(value, formatter),
+            Self::Number(value) => fmt::Display::fmt(value, formatter),
+        }
     }
 }
 
-/// A string key or a variant's name, read without giving up its text.
+/// What a path says of a key that isn't a string: the text of a tagged string, or the scalar it
+/// is. Neither, for a collection.
+fn key_name(key: &Value) -> (Option<String>, Option<PlainKey>) {
+    match key {
+        Value::Null => (None, Some(PlainKey::Null)),
+        Value::Bool(value) => (None, Some(PlainKey::Bool(*value))),
+        Value::Number(value) => (None, Some(PlainKey::Number(*value))),
+        Value::String(text) => (Some(text.clone()), None),
+        Value::Tagged(tagged) => key_name(&tagged.value),
+        Value::Sequence(_) | Value::Mapping(_) => (None, None),
+    }
+}
+
+/// A string key or a variant's name, read without giving up its text, which a path may need. The
+/// text isn't the input's, so a visitor gets a copy of it in whatever form it asks for.
 struct KeyDeserializer<'a> {
     text: &'a str,
 }
@@ -648,12 +674,9 @@ impl<'de> Deserializer<'de> for KeyDeserializer<'_> {
     type Error = crate::Error;
 
     // A visitor may implement only the owned form, and the default for it reads the borrowed one.
+    // That holds for an identifier too, as `from_value` read one before it kept keys for paths.
     fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         visitor.visit_string(self.text.to_owned())
-    }
-
-    fn deserialize_identifier<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        visitor.visit_str(self.text)
     }
 
     fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
@@ -690,7 +713,7 @@ impl<'de> Deserializer<'de> for KeyDeserializer<'_> {
 
     serde::forward_to_deserialize_any! {
         bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
-        unit unit_struct seq tuple tuple_struct map struct ignored_any
+        unit unit_struct seq tuple tuple_struct map struct identifier ignored_any
     }
 }
 
