@@ -16,14 +16,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the same bytes, so entries could cancel out under any key.
 - Equal tags now hash alike under a hasher that reads each write on its own, whatever the split
   between handle and suffix.
-- `from_str` and the other typed readers now see two keys that differ only in the order of their
-  entries as duplicates, as `parse_value` does. A typed map could silently lose one of them.
-- In a flow collection used as a key, a quote after plain text, or in a name, no longer hides the
-  rest of the key from the check on a block scalar's indentation, so an indentation indicator on
-  that scalar is now read from the key's indentation, and a scalar that isn't indented enough is
-  an error.
+- `from_str` and the other default-mode typed readers now see two keys that differ only in the
+  order of their entries as duplicates, as `parse_value` does. A typed map could silently lose one
+  of them. A typed map in compat mode still keeps the last of them, as it does for any key.
+- The check on a block scalar's indentation now reads a flow collection used as a key token by
+  token, by the scanner's rules, and finds a comment after that key the same way. It could lose the
+  key, for instance over a quote after plain text or in a name, a blank before a `:` after a quoted
+  key, or a verbatim tag holding a `]`. An indentation indicator on that scalar is now read from
+  the key's indentation, and a scalar that isn't indented enough is an error.
 - Floats now hash by value, so many float keys no longer take quadratic time. They used to share
-  one bucket, and 40,000 of them, in 0.3 MiB, took 19 seconds to read.
+  one bucket, and 40,000 of them, in 0.4 MiB, took 19 seconds to read.
 - A depth limit on a collection used as a key now gives its location on `parse_value`,
   `parse_documents`, and `Deserializer`, as it does elsewhere.
 - In compat mode, `from_str` no longer reports "more than one document" for a type error on a

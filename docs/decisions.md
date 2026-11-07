@@ -163,9 +163,11 @@ held by tags but not the copies that Serde names and the split at the core prefi
 document for anything but this cost. A tag that an alias copies counts against the alias budget, with
 the rest of what the alias copies. `max_events` stops a stream first, at between 250,000 and 500,000
 tagged nodes depending on how they're written, so 64 MiB holds every use it allows of a prefix up to
-about 134 bytes, more than any real document needs. A stream at both limits peaks at about 470 MiB
-from less than 4 MiB of input on `next_borrowed`, the costliest reader, where the same stream costs
-about 365 MiB with a short prefix. On `parse_value` the two are about 370 and 260 MiB.
+about 134 bytes, more than any real document needs. A stream at both limits, written as a flow sequence
+of empty tagged nodes, has a peak resident size of about 470 MiB from less than 4 MiB of input on
+`next_borrowed`, the costliest reader, where the same stream takes about 365 MiB with a short
+prefix. On `parse_value` the two are about 370 and 260 MiB. Live heap peaks about 30 to 60 MiB below
+each of those.
 
 **Consequences.** `Limits` and `LimitKind` each gain a member. Both are `#[non_exhaustive]`, so this
 isn't a breaking change. A document with more expansions than this needs a higher limit.

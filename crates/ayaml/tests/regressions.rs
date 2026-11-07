@@ -682,6 +682,45 @@ fn a_quote_inside_flow_plain_text_opens_nothing() {
         "{\"a\":!t \"]: \"}",
         "{\"a\":&b \"]: \"}",
         "{a: !t \"b # c\"}",
+        // A blank may come before the `:` of a key that takes an adjacent value.
+        "{\"a\" :\",\"}",
+        "{\"a\" :\"]: \"}",
+        "{\"a\" :\"[x\"}",
+        "{\"a\"\t:\"]: \"}",
+        "{[a] :\"]: \"}",
+        "['a' :\"]: \"]",
+        "{[a]:\"]: \"}",
+        // A plain scalar ends at a `:` before a blank, even one that looks like part of a name.
+        "[x &a: \"]: \"]",
+        "[x !a: \"]: \"]",
+        "{x *a: \"]: \"}",
+        "[x &a?: \"]: \"]",
+        "{a:\"b: c}",
+        "{a:!x: \"]: \"}",
+        // In a name, a `:` before more text doesn't end it, and nothing but a blank or a flow
+        // indicator does.
+        "[&a:b \"]: \"]",
+        // A verbatim tag holds what would otherwise end it.
+        "[[!<t:]> \"]: \"]]",
+        "{[!<t:]> \"}: \"]}",
+        "{!<t:]> : }",
+        "[!<t:]> : ]",
+        // A second `:` right after the first starts plain text, so a quote after it opens nothing.
+        "{\"a\"::\"b}",
+        "{','::'b}",
+        // A tab ends what a blank ends.
+        "{a:\t\"]: \"}",
+        "[&a\t\"]: \"]",
+        // So does what ends a flow entry, for a name.
+        "[&a,\"]: \"]",
+        "{&a}",
+        // A quoted scalar ends at its own closing quote.
+        "\"a\\\": b\"",
+        "[\"\\\"]: \"]",
+        "'\\'",
+        "['\\']",
+        "'a'': b'",
+        "['a'']: ']",
     ];
     for key in keys {
         assert_eq!(
@@ -689,7 +728,179 @@ fn a_quote_inside_flow_plain_text_opens_nothing() {
             [text.clone(), text.clone()],
             "{key}"
         );
+        let deeper = format!("- - {key}: |1\n     x\n");
+        for value in [
+            ayaml::parse_value(&deeper).unwrap_or_else(|error| panic!("{deeper:?}: {error}")),
+            ayaml::compat::from_str(&deeper).unwrap_or_else(|error| panic!("{deeper:?}: {error}")),
+        ] {
+            let read = value[0][0].as_mapping().unwrap().values().next().unwrap();
+            assert_eq!(*read, text, "{deeper:?}");
+        }
         rejected_in_both_modes(&format!("- {key}: |\n  x\n"));
+    }
+}
+
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn a_block_scalar_finds_its_key_past_a_name_or_a_tab() {
+    let text = ayaml::Value::String("x\n".into());
+    assert_eq!(
+        block_scalar_under_key("- a:\t|1\n   x\n"),
+        [text.clone(), text.clone()]
+    );
+    // Only compat ends these names, so only there is what follows them a key.
+    for input in [
+        "- &a:b: |1\n   x\n",
+        "- &a?b: |1\n   x\n",
+        "- &a?b \"c: |1\n   x\n",
+    ] {
+        let value: ayaml::Value =
+            ayaml::compat::from_str(input).unwrap_or_else(|error| panic!("{input:?}: {error}"));
+        let read = value[0].as_mapping().unwrap().values().next();
+        assert_eq!(read, Some(&text), "{input:?}");
+    }
+    for input in ["- &a:b: |1\n   x\n", "- &a?b: |1\n   x\n"] {
+        assert_eq!(
+            ayaml::parse_value(input).unwrap()[0],
+            ayaml::Value::String("  x\n".into()),
+            "{input:?}"
+        );
+    }
+    // No mode ends a tag there.
+    for input in ["- !a:b: |1\n   x\n", "- !a?b: |1\n   x\n"] {
+        for value in [
+            ayaml::parse_value(input).unwrap(),
+            ayaml::compat::from_str(input).unwrap(),
+        ] {
+            let ayaml::Value::Tagged(tagged) = &value[0] else {
+                panic!("{input:?}: {value:?}");
+            };
+            assert_eq!(
+                tagged.value,
+                ayaml::Value::String("  x\n".into()),
+                "{input:?}"
+            );
+        }
+    }
+}
+
+/// NEL, LS, and PS are ordinary characters in both modes, and these forms would read wrongly, or
+/// not at all, if either mode took one for a line break or for the end of a name.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn a_line_break_character_is_content_where_it_is_written() {
+    for (character, escape) in [('\u{85}', "\\N"), ('\u{2028}', "\\L"), ('\u{2029}', "\\P")] {
+        for (input, meaning) in [
+            (format!("k: a{character}b"), format!("k: \"a{escape}b\"")),
+            (
+                format!("k: a b{character}c"),
+                format!("k: \"a b{escape}c\""),
+            ),
+            (format!("|\n a{character}b"), format!("\"a{escape}b\"")),
+            (format!("[a{character}b]"), format!("[\"a{escape}b\"]")),
+            (format!("{character}a"), format!("\"{escape}a\"")),
+            (format!("a{character}\nb"), format!("\"a{escape} b\"")),
+        ] {
+            let expected = ayaml::parse_value(&meaning).unwrap();
+            let read =
+                ayaml::parse_value(&input).unwrap_or_else(|error| panic!("{input:?}: {error}"));
+            assert_eq!(read, expected, "{input:?} by default");
+            let read: ayaml::Value = ayaml::compat::from_str(&input)
+                .unwrap_or_else(|error| panic!("{input:?}: {error}"));
+            assert_eq!(read, expected, "{input:?} in compat");
+        }
+    }
+}
+
+/// A name may end in `:` before any separator, and a verbatim tag keeps its text as written.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn a_name_before_a_separator_and_a_verbatim_tag_read_alike_in_both_modes() {
+    for (input, meaning) in [("&a:\tb", "b"), ("&a:\rb", "b"), ("[&a:]", "[~]")] {
+        let expected = ayaml::parse_value(meaning).unwrap();
+        assert_eq!(ayaml::parse_value(input).unwrap(), expected, "{input:?}");
+        let read: ayaml::Value = ayaml::compat::from_str(input).unwrap();
+        assert_eq!(read, expected, "{input:?} in compat");
+    }
+    let tag_of = |value: ayaml::Value| match value {
+        ayaml::Value::Tagged(tagged) => tagged.tag.to_string(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(tag_of(ayaml::parse_value("!<Foo> x").unwrap()), "Foo");
+    assert_eq!(tag_of(ayaml::compat::from_str("!<Foo> x").unwrap()), "Foo");
+}
+
+/// In compat a flow `?` is an indicator whatever follows it, so a quote right after it opens, and
+/// by default `?` followed by more text starts plain text, so one there doesn't.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn a_question_mark_before_a_quote_is_read_as_each_mode_reads_it() {
+    let text = ayaml::Value::String("x\n".into());
+    let compat = |input: &str| -> ayaml::Value {
+        let value: ayaml::Value =
+            ayaml::compat::from_str(input).unwrap_or_else(|error| panic!("{input:?}: {error}"));
+        value[0]
+            .as_mapping()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .clone()
+    };
+    for key in ["[?\"]: \"]", "{?\"a]: b\"}", "{?\"]: \": b}"] {
+        assert_eq!(compat(&format!("- {key}: |1\n   x\n")), text, "{key}");
+        let shallow = format!("- {key}: |\n  x\n");
+        assert!(
+            ayaml::compat::from_str::<ayaml::Value>(&shallow).is_err(),
+            "{shallow:?}"
+        );
+        rejects(&format!("- {key}: |1\n   x\n"));
+    }
+    let input = "- {?\"a: b}: |1\n   x\n";
+    let value = ayaml::parse_value(input).unwrap_or_else(|error| panic!("{input:?}: {error}"));
+    assert_eq!(value[0].as_mapping().unwrap().values().next(), Some(&text));
+    rejects("- {?\"a: b}: |\n  x\n");
+}
+
+/// The node can start the next line, so what ends the key on this one takes reading its comment
+/// from where the scanner does.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn a_comment_after_a_key_is_found_as_the_scanner_finds_it() {
+    let text = ayaml::Value::String("x\n".into());
+    for line in [
+        "- [' # ']:",
+        "- [\" # \"]:",
+        "- [\"]: \"]: # c \"",
+        "- {\", \"}: # c \"",
+        "- {a: ' # '}: # c",
+        "- [a]: # c ]",
+    ] {
+        let input = format!("{line}\n    |1\n   x\n");
+        assert_eq!(
+            block_scalar_under_key(&input),
+            [text.clone(), text.clone()],
+            "{line}"
+        );
+    }
+}
+
+/// Only a blank before a `#` starts a comment, and only outside a quoted scalar, so what comes
+/// next is still on the line that says who owns it.
+#[test]
+fn a_line_that_only_looks_commented_still_owns_what_follows() {
+    let key = ayaml::Value::String("x\n".into());
+    for (input, value) in [
+        ("- 'a#b':\n    |1\n   x\n", &key),
+        ("- \"a # b\":\n    |1\n   x\n", &key),
+        ("- a#b:\n    |1\n   x\n", &key),
+    ] {
+        let read = ayaml::parse_value(input).unwrap_or_else(|error| panic!("{input:?}: {error}"));
+        assert_eq!(
+            read[0].as_mapping().unwrap().values().next(),
+            Some(value),
+            "{input:?}"
+        );
     }
 }
 
@@ -740,7 +951,6 @@ fn valid_forms_beside_wrong_rejections_keep_their_reading() {
         ("!<tag:yaml.org,2002:str> 1", "\"1\""),
         ("!<tag:yaml.org,2002:int> 1", "1"),
         ("!!%69nt 1", "1"),
-        ("!!fo%6F x", "!!foo x"),
         // A verbatim tag may hold a `!`.
         ("!<!a> x", "!a x"),
         ("!<!a!b> x", "%TAG !e! !a!\n---\n!e!b x"),

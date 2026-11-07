@@ -119,7 +119,7 @@ these places, on purpose:
   the string `:b` here and an empty node in default mode.
 - Global, verbatim, and non-specific tags are kept, with their escapes as written.
   Tag forms that YAML 1.2.2 allows and libyaml's scanner refuses are accepted, such as
-  `!#`, `!<a#>`, or `!` right before a flow indicator. `!` isn't a tag character, so
+  `!#`, `!<tag:a,1:b#c>`, or `!` right before a flow indicator. `!` isn't a tag character, so
   `!.!` and `!!!` are errors.
 - In a flow collection, `[:a]` holds a plain scalar starting with `:`, `a:]` holds a key,
   and `a:?` is a plain scalar. `{?:{}}` is an error because `?:` starts a plain scalar, and
