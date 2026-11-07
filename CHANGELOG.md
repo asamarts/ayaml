@@ -15,6 +15,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - In compat mode, an alias directly followed by `:` is now a mapping key, as in libyaml, so `*a: 1`
   has the key that `a` stands for. An alias keeps such a colon only when an anchor earlier in the
   same document has that exact name. Default mode is unchanged.
+- A malformed flow collection's error now says where it failed and where the collection opened,
+  as in `unterminated flow sequence at line 3 column 1, opened at line 2 column 5`, in both modes.
+  `Error::location` is where it failed, including at the end of the input, where it could be the
+  collection's opening or the first line. Compat words them all as libyaml words one,
+  `did not find expected ',' or ']' at line 3 column 1, while parsing a flow sequence at line 2
+  column 5`, and takes the opening from the parser, so a bracket in a quoted scalar is never named.
 
 ### Fixed
 

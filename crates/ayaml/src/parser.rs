@@ -13,8 +13,9 @@ use crate::composer::StreamingComposer;
 use crate::error::{Error, ErrorKind};
 use crate::event::{Anchor, CollectionStyle, Event, ScalarStyle};
 use crate::limits::Limits;
+use crate::position::LineIndex;
 use crate::scanner::{Scanner, Token, TokenKind};
-use crate::span::Span;
+use crate::span::{Marker, Span};
 use crate::tag::Tag;
 use crate::value::Value;
 
@@ -153,7 +154,10 @@ struct Parser<'a> {
     token_arena: Vec<Token<'a>>,
     sink: EventSink<'a>,
     limits: Limits,
-    input_len: usize,
+    input: &'a str,
+    /// Word a malformed flow collection's error as libyaml does, and count positions as compat's
+    /// scanner does.
+    compat: bool,
     documents: usize,
     emitted: usize,
     /// Stop at a second document start, as a single-document entry point
@@ -166,7 +170,7 @@ struct Parser<'a> {
 pub(crate) struct EventCursor<'a> {
     scanner: Scanner<'a>,
     limits: Limits,
-    input_len: usize,
+    input: &'a str,
     pending_line: Option<Vec<Token<'a>>>,
     queue: VecDeque<Event<'a>>,
     stream_started: bool,
@@ -186,7 +190,7 @@ impl<'a> EventCursor<'a> {
         Ok(Self {
             scanner,
             limits: limits.clone(),
-            input_len: input.len(),
+            input,
             pending_line: None,
             queue: VecDeque::new(),
             stream_started: false,
@@ -231,7 +235,7 @@ impl<'a> EventCursor<'a> {
                 Some(events) => {
                     self.events = self.events.saturating_add(events.len());
                     let span = events.first().map_or_else(
-                        || Span::empty(crate::span::Marker::new(self.input_len, 1, 1)),
+                        || Span::empty(crate::span::Marker::new(self.input.len(), 1, 1)),
                         Event::span,
                     );
                     self.limits
@@ -242,7 +246,7 @@ impl<'a> EventCursor<'a> {
                 None => {
                     self.stream_ended = true;
                     self.events += 1;
-                    let span = Span::empty(crate::span::Marker::new(self.input_len, 1, 1));
+                    let span = Span::empty(crate::span::Marker::new(self.input.len(), 1, 1));
                     self.limits
                         .check_events(self.events)
                         .map_err(|error| self.limit_at(span, error))?;
@@ -300,7 +304,7 @@ impl<'a> EventCursor<'a> {
                 stream_end: None,
             },
             &self.limits,
-            self.input_len,
+            self.input,
         )?;
         let documents = events
             .iter()
@@ -313,7 +317,7 @@ impl<'a> EventCursor<'a> {
                 Event::DocumentStart { span, .. } => Some(*span),
                 _ => None,
             })
-            .unwrap_or_else(|| Span::empty(crate::span::Marker::new(self.input_len, 1, 1)));
+            .unwrap_or_else(|| Span::empty(crate::span::Marker::new(self.input.len(), 1, 1)));
         self.limits
             .check_documents(self.documents)
             .map_err(|error| self.limit_at(span, error))?;
@@ -370,7 +374,7 @@ impl<'a> EventCursor<'a> {
 fn parse_lines<'a>(
     lines: Lines<'a>,
     limits: &Limits,
-    input_len: usize,
+    input: &'a str,
 ) -> Result<Vec<Event<'a>>, Error> {
     let event_capacity = event_capacity(&lines.lines, &lines.tokens);
     let mut parser = Parser {
@@ -378,7 +382,8 @@ fn parse_lines<'a>(
         token_arena: lines.tokens,
         sink: EventSink::Events(Vec::with_capacity(event_capacity)),
         limits: limits.clone(),
-        input_len,
+        input,
+        compat: false,
         documents: 0,
         emitted: 0,
         single_document: false,
@@ -460,7 +465,8 @@ fn parse_events_with_compat<'a>(
         token_arena: tokens,
         sink: EventSink::Events(events),
         limits: limits.clone(),
-        input_len: input.len(),
+        input,
+        compat: compat_flow,
         documents: 0,
         emitted: 0,
         single_document,
@@ -495,7 +501,8 @@ pub(crate) fn parse_documents(
             input.len(),
         ))),
         limits: limits.clone(),
-        input_len: input.len(),
+        input,
+        compat: false,
         documents: 0,
         emitted: 0,
         single_document,
@@ -809,16 +816,17 @@ impl<'a> Parser<'a> {
                 } else {
                     state.index = value;
                 }
-                if state.index >= state.tokens.len() {
-                    return Err(self.error(state.start_span, "unterminated flow sequence"));
-                }
-                match self.token(state.tokens, state.index).kind {
-                    TokenKind::FlowEntry => state.index += 1,
-                    TokenKind::FlowSequenceEnd => {}
+                match self
+                    .token_at(state.tokens, state.index)
+                    .map(|token| &token.kind)
+                {
+                    Some(TokenKind::FlowEntry) => state.index += 1,
+                    Some(TokenKind::FlowSequenceEnd) => {}
                     _ => {
-                        return Err(self.error(
-                            self.token(state.tokens, state.index).span,
-                            "expected ',' or ']'",
+                        return Err(self.flow_error(
+                            state.tokens,
+                            state.index,
+                            FlowLack::Separator,
                         ));
                     }
                 }
@@ -831,7 +839,7 @@ impl<'a> Parser<'a> {
                 key_end,
                 depth,
             } => {
-                self.expect_consumed(key, value, "unexpected token in flow key")?;
+                self.expect_flow_consumed(key, value)?;
                 self.flow_explicit_value(tokens, start_span, key_end, depth, stack)
             }
             Cont::FlowExplicitValue {
@@ -840,7 +848,7 @@ impl<'a> Parser<'a> {
                 value: value_tokens,
                 value_end,
             } => {
-                self.expect_consumed(value_tokens, value, "unexpected token in flow value")?;
+                self.expect_flow_consumed(value_tokens, value)?;
                 self.flow_mapping_end(tokens, start_span, value_end)
             }
             Cont::ImplicitFlowKey {
@@ -850,7 +858,7 @@ impl<'a> Parser<'a> {
                 colon,
                 depth,
             } => {
-                self.expect_consumed(key, value, "unexpected token in flow key")?;
+                self.expect_flow_consumed(key, value)?;
                 self.implicit_flow_value(tokens, start_span, colon, depth, stack)
             }
             Cont::ImplicitFlowValue {
@@ -859,18 +867,18 @@ impl<'a> Parser<'a> {
                 value: value_tokens,
                 value_end,
             } => {
-                self.expect_consumed(value_tokens, value, "unexpected token in flow value")?;
+                self.expect_flow_consumed(value_tokens, value)?;
                 self.flow_mapping_end(tokens, start_span, value_end)
             }
             Cont::FlowMappingKey { state, key } => {
-                self.expect_consumed(key, value, "unexpected token in flow key")?;
+                self.expect_flow_consumed(key, value)?;
                 self.flow_mapping_after_key(state, stack)
             }
             Cont::FlowMappingValue {
                 state,
                 value: value_tokens,
             } => {
-                self.expect_consumed(value_tokens, value, "unexpected token in flow value")?;
+                self.expect_flow_consumed(value_tokens, value)?;
                 self.flow_mapping_next(state, stack)
             }
             Cont::FlowMappingNext(state) => self.flow_mapping_next(state, stack),
@@ -878,6 +886,16 @@ impl<'a> Parser<'a> {
     }
 
     /// Fail unless a node consumed all of `run`.
+    /// A flow key or value that stops short has something after it where `,` or a closing bracket
+    /// belongs.
+    fn expect_flow_consumed(&self, run: Run, consumed: usize) -> Result<(), Error> {
+        if consumed == run.len() {
+            Ok(())
+        } else {
+            Err(self.flow_error(run, consumed, FlowLack::Separator))
+        }
+    }
+
     fn expect_consumed(&self, run: Run, consumed: usize, message: &str) -> Result<(), Error> {
         if consumed == run.len() {
             Ok(())
@@ -1620,7 +1638,10 @@ impl<'a> Parser<'a> {
                 self.emit(self.null_scalar_with(Span::empty(span.start()), tag, anchor))?;
                 Ok(Step::Return(index))
             }
-            kind => Err(self.error(span, format!("unexpected {kind} in node position"))),
+            kind => {
+                let problem = format!("unexpected {kind} in node position");
+                Err(self.flow_error(tokens, index, FlowLack::Node(problem)))
+            }
         }
     }
 
@@ -1661,7 +1682,7 @@ impl<'a> Parser<'a> {
         let tokens = state.tokens;
         let index = state.index;
         if index >= tokens.len() {
-            return Err(self.error(state.start_span, "unterminated flow sequence"));
+            return Err(self.flow_error(tokens, index, FlowLack::Separator));
         }
         let token = self.token(tokens, index);
         if matches!(token.kind, TokenKind::FlowSequenceEnd) {
@@ -1670,7 +1691,11 @@ impl<'a> Parser<'a> {
             return Ok(Step::Return(index + 1));
         }
         if matches!(token.kind, TokenKind::FlowEntry) {
-            return Err(self.error(token.span, "unexpected empty flow sequence entry"));
+            return Err(self.flow_error(
+                tokens,
+                index,
+                FlowLack::Node("unexpected empty flow sequence entry".to_owned()),
+            ));
         }
         state.entries += 1;
         self.limits
@@ -1730,7 +1755,7 @@ impl<'a> Parser<'a> {
             span: start_span,
         })?;
         let key_start = start + 1;
-        let key_end = self.find_flow_value(self.tokens(tokens), key_start)?;
+        let key_end = self.find_flow_value(self.tokens(tokens), key_start);
         let key = tokens.slice(key_start, key_end);
         if key.is_empty() {
             self.emit(self.null_scalar(Span::empty(start_span.end())))?;
@@ -1762,7 +1787,7 @@ impl<'a> Parser<'a> {
         let mut index = key_end;
         if index < tokens.len() && matches!(self.token(tokens, index).kind, TokenKind::Value) {
             index += 1;
-            let value_end = self.find_flow_item_end(self.tokens(tokens), index)?;
+            let value_end = self.find_flow_item_end(self.tokens(tokens), index);
             if index == value_end {
                 let span = Span::empty(self.token(tokens, index - 1).span.end());
                 self.emit(self.null_scalar(span))?;
@@ -1852,7 +1877,7 @@ impl<'a> Parser<'a> {
         stack: &mut Vec<Cont>,
     ) -> Result<Step<'a>, Error> {
         let value_start = colon + 1;
-        let value_end = self.find_flow_item_end(self.tokens(tokens), value_start)?;
+        let value_end = self.find_flow_item_end(self.tokens(tokens), value_start);
         if value_start >= tokens.len() || value_start == value_end {
             let span = Span::empty(self.token(tokens, colon).span.end());
             self.emit(self.null_scalar(span))?;
@@ -1910,7 +1935,7 @@ impl<'a> Parser<'a> {
         let tokens = state.tokens;
         let mut index = state.index;
         if index >= tokens.len() {
-            return Err(self.error(state.start_span, "unterminated flow mapping"));
+            return Err(self.flow_error(tokens, index, FlowLack::Separator));
         }
         let token = self.token(tokens, index);
         if matches!(token.kind, TokenKind::FlowMappingEnd) {
@@ -1919,12 +1944,16 @@ impl<'a> Parser<'a> {
             return Ok(Step::Return(index + 1));
         }
         if matches!(token.kind, TokenKind::FlowEntry) {
-            return Err(self.error(token.span, "unexpected empty flow mapping entry"));
+            return Err(self.flow_error(
+                tokens,
+                index,
+                FlowLack::Node("unexpected empty flow mapping entry".to_owned()),
+            ));
         }
         if matches!(token.kind, TokenKind::Key) {
             index += 1;
         }
-        let key_end = self.find_flow_value(self.tokens(tokens), index)?;
+        let key_end = self.find_flow_value(self.tokens(tokens), index);
         let key = tokens.slice(index, key_end);
         state.index = key_end;
         if key.is_empty() {
@@ -1949,12 +1978,19 @@ impl<'a> Parser<'a> {
     ) -> Result<Step<'a>, Error> {
         let tokens = state.tokens;
         let mut index = state.index;
+        // A key ends at the end of its tokens, or at a `]` that closes nothing here.
+        let Some(token) = self
+            .token_at(tokens, index)
+            .filter(|token| !matches!(token.kind, TokenKind::FlowSequenceEnd))
+        else {
+            return Err(self.flow_error(tokens, index, FlowLack::Separator));
+        };
         state.entries += 1;
-        let span = self.token(tokens, index).span;
+        let span = token.span;
         self.limits
             .check_collection_entries(state.entries)
             .map_err(|error| self.limit_at(span, error))?;
-        if index >= tokens.len() || !matches!(self.token(tokens, index).kind, TokenKind::Value) {
+        if !matches!(self.token(tokens, index).kind, TokenKind::Value) {
             // Flow mappings permit omitted values: `{key, other: value}`.
             let span = self.empty_before(tokens, index, state.start_span);
             self.emit(self.null_scalar(span))?;
@@ -1980,7 +2016,7 @@ impl<'a> Parser<'a> {
             stack.push(Cont::FlowMappingNext(state));
             return Ok(Step::Return(0));
         }
-        let value_end = self.find_flow_item_end(self.tokens(tokens), index)?;
+        let value_end = self.find_flow_item_end(self.tokens(tokens), index);
         let value = tokens.slice(index, value_end);
         state.index = value_end;
         let depth = state.depth + 1;
@@ -2036,41 +2072,123 @@ impl<'a> Parser<'a> {
         None
     }
 
-    fn find_flow_value(&self, tokens: &[Token<'a>], start: usize) -> Result<usize, Error> {
+    /// Where the flow key from `start` ends. With no end in sight the parse goes on to the end of
+    /// `tokens`, and finds what is wrong in order.
+    fn find_flow_value(&self, tokens: &[Token<'a>], start: usize) -> usize {
         let mut depth = 0usize;
         for (index, token) in tokens.iter().enumerate().skip(start) {
             match token.kind {
                 TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart => depth += 1,
                 TokenKind::FlowSequenceEnd | TokenKind::FlowMappingEnd => {
                     if depth == 0 {
-                        return Ok(index);
+                        return index;
                     }
                     depth -= 1;
                 }
-                TokenKind::Value if depth == 0 => return Ok(index),
-                TokenKind::FlowEntry if depth == 0 => return Ok(index),
+                TokenKind::Value if depth == 0 => return index,
+                TokenKind::FlowEntry if depth == 0 => return index,
                 _ => {}
             }
         }
-        Err(self.error(self.empty_span(0), "expected ':' in flow mapping"))
+        tokens.len()
     }
 
-    fn find_flow_item_end(&self, tokens: &[Token<'a>], start: usize) -> Result<usize, Error> {
+    /// Where the flow item from `start` ends, on the same terms as [`Self::find_flow_value`].
+    fn find_flow_item_end(&self, tokens: &[Token<'a>], start: usize) -> usize {
         let mut depth = 0usize;
         for (index, token) in tokens.iter().enumerate().skip(start) {
             match token.kind {
                 TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart => depth += 1,
                 TokenKind::FlowSequenceEnd | TokenKind::FlowMappingEnd => {
                     if depth == 0 {
-                        return Ok(index);
+                        return index;
                     }
                     depth -= 1;
                 }
-                TokenKind::FlowEntry if depth == 0 => return Ok(index),
+                TokenKind::FlowEntry if depth == 0 => return index,
                 _ => {}
             }
         }
-        Err(self.error(self.empty_span(0), "unterminated flow collection"))
+        tokens.len()
+    }
+
+    /// The error for a flow collection that fails at `index` of `tokens`, or at the end of the
+    /// input past the last of them. Inside a collection it names the failure and the opening.
+    #[cold]
+    fn flow_error(&self, tokens: Run, index: usize, lack: FlowLack) -> Error {
+        let failure = self.token_at(tokens, index).map(|token| token.span);
+        let span = failure.unwrap_or_else(|| self.end_of_input());
+        let Some((opening, sequence)) = self.open_flow(tokens, index) else {
+            return self.error(
+                span,
+                match lack {
+                    FlowLack::Separator => "expected ',' or a closing bracket".to_owned(),
+                    FlowLack::Node(problem) => problem,
+                },
+            );
+        };
+        let (name, closing) = if sequence {
+            ("sequence", ']')
+        } else {
+            ("mapping", '}')
+        };
+        let (at, from) = (span.start(), opening.start());
+        let here = format!("at line {} column {}", at.line(), at.column());
+        let there = format!("at line {} column {}", from.line(), from.column());
+        let message = match lack {
+            FlowLack::Separator if self.compat => format!(
+                "did not find expected ',' or '{closing}' {here}, while parsing a flow {name} {there}"
+            ),
+            FlowLack::Node(_) if self.compat => format!(
+                "did not find expected node content {here}, while parsing a flow {name} {there}"
+            ),
+            FlowLack::Separator if failure.is_none() => {
+                format!("unterminated flow {name} {here}, opened {there}")
+            }
+            FlowLack::Separator => {
+                format!("expected ',' or '{closing}' {here}, in the flow {name} opened {there}")
+            }
+            FlowLack::Node(problem) => {
+                format!("{problem} {here}, in the flow {name} opened {there}")
+            }
+        };
+        self.error(span, message)
+    }
+
+    /// The innermost flow collection still open before `index` of `tokens`: its opening token's
+    /// span, and whether it is a sequence. A closing bracket here closes what it follows, since
+    /// the parse stops at the first one that doesn't match.
+    fn open_flow(&self, tokens: Run, index: usize) -> Option<(Span, bool)> {
+        let line = &self.lines[tokens.line];
+        let before = (line.start + tokens.start + index).min(line.end);
+        let mut closed = 0_usize;
+        for token in self.token_arena[line.start..before].iter().rev() {
+            match token.kind {
+                TokenKind::FlowSequenceEnd | TokenKind::FlowMappingEnd => closed += 1,
+                TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart if closed > 0 => {
+                    closed -= 1;
+                }
+                TokenKind::FlowSequenceStart => return Some((token.span, true)),
+                TokenKind::FlowMappingStart => return Some((token.span, false)),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// An empty span at the end of the input, counted as the scanner counts it.
+    fn end_of_input(&self) -> Span {
+        let index = if self.compat {
+            LineIndex::counting_line_boms(self.input)
+        } else {
+            LineIndex::new(self.input)
+        };
+        let end = self.input.len();
+        Span::empty(
+            index
+                .marker(self.input, end)
+                .unwrap_or_else(|| Marker::new(end, 1, 1)),
+        )
     }
 
     /// A node's properties at the start of `run`, and how many tokens they are. A node
@@ -2217,7 +2335,7 @@ impl<'a> Parser<'a> {
             let marker = token.span.start();
             return Span::empty(marker);
         }
-        Span::empty(crate::span::Marker::new(self.input_len, 1, 1))
+        Span::empty(crate::span::Marker::new(self.input.len(), 1, 1))
     }
 
     fn last_span(&self, index: usize) -> Span {
@@ -2302,6 +2420,14 @@ const DUPLICATE_PROPERTIES: &str = "a node cannot have duplicate tag or anchor p
 
 /// A node's tag and anchor, and how many tokens they take up.
 type Properties<'a> = (Option<Tag>, Option<Anchor<'a>>, usize);
+
+/// What a malformed flow collection lacks where it fails.
+enum FlowLack {
+    /// `,` or its closing bracket.
+    Separator,
+    /// A node, with what stands there instead.
+    Node(String),
+}
 
 /// A run of one logical line's tokens in the shared token arena.
 /// Every token slice the grammar works on is one; a flow collection is
