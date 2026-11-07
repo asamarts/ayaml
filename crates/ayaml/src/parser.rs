@@ -57,9 +57,19 @@ const TOKEN_ARENA_MID_CHUNK: usize = 256;
 
 fn push_token<'a>(tokens: &mut Vec<Token<'a>>, token: Token<'a>, chunk: usize) {
     if tokens.len() == tokens.capacity() {
-        tokens.reserve_exact(chunk);
+        tokens.reserve_exact(arena_growth(tokens.len(), chunk));
     }
     tokens.push(token);
+}
+
+/// How many tokens a full arena of `len` grows by: its chunk while that's at least a sixteenth of
+/// it, then a sixteenth. Growing by a fixed chunk alone copies the arena once per chunk, which is
+/// quadratic in its length where `realloc` copies. A sixteenth keeps all the copying under 17
+/// times the final length, and the unused capacity under a sixteenth of it. Up to 16 chunks the
+/// arena grows as it did by chunks alone, so a typical file's peak doesn't move.
+const fn arena_growth(len: usize, chunk: usize) -> usize {
+    let sixteenth = len / 16;
+    if sixteenth > chunk { sixteenth } else { chunk }
 }
 
 /// Logical lines read from the scanner, plus the stream boundary spans.
@@ -2738,13 +2748,58 @@ fn is_mapping_line(tokens: &[Token<'_>]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_events;
+    use super::{TOKEN_ARENA_CHUNK, TOKEN_ARENA_SMALL_CHUNK, arena_growth, parse_events};
     use crate::error::ErrorKind;
     use crate::event::Event;
     use crate::limits::Limits;
 
     fn events(input: &str) -> Vec<Event<'_>> {
         parse_events(input, &Limits::default()).expect("parse")
+    }
+
+    /// The tokens a `realloc` that copies would move while the arena grows to `tokens`, and the
+    /// arena's capacity then.
+    fn arena_copies(tokens: usize, chunk: usize) -> (usize, usize) {
+        let (mut capacity, mut copied) = (0_usize, 0_usize);
+        while capacity < tokens {
+            copied += capacity;
+            capacity += arena_growth(capacity, chunk);
+        }
+        (copied, capacity)
+    }
+
+    /// A growing arena costs copies linear in its length, at most 17 times it, with less than a
+    /// sixteenth of it, or one chunk, unused. Growing by a fixed chunk copied quadratically: about
+    /// 37 times as much at ten million tokens, and the gap grows with the length. Up to 16 chunks,
+    /// the arena grows by chunks alone.
+    #[test]
+    fn the_token_arena_grows_with_linear_copying_and_bounded_waste() {
+        for chunk in [TOKEN_ARENA_SMALL_CHUNK, TOKEN_ARENA_CHUNK] {
+            for tokens in [
+                1,
+                chunk,
+                chunk + 1,
+                16 * chunk + 1,
+                100_000,
+                1_000_000,
+                10_000_000,
+            ] {
+                let (copied, capacity) = arena_copies(tokens, chunk);
+                assert!(copied <= 17 * tokens, "{tokens} tokens: {copied} copied");
+                assert!(
+                    capacity - tokens <= chunk.max(tokens / 16),
+                    "{tokens} tokens: capacity {capacity}"
+                );
+            }
+            for len in [0, chunk, 16 * chunk] {
+                assert_eq!(arena_growth(len, chunk), chunk);
+            }
+            assert!(arena_growth(17 * chunk, chunk) > chunk);
+        }
+        let fixed: usize = (0..10_000_000 / TOKEN_ARENA_CHUNK)
+            .map(|n| n * TOKEN_ARENA_CHUNK)
+            .sum();
+        assert!(fixed > 35 * arena_copies(10_000_000, TOKEN_ARENA_CHUNK).0);
     }
 
     fn event_kinds(input: &str) -> Vec<&'static str> {

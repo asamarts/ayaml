@@ -1466,7 +1466,12 @@ impl<'a> Scanner<'a> {
             }
         }
 
-        let mut lines: Vec<(String, bool)> = Vec::new();
+        // The scalar's lines, each followed by its line break if it has one, built as they are
+        // read. Holding each line in a string of its own cost dozens of times the input on short
+        // lines, before the scalar limit could see the scalar.
+        let mut text = String::new();
+        // Whether the last line with any text has a line break, which clipping keeps.
+        let mut final_break = false;
         let mut seen_content = false;
         let mut end = content_start;
         loop {
@@ -1489,16 +1494,24 @@ impl<'a> Scanner<'a> {
                 }
                 // Spaces past the indentation are content, on a leading line
                 // too when an indicator fixes the indentation.
-                let text = if (seen_content || explicit_indent.is_some()) && spaces > indent {
-                    " ".repeat(spaces - indent)
-                } else {
-                    String::new()
-                };
+                let content_spaces =
+                    if (seen_content || explicit_indent.is_some()) && spaces > indent {
+                        spaces - indent
+                    } else {
+                        0
+                    };
                 // The suite treats a whitespace-only last line at end of input
                 // as a complete line (JEF9, L24T); libyaml drops its line
                 // break, and the compatibility scanner keeps that.
                 let at_eof_line = next.is_none() && spaces > 0 && !self.compat_flow;
-                lines.push((text, next.is_some() || at_eof_line));
+                let had_break = next.is_some() || at_eof_line;
+                text.extend(std::iter::repeat_n(' ', content_spaces));
+                if had_break {
+                    text.push('\n');
+                }
+                if content_spaces > 0 {
+                    final_break = had_break;
+                }
                 end = self.pos;
                 continue;
             }
@@ -1545,18 +1558,20 @@ impl<'a> Scanner<'a> {
                 }
                 self.pos += ch.len_utf8();
             }
-            let text = self.input[text_start..self.pos].to_owned();
+            // A content line holds at least the character that made it one.
+            text.push_str(&self.input[text_start..self.pos]);
             let had_break = self.peek().is_some_and(is_line_break);
             if had_break {
                 self.consume_line_break();
+                text.push('\n');
             }
+            final_break = had_break;
             seen_content = true;
-            lines.push((text, had_break));
             end = self.pos;
         }
         self.pos = end;
 
-        let value = build_block_scalar(&lines, literal, chomping);
+        let value = build_block_scalar(text, final_break, literal, chomping);
         let raw = Cow::Borrowed(&self.input[start..end]);
         self.make(
             TokenKind::Scalar {
@@ -2464,68 +2479,63 @@ enum Chomping {
     Keep,
 }
 
+/// Fold the lines of a folded block scalar, given as `raw`'s lines between line breaks, without
+/// collecting them: only the line before a run of empty lines and the one after it matter.
 fn fold_block_scalar(raw: &str) -> String {
-    let lines: Vec<&str> = raw.split('\n').collect();
-    let mut value = String::new();
-    let mut index = 0;
-    while index < lines.len() {
-        let line = lines[index];
+    let mut value = String::with_capacity(raw.len());
+    let mut lines = raw.split('\n');
+    let Some(mut line) = lines.next() else {
+        return value;
+    };
+    loop {
         value.push_str(line);
-        if index + 1 == lines.len() {
-            break;
-        }
-        let mut next = index + 1;
-        while next < lines.len() && lines[next].is_empty() {
-            next += 1;
-        }
-        if next == lines.len() {
-            for _ in index + 1..lines.len() {
-                value.push('\n');
+        // The lines between this one and the next with text, and that line if there is one.
+        let mut empty = 0;
+        let mut next = None;
+        let mut last = true;
+        for candidate in lines.by_ref() {
+            last = false;
+            if candidate.is_empty() {
+                empty += 1;
+            } else {
+                next = Some(candidate);
+                break;
             }
+        }
+        if last {
             break;
         }
-        let breaks = next - index;
-        let more_indented = line.starts_with([' ', '\t']) || lines[next].starts_with([' ', '\t']);
+        let Some(next) = next else {
+            value.extend(std::iter::repeat_n('\n', empty));
+            break;
+        };
+        let breaks = empty + 1;
+        let more_indented = line.starts_with([' ', '\t']) || next.starts_with([' ', '\t']);
         if line.is_empty() || more_indented {
-            for _ in 0..breaks {
-                value.push('\n');
-            }
+            value.extend(std::iter::repeat_n('\n', breaks));
         } else if breaks == 1 {
             value.push(' ');
         } else {
-            for _ in 0..breaks - 1 {
-                value.push('\n');
-            }
+            value.extend(std::iter::repeat_n('\n', breaks - 1));
         }
-        index = next;
+        line = next;
     }
     value
 }
 
-fn build_block_scalar(lines: &[(String, bool)], literal: bool, chomping: Chomping) -> String {
-    let mut value = String::new();
-    if literal {
-        for (text, had_break) in lines {
-            value.push_str(text);
-            if *had_break {
-                value.push('\n');
-            }
-        }
+/// A block scalar's value from its lines, `text`, each with its line break if it had one, and
+/// whether the last line with any text had one.
+fn build_block_scalar(
+    text: String,
+    final_break: bool,
+    literal: bool,
+    chomping: Chomping,
+) -> String {
+    let mut value = if literal {
+        text
     } else {
-        let mut raw = String::new();
-        for (text, had_break) in lines {
-            raw.push_str(text);
-            if *had_break {
-                raw.push('\n');
-            }
-        }
-        value = fold_block_scalar(&raw);
-    }
-    let final_break = lines
-        .iter()
-        .rev()
-        .find(|(text, _)| !text.is_empty())
-        .is_some_and(|(_, had_break)| *had_break);
+        fold_block_scalar(&text)
+    };
     match chomping {
         Chomping::Strip => {
             while value.ends_with('\n') {
@@ -2610,8 +2620,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        LineShape, LineStop, NameRules, Owner, Scanner, TokenKind, closing_quote, line_shape,
-        strip_comment, walk_line,
+        Chomping, LineShape, LineStop, NameRules, Owner, Scanner, TokenKind, build_block_scalar,
+        closing_quote, line_shape, strip_comment, walk_line,
     };
     use crate::event::ScalarStyle;
     use crate::limits::Limits;
@@ -2925,6 +2935,141 @@ mod tests {
 
         let (value, _, _) = scalar("|+\n  a\n\n");
         assert_eq!(value, "a\n\n");
+    }
+
+    /// How a block scalar's value was built from a list of its lines, before the scanner built
+    /// one string as it read them.
+    fn block_scalar_from_lines(
+        lines: &[(String, bool)],
+        literal: bool,
+        chomping: Chomping,
+    ) -> String {
+        let mut raw = String::new();
+        for (text, had_break) in lines {
+            raw.push_str(text);
+            if *had_break {
+                raw.push('\n');
+            }
+        }
+        let mut value = if literal {
+            raw
+        } else {
+            let lines: Vec<&str> = raw.split('\n').collect();
+            let mut value = String::new();
+            let mut index = 0;
+            while index < lines.len() {
+                let line = lines[index];
+                value.push_str(line);
+                if index + 1 == lines.len() {
+                    break;
+                }
+                let mut next = index + 1;
+                while next < lines.len() && lines[next].is_empty() {
+                    next += 1;
+                }
+                if next == lines.len() {
+                    for _ in index + 1..lines.len() {
+                        value.push('\n');
+                    }
+                    break;
+                }
+                let breaks = next - index;
+                let more_indented =
+                    line.starts_with([' ', '\t']) || lines[next].starts_with([' ', '\t']);
+                if line.is_empty() || more_indented {
+                    for _ in 0..breaks {
+                        value.push('\n');
+                    }
+                } else if breaks == 1 {
+                    value.push(' ');
+                } else {
+                    for _ in 0..breaks - 1 {
+                        value.push('\n');
+                    }
+                }
+                index = next;
+            }
+            value
+        };
+        let final_break = lines
+            .iter()
+            .rev()
+            .find(|(text, _)| !text.is_empty())
+            .is_some_and(|(_, had_break)| *had_break);
+        match chomping {
+            Chomping::Strip => {
+                while value.ends_with('\n') {
+                    value.pop();
+                }
+            }
+            Chomping::Clip => {
+                while value.ends_with('\n') {
+                    value.pop();
+                }
+                if final_break && !value.is_empty() {
+                    value.push('\n');
+                }
+            }
+            Chomping::Keep => {}
+        }
+        value
+    }
+
+    /// Building one string as the lines are read gives what the list of lines gave, for every
+    /// sequence of up to five lines of these kinds, with or without a last line break.
+    #[test]
+    fn block_scalars_built_as_read_match_the_list_of_lines() {
+        let kinds = ["", "a", "b c", " a", "\ta", "  "];
+        let mut sequences: Vec<Vec<&str>> = vec![Vec::new()];
+        let mut checked = 0;
+        for _ in 0..5 {
+            sequences = sequences
+                .iter()
+                .flat_map(|sequence| {
+                    kinds.iter().map(move |kind| {
+                        let mut longer = sequence.clone();
+                        longer.push(kind);
+                        longer
+                    })
+                })
+                .collect();
+            for sequence in &sequences {
+                for last_break in [true, false] {
+                    let lines: Vec<(String, bool)> = sequence
+                        .iter()
+                        .enumerate()
+                        .map(|(at, text)| {
+                            ((*text).to_owned(), last_break || at + 1 < sequence.len())
+                        })
+                        .collect();
+                    let text: String = lines
+                        .iter()
+                        .map(|(text, had_break)| {
+                            format!("{text}{}", if *had_break { "\n" } else { "" })
+                        })
+                        .collect();
+                    let final_break = lines
+                        .iter()
+                        .rev()
+                        .find(|(text, _)| !text.is_empty())
+                        .is_some_and(|(_, had_break)| *had_break);
+                    for literal in [true, false] {
+                        for chomping in [Chomping::Strip, Chomping::Clip, Chomping::Keep] {
+                            assert_eq!(
+                                build_block_scalar(text.clone(), final_break, literal, chomping),
+                                block_scalar_from_lines(&lines, literal, chomping),
+                                "{lines:?}, literal {literal}"
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            checked,
+            (1..=5).map(|n| 6_usize.pow(n) * 2 * 6).sum::<usize>()
+        );
     }
 
     #[test]

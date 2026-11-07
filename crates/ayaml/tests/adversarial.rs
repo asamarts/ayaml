@@ -15,7 +15,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use ayaml::{ErrorKind, Limits, MAX_DEPTH, MAX_DEPTH_CAP, Value};
+use ayaml::{ErrorKind, LimitExceeded, LimitKind, Limits, MAX_DEPTH, MAX_DEPTH_CAP, Value};
 use serde::de::IgnoredAny;
 
 /// Set in a child process, where a test runs its body instead of starting another child. The
@@ -103,10 +103,13 @@ fn run_child(test: &str, deadline: Duration) -> ChildRun {
 
 /// Like [`run_child`], with the time after which the child ends itself.
 fn run_child_ending_itself(test: &str, deadline: Duration, own_deadline: Duration) -> ChildRun {
+    run_command(child_command(test, own_deadline), deadline)
+}
+
+/// Run a child from [`child_command`] and wait for it, up to `deadline`.
+fn run_command(mut command: Command, deadline: Duration) -> ChildRun {
     let started = Instant::now();
-    let mut child = child_command(test, own_deadline)
-        .spawn()
-        .expect("start the child");
+    let mut child = command.spawn().expect("start the child");
     let stdout = read_all(child.stdout.take().expect("piped stdout"));
     let stderr = read_all(child.stderr.take().expect("piped stderr"));
     let status = wait_or_kill(&mut child, started, deadline);
@@ -624,62 +627,92 @@ fn repeated_inputs(length: usize) -> Vec<String> {
     ]
 }
 
+/// How the linear-time tests compare. One run on 8 times the length takes about as long as 8 runs
+/// on the short input if the work is linear, and about 8 times as long if it's quadratic, on any
+/// host. The limit on the ratio sits between those, with room for a host's noise on either side.
+const LARGEST_RATIO: u32 = 3;
+/// How long a batch of runs takes at least. A run on the long input repeats until its batch takes
+/// this long, and the short runs repeat as often, so that a busy host interrupts both alike and a
+/// quadratic scan too quick to time on its own still shows.
+const QUICK: Duration = Duration::from_millis(100);
+/// The most runs in one batch. A run that takes under `QUICK` divided by this isn't a scan worth
+/// timing.
+const MOST_REPEATS: u32 = 1 << 16;
+/// On a busy host one batch can take 10 times its share, so a read has to look quadratic through
+/// many batches before it counts. A real quadratic scan spends this budget and fails.
+const TRIES: usize = 12;
+const RETRY_BUDGET: Duration = Duration::from_secs(40);
+
+/// A read whose time or memory a test measures. Errors don't matter there.
+type Reading = fn(&str);
+
+/// How long `repeats` runs of `read` on `input` take.
+fn time_runs(read: &dyn Fn(&str), input: &str, repeats: u32) -> Duration {
+    let started = Instant::now();
+    for _ in 0..repeats {
+        read(input);
+    }
+    started.elapsed()
+}
+
+/// How long one run of `read` on `long` takes, if `read` takes time linear in its input, from
+/// `short`, which is an eighth of `long`, to `long`. Otherwise, the times that look quadratic.
+/// Each time is the best of its tries, which drops any pause the host took.
+fn linear_time(read: &dyn Fn(&str), short: &str, long: &str) -> Result<Duration, String> {
+    let mut repeats = 1;
+    let mut long_time = time_runs(read, long, repeats);
+    while long_time < QUICK && repeats < MOST_REPEATS {
+        repeats *= 2;
+        long_time = time_runs(read, long, repeats);
+    }
+    if long_time < QUICK {
+        return Ok(long_time / repeats);
+    }
+    let mut shorts_time = Duration::MAX;
+    let started = Instant::now();
+    for _ in 0..TRIES {
+        shorts_time = shorts_time.min(time_runs(read, short, 8 * repeats));
+        if long_time < shorts_time * LARGEST_RATIO || started.elapsed() > RETRY_BUDGET {
+            break;
+        }
+        long_time = long_time.min(time_runs(read, long, repeats));
+    }
+    if long_time < shorts_time * LARGEST_RATIO {
+        Ok(long_time / repeats)
+    } else {
+        Err(format!(
+            "{shorts_time:?} for {} short runs, then {long_time:?} for {repeats} on 8 times the \
+             length",
+            8 * repeats
+        ))
+    }
+}
+
 #[test]
 fn scanning_takes_time_linear_in_the_input() {
     in_child!(|| {
-        // One run on 8 times the length takes about as long as 8 runs on the short one if the scan
-        // is linear, and about 8 times as long if it's quadratic, on any host. Both take long enough
-        // that a busy host interrupts them alike, where a single short run could fit between its
-        // interruptions. The limit sits between those, with room for a host's noise on either
-        // side. A scan this quick isn't compared, because the difference would be noise. Some
-        // quadratic scans take only seconds on this length, so a limit on the time alone misses
-        // them. The length stays within the normal peak of memory.
+        // Some quadratic scans take only seconds on this length, so a limit on the time alone
+        // misses them. The length stays within the normal peak of memory.
         const LENGTH: usize = 1 << 19;
-        const QUICK: Duration = Duration::from_millis(100);
-        const LARGEST_RATIO: u32 = 3;
         const SLOWEST: Duration = Duration::from_secs(20);
-        // On a busy host one run can take 10 times its share, so a scan has to look quadratic
-        // through many runs before it counts. A real quadratic scan spends this budget and fails.
-        const TRIES: usize = 12;
-        const RETRY_BUDGET: Duration = Duration::from_secs(40);
-        type Read = fn(&str) -> Result<(), ayaml::Error>;
-        let timed = |read: &Read, input: &str| {
-            let started = Instant::now();
-            // Some of these are errors in one mode or the other. What counts is the time.
-            let _ = read(input);
-            started.elapsed()
-        };
-        let readers: Vec<(&str, Read)> = vec![
-            ("parse_documents", |input| ok(ayaml::parse_documents(input))),
+        // Some of these are errors in one mode or the other. What counts is the time.
+        let readers: Vec<(&str, Reading)> = vec![
+            ("parse_documents", |input| {
+                let _ = ayaml::parse_documents(input);
+            }),
             #[cfg(feature = "libyaml-compat")]
             ("compat", |input| {
-                ok(ayaml::compat::from_str::<ayaml::Value>(input))
+                let _ = ayaml::compat::from_str::<ayaml::Value>(input);
             }),
         ];
         let shorter = repeated_inputs(LENGTH / 8);
         for (short, long) in shorter.iter().zip(repeated_inputs(LENGTH)) {
             let name: String = long.chars().take(30).collect();
             for (reader, read) in &readers {
-                let mut shorts_time = Duration::MAX;
-                let mut long_time = Duration::MAX;
-                let started = Instant::now();
-                // Each best time drops any pause the host took, so it takes a real scan to fail.
-                for _ in 0..TRIES {
-                    long_time = long_time.min(timed(read, &long));
-                    if long_time < QUICK {
-                        break;
-                    }
-                    shorts_time = shorts_time.min((0..8).map(|_| timed(read, short)).sum());
-                    if long_time < shorts_time * LARGEST_RATIO || started.elapsed() > RETRY_BUDGET {
-                        break;
-                    }
+                match linear_time(read, short, &long) {
+                    Ok(time) => assert!(time < SLOWEST, "{reader}: {name:?}: {time:?}"),
+                    Err(times) => panic!("{reader}: {name:?}: {times}"),
                 }
-                assert!(long_time < SLOWEST, "{reader}: {name:?}: {long_time:?}");
-                assert!(
-                    long_time < QUICK || long_time < shorts_time * LARGEST_RATIO,
-                    "{reader}: {name:?}: {shorts_time:?} for 8 short runs, then {long_time:?} for \
-                     one on 8 times the length",
-                );
             }
         }
     });
@@ -689,27 +722,18 @@ fn scanning_takes_time_linear_in_the_input() {
 fn many_keys_take_time_linear_in_their_number() {
     in_child!(|| {
         // Keys that all land in one hash bucket take quadratic time, and that's a few seconds here
-        // at most, so only the ratio can tell. See `scanning_takes_time_linear_in_the_input` for
-        // how it's compared.
+        // at most, so only the ratio can tell.
         const KEYS: usize = 40_000;
-        const QUICK: Duration = Duration::from_millis(100);
-        const LARGEST_RATIO: u32 = 3;
-        const TRIES: usize = 12;
-        const RETRY_BUDGET: Duration = Duration::from_secs(40);
-        type Read = fn(&str) -> Result<(), ayaml::Error>;
-        let timed = |read: &Read, input: &str| {
-            let started = Instant::now();
-            read(input).expect("distinct keys parse");
-            started.elapsed()
-        };
-        let readers: Vec<(&str, Read)> = vec![
-            ("parse_value", |input| ok(ayaml::parse_value(input))),
+        let readers: Vec<(&str, Reading)> = vec![
+            ("parse_value", |input| {
+                ayaml::parse_value(input).expect("distinct keys parse");
+            }),
             ("from_str", |input| {
-                ok(ayaml::from_str::<ayaml::Value>(input))
+                ayaml::from_str::<ayaml::Value>(input).expect("distinct keys parse");
             }),
             #[cfg(feature = "libyaml-compat")]
             ("compat", |input| {
-                ok(ayaml::compat::from_str::<ayaml::Value>(input))
+                ayaml::compat::from_str::<ayaml::Value>(input).expect("distinct keys parse");
             }),
         ];
         type Key = fn(usize) -> String;
@@ -734,26 +758,47 @@ fn many_keys_take_time_linear_in_their_number() {
             let keys = |count: usize| (0..count).map(key).collect::<String>();
             let (short, long) = (keys(KEYS / 8), keys(KEYS));
             for (reader, read) in &readers {
-                let mut shorts_time = Duration::MAX;
-                let mut long_time = Duration::MAX;
-                let started = Instant::now();
-                for _ in 0..TRIES {
-                    long_time = long_time.min(timed(read, &long));
-                    if long_time < QUICK {
-                        break;
-                    }
-                    shorts_time = shorts_time.min((0..8).map(|_| timed(read, &short)).sum());
-                    if long_time < shorts_time * LARGEST_RATIO || started.elapsed() > RETRY_BUDGET {
-                        break;
-                    }
+                if let Err(times) = linear_time(read, &short, &long) {
+                    panic!("{reader}: {shape}: {times}");
                 }
-                assert!(
-                    long_time < QUICK || long_time < shorts_time * LARGEST_RATIO,
-                    "{reader}: {shape}: {shorts_time:?} for 8 short runs, then {long_time:?} for \
-                     one on 8 times the keys",
-                );
             }
         }
+    });
+}
+
+/// The comparison fails a quadratic scan even when one run on the long input takes less than
+/// `QUICK`, and passes a linear one.
+#[test]
+fn the_linear_time_check_fails_a_quick_quadratic_scan() {
+    in_child!(|| {
+        const LENGTH: usize = 1 << 19;
+        // Every pair of bytes in a 512th of the input: about a millionth of a second each on
+        // the long input, so a run takes a few milliseconds.
+        let quadratic: fn(&str) = |input| {
+            let bytes = &input.as_bytes()[..input.len() / 512];
+            let mut sum = 0_u64;
+            for first in bytes {
+                for second in bytes {
+                    sum = sum.wrapping_add(u64::from(first ^ second));
+                }
+            }
+            std::hint::black_box(sum);
+        };
+        let linear: fn(&str) = |input| {
+            std::hint::black_box(input.bytes().map(u64::from).sum::<u64>());
+        };
+        let short = "ab".repeat(LENGTH / 16);
+        let long = "ab".repeat(LENGTH / 2);
+        let one_run = (0..5)
+            .map(|_| time_runs(&quadratic, &long, 1))
+            .min()
+            .expect("runs");
+        assert!(one_run < QUICK, "one run took {one_run:?}");
+        assert!(
+            linear_time(&quadratic, &short, &long).is_err(),
+            "a quadratic scan passed"
+        );
+        linear_time(&linear, &short, &long).expect("a linear scan");
     });
 }
 
@@ -1013,6 +1058,86 @@ fn value_paths(input: &str, limits: &Limits) -> Vec<(&'static str, Result<(), ay
     ]
 }
 
+/// Every public path that takes explicit limits and writes YAML. What they write is `input`, read
+/// under the default limits.
+fn limited_emitters(input: &str, limits: &Limits) -> Vec<(&'static str, Result<(), ayaml::Error>)> {
+    let value = ayaml::parse_value(input).expect("parse");
+    let documents = std::slice::from_ref(&value);
+    let events = ayaml::parse_events(input)
+        .and_then(|stream| stream.collect::<Result<Vec<_>, _>>())
+        .expect("events");
+    let options = ayaml::EmitterOptions::default();
+    let styles = ayaml::EmitterStyles::default();
+    let emitter = ayaml::Emitter::new(limits, &options);
+    vec![
+        (
+            "to_string_value_with_limits",
+            ok(ayaml::to_string_value_with_limits(&value, limits)),
+        ),
+        (
+            "to_string_value_with_limits_and_styles",
+            ok(ayaml::to_string_value_with_limits_and_styles(
+                &value, limits, &styles,
+            )),
+        ),
+        (
+            "to_writer_value_with_limits",
+            ayaml::to_writer_value_with_limits(&mut Vec::new(), &value, limits),
+        ),
+        (
+            "to_writer_value_with_limits_and_styles",
+            ayaml::to_writer_value_with_limits_and_styles(&mut Vec::new(), &value, limits, &styles),
+        ),
+        (
+            "to_string_with_limits",
+            ok(ayaml::to_string_with_limits(&value, limits)),
+        ),
+        (
+            "to_writer_with_limits",
+            ayaml::to_writer_with_limits(&mut Vec::new(), &value, limits),
+        ),
+        (
+            "to_string_documents_with_limits",
+            ok(ayaml::to_string_documents_with_limits(documents, limits)),
+        ),
+        (
+            "to_writer_documents_with_limits",
+            ayaml::to_writer_documents_with_limits(&mut Vec::new(), documents, limits),
+        ),
+        (
+            "to_string_events_with_limits",
+            ok(ayaml::to_string_events_with_limits(&events, limits)),
+        ),
+        (
+            "to_writer_event_stream_with_limits",
+            ayaml::parse_events_with_limits(input, &Limits::default()).and_then(|stream| {
+                ayaml::to_writer_event_stream_with_limits(&mut Vec::new(), stream, limits)
+            }),
+        ),
+        ("Emitter::to_string", ok(emitter.to_string(&value))),
+        (
+            "Emitter::value_to_string",
+            ok(emitter.value_to_string(&value)),
+        ),
+        (
+            "Emitter::documents_to_string",
+            ok(emitter.documents_to_string(documents)),
+        ),
+    ]
+}
+
+/// Every public path that takes explicit limits and reads YAML, compat's included.
+fn limited_readers(input: &str, limits: &Limits) -> Vec<(&'static str, Result<(), ayaml::Error>)> {
+    #[cfg_attr(not(feature = "libyaml-compat"), allow(unused_mut))]
+    let mut readers = limited_entry_points(input, limits);
+    #[cfg(feature = "libyaml-compat")]
+    readers.push((
+        "compat::parse_events_with_limits",
+        ok(ayaml::compat::parse_events_with_limits(input, limits)),
+    ));
+    readers
+}
+
 /// Expect the depth limit from an entry point reading `depth`-deep
 /// `shape`. The event stream leaves aliases unexpanded, so an alias chain
 /// stays shallow there.
@@ -1052,51 +1177,18 @@ fn max_depth_above_the_cap_is_rejected_on_every_entry_point() {
         let over = Limits::default().with_max_depth(MAX_DEPTH_CAP + 1);
         let at_cap = Limits::default().with_max_depth(MAX_DEPTH_CAP);
         let input = "a: [1, {b: 2}]\n";
-        let value = ayaml::parse_value(input).expect("parse");
-        let events = ayaml::parse_events(input)
-            .and_then(|stream| stream.collect::<Result<Vec<_>, _>>())
-            .expect("events");
-        let emitters = |limits: &Limits| -> Vec<(&'static str, Result<(), ayaml::Error>)> {
-            vec![
-                (
-                    "to_string_value_with_limits",
-                    ok(ayaml::to_string_value_with_limits(&value, limits)),
-                ),
-                (
-                    "to_string_with_limits",
-                    ok(ayaml::to_string_with_limits(&value, limits)),
-                ),
-                (
-                    "to_string_documents_with_limits",
-                    ok(ayaml::to_string_documents_with_limits(
-                        std::slice::from_ref(&value),
-                        limits,
-                    )),
-                ),
-                (
-                    "to_string_events_with_limits",
-                    ok(ayaml::to_string_events_with_limits(&events, limits)),
-                ),
-                (
-                    "to_writer_event_stream_with_limits",
-                    ayaml::parse_events_with_limits(input, &Limits::default()).and_then(|stream| {
-                        ayaml::to_writer_event_stream_with_limits(&mut Vec::new(), stream, limits)
-                    }),
-                ),
-            ]
-        };
-        for (name, result) in limited_entry_points(input, &over)
+        for (name, result) in limited_readers(input, &over)
             .into_iter()
-            .chain(emitters(&over))
+            .chain(limited_emitters(input, &over))
         {
             let error = result.expect_err(name);
             assert_eq!(error.kind(), ErrorKind::Limit, "{name}: {error}");
             let expected = format!("max_depth {}", MAX_DEPTH_CAP + 1);
             assert!(error.to_string().contains(&expected), "{name}: {error}");
         }
-        for (name, result) in limited_entry_points(input, &at_cap)
+        for (name, result) in limited_readers(input, &at_cap)
             .into_iter()
-            .chain(emitters(&at_cap))
+            .chain(limited_emitters(input, &at_cap))
         {
             result.unwrap_or_else(|error| panic!("{name}: {error}"));
         }
@@ -1268,4 +1360,291 @@ fn wide_collections_fit_a_small_stack() {
             }
         });
     });
+}
+
+/// Nine levels of nine aliases each over a list of nine empty nodes: 9^9 nodes with no text, which
+/// only the cost of a node charges for.
+fn empty_node_bomb() -> String {
+    let mut bomb = String::from("a0: &a0\n");
+    bomb.push_str(&"-\n".repeat(9));
+    for level in 1..9 {
+        let previous = format!("*a{}", level - 1);
+        let row = [previous.as_str(); 9].join(", ");
+        bomb.push_str(&format!("a{level}: &a{level} [{row}]\n"));
+    }
+    bomb
+}
+
+/// A `node_cost_bytes` of 0 would make every node an alias copies free, which turns the alias budget
+/// off, so it is a configuration error on every path that takes limits. 1, the least cost, is
+/// accepted, and the budget still stops a bomb of empty nodes there.
+#[test]
+fn a_node_cost_of_zero_is_rejected_on_every_entry_point() {
+    in_child!(|| {
+        let zero = Limits::default().with_node_cost_bytes(0);
+        let one = Limits::default().with_node_cost_bytes(1);
+        let input = "a: &x [1, {b: 2}, ~]\nb: *x\n";
+        for (name, result) in limited_readers(input, &zero)
+            .into_iter()
+            .chain(limited_emitters(input, &zero))
+        {
+            let error = result.expect_err(name);
+            assert_eq!(error.kind(), ErrorKind::Limit, "{name}: {error}");
+            assert_eq!(error.limit(), None, "{name}");
+            assert!(
+                error.to_string().contains("node_cost_bytes 0"),
+                "{name}: {error}"
+            );
+        }
+        for (name, result) in limited_readers(input, &one)
+            .into_iter()
+            .chain(limited_emitters(input, &one))
+        {
+            result.unwrap_or_else(|error| panic!("{name}: {error}"));
+        }
+        // A node costs more memory than 1 byte, so the budget is small here: it lets through at
+        // most 256 Ki nodes before it stops the bomb. The event stream doesn't expand aliases.
+        let small = one
+            .with_max_alias_expansion_bytes(256 << 10)
+            .with_alias_bytes_per_input_byte(0);
+        for (name, result) in limited_readers(&empty_node_bomb(), &small) {
+            if name.ends_with("parse_events_with_limits") {
+                result.unwrap_or_else(|error| panic!("{name}: {error}"));
+                continue;
+            }
+            let error = result.expect_err(name);
+            assert_eq!(
+                error.limit().map(LimitExceeded::kind),
+                Some(LimitKind::AliasExpansion),
+                "{name}: {error}"
+            );
+        }
+    });
+}
+
+/// Every use of a handle counts the prefix it stands for, `!` 1 byte, `!!` 18, and a `%TAG`
+/// handle its prefix, over the whole stream. The non-specific `!` and a verbatim tag count
+/// nothing. A stream is accepted at the limit and refused one byte below it, where the tag that
+/// goes over is the error's place.
+#[test]
+fn tag_expansion_is_accepted_up_to_its_limit() {
+    in_child!(|| {
+        let core = "tag:yaml.org,2002:".len();
+        let one_document =
+            "%TAG !e! tag:ab:\n---\n- !!str a\n- !e!x b\n- !y c\n- ! d\n- !<tag:z> e\n";
+        let two_documents = "--- !!str a\n--- !!str b\n";
+        let streams = |input: &str, limits: &Limits| {
+            let cursor = ayaml::Deserializer::from_str_with_limits(input, limits)
+                .and_then(|mut cursor| cursor.next::<Value>().map(drop));
+            vec![
+                (
+                    "parse_events_with_limits",
+                    ayaml::parse_events_with_limits(input, limits)
+                        .and_then(|stream| stream.collect::<Result<Vec<_>, _>>())
+                        .map(drop),
+                ),
+                (
+                    "parse_documents_with_limits",
+                    ok(ayaml::parse_documents_with_limits(input, limits)),
+                ),
+                ("Deserializer::next", cursor),
+            ]
+        };
+        type Readers = fn(&str, &Limits) -> Vec<(&'static str, Result<(), ayaml::Error>)>;
+        let cases: [(&str, usize, (usize, usize), Readers); 2] = [
+            (
+                one_document,
+                core + "tag:ab:".len() + 1,
+                (5, 3),
+                limited_readers,
+            ),
+            (two_documents, 2 * core, (2, 5), streams),
+        ];
+        // JSON has no form for a tag, so a reader into JSON stops at the first local one.
+        let into_json = |result: &Result<(), ayaml::Error>| {
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("expected any valid JSON value"))
+        };
+        for (input, cost, (line, column), readers) in cases {
+            for limit in [cost, cost + 1] {
+                let limits = Limits::default().with_max_tag_expansion_bytes(limit);
+                for (name, result) in readers(input, &limits) {
+                    if !into_json(&result) {
+                        result.unwrap_or_else(|error| panic!("{name}, limit {limit}: {error}"));
+                    }
+                }
+            }
+            let limits = Limits::default().with_max_tag_expansion_bytes(cost - 1);
+            for (name, result) in readers(input, &limits) {
+                if into_json(&result) {
+                    continue;
+                }
+                let error = result.expect_err(name);
+                let limit = error.limit().expect("a structured limit");
+                assert_eq!(limit.kind(), LimitKind::TagExpansion, "{name}: {error}");
+                assert_eq!(limit.limit(), (cost - 1) as u64, "{name}");
+                assert_eq!(limit.observed(), cost as u64, "{name}");
+                let at = error.location().expect("a location");
+                assert_eq!((at.line(), at.column()), (line, column), "{name}: {error}");
+            }
+        }
+    });
+}
+
+/// A block scalar's size, for `max_scalar_bytes`, is its text in the input from its indicator
+/// through its last line, header and indentation included, so it's never less than its value.
+#[test]
+fn a_block_scalar_counts_its_header_toward_the_scalar_limit() {
+    in_child!(|| {
+        for input in [
+            "k: |\n  ab\n  c\n",
+            "k: >\n  ab\n  c\n",
+            "k: >-\n  ab\n\n  c\n",
+            "k: |+ # kept\n  ab\n\n\n",
+            "- |2\n   ab\n  c\n",
+            "k: >\n  ab\n  c\nnext: 1\n",
+        ] {
+            let start = input.find(['|', '>']).expect("an indicator");
+            let end = input.find("next").unwrap_or(input.len());
+            let size = end - start;
+            for limit in [size, size + 1] {
+                let limits = Limits::default().with_max_scalar_bytes(limit);
+                for (name, result) in limited_readers(input, &limits) {
+                    result.unwrap_or_else(|error| panic!("{name}, {input:?}, {limit}: {error}"));
+                }
+            }
+            let limits = Limits::default().with_max_scalar_bytes(size - 1);
+            for (name, result) in limited_readers(input, &limits) {
+                let error = result.expect_err(name);
+                let limit = error.limit().expect("a structured limit");
+                assert_eq!(limit.kind(), LimitKind::ScalarBytes, "{name}: {error}");
+                assert_eq!(limit.observed(), size as u64, "{name}, {input:?}");
+                let at = error.span().expect("a span").start().index();
+                assert_eq!(at, start, "{name}, {input:?}");
+            }
+        }
+    });
+}
+
+/// Set in a child of a memory test: the case it measures, as `case|reader`.
+const MEASURED: &str = "AYAML_ADVERSARIAL_MEASURED";
+
+/// How much more memory this process held at its peak during `read` than when `read` started, in
+/// bytes. Linux resets the peak when asked. Elsewhere, and if the reset fails, this is `None`.
+fn peak_growth(read: impl FnOnce()) -> Option<u64> {
+    let reset = cfg!(target_os = "linux") && std::fs::write("/proc/self/clear_refs", "5").is_ok();
+    let before = proc_self_number("status", "VmRSS:").filter(|_| reset);
+    read();
+    let peak = proc_self_number("status", "VmHWM:")?;
+    Some(peak.saturating_sub(before?) * 1024)
+}
+
+/// The readers whose memory the tests below measure: one that builds a value, one that keeps
+/// nothing, and compat's.
+fn measured_readers() -> Vec<(&'static str, Reading)> {
+    vec![
+        ("parse_value", |input| {
+            ayaml::parse_value(input).expect("parse_value");
+        }),
+        ("from_str_borrowed (IgnoredAny)", |input| {
+            ayaml::from_str_borrowed::<IgnoredAny>(input).expect("from_str_borrowed");
+        }),
+        #[cfg(feature = "libyaml-compat")]
+        ("compat::from_str", |input| {
+            ayaml::compat::from_str::<Value>(input).expect("compat");
+        }),
+    ]
+}
+
+/// Block scalars of 4 MiB: each case's name, header, the unit its lines repeat, and the most memory
+/// a read may hold at its peak, as a multiple of the input. A read holds about 5 times the input
+/// for short lines and 10 for blank ones. When a scalar's lines were listed before it was built,
+/// these took 25 to 42 times the input.
+const BLOCK_SCALARS: [(&str, &str, &str, u64); 4] = [
+    ("literal short lines", "k: |\n", " a\n", 8),
+    ("folded short lines", "k: >\n", " a\n", 8),
+    ("folded blank runs", "k: >\n", " a\n\n", 10),
+    ("literal blank lines", "k: |\n a\n", "\n", 16),
+];
+
+/// Entries in the flow sequence whose tokens the arena holds, and the most memory a read may hold
+/// for each token. A read holds about 190 bytes a token: the token, and the event it becomes.
+const FLOW_ENTRIES: usize = 200_000;
+const MOST_PER_TOKEN: u64 = 300;
+
+/// The input a memory case reads, and the most memory a read of it may hold at its peak.
+fn memory_case(case: &str) -> (String, u64) {
+    if case == "flow sequence" {
+        let tokens = 2 * FLOW_ENTRIES + 3;
+        let input = format!("[{}a]\n", "a,".repeat(FLOW_ENTRIES));
+        return (input, MOST_PER_TOKEN * tokens as u64);
+    }
+    let (_, header, unit, most) = BLOCK_SCALARS
+        .into_iter()
+        .find(|(name, ..)| *name == case)
+        .unwrap_or_else(|| panic!("no memory case {case:?}"));
+    let input = format!("{header}{}", unit.repeat((4 << 20) / unit.len()));
+    let bound = most * input.len() as u64;
+    (input, bound)
+}
+
+/// Measure each reader on `case`, each in a child of its own. A process keeps memory a read gave
+/// back, so a later read in the same process could reuse it and seem to need none.
+fn measure_in_children(case: &str) {
+    for (reader, _) in measured_readers() {
+        let mut command = child_command("measure_one_read", CHILD_DEADLINE + CHILD_GRACE);
+        command.env(MEASURED, format!("{case}|{reader}"));
+        let run = run_command(command, CHILD_DEADLINE);
+        assert!(
+            run.passed(),
+            "{case}, {reader}: ended with {:?} after {:?}\n{}",
+            run.status,
+            run.elapsed,
+            run.output
+        );
+    }
+}
+
+/// One read that a memory test measures, in a child of that test.
+#[test]
+#[ignore = "only for a child of a memory test"]
+fn measure_one_read() {
+    let Ok(measured) = std::env::var(MEASURED) else {
+        return;
+    };
+    in_child!(|| {
+        let (case, reader) = measured.split_once('|').expect("case|reader");
+        let (_, read) = measured_readers()
+            .into_iter()
+            .find(|(name, _)| *name == reader)
+            .unwrap_or_else(|| panic!("no reader {reader:?}"));
+        let (input, most) = memory_case(case);
+        let Some(growth) = peak_growth(|| read(&input)) else {
+            return;
+        };
+        let ratio = growth as f64 / input.len() as f64;
+        println!("{case}, {reader}: {growth} bytes at the peak, {ratio:.2} times the input");
+        assert!(
+            growth <= most,
+            "{case}, {reader}: {growth} bytes at the peak, over the {most} expected"
+        );
+    });
+}
+
+/// A block scalar is built as it is read, so a read holds a small multiple of its input at most.
+/// Each LF costs 8 bytes in the index of line starts, so blank lines, a byte each, cost most.
+#[test]
+fn a_block_scalar_holds_memory_in_proportion_to_its_input() {
+    for (case, ..) in BLOCK_SCALARS {
+        measure_in_children(case);
+    }
+}
+
+/// The scanner keeps a logical line's tokens in one arena, 104 bytes each, and counts every token
+/// against `max_events`. A flow collection is one logical line, so a long one holds memory in
+/// proportion to its tokens, and the arena wastes at most a sixteenth of itself as it grows.
+#[test]
+fn tokens_hold_memory_in_proportion_to_their_number() {
+    measure_in_children("flow sequence");
 }

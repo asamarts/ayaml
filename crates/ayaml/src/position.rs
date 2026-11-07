@@ -34,12 +34,32 @@ pub(crate) fn starts_with_document_marker(text: &str) -> bool {
             .is_none_or(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r'))
 }
 
+/// At most how many lines `bytes` holds: one more than its CR and LF bytes. That is its line count
+/// when no CR is followed by an LF. Otherwise it counts each CRLF twice, which stays under twice the
+/// line count, since every CRLF ends a line, and under one more than the bytes. NEL, LS, and PS are
+/// content, and no byte of their UTF-8 is a CR or LF.
+fn lines_at_most(bytes: &[u8]) -> usize {
+    // A byte-wide sum over chunks of 240 bytes, which can't overflow, is vectorized. Counting into a
+    // `usize` for each byte, or counting a CRLF once, cost as much again as building the index.
+    1 + bytes
+        .chunks(240)
+        .map(|chunk| {
+            usize::from(chunk.iter().fold(0_u8, |count, &byte| {
+                count + (u8::from(byte == b'\n') | u8::from(byte == b'\r'))
+            }))
+        })
+        .sum::<usize>()
+}
+
 impl LineIndex {
     /// Build an index for `input`.
     #[must_use]
     pub(crate) fn new(input: &str) -> Self {
+        // Allocated once, at 8 bytes for each CR or LF: growing by doubling would hold up to twice
+        // the index, and three times it while a copying `realloc` moves it.
+        let mut starts = Vec::with_capacity(lines_at_most(input.as_bytes()));
+        starts.push(0);
         if input.is_ascii() {
-            let mut starts = vec![0];
             let bytes = input.as_bytes();
             let mut index = 0;
             while index < bytes.len() {
@@ -68,7 +88,6 @@ impl LineIndex {
                 counted_column: Cell::new((usize::MAX, 0, 0)),
             };
         }
-        let mut starts = vec![0];
         let mut chars = input.char_indices().peekable();
         while let Some((index, ch)) = chars.next() {
             match ch {
@@ -224,8 +243,51 @@ impl LineIndex {
 
 #[cfg(test)]
 mod tests {
-    use super::LineIndex;
+    use super::{LineIndex, lines_at_most};
     use crate::span::Marker;
+
+    /// The index is allocated once, at its length when no CR is followed by an LF and under twice
+    /// it otherwise, on every text of up to five characters from line breaks, ASCII, and the
+    /// characters that are content, and on longer ones that cross the count's chunks.
+    #[test]
+    fn the_index_is_allocated_once_within_a_bound() {
+        let alphabet = ["a", "\n", "\r", "é", "\u{85}", "\u{2028}", "\u{feff}"];
+        let mut texts = vec![String::new()];
+        let mut checked = 0;
+        let mut check = |text: &str| {
+            for index in [LineIndex::new(text), LineIndex::counting_line_boms(text)] {
+                let (lines, capacity) = (index.line_count(), index.starts.capacity());
+                assert_eq!(capacity, lines_at_most(text.as_bytes()), "{text:?}");
+                if text.contains("\r\n") {
+                    assert!(lines < capacity && capacity < 2 * lines, "{text:?}");
+                } else {
+                    assert_eq!(capacity, lines, "{text:?}");
+                }
+                assert!(capacity <= text.len() + 1, "{text:?}");
+            }
+            checked += 1;
+        };
+        for _ in 0..5 {
+            let mut longer = Vec::new();
+            for text in &texts {
+                for piece in alphabet {
+                    longer.push(format!("{text}{piece}"));
+                }
+            }
+            for text in &longer {
+                check(text);
+            }
+            texts = longer;
+        }
+        for length in [239, 240, 241, 480, 1000] {
+            check(&"\n".repeat(length));
+            check(&"\r".repeat(length));
+            check(&"\r\n".repeat(length));
+            check(&"a\r\n\n\u{2028}".repeat(length));
+        }
+        assert_eq!(checked, 7 + 49 + 343 + 2401 + 16_807 + 20);
+        assert_eq!(lines_at_most(b""), 1);
+    }
 
     #[test]
     fn ascii_lines_and_columns() {
