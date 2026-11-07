@@ -728,9 +728,22 @@ fn valid_forms_beside_wrong_rejections_keep_their_reading() {
         ("'a\u{85}b'", "\"a\\Nb\""),
         ("k: 'a\u{2028}b'", "{k: \"a\\Lb\"}"),
         ("k: \"a\u{2028}b\"", "{k: \"a\\Lb\"}"),
+        ("# a\u{85}b\nk: 1", "{k: 1}"),
+        ("k: 1 # a\u{85}b", "{k: 1}"),
         // A comment with nothing before it.
         ("# c\na: 1", "{a: 1}"),
         ("#", "~"),
+        // A name may end in `:`, and a comment may follow it.
+        ("&a: # c\nb", "b"),
+        ("x: &a: # c\n  b", "{x: b}"),
+        // A core tag however it's written.
+        ("!<tag:yaml.org,2002:str> 1", "\"1\""),
+        ("!<tag:yaml.org,2002:int> 1", "1"),
+        ("!!%69nt 1", "1"),
+        ("!!fo%6F x", "!!foo x"),
+        // A verbatim tag may hold a `!`.
+        ("!<!a> x", "!a x"),
+        ("!<!a!b> x", "%TAG !e! !a!\n---\n!e!b x"),
     ] {
         let expected =
             ayaml::parse_value(meaning).unwrap_or_else(|error| panic!("{meaning:?}: {error}"));
