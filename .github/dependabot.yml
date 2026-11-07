@@ -1,0 +1,16 @@
+# Bumps the commit SHAs the workflows pin actions to, and their version comments, in one pull
+# request a week. Cargo dependencies are updated by hand, under the dependency policy.
+#
+# A Dependabot pull request reads only Dependabot's secrets, so the leak gate's pattern list is
+# kept there as well, under the same name.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "Bump actions:"

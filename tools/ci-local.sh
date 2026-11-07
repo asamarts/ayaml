@@ -174,7 +174,7 @@ job_sync() {
     for wf in .github/workflows/ci.yml .github/workflows/fuzz.yml; do
       while IFS= read -r cmd; do
         case "$cmd" in
-          "cargo install cargo-geiger --locked"|"cargo install cargo-fuzz --locked"|"cargo install aplan --version 0.6.0 --locked"|"sudo rm -f /var/lib/man-db/auto-update && sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind") continue ;;
+          "cargo install cargo-geiger --version 0.14.0 --locked"|"cargo install cargo-fuzz --version 0.13.2 --locked"|"cargo install aplan --version 0.6.0 --locked"|"sudo rm -f /var/lib/man-db/auto-update && sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind"|"tools/install-semver-checks.sh \"\$TMPDIR/semver-checks\" >> \"\$GITHUB_PATH\"") continue ;;
         esac
         if ! grep -qF -- "$cmd" tools/ci-local.sh; then
           echo "not mirrored ($wf): $cmd"; missing=1
@@ -342,6 +342,12 @@ job_package() {
   local crate
   crate="$(ls -t target/package/ayaml-*.crate 2>/dev/null | head -1)"
   if [ -z "$crate" ]; then echo "  no packaged crate"; job_failed=1; return; fi
+  if [ "$dirty" -eq 0 ]; then
+    step "the package holds the commit's files" python3 tools/check_release.py package "$crate" "$sha"
+    # Mirrors: python3 tools/check_release.py package target/package/ayaml-*.crate "$(git rev-parse HEAD)"
+  else
+    skip "the checkout is dirty: the package against the commit"
+  fi
   shstep "packaged crate contents" "tar -tzf '$crate' | sed 's|^[^/]*/||' | sort > '$logdir/package-files.txt'; cat '$logdir/package-files.txt'"
   local work
   work="$(mktemp -d "$ROOT/target/ayaml-smoke.XXXXXX")"
@@ -415,6 +421,8 @@ job_fuzz-smoke() {
 # Hosted-only: minimal versions needs a throwaway lockfile, so run it in CI.
 # Mirrors: cargo update -Z minimal-versions
 # Mirrors: cargo test --workspace --all-features
+# Hosted-only: semver checks read the published baseline from crates.io.
+# Mirrors: cargo semver-checks --package ayaml
 
 job_leak-gate() {
   step "leak gate tests" python3 tools/leak-scan/test_gate.py

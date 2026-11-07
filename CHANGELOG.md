@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Releases are now published by a GitHub Actions workflow through crates.io Trusted Publishing,
+  and each release's crate carries a SLSA build provenance attestation and a SHA256SUMS file.
+  `RELEASING.md` says how to verify a release against its tag and commit.
+
 - A typed reader's error now names the path to what it rejected, as in
   ``servers[1]: unknown field `prot`, expected `host` or `port` at line 4 column 5``, on every
   typed entry point. `Error::message` documents how a path reads. The span and `ErrorKind::Serde`
