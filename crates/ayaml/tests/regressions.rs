@@ -661,16 +661,27 @@ fn a_quote_inside_flow_plain_text_opens_nothing() {
         "[a b\"c]",
         "[a, b\"c]",
         "{a\"b: c}",
+        "[? \"\": :\"]",
         // A quoted scalar in a flow collection still hides what it holds.
         "{\"a\":\"b]c\"}",
         "['a]']",
         "[a, \"b]c\"]",
-        "[a: \"b]c\"]",
-        // And so does one after a `:`, a `,`, or the start or end of a collection, past plain text.
+        // And so does one after a `:`, a `,`, a `?`, or the start or end of a collection, past
+        // plain text.
         "{\"a\":\"]: \"}",
         "[a, \"]: \"]",
         "{a: [\"]: \"]}",
         "{[a]: \"]: \"}",
+        "[a: \"]: \"]",
+        "{a: \"b # c\"}",
+        "{a: 'b # c'}",
+        "{a: \"[x\"}",
+        "{a: \"x, \"}",
+        "{? \"]: \": b}",
+        // A property between them changes nothing.
+        "{\"a\":!t \"]: \"}",
+        "{\"a\":&b \"]: \"}",
+        "{a: !t \"b # c\"}",
     ];
     for key in keys {
         assert_eq!(
@@ -679,6 +690,61 @@ fn a_quote_inside_flow_plain_text_opens_nothing() {
             "{key}"
         );
         rejected_in_both_modes(&format!("- {key}: |\n  x\n"));
+    }
+}
+
+/// Valid forms next to known wrong rejections, each read as what it means in both modes. A fix that
+/// goes too far, or a new check that catches one of these, fails here.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn valid_forms_beside_wrong_rejections_keep_their_reading() {
+    for (input, meaning) in [
+        // A block scalar past its parent.
+        ("a:\n |\n  x", "a: \"x\""),
+        ("b: 1\na:\n >\n  x", "{b: 1, a: \"x\"}"),
+        // A tab before a plain key's `:`, or with no `: ` after it.
+        ("a\t: 1", "{a: 1}"),
+        ("b: 1\na\t: 1", "{b: 1, a: 1}"),
+        ("k:\t\"a:b\"", "{k: \"a:b\"}"),
+        ("k:\t[a:b]", "{k: [\"a:b\"]}"),
+        ("k:\t{a:b}", "{k: {\"a:b\": ~}}"),
+        ("---\tb", "b"),
+        ("--- a\t# c", "a"),
+        // A flow mapping's empty key.
+        ("{? ,}", "{~: ~}"),
+        // A comment's colon on a flow scalar's line.
+        ("[a\n b # c: d\n]", "[\"a b\"]"),
+        ("{a: b\n c # d: e\n}", "{a: \"b c\"}"),
+        // Text like a marker on a flow scalar's line.
+        ("[a\n---b]", "[\"a ---b\"]"),
+        ("k: [a\n  ...b]", "{k: [\"a ...b\"]}"),
+        ("{a\n  ---b\n}", "{\"a ---b\": ~}"),
+        // These lines are past the scalar's parent.
+        ("- \"a\n b\"", "[\"a b\"]"),
+        ("k: \"a\n b\"", "{k: \"a b\"}"),
+        // Characters that YAML 1.2 doesn't break a line on.
+        ("'a\u{2028}b'", "\"a\\Lb\""),
+        ("'a\u{2029}b'", "\"a\\Pb\""),
+        ("'a\u{85}b'", "\"a\\Nb\""),
+        ("k: 'a\u{2028}b'", "{k: \"a\\Lb\"}"),
+        ("k: \"a\u{2028}b\"", "{k: \"a\\Lb\"}"),
+        // A comment with nothing before it.
+        ("# c\na: 1", "{a: 1}"),
+        ("#", "~"),
+    ] {
+        let expected =
+            ayaml::parse_value(meaning).unwrap_or_else(|error| panic!("{meaning:?}: {error}"));
+        assert_eq!(
+            ayaml::parse_value(input).unwrap_or_else(|error| panic!("{input:?}: {error}")),
+            expected,
+            "{input:?}"
+        );
+        assert_eq!(
+            ayaml::compat::from_str::<ayaml::Value>(input)
+                .unwrap_or_else(|error| panic!("{input:?} in compat: {error}")),
+            expected,
+            "{input:?} in compat"
+        );
     }
 }
 

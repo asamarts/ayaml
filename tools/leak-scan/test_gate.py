@@ -170,15 +170,29 @@ class Classes(GateCase):
                 self.commit(f"Change\n\n{content}")
                 self.assert_rejected(self.scan(), "message or metadata")
 
-    def signed_commit(self, signature: str, message: str, after: str = "") -> None:
+    def signed_commit(
+        self,
+        signature: str,
+        message: str,
+        after: str = "",
+        header: str = "gpgsig",
+        armor: str = "PGP",
+        past_end: str = "",
+    ) -> None:
         """Make HEAD a commit whose signature header holds `signature`, as GitHub's commits do."""
+        self.commit_with_header(
+            f"{header} -----BEGIN {armor} SIGNATURE-----\n \n {signature}\n"
+            f" -----END {armor} SIGNATURE-----\n{past_end}{after}",
+            message,
+        )
+
+    def commit_with_header(self, header: str, message: str) -> None:
         tree = self.git("rev-parse", "HEAD^{tree}").stdout.strip()
         raw = (
             f"tree {tree}\nparent {self.base}\n"
             "author Test <test@example.invalid> 1 +0000\n"
             "committer GitHub <noreply@example.invalid> 1 +0000\n"
-            f"gpgsig -----BEGIN PGP SIGNATURE-----\n \n {signature}\n -----END PGP SIGNATURE-----\n"
-            f"{after}\n{message}\n"
+            f"{header}\n{message}\n"
         )
         sha = subprocess.run(
             ["git", "hash-object", "-t", "commit", "-w", "--stdin", "--literally"],
@@ -196,6 +210,29 @@ class Classes(GateCase):
         self.signed_commit(HOME_PATH, "Change")
         result = self.scan()
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_each_kind_of_signature_is_not_read_as_text(self) -> None:
+        for header, armor in (("gpgsig-sha256", "PGP"), ("gpgsig", "SSH"), ("gpgsig-sha256", "SSH")):
+            with self.subTest(f"{header} {armor}"):
+                self.git("checkout", "-q", "-B", f"{header}-{armor}", self.base)
+                self.signed_commit(HOME_PATH, "Change", header=header, armor=armor)
+                result = self.scan()
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_one_word_outside_the_armor_is_read(self) -> None:
+        self.commit_with_header(f"gpgsig {HOME_PATH}", "Change")
+        self.assert_rejected(self.scan(), "message or metadata")
+        for armor in ("PGP", "SSH"):
+            with self.subTest(armor):
+                self.git("checkout", "-q", "-B", f"past-end-{armor}", self.base)
+                self.signed_commit("wsFcBAABCAAQ", "Change", armor=armor, past_end=f" {HOME_PATH}\n")
+                self.assert_rejected(self.scan(), "message or metadata")
+
+    def test_armor_with_no_end_stops_at_the_next_header(self) -> None:
+        self.commit_with_header(
+            f"gpgsig -----BEGIN PGP SIGNATURE-----\n wsFcBAABCAAQ\nmergetag {HOME_PATH}", "Change"
+        )
+        self.assert_rejected(self.scan(), "message or metadata")
 
     def test_other_text_in_a_signature_header_is_read(self) -> None:
         self.signed_commit(LEAKS["host"].strip(), "Change")

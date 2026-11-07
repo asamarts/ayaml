@@ -2133,12 +2133,17 @@ fn find_value_indicator(text: &str, compat: bool) -> Option<usize> {
     // Inside a plain scalar at depth 0, quotes, flow indicators, and
     // property indicators are content: `a [b: |` has the key `a [b`.
     let mut in_plain = false;
-    // In a flow collection, a plain scalar runs to the next flow indicator, and quotes inside it,
-    // after any blank, are content too: `[a"b]: |` has the key `[a"b]`.
+    // In a flow collection, a plain scalar runs to the next flow indicator or `: `, and quotes
+    // inside it, after any blank, are content too: `[a"b]: |` has the key `[a"b]`.
     let mut in_flow_plain = false;
     let mut name_stopped = false;
     while index < bytes.len() {
         let byte = bytes[index];
+        let ends_indicator = bytes
+            .get(index + 1)
+            .is_none_or(|next| matches!(next, b' ' | b'\t' | b',' | b'[' | b']' | b'{' | b'}'));
+        // A property may come right after a quoted key's `:`, as in `{"a":!t "b"}`.
+        let after_key_colon = depth > 0 && !in_flow_plain && index > 0 && bytes[index - 1] == b':';
         match byte {
             b'#' if token_start => return None,
             b':' if depth == 0
@@ -2171,7 +2176,7 @@ fn find_value_indicator(text: &str, compat: bool) -> Option<usize> {
             // `!: |` or `&a: x`, is part of the name. In compat an anchor or
             // alias name ends where libyaml ends it, and a new token starts
             // there: `&a:: |` is the key `:` anchored `a`.
-            b'!' | b'&' | b'*' if token_start => {
+            b'!' | b'&' | b'*' if token_start || after_key_colon => {
                 let name_start = index + 1;
                 while index + 1 < bytes.len()
                     && !matches!(bytes[index + 1], b' ' | b'\t')
@@ -2197,8 +2202,10 @@ fn find_value_indicator(text: &str, compat: bool) -> Option<usize> {
             }
             b',' if depth > 0 => in_flow_plain = false,
             b' ' | b'\t' => {}
-            // A `:` starts no plain scalar here if a quoted one follows: `{"a":"b"}`.
-            b':' if depth > 0 => {}
+            // These indicators end a plain scalar, and whatever follows them can be quoted. A `:`
+            // with text right after it starts one, unless a quoted key comes first: `{"a":"b"}`.
+            b':' if depth > 0 => in_flow_plain = !ends_indicator && (in_flow_plain || token_start),
+            b'?' if depth > 0 && !in_flow_plain && ends_indicator => {}
             _ if depth > 0 => in_flow_plain = true,
             _ if token_start => in_plain = true,
             _ => {}

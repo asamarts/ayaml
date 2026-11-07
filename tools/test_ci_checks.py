@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import io
 import json
 import os
@@ -115,6 +116,7 @@ def run(hours_ago: float, conclusion: str = "success", status: str = "completed"
     return {
         "conclusion": conclusion,
         "createdAt": created.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "databaseId": 1,
         "event": "schedule",
         "status": status,
         "url": "https://example.invalid/run",
@@ -175,6 +177,34 @@ class ScheduledRuns(unittest.TestCase):
             status = check_scheduled_runs.main(arguments if arguments is not None else [])
         return status, calls
 
+    def test_no_run_says_when_the_last_was_so_that_each_outage_reads_differently(self) -> None:
+        found = self.problems(run(40))
+        self.assertEqual(len(found), 1)
+        self.assertIn("no run in the last 36 hours", found[0])
+        self.assertIn(run(40)["createdAt"], found[0])
+        self.assertNotEqual(found, self.problems(run(50)))
+
+    def test_a_green_run_that_left_a_sealed_file_is_a_problem(self) -> None:
+        found = self.problems(run(3) | {"sealed": 1})
+        self.assertEqual(len(found), 1)
+        self.assertIn("passed and left sealed files", found[0])
+        self.assertEqual(self.problems(run(3) | {"sealed": 0}), [])
+
+    def test_the_watch_asks_only_about_green_scheduled_runs_in_its_window(self) -> None:
+        runs = [
+            run(3) | {"databaseId": 11},
+            run(4, "failure") | {"databaseId": 12},
+            run(5) | {"databaseId": 13, "event": "workflow_dispatch"},
+            run(37) | {"databaseId": 14},
+        ]
+        replies = [json.dumps(runs), json.dumps({"total_count": 2}), "[]", "[]", ""]
+        status, calls = self.with_gh(*replies, arguments=["--open-issue"])
+        self.assertEqual(status, 1)
+        asked = [call[1] for call in calls if call[0] == "api"]
+        self.assertEqual(asked, ["repos/{owner}/{repo}/actions/runs/11/artifacts"])
+        self.assertEqual(calls[-1][:2], ["issue", "create"])
+        self.assertIn("fuzz.yml passed and left sealed files", calls[-1][-1])
+
     def test_main_does_not_touch_issues_unless_asked(self) -> None:
         status, calls = self.with_gh("[]", "[]")
         self.assertEqual(status, 1)
@@ -187,42 +217,83 @@ class ScheduledRuns(unittest.TestCase):
         self.assertIn("fuzz.yml has had no run", calls[-1][-1])
         self.assertIn("advisories.yml has had no run", calls[-1][-1])
 
-    OPEN_ISSUES = json.dumps(
-        [
-            {"number": 7, "title": check_scheduled_runs.ISSUE_TITLE},
-            {"number": 8, "title": "Something else"},
-        ]
-    )
+    @staticmethod
+    def issues(body: str, comment: str = "", state: str = "OPEN") -> str:
+        return json.dumps(
+            [
+                {
+                    "number": 7,
+                    "state": state,
+                    "title": check_scheduled_runs.ISSUE_TITLE,
+                    "body": body,
+                    "comments": [{"body": comment}] if comment else [],
+                },
+                {
+                    "number": 8,
+                    "state": "OPEN",
+                    "title": "Something else",
+                    "body": "- advisories.yml has had no run in the last 36 hours",
+                    "comments": [],
+                },
+            ]
+        )
 
     def test_a_problem_already_in_the_open_issue_is_not_repeated(self) -> None:
         body = "- fuzz.yml has had no run in the last 36 hours"
         comment = "- advisories.yml has had no run in the last 36 hours"
-        issue = json.dumps({"body": body, "comments": [{"body": comment}]})
         status, calls = self.with_gh(
-            "[]", "[]", self.OPEN_ISSUES, issue, arguments=["--open-issue"]
+            "[]", "[]", self.issues(body, comment), arguments=["--open-issue"]
         )
         self.assertEqual(status, 1)
-        self.assertEqual(calls[-1][:3], ["issue", "view", "7"])
+        self.assertEqual(calls[-1][:2], ["issue", "list"])
 
     def test_a_new_problem_adds_to_the_open_issue(self) -> None:
-        issue = json.dumps(
-            {"body": "- fuzz.yml has had no run in the last 36 hours", "comments": []}
-        )
         status, calls = self.with_gh(
-            "[]", "[]", self.OPEN_ISSUES, issue, "", arguments=["--open-issue"]
+            "[]",
+            "[]",
+            self.issues("- fuzz.yml has had no run in the last 36 hours"),
+            "",
+            arguments=["--open-issue"],
         )
         self.assertEqual(status, 1)
         self.assertEqual(calls[-1][:3], ["issue", "comment", "7"])
         self.assertIn("advisories.yml has had no run", calls[-1][-1])
         self.assertNotIn("fuzz.yml", calls[-1][-1])
 
+    def test_closed_issues_are_read_too(self) -> None:
+        _, calls = self.with_gh("[]", "[]", self.issues("- x"), "", arguments=["--open-issue"])
+        listed = next(call for call in calls if call[:2] == ["issue", "list"])
+        self.assertEqual(listed[listed.index("--state") + 1], "all")
+
+    def test_a_problem_in_a_closed_issue_is_not_filed_again(self) -> None:
+        # Someone read it and closed the issue, and that run is still inside the window.
+        body = "- fuzz.yml has had no run in the last 36 hours\n- advisories.yml has had no run in the last 36 hours"
+        status, calls = self.with_gh(
+            "[]", "[]", self.issues(body, state="CLOSED"), arguments=["--open-issue"]
+        )
+        self.assertEqual(status, 1)
+        self.assertEqual(calls[-1][:2], ["issue", "list"])
+
+    def test_a_new_problem_after_a_closed_issue_opens_another(self) -> None:
+        status, calls = self.with_gh(
+            "[]",
+            "[]",
+            self.issues("- fuzz.yml has had no run in the last 36 hours", state="CLOSED"),
+            "",
+            arguments=["--open-issue"],
+        )
+        self.assertEqual(status, 1)
+        self.assertEqual(calls[-1][:2], ["issue", "create"])
+        self.assertIn("advisories.yml has had no run", calls[-1][-1])
+        self.assertNotIn("fuzz.yml", calls[-1][-1])
+
     def test_a_green_check_leaves_an_open_issue_for_a_person_to_close(self) -> None:
         # What the failed run found stays sealed until someone reads it.
         good = json.dumps([run(3)])
-        status, calls = self.with_gh(good, good, self.OPEN_ISSUES, arguments=["--open-issue"])
+        none = json.dumps({"total_count": 0})
+        status, calls = self.with_gh(good, none, good, none, arguments=["--open-issue"])
         self.assertEqual(status, 0)
-        self.assertEqual(calls[-1][:2], ["issue", "list"])
-        self.assertEqual(len(calls), 3)
+        self.assertEqual([call[0] for call in calls], ["run", "api", "run", "api"])
 
     def test_a_check_that_cannot_run_says_so(self) -> None:
         with mock.patch("subprocess.run", side_effect=FileNotFoundError("gh")), mock.patch("builtins.print"):
@@ -316,6 +387,26 @@ class FuzzHostedTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("::warning::the parse fuzzer passed and left 1 files\n", result.stdout)
         self.assertTrue((self.output / "fuzz-parse.tar.gz.age").exists())
+        self.assert_nothing_plain_left(result)
+
+    def test_a_failed_encryption_turns_a_green_run_red(self) -> None:
+        self.fuzzer(0)
+        fake_tool(self.bin, "age", 'while [ "$1" != -o ]; do shift; done; echo part > "$2"; exit 1\n')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("nothing was kept", result.stderr)
+        self.assert_nothing_plain_left(result)
+
+    def test_what_a_run_left_stays_out_of_the_cached_corpus(self) -> None:
+        corpus = self.root / "fuzz/corpus/parse"
+        corpus.mkdir(parents=True)
+        (corpus / hashlib.sha1(SECRET.encode()).hexdigest()).write_text(SECRET)
+        (corpus / "other").write_text("kept")
+        self.fuzzer(0)
+        fake_tool(self.bin, "age", 'while [ "$1" != -o ]; do shift; done; echo sealed > "$2"\n')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual([path.name for path in corpus.iterdir()], ["other"])
         self.assert_nothing_plain_left(result)
 
     def test_a_failed_pack_does_not_show_a_file_name(self) -> None:

@@ -128,9 +128,9 @@ these places, on purpose:
 - An empty implicit key, such as `: a`, is valid.
 - Tabs are separation wherever they aren't indentation. A nested flow collection's or
   quoted scalar's lines still need space indentation, so `a: [\n\tb]` is an error.
-- A top-level block scalar may hold content at column 0. A `#` line indented less than a blank
-  line before it is that scalar's first content, so the blank line is too long and it's an error,
-  where libyaml ends the scalar there.
+- A top-level block scalar may hold content at column 0. A `#` line past the scalar's parent and
+  indented less than a blank line before it is that scalar's first content, so the blank line is
+  too long and it's an error, where libyaml ends the scalar there.
 - A block scalar or a quoted scalar's continuation must be indented past its parent, so
   `a:\n|` and `a: "b\nc"` are errors.
 - A comment must be separated from what precedes it, so `""#` and `|#` are errors.

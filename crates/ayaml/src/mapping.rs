@@ -481,9 +481,8 @@ mod tests {
         );
     }
 
-    /// Any 65 values of 64 bits have a subset whose XOR is zero. Found by elimination under a
-    /// key anyone can compute, the subset splits into two mappings that would hash alike, and
-    /// enough of those are keys that take quadratic time.
+    /// Without a mark for each kind of number, these write the same bytes, and a mapping of them
+    /// cancels out under any key.
     #[test]
     fn what_values_write_tells_them_apart() {
         use std::hash::{Hash, Hasher};
@@ -505,18 +504,24 @@ mod tests {
             }
             bytes.0
         };
-        let (max, wide) = (u64::MAX.to_string(), (2_u128 << 64).to_string());
+        let max = u64::MAX.to_string();
+        let wide = ((2_u128 << 64) + 1).to_string();
+        let high = ((1_u128 << 127) + 5).to_string();
+        let low = format!("-{}", (1_u128 << 127) - 5);
         for (left, right) in [
             (vec!["-1"], vec![max.as_str()]),
-            (vec!["-1"], vec!["18446744073709551616"]),
             (vec!["1", "0"], vec![wide.as_str(), "~"]),
             (vec!["[-1, -1]"], vec!["[-1, 18446744073709551615]"]),
+            (vec![high.as_str()], vec![low.as_str()]),
             (vec!["1.5"], vec!["4609434218613702656"]),
         ] {
             assert_ne!(bytes(&left), bytes(&right), "{left:?} and {right:?}");
         }
     }
 
+    /// Any 65 values of 64 bits have a subset whose XOR is zero. Found by elimination under a
+    /// key anyone can compute, the subset splits into two mappings that would hash alike, and
+    /// enough of those are keys that take quadratic time.
     #[test]
     fn entries_cannot_be_chosen_to_cancel_out() {
         use std::collections::hash_map::DefaultHasher;
