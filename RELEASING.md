@@ -88,15 +88,23 @@ gh workflow run release.yml -R asamarts/ayaml -f tag=v0.1.1
 ```
 
 The gate runs on the branch it was started from. The tag's checks and package run on the
-tag, and the package is compared with the bytes crates.io serves for that version. Nothing is
-published or released. This shows that `RELEASE_TOOLCHAIN` still rebuilds a published crate
-byte for byte. A rehearsal runs apart from releases, so it can't cancel one that waits for
-approval.
+tag, and the package is compared with the bytes crates.io serves for that version. Those bytes
+then go into a draft release named `rehearsal-RUN-ATTEMPT`, with the release job's notes but
+for the attestation record. The draft is checked as a rerun checks a release: exactly the crate
+and SHA256SUMS, with these bytes, and the notes it was given. Then it's deleted (D77). A draft
+makes no tag and only the repository's writers can see it. The job's last step deletes it even
+when an earlier step failed. If a cancelled run leaves one anyway, delete it under Releases.
 
-A rehearsal can't run the publish, attestation, and release jobs, since each writes something
-public. The first release is their first run. If the release job then fails the same way on
-every rerun, the version is on crates.io with no GitHub release, and since a rerun uses the
-tag's workflow, completing it takes the next patch version.
+Nothing is published or released. A rehearsal shows that `RELEASE_TOOLCHAIN` still rebuilds a
+published crate byte for byte, and that `tools/github_release.sh`, which the release job runs
+too, still creates and checks a release. Started from a pull request's branch, it rehearses
+that branch's script. A rehearsal runs apart from releases, so it can't cancel one that waits
+for approval.
+
+A rehearsal can't run the publish or the attestation, since each writes something public for
+good. The first release is their first run. If the release job then fails the same way on every
+rerun, the version is on crates.io with no GitHub release, and since a rerun uses the tag's
+workflow, completing it takes the next patch version.
 
 ## When a run fails
 

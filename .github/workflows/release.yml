@@ -6,9 +6,10 @@ name: release
 # release with their checksums. RELEASING.md says how to cut a release and how to recover from a
 # failed run.
 #
-# Started by hand, it rehearses everything but the publish and the release against a tag that is
-# already published: the gate runs on the branch it was started from, the tag is checked and
-# packaged, and the package is compared with the bytes crates.io serves.
+# Started by hand, it rehearses everything but the publish and the attestation against a tag that
+# is already published: the gate runs on the branch it was started from, the tag is checked and
+# packaged, the package is compared with the bytes crates.io serves, and those bytes go into a
+# draft release that is checked as a rerun checks a release, and deleted (D77).
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
@@ -177,14 +178,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$COMMIT"
-          mkdir -p "$RUNNER_TEMP/dist"
-          crate="$RUNNER_TEMP/dist/ayaml-$VERSION.crate"
-          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error --retry 3 \
-            --user-agent "ayaml-release (https://github.com/asamarts/ayaml)" \
-            --output "$crate" "https://static.crates.io/crates/ayaml/ayaml-$VERSION.crate"
-          python3 tools/check_release.py registry "$crate" "$VERSION" 600
-          test "$(sha256sum "$crate" | cut -d' ' -f1)" = "$DIGEST"
-          (cd "$RUNNER_TEMP/dist" && sha256sum "ayaml-$VERSION.crate" > SHA256SUMS)
+          tools/github_release.sh fetch "$VERSION" "$DIGEST" "$RUNNER_TEMP/dist"
       - name: Attest the crate's provenance
         id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -205,31 +199,50 @@ jobs:
           ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
         run: |
           set -euo pipefail
-          dist="$RUNNER_TEMP/dist"
-          # gh finds a draft too. gh creates a release as a draft, uploads its assets, and then
-          # publishes it, so a run stopped in between leaves a draft.
-          if assets="$(gh release view "$TAG" --json assets --jq '[.assets[].name] | sort | join(" ")' 2>/dev/null)"; then
-            # A rerun: the release must hold exactly these assets, with these bytes.
-            if [ "$assets" != "SHA256SUMS ayaml-$VERSION.crate" ]; then
-              echo "::error::release $TAG holds '$assets', not this crate and SHA256SUMS; see RELEASING.md"
-              exit 1
-            fi
-            mkdir -p "$RUNNER_TEMP/existing"
-            gh release download "$TAG" --dir "$RUNNER_TEMP/existing" --pattern "ayaml-$VERSION.crate" --pattern SHA256SUMS
-            cmp "$RUNNER_TEMP/existing/ayaml-$VERSION.crate" "$dist/ayaml-$VERSION.crate"
-            cmp "$RUNNER_TEMP/existing/SHA256SUMS" "$dist/SHA256SUMS"
-            if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true ]; then
-              gh release edit "$TAG" --draft=false
-              echo "::notice::published the draft release $TAG, which holds ayaml-$VERSION.crate with sha256 $DIGEST"
-            else
-              echo "::notice::release $TAG already holds ayaml-$VERSION.crate with sha256 $DIGEST"
-            fi
-            exit 0
-          fi
           {
             python3 tools/check_release.py notes "$VERSION"
             echo
             python3 tools/check_release.py record "$TAG" "$COMMIT" "$DIGEST" "$ATTESTATION_URL"
           } > "$RUNNER_TEMP/notes.md"
-          gh release create "$TAG" --verify-tag --title "ayaml $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
-            "$dist/ayaml-$VERSION.crate" "$dist/SHA256SUMS"
+          tools/github_release.sh release "$TAG" "$VERSION" "$RUNNER_TEMP/dist" "$RUNNER_TEMP/notes.md"
+
+  rehearse-release:
+    name: rehearse the GitHub release
+    needs: package
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'asamarts/ayaml'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    # The draft needs write access to releases. This job builds nothing, and it runs only the
+    # scripts of the branch the rehearsal was started from, which only a writer can start.
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.package.outputs.version }}
+      COMMIT: ${{ needs.package.outputs.commit }}
+      DIGEST: ${{ needs.package.outputs.digest }}
+      DRAFT: rehearsal-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download what crates.io serves
+        run: tools/github_release.sh fetch "$VERSION" "$DIGEST" "$RUNNER_TEMP/dist"
+      - name: Create, check, and delete a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        # The release job's notes, but for the attestation's record, which a rehearsal doesn't make.
+        run: |
+          set -euo pipefail
+          {
+            python3 tools/check_release.py notes "$VERSION"
+            echo
+            python3 tools/check_release.py record "$TAG" "$COMMIT" "$DIGEST"
+          } > "$RUNNER_TEMP/notes.md"
+          tools/github_release.sh rehearse "$DRAFT" "$COMMIT" "$VERSION" "$RUNNER_TEMP/dist" "$RUNNER_TEMP/notes.md"
+      - name: Delete the draft if a step stopped before it could
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: tools/github_release.sh discard "$DRAFT"
