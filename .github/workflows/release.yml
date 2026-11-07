@@ -221,6 +221,9 @@ jobs:
       COMMIT: ${{ needs.package.outputs.commit }}
       DIGEST: ${{ needs.package.outputs.digest }}
       DRAFT: rehearsal-${{ github.run_id }}-${{ github.run_attempt }}
+      # A draft's tag would be made here. At the tag's own commit, whose workflow files aren't the
+      # default branch's, GitHub refused this job's token the draft, with a 403.
+      DRAFT_TARGET: ${{ github.event.repository.default_branch }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -239,7 +242,7 @@ jobs:
             echo
             python3 tools/check_release.py record "$TAG" "$COMMIT" "$DIGEST"
           } > "$RUNNER_TEMP/notes.md"
-          tools/github_release.sh rehearse "$DRAFT" "$COMMIT" "$VERSION" "$RUNNER_TEMP/dist" "$RUNNER_TEMP/notes.md"
+          tools/github_release.sh rehearse "$DRAFT" "$DRAFT_TARGET" "$VERSION" "$RUNNER_TEMP/dist" "$RUNNER_TEMP/notes.md"
       - name: Delete the draft if a step stopped before it could
         if: always()
         env:

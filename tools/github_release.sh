@@ -10,10 +10,11 @@
 #       Creates the release of TAG with the crate and SHA256SUMS of DIST and the notes in NOTES. A
 #       release that exists, as a rerun finds it, must hold exactly those assets with these bytes,
 #       and if it's a draft it's then published.
-#   tools/github_release.sh rehearse NAME COMMIT VERSION DIST NOTES
-#       Creates a draft named NAME at COMMIT the same way, checks it as a rerun checks a release, and
-#       deletes it. NAME is rehearsal-RUN-ATTEMPT, which no release tag can be, and a draft makes
-#       no tag.
+#   tools/github_release.sh rehearse NAME TARGET VERSION DIST NOTES
+#       Creates a draft named NAME the same way, checks it as a rerun checks a release, and deletes
+#       it. NAME is rehearsal-RUN-ATTEMPT, which no release tag can be. A draft makes no tag, but
+#       GitHub refused a job's token one whose tag would be made at a commit with other workflow
+#       files than the default branch's, so TARGET is the default branch.
 #   tools/github_release.sh discard NAME
 #       Deletes the draft NAME, if a rehearsal stopped before it could, and nothing else.
 set -euo pipefail
@@ -91,12 +92,12 @@ discard_draft() {
 }
 
 rehearse() {
-  local name="$1" commit="$2" version="$3" dist="$4" notes="$5"
+  local name="$1" target="$2" version="$3" dist="$4" notes="$5"
   [[ "$name" =~ $rehearsal_name ]] || fail "$name isn't a rehearsal's name, rehearsal-RUN-ATTEMPT"
   ! exists "$name" || fail "a release named $name exists already"
   draft="$name"
   trap discard_draft EXIT
-  gh release create "$name" --draft --target "$commit" --title "ayaml $version (rehearsal)" \
+  gh release create "$name" --draft --target "$target" --title "ayaml $version (rehearsal)" \
     --notes-file "$notes" "$dist/ayaml-$version.crate" "$dist/SHA256SUMS"
   is_draft "$name" || fail "$name was created, but not as a draft"
   check_assets "$name" "$version" "$dist"
@@ -116,7 +117,7 @@ discard() {
 }
 
 usage() {
-  sed -n '2,19s/^# \{0,1\}//p' "$0" >&2
+  sed -n '2,20s/^# \{0,1\}//p' "$0" >&2
   exit 2
 }
 

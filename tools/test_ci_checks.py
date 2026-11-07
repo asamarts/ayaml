@@ -611,7 +611,7 @@ class GitHubRelease(unittest.TestCase):
         return self.run_script("release", "v0.2.0", "0.2.0", str(self.dist), str(self.notes))
 
     def rehearse(self, name: str = "rehearsal-7-1", **env: str) -> subprocess.CompletedProcess:
-        return self.run_script("rehearse", name, "a" * 40, "0.2.0", str(self.dist), str(self.notes), **env)
+        return self.run_script("rehearse", name, "main", "0.2.0", str(self.dist), str(self.notes), **env)
 
     def releases(self) -> dict[str, str]:
         return {path.name: (path / "draft").read_text() for path in (self.state / "releases").iterdir()}
@@ -667,7 +667,7 @@ class GitHubRelease(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.releases(), {"v0.1.1": "false"})
         [create] = [call for call in self.calls() if call.startswith("release create")]
-        self.assertTrue(create.startswith("release create rehearsal-7-1 --draft --target " + "a" * 40), create)
+        self.assertTrue(create.startswith("release create rehearsal-7-1 --draft --target main "), create)
         self.assertNotIn("--verify-tag", create)
         self.assertIn("release delete rehearsal-7-1 --yes", self.calls())
         self.assertFalse([call for call in self.calls() if "v0.1.1" in call])
