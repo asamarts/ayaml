@@ -5,9 +5,10 @@
 #
 # Whatever the fuzzer prints can hold the input, and a crash file's name is a hash that a short
 # input could be guessed from. So the public log gets only the target, the exit status, the run
-# count, and the hash of the encrypted file. On a failure, the fuzzer's log and its crash files go
-# to OUTPUT_DIRECTORY, encrypted to tools/fuzz-crash-recipient.txt. If that fails, nothing is kept,
-# because a lost input is better than a published one. See D74.
+# count, how many files the run left, and the hash of the encrypted file. On a failure, or a green
+# run that left files such as a slow unit, the fuzzer's log and those files go to OUTPUT_DIRECTORY,
+# encrypted to tools/fuzz-crash-recipient.txt. If that fails, nothing is kept, because a lost input
+# is better than a published one. See D74.
 set -uo pipefail
 
 if [[ $# -ne 3 || ! "$1" =~ ^[a-z_]+$ || ! "$2" =~ ^[0-9]+$ ]]; then
@@ -29,15 +30,20 @@ status=$?
 
 runs="$(sed -n 's/^stat::number_of_executed_units: *\([0-9]*\)$/\1/p' "$work/fuzz.log" | tail -n1)"
 printf 'target=%s exit=%s runs=%s\n' "$target" "$status" "${runs:-unknown}"
-if [[ "$status" -eq 0 ]]; then
+found="$(find "$artifacts/$target" -type f 2>/dev/null | wc -l)"
+if [[ "$status" -eq 0 && "$found" -eq 0 ]]; then
     exit 0
+fi
+if [[ "$status" -eq 0 ]]; then
+    # A slow unit doesn't fail the run, so this is the only sign of it.
+    printf '::warning::the %s fuzzer passed and left %s files\n' "$target" "$found"
 fi
 
 sealed="$output/fuzz-$target.tar.gz.age"
 packed=()
 [[ -d "$artifacts/$target" ]] && packed=(-C "$artifacts" "$target")
 if mkdir -p "$output" &&
-    tar -czf "$work/found.tar.gz" -C "$work" fuzz.log "${packed[@]}" &&
+    tar -czf "$work/found.tar.gz" -C "$work" fuzz.log "${packed[@]}" 2>/dev/null &&
     age -R "$root/tools/fuzz-crash-recipient.txt" -o "$sealed" "$work/found.tar.gz"; then
     printf 'encrypted=%s sha256=%s\n' "${sealed##*/}" "$(sha256sum "$sealed" | cut -d' ' -f1)"
 else

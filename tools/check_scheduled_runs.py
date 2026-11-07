@@ -4,12 +4,14 @@
 usage: tools/check_scheduled_runs.py [--open-issue]
 
 Asks `gh` about each workflow in WATCHED. Each one needs at least one run on main within
-WINDOW_HOURS, and every run in that window has to have succeeded. A run by hand counts, so running
-a workflow is enough to show that it works before its first scheduled run.
+WINDOW_HOURS, and every scheduled run in that window has to have succeeded. A run by hand counts as
+a run, so running a workflow is enough to show that it works before its first scheduled run, but
+its own result is not reported.
 
-With --open-issue, as in the scheduled-watch workflow, a problem opens one issue, and an open one
-is closed once nothing is wrong. The issue names the workflow and links the run, and holds nothing
-from its log.
+With --open-issue, as in the scheduled-watch workflow, a problem opens one issue, and each new
+problem adds to the one that's open. Only a person closes it: a later green run says nothing about
+what a failed run found, which is sealed in that run's artifact until someone reads it. The issue
+names the workflow and links the run, and holds nothing from its log.
 
 GitHub turns off every schedule in a repository after 60 days with no activity, this one included,
 so `tools/ci-local.sh` runs this too.
@@ -74,8 +76,12 @@ def recent_runs(workflow: str) -> list[dict]:
     )
 
 
+def as_list(found: list[str]) -> str:
+    return "\n".join(f"- {problem}" for problem in found)
+
+
 def update_issue(found: list[str]) -> None:
-    """Keep one issue open while there's a problem, and close it once there isn't."""
+    """Report what isn't in the open issue yet, opening one if there's none."""
     numbers = [
         issue["number"]
         for issue in json.loads(
@@ -83,12 +89,16 @@ def update_issue(found: list[str]) -> None:
         )
         if issue["title"] == ISSUE_TITLE
     ]
-    if found and not numbers:
-        body = "\n".join(f"- {problem}" for problem in found)
-        gh("issue", "create", "--title", ISSUE_TITLE, "--body", body)
-    elif not found:
-        for number in numbers:
-            gh("issue", "close", str(number), "--comment", "The latest check found nothing wrong.")
+    if not found:
+        return
+    if not numbers:
+        gh("issue", "create", "--title", ISSUE_TITLE, "--body", as_list(found))
+        return
+    issue = json.loads(gh("issue", "view", str(numbers[0]), "--json", "body,comments"))
+    reported = "\n".join([issue["body"], *(comment["body"] for comment in issue["comments"])])
+    new = [problem for problem in found if problem not in reported]
+    if new:
+        gh("issue", "comment", str(numbers[0]), "--body", as_list(new))
 
 
 def main(arguments: list[str]) -> int:

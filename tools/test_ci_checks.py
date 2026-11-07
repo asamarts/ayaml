@@ -187,24 +187,42 @@ class ScheduledRuns(unittest.TestCase):
         self.assertIn("fuzz.yml has had no run", calls[-1][-1])
         self.assertIn("advisories.yml has had no run", calls[-1][-1])
 
-    def test_an_open_issue_is_not_repeated(self) -> None:
-        issues = json.dumps([{"number": 7, "title": check_scheduled_runs.ISSUE_TITLE}])
-        status, calls = self.with_gh("[]", "[]", issues, arguments=["--open-issue"])
-        self.assertEqual(status, 1)
-        self.assertEqual(calls[-1][:2], ["issue", "list"])
+    OPEN_ISSUES = json.dumps(
+        [
+            {"number": 7, "title": check_scheduled_runs.ISSUE_TITLE},
+            {"number": 8, "title": "Something else"},
+        ]
+    )
 
-    def test_an_issue_is_closed_once_nothing_is_wrong(self) -> None:
-        good = json.dumps([run(3)])
-        issues = json.dumps(
-            [
-                {"number": 7, "title": check_scheduled_runs.ISSUE_TITLE},
-                {"number": 8, "title": "Something else"},
-            ]
+    def test_a_problem_already_in_the_open_issue_is_not_repeated(self) -> None:
+        body = "- fuzz.yml has had no run in the last 36 hours"
+        comment = "- advisories.yml has had no run in the last 36 hours"
+        issue = json.dumps({"body": body, "comments": [{"body": comment}]})
+        status, calls = self.with_gh(
+            "[]", "[]", self.OPEN_ISSUES, issue, arguments=["--open-issue"]
         )
-        status, calls = self.with_gh(good, good, issues, "", arguments=["--open-issue"])
+        self.assertEqual(status, 1)
+        self.assertEqual(calls[-1][:3], ["issue", "view", "7"])
+
+    def test_a_new_problem_adds_to_the_open_issue(self) -> None:
+        issue = json.dumps(
+            {"body": "- fuzz.yml has had no run in the last 36 hours", "comments": []}
+        )
+        status, calls = self.with_gh(
+            "[]", "[]", self.OPEN_ISSUES, issue, "", arguments=["--open-issue"]
+        )
+        self.assertEqual(status, 1)
+        self.assertEqual(calls[-1][:3], ["issue", "comment", "7"])
+        self.assertIn("advisories.yml has had no run", calls[-1][-1])
+        self.assertNotIn("fuzz.yml", calls[-1][-1])
+
+    def test_a_green_check_leaves_an_open_issue_for_a_person_to_close(self) -> None:
+        # What the failed run found stays sealed until someone reads it.
+        good = json.dumps([run(3)])
+        status, calls = self.with_gh(good, good, self.OPEN_ISSUES, arguments=["--open-issue"])
         self.assertEqual(status, 0)
-        self.assertEqual(calls[-1][:3], ["issue", "close", "7"])
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(calls[-1][:2], ["issue", "list"])
+        self.assertEqual(len(calls), 3)
 
     def test_a_check_that_cannot_run_says_so(self) -> None:
         with mock.patch("subprocess.run", side_effect=FileNotFoundError("gh")), mock.patch("builtins.print"):
@@ -289,6 +307,24 @@ class FuzzHostedTests(unittest.TestCase):
         self.assertEqual(result.returncode, 77)
         self.assertIn("nothing was kept", result.stderr)
         self.assertEqual(list(self.output.iterdir()), [])
+        self.assert_nothing_plain_left(result)
+
+    def test_a_green_run_that_left_a_file_seals_it_and_stays_green(self) -> None:
+        self.fuzzer(0)
+        fake_tool(self.bin, "age", 'while [ "$1" != -o ]; do shift; done; echo sealed > "$2"\n')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("::warning::the parse fuzzer passed and left 1 files\n", result.stdout)
+        self.assertTrue((self.output / "fuzz-parse.tar.gz.age").exists())
+        self.assert_nothing_plain_left(result)
+
+    def test_a_failed_pack_does_not_show_a_file_name(self) -> None:
+        self.fuzzer(77)
+        fake_tool(self.bin, "tar", 'echo "tar: crash-abc: Cannot open" >&2; exit 2\n')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 77)
+        self.assertIn("nothing was kept", result.stderr)
+        self.assertNotIn("crash-abc", result.stdout + result.stderr)
         self.assert_nothing_plain_left(result)
 
     def test_a_failure_with_no_crash_file_still_hides_the_log(self) -> None:

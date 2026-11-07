@@ -192,9 +192,14 @@ class Classes(GateCase):
         self.git("reset", "-q", "--hard", sha)
 
     def test_a_signature_is_not_read_as_text(self) -> None:
-        self.signed_commit(LEAKS["host"].strip(), "Change")
+        # All of it is base64, as a signature that matches a pattern by chance would be.
+        self.signed_commit(HOME_PATH, "Change")
         result = self.scan()
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_other_text_in_a_signature_header_is_read(self) -> None:
+        self.signed_commit(LEAKS["host"].strip(), "Change")
+        self.assert_rejected(self.scan(), "message or metadata")
 
     def test_a_signed_commit_message_is_still_scanned(self) -> None:
         for name, content in LEAKS.items():

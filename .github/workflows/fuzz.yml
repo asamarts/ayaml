@@ -39,7 +39,7 @@ jobs:
       - name: Run fuzzer
         run: tools/fuzz-hosted.sh ${{ matrix.target }} 60 "$RUNNER_TEMP/fuzz-encrypted"
       - name: Upload what it found, encrypted
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: fuzz-${{ matrix.target }}-encrypted
