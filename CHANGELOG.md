@@ -12,6 +12,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tasks[1]: unknown field `efort`, expected `title` or `effort` at line 4 column 5`, on every
   typed entry point. `Error::message` documents how a path reads. The span and `ErrorKind::Serde`
   are as they were, and an error at the document's root gains nothing.
+- In compat mode, an alias directly followed by `:` is now a mapping key, as in libyaml, so `*a: 1`
+  has the key that `a` stands for. An alias keeps such a colon only when an anchor earlier in the
+  same document has that exact name. Default mode is unchanged.
 
 ### Fixed
 

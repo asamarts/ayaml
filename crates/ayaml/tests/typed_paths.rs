@@ -4,12 +4,12 @@
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, HashMap};
-use std::fmt::Debug;
+use std::fmt::{self, Debug};
 use std::marker::PhantomData;
 
 use ayaml::{Deserializer, Error, ErrorKind, Value};
 use serde::Deserialize;
-use serde::de::{DeserializeOwned, IgnoredAny};
+use serde::de::{DeserializeOwned, Deserializer as Deserializer2, IgnoredAny, MapAccess, Visitor};
 
 /// Every typed entry point, and whether it reports source spans.
 fn every_reader<T: DeserializeOwned + Debug>(input: &str) -> Vec<(&'static str, Error, bool)> {
@@ -432,4 +432,44 @@ fn a_string_key_reads_the_same_whatever_the_target() {
     }
     let keys: BTreeMap<IgnoredKey, u8> = owned("ab: 1\n").unwrap();
     assert_eq!(keys.keys().next().unwrap().0, b"ab");
+}
+
+/// Reads one key and asks for its value twice, or asks for a value before reading any key.
+#[derive(Debug)]
+struct Greedy<const KEY_FIRST: bool>;
+
+impl<'de, const KEY_FIRST: bool> Deserialize<'de> for Greedy<KEY_FIRST> {
+    fn deserialize<D: Deserializer2<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(Self)
+    }
+}
+
+impl<'de, const KEY_FIRST: bool> Visitor<'de> for Greedy<KEY_FIRST> {
+    type Value = Self;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a mapping")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self, A::Error> {
+        if KEY_FIRST {
+            map.next_key::<IgnoredAny>()?;
+            map.next_value::<IgnoredAny>()?;
+        }
+        map.next_value::<IgnoredAny>()?;
+        Ok(self)
+    }
+}
+
+#[test]
+fn a_map_gives_each_value_once_and_only_after_its_key() {
+    let input = "a: 1\nb: 2\n";
+    let before = ayaml::from_str::<Greedy<false>>(input).expect_err("no key was read");
+    let twice = ayaml::from_str::<Greedy<true>>(input).expect_err("the value was read");
+    for error in [before, twice] {
+        assert!(
+            error.to_string().contains("map value requested before key"),
+            "{error}"
+        );
+    }
 }
