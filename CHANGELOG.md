@@ -53,8 +53,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - A block scalar is now built as it is read. Its lines were listed first, so a read of a 4 MiB
-  block scalar of short or blank lines held 25 to 42 times its size at its peak, where it now
-  holds about 5 to 10 times. The index of line starts is sized before it is built, at 8 bytes
+  block scalar of short or blank lines took 25 to 42 times its size in resident memory at its
+  peak, where it now takes about 5 to 10 times. Counting the capacity it reserves without
+  touching, a literal scalar of blank lines reaches 12 times. The index of line starts is sized before it is built, at 8 bytes
   for each CR or LF, so it no longer grows by doubling.
 - The scanner's token arena now grows by a sixteenth of itself once it holds more than 16 chunks.
   Growing by a fixed chunk alone copied it a number of times quadratic in its length wherever

@@ -63,8 +63,10 @@ line at a time, besides what it builds:
 - The index takes 8 bytes for each CR or LF in the input, so input of blank lines, a
   byte each, costs 8 times its size there. That is 8 bytes a line, or under 16 where
   lines end in CRLF.
-- A block scalar is built as it is read. A read of one holds about 5 times its input
-  for short lines, and about 10 times for blank lines, where the index costs most.
+- A block scalar is built as it is read. At its peak a read of one takes about 5 times
+  its input in resident memory for short lines, and about 10 times for blank lines,
+  where the index costs most. Counting the capacity it reserves without touching, a
+  literal scalar of blank lines reaches 12 times.
 - A token takes about 100 bytes. A flow collection is one logical line, so all its
   tokens are held at once, and every token counts against `max_events`. The arena
   that holds them grows by at least a sixteenth of itself, so its copying stays
