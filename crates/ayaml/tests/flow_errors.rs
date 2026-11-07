@@ -55,9 +55,21 @@ fn without_location(shown: &str, failure: At) -> String {
     shown.replacen(&location, "", 1)
 }
 
+/// Where a collection fails.
+#[derive(Clone, Copy, PartialEq)]
+enum Failure {
+    /// At a token where `,` or the closing bracket belongs.
+    Token,
+    /// At the end of the input, after a node.
+    End,
+    /// At the end of the input, where an entry, a key or a value starts: after `[`, `{`, `,`, `?`
+    /// or `:`. libyaml finds no node there, and compat says so.
+    EndWhereANodeBelongs,
+}
+
 /// In both modes, `input` fails at `failure`, in the collection opened at `opening`.
 #[track_caller]
-fn failure_is(input: &str, failure: At, opening: At, sequence: bool, ended: bool) {
+fn failure_is(input: &str, failure: At, opening: At, sequence: bool, kind: Failure) {
     let (name, closing) = if sequence {
         ("sequence", ']')
     } else {
@@ -65,7 +77,7 @@ fn failure_is(input: &str, failure: At, opening: At, sequence: bool, ended: bool
     };
     let (line, column) = failure;
     let (opened_line, opened_column) = opening;
-    let default = if ended {
+    let default = if kind != Failure::Token {
         format!(
             "unterminated flow {name} at line {line} column {column}, \
              opened at line {opened_line} column {opened_column}"
@@ -86,14 +98,21 @@ fn failure_is(input: &str, failure: At, opening: At, sequence: bool, ended: bool
         assert_eq!(location(&error), failure, "{reader}, {input:?}");
     }
     #[cfg(feature = "libyaml-compat")]
-    compat_failure_is(
-        input,
-        &format!(
-            "did not find expected ',' or '{closing}' at line {line} column {column}, \
-             while parsing a flow {name} at line {opened_line} column {opened_column}"
-        ),
-        failure,
-    );
+    {
+        let problem = if kind == Failure::EndWhereANodeBelongs {
+            "did not find expected node content".to_owned()
+        } else {
+            format!("did not find expected ',' or '{closing}'")
+        };
+        compat_failure_is(
+            input,
+            &format!(
+                "{problem} at line {line} column {column}, \
+                 while parsing a flow {name} at line {opened_line} column {opened_column}"
+            ),
+            failure,
+        );
+    }
 }
 
 /// In compat, every entry point gives `input` this message and failure location.
@@ -135,57 +154,73 @@ fn compat_failure_is(input: &str, message: &str, failure: At) {
 
 #[track_caller]
 fn sequence_ends(input: &str, failure: At, opening: At) {
-    failure_is(input, failure, opening, true, true);
+    failure_is(input, failure, opening, true, Failure::End);
 }
 
 #[track_caller]
 fn mapping_ends(input: &str, failure: At, opening: At) {
-    failure_is(input, failure, opening, false, true);
+    failure_is(input, failure, opening, false, Failure::End);
+}
+
+#[track_caller]
+fn sequence_ends_lacking_a_node(input: &str, failure: At, opening: At) {
+    failure_is(input, failure, opening, true, Failure::EndWhereANodeBelongs);
+}
+
+#[track_caller]
+fn mapping_ends_lacking_a_node(input: &str, failure: At, opening: At) {
+    failure_is(
+        input,
+        failure,
+        opening,
+        false,
+        Failure::EndWhereANodeBelongs,
+    );
 }
 
 #[track_caller]
 fn sequence_fails(input: &str, failure: At, opening: At) {
-    failure_is(input, failure, opening, true, false);
+    failure_is(input, failure, opening, true, Failure::Token);
 }
 
 #[track_caller]
 fn mapping_fails(input: &str, failure: At, opening: At) {
-    failure_is(input, failure, opening, false, false);
+    failure_is(input, failure, opening, false, Failure::Token);
 }
 
 #[test]
 fn input_that_ends_inside_a_sequence_names_the_end_and_the_opening() {
-    sequence_ends("[", (1, 2), (1, 1));
+    sequence_ends_lacking_a_node("[", (1, 2), (1, 1));
     sequence_ends("[a", (1, 3), (1, 1));
     sequence_ends("[a\n", (2, 1), (1, 1));
-    sequence_ends("[a,", (1, 4), (1, 1));
+    sequence_ends_lacking_a_node("[a,", (1, 4), (1, 1));
     sequence_ends("[a, b\n", (2, 1), (1, 1));
-    sequence_ends("[a: ", (1, 5), (1, 1));
+    sequence_ends_lacking_a_node("[a: ", (1, 5), (1, 1));
     sequence_ends("[a: b", (1, 6), (1, 1));
-    sequence_ends("[a: b, c: ", (1, 11), (1, 1));
-    sequence_ends("[?", (1, 3), (1, 1));
+    sequence_ends_lacking_a_node("[a: b, c: ", (1, 11), (1, 1));
+    sequence_ends_lacking_a_node("[?", (1, 3), (1, 1));
     sequence_ends("[? a", (1, 5), (1, 1));
     sequence_ends("[? a : b", (1, 9), (1, 1));
     sequence_ends("[&a", (1, 4), (1, 1));
     sequence_ends("[!!str", (1, 7), (1, 1));
     sequence_ends("[a #c\n", (2, 1), (1, 1));
-    sequence_ends("[a,\n\n\n", (4, 1), (1, 1));
+    sequence_ends_lacking_a_node("[a,\n\n\n", (4, 1), (1, 1));
     sequence_ends("- [a\n- b\n", (3, 1), (1, 3));
 }
 
 #[test]
 fn input_that_ends_inside_a_mapping_names_the_end_and_the_opening() {
-    mapping_ends("{", (1, 2), (1, 1));
+    mapping_ends_lacking_a_node("{", (1, 2), (1, 1));
     mapping_ends("{a", (1, 3), (1, 1));
-    mapping_ends("{a: ", (1, 5), (1, 1));
+    mapping_ends_lacking_a_node("{a: ", (1, 5), (1, 1));
     mapping_ends("{a: 1", (1, 6), (1, 1));
-    mapping_ends("{a: 1,", (1, 7), (1, 1));
+    mapping_ends_lacking_a_node("{a: 1,", (1, 7), (1, 1));
     mapping_ends("{\"a\" ", (1, 6), (1, 1));
-    mapping_ends("{\"a\": ", (1, 7), (1, 1));
+    mapping_ends_lacking_a_node("{\"a\": ", (1, 7), (1, 1));
     mapping_ends("{? a", (1, 5), (1, 1));
-    mapping_ends("{? a : ", (1, 8), (1, 1));
+    mapping_ends_lacking_a_node("{? a : ", (1, 8), (1, 1));
     mapping_ends("{&a", (1, 4), (1, 1));
-    mapping_ends("{a: 1, # c\n\n", (3, 1), (1, 1));
+    mapping_ends_lacking_a_node("{a: 1, # c\n\n", (3, 1), (1, 1));
     mapping_ends("x: {a\n b\n", (3, 1), (1, 4));
 }
 
@@ -212,14 +247,14 @@ fn the_innermost_open_collection_is_the_one_named() {
     mapping_fails("[{a: 1]", (1, 7), (1, 2));
     mapping_fails("[a: {b], c]", (1, 7), (1, 5));
     // A nested collection that never closes.
-    sequence_ends("[[", (1, 3), (1, 2));
+    sequence_ends_lacking_a_node("[[", (1, 3), (1, 2));
     sequence_ends("[? [a", (1, 6), (1, 4));
     sequence_ends("[a: [b", (1, 7), (1, 5));
-    sequence_ends("{[", (1, 3), (1, 2));
+    sequence_ends_lacking_a_node("{[", (1, 3), (1, 2));
     sequence_ends("{[a", (1, 4), (1, 2));
     sequence_ends("{? [a", (1, 6), (1, 4));
-    mapping_ends("[{", (1, 3), (1, 2));
-    mapping_ends("{{", (1, 3), (1, 2));
+    mapping_ends_lacking_a_node("[{", (1, 3), (1, 2));
+    mapping_ends_lacking_a_node("{{", (1, 3), (1, 2));
 }
 
 #[test]
@@ -230,7 +265,7 @@ fn a_collection_that_has_closed_is_never_named() {
     sequence_fails("[[a] b]", (1, 6), (1, 1));
     sequence_fails("{a: [b], c: [d}", (1, 15), (1, 13));
     mapping_ends("{a: {b: 1}", (1, 11), (1, 1));
-    mapping_ends("{[a]: ", (1, 7), (1, 1));
+    mapping_ends_lacking_a_node("{[a]: ", (1, 7), (1, 1));
     mapping_fails("{a: [b] c: d}", (1, 9), (1, 1));
 }
 
@@ -260,7 +295,7 @@ fn line_endings_and_marks_and_wide_characters_count_as_they_do_elsewhere() {
     // A byte order mark at the start of the input takes up no column.
     sequence_ends("\u{feff}[a", (1, 3), (1, 1));
     mapping_fails("\u{feff}{a: 1]", (1, 6), (1, 1));
-    sequence_ends("\u{feff}x: [\n", (2, 1), (1, 4));
+    sequence_ends_lacking_a_node("\u{feff}x: [\n", (2, 1), (1, 4));
     // Columns count characters, not bytes.
     sequence_ends("é: [ñ, é", (1, 9), (1, 4));
     sequence_fails("é: [ñ, \"é\" é: x", (1, 12), (1, 4));
@@ -458,7 +493,7 @@ fn the_modes_keep_their_own_readings() {
     sequence_ends_by_default(input, (2, 1), (1, 1));
     compat_failure_is(
         input,
-        "did not find expected ',' or ']' at line 2 column 2, \
+        "did not find expected node content at line 2 column 2, \
          while parsing a flow sequence at line 1 column 1",
         (2, 2),
     );

@@ -68,9 +68,10 @@ impl fmt::Display for ErrorKind {
 pub struct Error {
     kind: ErrorKind,
     /// How much of `message` is the path to what a typed reader rejected, with the `: ` after it.
-    path_len: u32,
+    /// A path is at most `MAX_PATH_BYTES` and one step long. Two `u16`s keep `Error` at 112 bytes.
+    path_len: u16,
     /// How much of the end of `message` is context that the error's location goes before.
-    context_len: u32,
+    context_len: u16,
     span: Option<Span>,
     message: String,
     limit: Option<Box<crate::limits::LimitExceeded>>,
@@ -103,7 +104,8 @@ impl Error {
     #[cold]
     pub(crate) fn with_context(mut self, context: &str) -> Self {
         self.message.push_str(context);
-        self.context_len = context.len() as u32;
+        // The parser's contexts are short. A longer one would stay before the location.
+        self.context_len = u16::try_from(context.len()).unwrap_or(0);
         self
     }
 
@@ -191,7 +193,7 @@ impl Error {
         if path_len == 0 {
             self.message.insert_str(0, ": ");
             self.message.insert_str(0, step);
-            self.path_len = (step.len() + 2) as u32;
+            self.path_len = path_bytes(step.len() + 2);
             return self;
         }
         if self.message.starts_with(ELIDED) {
@@ -209,9 +211,15 @@ impl Error {
         };
         self.message.insert_str(0, separator);
         self.message.insert_str(0, step);
-        self.path_len = (path_len + step.len() + separator.len()) as u32;
+        self.path_len = path_bytes(path_len + step.len() + separator.len());
         self
     }
+}
+
+/// A path's length as kept. One past `MAX_PATH_BYTES` has the same effect as any more: the next
+/// step is elided.
+fn path_bytes(len: usize) -> u16 {
+    u16::try_from(len).unwrap_or(u16::MAX)
 }
 
 /// Whether a key can stand in a path as it is, with no doubt about where it ends.
@@ -413,6 +421,41 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "a: invalid type: string \"at line 9\" at line 2 column 3"
+        );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn an_error_stays_small() {
+        assert_eq!(std::mem::size_of::<Error>(), 112);
+        assert_eq!(std::mem::size_of::<Result<crate::Value, Error>>(), 112);
+    }
+
+    /// A path's steps are as long as `inside` lets them be, and a context too long to keep its
+    /// length still shows.
+    #[test]
+    fn a_long_path_or_context_keeps_its_text() {
+        let long = "k".repeat(70_000);
+        let error = Error::new(ErrorKind::Serde, "bad").inside_key(&long);
+        assert!(
+            error.message().ends_with("…\"]: bad"),
+            "{}",
+            error.message()
+        );
+        let error = (0..2_000).fold(Error::new(ErrorKind::Serde, "bad"), |error, index| {
+            error.inside_index(index)
+        });
+        let start: String = error.message().chars().take(40).collect();
+        assert!(error.message().starts_with('…'), "{start}");
+        assert!(error.message().len() < 2_048);
+        let span = Span::new(Marker::new(4, 2, 3), Marker::new(5, 2, 4));
+        let context = format!(", {}", "c".repeat(70_000));
+        let error = Error::new(ErrorKind::Parser, "bad")
+            .with_context(&context)
+            .with_span(span);
+        assert_eq!(
+            error.to_string(),
+            format!("bad{context} at line 2 column 3")
         );
     }
 

@@ -11,6 +11,7 @@ use serde::ser::{
     Serialize, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant, SerializeTuple,
     SerializeTupleStruct, SerializeTupleVariant, Serializer,
 };
+use std::borrow::Cow;
 use std::fmt;
 
 use crate::mapping::Mapping;
@@ -287,7 +288,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
                 Ok(value)
             }
             Value::Tagged(tagged) => visitor.visit_enum(ValueEnumAccess {
-                variant: tagged.tag.serde_name(),
+                variant: Cow::Owned(tagged.tag.serde_name()),
                 value: tagged.value,
                 in_path: false,
             }),
@@ -431,7 +432,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
             }
         };
         visitor.visit_enum(ValueEnumAccess {
-            variant,
+            variant: Cow::Owned(variant),
             value,
             in_path: true,
         })
@@ -603,7 +604,7 @@ impl<'de> MapAccess<'de> for ValueMapAccess {
             // The map keeps the text, and a target copies it only if it needs its own.
             Value::String(text) => seed
                 .deserialize(KeyDeserializer {
-                    text: self.key.insert(text),
+                    text: Cow::Borrowed(self.key.insert(text)),
                 })
                 .map(Some),
             key => {
@@ -664,10 +665,10 @@ fn key_name(key: &Value) -> (Option<String>, Option<PlainKey>) {
     }
 }
 
-/// A string key or a variant's name, read without giving up its text, which a path may need. The
-/// text isn't the input's, so a visitor gets a copy of it in whatever form it asks for.
+/// A string key or a variant's name. Text that a path may need is borrowed, and a visitor gets a
+/// copy of it in whatever form it asks for. Text that nothing else keeps is the visitor's.
 struct KeyDeserializer<'a> {
-    text: &'a str,
+    text: Cow<'a, str>,
 }
 
 impl<'de> Deserializer<'de> for KeyDeserializer<'_> {
@@ -676,7 +677,7 @@ impl<'de> Deserializer<'de> for KeyDeserializer<'_> {
     // A visitor may implement only the owned form, and the default for it reads the borrowed one.
     // That holds for an identifier too, as `from_value` read one before it kept keys for paths.
     fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        visitor.visit_string(self.text.to_owned())
+        visitor.visit_string(self.text.into_owned())
     }
 
     fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
@@ -692,23 +693,26 @@ impl<'de> Deserializer<'de> for KeyDeserializer<'_> {
     }
 
     fn deserialize_bytes<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        visitor.visit_byte_buf(self.text.as_bytes().to_vec())
+        visitor.visit_byte_buf(self.text.into_owned().into_bytes())
     }
 
     fn deserialize_byte_buf<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         self.deserialize_bytes(visitor)
     }
 
+    /// A key read as an enum names a variant with no content, as a string value does. An error
+    /// inside it names the variant, from the key's own text.
     fn deserialize_enum<V: Visitor<'de>>(
         self,
-        name: &'static str,
-        variants: &'static [&'static str],
+        _name: &'static str,
+        _variants: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        ValueDeserializer {
-            value: Value::String(self.text.to_owned()),
-        }
-        .deserialize_enum(name, variants, visitor)
+        visitor.visit_enum(ValueEnumAccess {
+            variant: self.text,
+            value: Value::Null,
+            in_path: true,
+        })
     }
 
     serde::forward_to_deserialize_any! {
@@ -717,42 +721,49 @@ impl<'de> Deserializer<'de> for KeyDeserializer<'_> {
     }
 }
 
-struct ValueEnumAccess {
-    variant: String,
+struct ValueEnumAccess<'a> {
+    variant: Cow<'a, str>,
     value: Value,
     /// Whether an error inside names the variant. A target that isn't an enum takes the tag as a
     /// tag, and the document has no key by that name.
     in_path: bool,
 }
 
-impl<'de> serde::de::EnumAccess<'de> for ValueEnumAccess {
+impl<'de, 'a> serde::de::EnumAccess<'de> for ValueEnumAccess<'a> {
     type Error = crate::Error;
-    type Variant = ValueVariantAccess;
+    type Variant = ValueVariantAccess<'a>;
 
     fn variant_seed<V: serde::de::DeserializeSeed<'de>>(
         self,
         seed: V,
     ) -> Result<(V::Value, Self::Variant), Self::Error> {
-        let variant = seed.deserialize(KeyDeserializer {
-            text: &self.variant,
-        })?;
+        // A name kept for a path is lent to the visitor, and one that isn't is given to it.
+        let (variant, name) = if self.in_path {
+            let variant = seed.deserialize(KeyDeserializer {
+                text: Cow::Borrowed(&self.variant),
+            })?;
+            (variant, Some(self.variant))
+        } else {
+            let variant = seed.deserialize(KeyDeserializer { text: self.variant })?;
+            (variant, None)
+        };
         Ok((
             variant,
             ValueVariantAccess {
-                name: self.in_path.then_some(self.variant),
+                name,
                 value: self.value,
             },
         ))
     }
 }
 
-struct ValueVariantAccess {
+struct ValueVariantAccess<'a> {
     /// The variant's name, if an error inside gives it.
-    name: Option<String>,
+    name: Option<Cow<'a, str>>,
     value: Value,
 }
 
-impl ValueVariantAccess {
+impl ValueVariantAccess<'_> {
     #[cold]
     fn inside_variant(name: Option<&str>, error: crate::Error) -> crate::Error {
         match name {
@@ -762,7 +773,7 @@ impl ValueVariantAccess {
     }
 }
 
-impl<'de> serde::de::VariantAccess<'de> for ValueVariantAccess {
+impl<'de> serde::de::VariantAccess<'de> for ValueVariantAccess<'_> {
     type Error = crate::Error;
 
     fn unit_variant(self) -> Result<(), Self::Error> {
@@ -1275,5 +1286,114 @@ mod tests {
 
         let mode = Mode::deserialize(Value::from("careful")).expect("unit variant");
         assert_eq!(mode, Mode::Careful);
+    }
+
+    /// A key that is a null, a boolean or a number is kept as it is, and its text is written only
+    /// for an error's path. Tests can't count allocations, so this looks at what a read keeps.
+    #[test]
+    fn a_scalar_key_is_kept_without_its_text() {
+        use super::{PlainKey, ValueMapAccess};
+        use crate::tag::{Tag, TaggedValue};
+        use serde::de::{IgnoredAny, MapAccess as _};
+
+        let tagged = Value::Tagged(Box::new(TaggedValue::new(
+            Tag::new("!", "t"),
+            Value::from(7_u64),
+        )));
+        for (key, text) in [
+            (Value::Null, "null"),
+            (Value::from(true), "true"),
+            (Value::from(42_u64), "42"),
+            (Value::from(-3_i64), "-3"),
+            (Value::from(1.5), "1.5"),
+            (tagged, "7"),
+        ] {
+            let mut mapping = crate::Mapping::new();
+            mapping.insert(key.clone(), Value::Null);
+            let mut access = ValueMapAccess {
+                iter: mapping.into_iter(),
+                key: None,
+                plain_key: None,
+                value: None,
+            };
+            access.next_key::<IgnoredAny>().expect("a key");
+            assert!(access.key.is_none(), "{key:?} kept text");
+            let kept = access.plain_key.expect("the key is kept");
+            assert!(
+                matches!(
+                    kept,
+                    PlainKey::Null | PlainKey::Bool(_) | PlainKey::Number(_)
+                ),
+                "{key:?}"
+            );
+            assert_eq!(kept.to_string(), text, "{key:?}");
+        }
+        // A string key keeps its own text, which isn't copied, and a collection keeps nothing.
+        let mut mapping = crate::Mapping::new();
+        mapping.insert(Value::from("name"), Value::Null);
+        mapping.insert(Value::Sequence(vec![]), Value::Null);
+        let mut access = ValueMapAccess {
+            iter: mapping.into_iter(),
+            key: None,
+            plain_key: None,
+            value: None,
+        };
+        access.next_key::<IgnoredAny>().expect("a key");
+        assert_eq!(access.key.as_deref(), Some("name"));
+        access.next_value::<IgnoredAny>().expect("a value");
+        access.next_key::<IgnoredAny>().expect("a key");
+        assert!(access.key.is_none() && access.plain_key.is_none());
+    }
+
+    /// A variant's name that no path keeps is given to the visitor, and one that a path keeps is
+    /// lent to it.
+    #[test]
+    fn a_variant_s_name_is_moved_unless_a_path_keeps_it() {
+        use super::ValueEnumAccess;
+        use serde::de::{DeserializeSeed, Deserializer, EnumAccess as _, Visitor};
+        use std::borrow::Cow;
+
+        /// Where the text it was handed lives.
+        struct Address;
+        impl<'de> DeserializeSeed<'de> for Address {
+            type Value = usize;
+            fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<usize, D::Error> {
+                deserializer.deserialize_identifier(self)
+            }
+        }
+        impl Visitor<'_> for Address {
+            type Value = usize;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a name")
+            }
+            fn visit_string<E>(self, text: String) -> Result<usize, E> {
+                Ok(text.as_ptr().addr())
+            }
+            // The name is always handed over owned, so a visitor that takes only that form reads it.
+            fn visit_str<E: serde::de::Error>(self, _text: &str) -> Result<usize, E> {
+                Err(E::custom("the name was only lent"))
+            }
+        }
+
+        let name = String::from("Right");
+        let address = name.as_ptr().addr();
+        let access = ValueEnumAccess {
+            variant: Cow::Owned(name),
+            value: Value::Null,
+            in_path: false,
+        };
+        let (handed, variant) = access.variant_seed(Address).expect("a name");
+        assert_eq!(handed, address, "the name was copied");
+        assert!(variant.name.is_none());
+
+        let key = String::from("Right");
+        let access = ValueEnumAccess {
+            variant: Cow::Borrowed(&key),
+            value: Value::Null,
+            in_path: true,
+        };
+        let (handed, variant) = access.variant_seed(Address).expect("a name");
+        assert_ne!(handed, key.as_ptr().addr());
+        assert!(matches!(variant.name, Some(Cow::Borrowed("Right"))));
     }
 }

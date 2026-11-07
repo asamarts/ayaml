@@ -381,6 +381,47 @@ fn a_location_in_a_key_leaves_the_error_s_own_location() {
     );
 }
 
+/// An error's text never decides whether it says where the error is, so a value or a field name
+/// that holds the words `at line` keeps the error's location on every reader that has one.
+#[test]
+fn a_value_or_a_field_that_quotes_a_location_keeps_the_error_s_own() {
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct Only {
+        a: Option<u8>,
+    }
+
+    let cases = [
+        (
+            every_reader::<BTreeMap<String, u8>>("a: \"at line 9\"\n"),
+            "a: invalid type: string \"at line 9\", expected u8",
+            (1, 4),
+        ),
+        (
+            every_reader::<Only>("at line 1: 2\n"),
+            "unknown field `at line 1`, expected `a`",
+            (1, 1),
+        ),
+    ];
+    for (readers, message, (line, column)) in cases {
+        for (reader, error, spans) in readers {
+            assert_eq!(error.message(), message, "{reader}");
+            if spans {
+                assert_eq!(
+                    error.to_string(),
+                    format!("{message} at line {line} column {column}"),
+                    "{reader}"
+                );
+                let found = error.location().expect("a location");
+                assert_eq!((found.line(), found.column()), (line, column), "{reader}");
+            } else {
+                assert_eq!(error.to_string(), message, "{reader}");
+            }
+        }
+    }
+}
+
 #[test]
 fn a_string_key_reads_the_same_whatever_the_target() {
     #[derive(Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

@@ -248,9 +248,19 @@ fn an_anchor_after_the_alias_does_not_keep_its_colon() {
             "a: &a k\n*a:\n  &a: |\n  y\n",
             "a: &a k\n*a:\n  &b: |\n  y\n",
         ),
+        // An anchor defined before the alias and again after it counts from where it was first
+        // defined, so the alias keeps its colon, on its own line and in the lines read again.
+        (
+            "- &x: e\n- *x: : &x: |1\n    text\n",
+            "- &x: e\n- *x: : &y: |1\n    text\n",
+        ),
     ] {
         assert_eq!(read(later), read(other), "{later:?}");
     }
+    assert_eq!(
+        read("- &x: e\n- *x: : &x: |1\n    text\n"),
+        json!(["e", {"e": " text\n"}])
+    );
     assert_eq!(
         read("- &a k\n- *a: &a: |1\n    y\n"),
         json!(["k", {"k": " y\n"}])

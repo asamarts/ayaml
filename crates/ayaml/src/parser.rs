@@ -2160,6 +2160,31 @@ impl<'a> Parser<'a> {
         };
         let from = opening.start();
         let there = format!("at line {} column {}", from.line(), from.column());
+        // An input that ends where an entry, a key or a value starts lacks a node, not a `,`, as
+        // libyaml words it.
+        let lack = match lack {
+            FlowLack::Separator if self.compat && failure.is_none() => {
+                let last = tokens
+                    .len()
+                    .checked_sub(1)
+                    .and_then(|last| self.token_at(tokens, last));
+                if last.is_some_and(|token| {
+                    matches!(
+                        token.kind,
+                        TokenKind::FlowSequenceStart
+                            | TokenKind::FlowMappingStart
+                            | TokenKind::FlowEntry
+                            | TokenKind::Key
+                            | TokenKind::Value
+                    )
+                }) {
+                    FlowLack::Node(String::new())
+                } else {
+                    FlowLack::Separator
+                }
+            }
+            lack => lack,
+        };
         // The failure's location goes between the two when the error is displayed.
         let (problem, context) = match lack {
             FlowLack::Separator if self.compat => (
