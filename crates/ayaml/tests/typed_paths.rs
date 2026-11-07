@@ -125,10 +125,10 @@ fn assert_path<T: DeserializeOwned + Debug>(input: &str, path: &str, location: (
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Task {
-    title: String,
+struct Server {
+    host: String,
     #[serde(default)]
-    effort: Option<u32>,
+    port: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,52 +136,52 @@ struct Task {
 struct Entry {
     key: String,
     #[serde(flatten)]
-    task: Task,
+    server: Server,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Plan {
+struct Config {
     #[serde(default)]
-    tasks: Vec<Task>,
+    servers: Vec<Server>,
     #[serde(default)]
     entries: Vec<Entry>,
 }
 
-const PLAN: &str = "\
-tasks:
-  - title: first
-  - title: second
-    efort: 1
+const CONFIG: &str = "\
+servers:
+  - host: first
+  - host: second
+    prot: 1
 ";
 
 #[test]
 fn a_sequence_of_nested_structs_reports_the_path_and_the_accepted_fields() {
-    let error = ayaml::from_str::<Plan>(PLAN).unwrap_err();
+    let error = ayaml::from_str::<Config>(CONFIG).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Serde);
     assert_eq!(
         error.to_string(),
-        "tasks[1]: unknown field `efort`, expected `title` or `effort` at line 4 column 5"
+        "servers[1]: unknown field `prot`, expected `host` or `port` at line 4 column 5"
     );
     let location = error.location().expect("a location");
     assert_eq!((location.line(), location.column()), (4, 5));
-    assert_path::<Plan>(PLAN, "tasks[1]", (4, 5));
+    assert_path::<Config>(CONFIG, "servers[1]", (4, 5));
 }
 
 #[test]
 fn a_flattened_struct_keeps_the_outer_path() {
-    let input = "entries:\n  - key: a\n    title: t\n    efort: 1\n";
-    let error = ayaml::from_str::<Plan>(input).unwrap_err();
+    let input = "entries:\n  - key: a\n    host: t\n    prot: 1\n";
+    let error = ayaml::from_str::<Config>(input).unwrap_err();
     assert!(
         error
             .to_string()
-            .starts_with("entries[0]: unknown field `efort`"),
+            .starts_with("entries[0]: unknown field `prot`"),
         "{error}"
     );
-    assert_path::<Plan>(input, "entries[0]", (2, 5));
+    assert_path::<Config>(input, "entries[0]", (2, 5));
     // A type error inside a flattened field reports the flattened struct's parent too.
-    assert_path::<Plan>(
-        "entries:\n  - key: a\n    title: [x]\n",
+    assert_path::<Config>(
+        "entries:\n  - key: a\n    host: [x]\n",
         "entries[0]",
         (2, 5),
     );
@@ -456,6 +456,7 @@ fn a_string_key_reads_for_a_target_that_takes_only_the_owned_form() {
             match HOW {
                 0 => deserializer.deserialize_string(Text::<HOW>),
                 1 => deserializer.deserialize_str(Text::<HOW>),
+                2 => deserializer.deserialize_identifier(Text::<HOW>),
                 _ => deserializer.deserialize_any(Text::<HOW>),
             }
         }
@@ -489,8 +490,37 @@ fn a_string_key_reads_for_a_target_that_takes_only_the_owned_form() {
     assert_eq!(only_key::<OwnedText<0>>("ab: 1\n").0, "ab");
     assert_eq!(only_key::<OwnedText<1>>("ab: 1\n").0, "ab");
     assert_eq!(only_key::<OwnedText<2>>("ab: 1\n").0, "ab");
+    assert_eq!(only_key::<OwnedText<3>>("ab: 1\n").0, "ab");
     assert_eq!(only_key::<OwnedBytes<0>>("ab: 1\n").0, b"ab");
     assert_eq!(only_key::<OwnedBytes<1>>("ab: 1\n").0, b"ab");
+    // A variant's name is read the same way, from a mapping or a tag.
+    #[derive(Debug)]
+    struct Variant(String);
+    impl<'de> Deserialize<'de> for Variant {
+        fn deserialize<D: Deserializer2<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Choice;
+            impl<'de> Visitor<'de> for Choice {
+                type Value = Variant;
+                fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    formatter.write_str("a variant")
+                }
+                fn visit_enum<A: serde::de::EnumAccess<'de>>(
+                    self,
+                    data: A,
+                ) -> Result<Variant, A::Error> {
+                    let (name, variant): (OwnedText<2>, _) = data.variant()?;
+                    serde::de::VariantAccess::unit_variant(variant)?;
+                    Ok(Variant(name.0))
+                }
+            }
+            deserializer.deserialize_enum("Variant", &["left"], Choice)
+        }
+    }
+    for input in ["left\n", "left: null\n", "!left\n"] {
+        let variant: Variant =
+            ayaml::from_value(ayaml::parse_value(input).expect("a value")).expect(input);
+        assert_eq!(variant.0, "left", "{input:?}");
+    }
 }
 
 /// Reads a tagged node as a tag and a number, as a target that isn't an enum does.

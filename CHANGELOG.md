@@ -9,21 +9,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - A typed reader's error now names the path to what it rejected, as in
-  `tasks[1]: unknown field `efort`, expected `title` or `effort` at line 4 column 5`, on every
+  ``servers[1]: unknown field `prot`, expected `host` or `port` at line 4 column 5``, on every
   typed entry point. `Error::message` documents how a path reads. The span and `ErrorKind::Serde`
-  are as they were, and an error at the document's root gains nothing.
-- In compat mode, an alias directly followed by `:` is now a mapping key, as in libyaml, so `*a: 1`
-  has the key that `a` stands for. An alias keeps such a colon only when an anchor earlier in the
-  same document has that exact name. Default mode is unchanged.
+  are as they were, and an error at the document's root gains nothing. The readers that decode
+  from the input build the path only for an error. `from_value`, and the `Deserializer` methods
+  built on it, keep each string key until its value has been read, so a key read as a string or
+  a field name costs a copy of its text.
+- In compat mode, an alias directly followed by a `:` that ends its name, before a blank, a flow
+  indicator, or the end of the line, is now a mapping key, as in libyaml, so `*a: 1` has the key
+  that `a` stands for. An alias keeps such a colon only when an anchor earlier in the same
+  document has that exact name. In a flow collection a name runs on through a `:` with more text
+  after it, so `{*a:b}` still looks for an anchor named `a:b`. Default mode is unchanged.
 - A malformed flow collection's error now says where it failed and where the collection opened,
   as in `unterminated flow sequence at line 3 column 1, opened at line 2 column 5`, in both modes.
   `Error::location` is where it failed, including at the end of the input, where it could be the
-  collection's opening or the first line. Compat words them all as libyaml words one,
-  `did not find expected ',' or ']' at line 3 column 1, while parsing a flow sequence at line 2
-  column 5`, and takes the opening from the parser, so a bracket in a quoted scalar is never named.
+  collection's opening or the first line. `Error::message` holds the rest, as in
+  `unterminated flow sequence, opened at line 2 column 5`. Compat words these failures as it
+  already worded the one that names an opening, as in `did not find expected ',' or ']' at line
+  3 column 1, while parsing a flow sequence at line 2 column 5`, and takes the opening from the
+  parser, so a bracket in a quoted scalar is never named. Its wording isn't libyaml's for every
+  failure: where libyaml says it is parsing a flow node, or reports input that ends inside a
+  collection on the next line, compat names the collection and the end of the input. An error
+  about a node itself keeps its wording and names no opening, as `aliases cannot carry tags or
+  anchors` does in `{!t *a`.
 
 ### Fixed
 
+- An error's text is no longer read to decide whether it says where the error is. A message that
+  quoted a value holding the words `at line`, as in `a: "at line 9"` read into a number, lost
+  its location.
 - A mapping can no longer be written so that its hash collides with those of other mappings. The
   entries' hashes combine by XOR under a key anyone could compute, so entries could be chosen to
   cancel out, and 2 MiB of mappings used as keys took 30 seconds to read. The key is now random

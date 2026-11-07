@@ -123,7 +123,8 @@ these places, on purpose:
   the colon in one case: an anchor earlier in the same document has that exact name, as in
   `&a: x` then `*a:`. `*a : 1` means the same in both modes. In a flow collection a name runs on
   through a `:` with more text after it, so `{*a:b}` looks for an anchor named `a:b`, where libyaml
-  reads the key that `a` stands for and the value `b`.
+  reads the key that `a` stands for and the value `b`. Only a JSON-like key takes a value right
+  after its `:` there, so `{*a:[1]}` is an error, where libyaml reads the value `[1]`.
 - Global, verbatim, and non-specific tags are kept, with their escapes as written.
   Tag forms that YAML 1.2.2 allows and libyaml's scanner refuses are accepted, such as
   `!#`, `!<tag:a,1:b#c>`, or `!` right before a flow indicator. `!` isn't a tag character, so
@@ -170,3 +171,8 @@ When input provides a location, the error carries a span and `Error::location()`
 returns the one-based line and column. Resource-limit failures expose the
 configured ceiling and observed value through `Error::limit()`, with the exceptions
 in [`limits.md`](limits.md#errors).
+
+A typed error's path is written the same way in both modes, as `Error::message`
+describes: a key that isn't a short name is quoted in brackets, as in
+`ports["80"]` or `["a.b"]`, where readers built on libyaml write `ports.80` and
+`a.b`.

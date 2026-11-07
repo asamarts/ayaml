@@ -233,6 +233,42 @@ fn a_block_scalar_after_the_key_is_indented_from_the_key() {
     refused("x: &a: k\n*a: |\n  y\n");
 }
 
+/// The lines before a block scalar or a plain scalar's next line are read again to find what owns
+/// it, after the rest of its own line has been scanned. An anchor named `a:` later on, or on a
+/// later line, isn't one before the alias, so `*a:` gives up its colon there too, and the input
+/// reads as it does with any other name in that place.
+#[test]
+fn an_anchor_after_the_alias_does_not_keep_its_colon() {
+    for (later, other) in [
+        (
+            "- &a k\n- *a: &a: |1\n    y\n",
+            "- &a k\n- *a: &b: |1\n    y\n",
+        ),
+        (
+            "a: &a k\n*a:\n  &a: |\n  y\n",
+            "a: &a k\n*a:\n  &b: |\n  y\n",
+        ),
+    ] {
+        assert_eq!(read(later), read(other), "{later:?}");
+    }
+    assert_eq!(
+        read("- &a k\n- *a: &a: |1\n    y\n"),
+        json!(["k", {"k": " y\n"}])
+    );
+    assert_eq!(
+        read("a: &a k\n*a:\n  &a: |\n  y\n"),
+        json!({"a": "k", "k": "y\n"})
+    );
+    // A plain scalar's next line is no deeper than the key, so it can't continue it.
+    for input in ["- &a k\n- *a: &a: b\n  c\n", "- &a k\n- *a: &b: b\n  c\n"] {
+        assert_eq!(
+            refused(input).to_string(),
+            "unexpected content after document at line 3 column 3",
+            "{input:?}"
+        );
+    }
+}
+
 /// The check on a block scalar's first line finds its owner by reading the lines before it, with
 /// the same names the scanner keeps. Read without them, this line owns less, and the scalar's text
 /// reads as content.
