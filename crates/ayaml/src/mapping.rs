@@ -183,20 +183,29 @@ impl std::fmt::Debug for Mapping {
 
 impl Hash for Mapping {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Eq is order-insensitive for a YAML mapping, so Hash must be too. XOR gives that, but
-        // whoever can compute an entry's hash can solve for entries that cancel out, and so write
-        // many mappings with one hash, as keys that take quadratic time. So the key is random.
-        static ENTRY_HASH: OnceLock<RandomState> = OnceLock::new();
-        let entry_hash = ENTRY_HASH.get_or_init(RandomState::new);
-        let mut xor = 0_u64;
-        for (key, value) in &self.map {
-            let mut hasher = entry_hash.build_hasher();
-            key.hash(&mut hasher);
-            value.hash(&mut hasher);
-            xor ^= hasher.finish();
-        }
-        xor.hash(state);
+        hash_of_entries(self.map.iter()).hash(state);
     }
+}
+
+/// A hash of a mapping's entries that doesn't depend on their order, as Eq doesn't. XOR gives that,
+/// but whoever can compute an entry's hash can solve for entries that cancel out, and so write many
+/// mappings with one hash, as keys that take quadratic time. So the key is random. Two entries can
+/// still cancel if they write the same bytes, so what a key and value write has to tell them apart.
+pub(crate) fn hash_of_entries<'a, K, V>(entries: impl Iterator<Item = (&'a K, &'a V)>) -> u64
+where
+    K: Hash + 'a,
+    V: Hash + 'a,
+{
+    static ENTRY_HASH: OnceLock<RandomState> = OnceLock::new();
+    let entry_hash = ENTRY_HASH.get_or_init(RandomState::new);
+    let mut xor = 0_u64;
+    for (key, value) in entries {
+        let mut hasher = entry_hash.build_hasher();
+        key.hash(&mut hasher);
+        value.hash(&mut hasher);
+        xor ^= hasher.finish();
+    }
+    xor
 }
 
 impl OpsIndex<&str> for Mapping {
@@ -475,6 +484,39 @@ mod tests {
     /// Any 65 values of 64 bits have a subset whose XOR is zero. Found by elimination under a
     /// key anyone can compute, the subset splits into two mappings that would hash alike, and
     /// enough of those are keys that take quadratic time.
+    #[test]
+    fn what_values_write_tells_them_apart() {
+        use std::hash::{Hash, Hasher};
+
+        #[derive(Default)]
+        struct Bytes(Vec<u8>);
+        impl Hasher for Bytes {
+            fn write(&mut self, bytes: &[u8]) {
+                self.0.extend_from_slice(bytes);
+            }
+            fn finish(&self) -> u64 {
+                0
+            }
+        }
+        let bytes = |values: &[&str]| {
+            let mut bytes = Bytes::default();
+            for value in values {
+                crate::parse_value(value).expect("a value").hash(&mut bytes);
+            }
+            bytes.0
+        };
+        let (max, wide) = (u64::MAX.to_string(), (2_u128 << 64).to_string());
+        for (left, right) in [
+            (vec!["-1"], vec![max.as_str()]),
+            (vec!["-1"], vec!["18446744073709551616"]),
+            (vec!["1", "0"], vec![wide.as_str(), "~"]),
+            (vec!["[-1, -1]"], vec!["[-1, 18446744073709551615]"]),
+            (vec!["1.5"], vec!["4609434218613702656"]),
+        ] {
+            assert_ne!(bytes(&left), bytes(&right), "{left:?} and {right:?}");
+        }
+    }
+
     #[test]
     fn entries_cannot_be_chosen_to_cancel_out() {
         use std::collections::hash_map::DefaultHasher;

@@ -6,7 +6,7 @@
 //! value. `from_value` continues to use the owned value deserializer.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -32,7 +32,7 @@ struct Node<'de> {
     span: Span,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug)]
 enum NodeKind<'de> {
     Null,
     Bool(bool),
@@ -42,6 +42,55 @@ enum NodeKind<'de> {
     Mapping(Vec<(Node<'de>, Node<'de>)>),
     Tagged(Tag, Box<Node<'de>>),
     Alias(Arc<Node<'de>>),
+}
+
+/// Mappings compare as sets of entries, as `Mapping` does, so two keys that differ only in the order
+/// of their entries are duplicates.
+impl PartialEq for NodeKind<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Null, Self::Null) => true,
+            (Self::Bool(left), Self::Bool(right)) => left == right,
+            (Self::Number(left), Self::Number(right)) => left == right,
+            (Self::String(left), Self::String(right)) => left == right,
+            (Self::Sequence(left), Self::Sequence(right)) => left == right,
+            (Self::Mapping(left), Self::Mapping(right)) => {
+                left.len() == right.len() && {
+                    let right: HashSet<_> = right.iter().collect();
+                    left.iter().all(|entry| right.contains(entry))
+                }
+            }
+            (Self::Tagged(left_tag, left), Self::Tagged(right_tag, right)) => {
+                left_tag == right_tag && left == right
+            }
+            (Self::Alias(left), Self::Alias(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for NodeKind<'_> {}
+
+impl Hash for NodeKind<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Null => {}
+            Self::Bool(value) => value.hash(state),
+            Self::Number(value) => value.hash(state),
+            Self::String(value) => value.hash(state),
+            Self::Sequence(items) => items.hash(state),
+            Self::Mapping(entries) => {
+                crate::mapping::hash_of_entries(entries.iter().map(|(key, value)| (key, value)))
+                    .hash(state);
+            }
+            Self::Tagged(tag, value) => {
+                tag.hash(state);
+                value.hash(state);
+            }
+            Self::Alias(target) => target.hash(state),
+        }
+    }
 }
 
 /// Nodes compare by what they denote: an alias equals its target, so a key

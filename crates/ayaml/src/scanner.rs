@@ -2101,18 +2101,19 @@ fn only_properties(text: &str, compat: bool) -> bool {
                 || (token.starts_with('&')
                     && !(compat
                         && (1..token.len())
-                            .any(|index| compat_name_stop(token.as_bytes(), index, 1))))
+                            .any(|index| compat_name_stop(token.as_bytes(), index, 1, false))))
         })
 }
 
 /// Whether the compat scanner ends the anchor or alias name that starts at
 /// `name_start` before `bytes[index]`: libyaml stops at a `?`, and at a `:`
-/// followed by more name text (see `scan_anchor`).
-fn compat_name_stop(bytes: &[u8], index: usize, name_start: usize) -> bool {
+/// followed by more name text, outside a flow collection (see `scan_anchor`).
+fn compat_name_stop(bytes: &[u8], index: usize, name_start: usize, in_flow: bool) -> bool {
     match bytes[index] {
         b'?' => true,
         b':' => {
-            index > name_start
+            !in_flow
+                && index > name_start
                 && bytes.get(index + 1).is_some_and(|next| {
                     !matches!(next, b' ' | b'\t' | b'[' | b']' | b'{' | b'}' | b',')
                 })
@@ -2132,6 +2133,9 @@ fn find_value_indicator(text: &str, compat: bool) -> Option<usize> {
     // Inside a plain scalar at depth 0, quotes, flow indicators, and
     // property indicators are content: `a [b: |` has the key `a [b`.
     let mut in_plain = false;
+    // In a flow collection, a plain scalar runs to the next flow indicator, and quotes inside it,
+    // after any blank, are content too: `[a"b]: |` has the key `[a"b]`.
+    let mut in_flow_plain = false;
     let mut name_stopped = false;
     while index < bytes.len() {
         let byte = bytes[index];
@@ -2145,7 +2149,7 @@ fn find_value_indicator(text: &str, compat: bool) -> Option<usize> {
                 return Some(index);
             }
             _ if in_plain => {}
-            b'"' | b'\'' if token_start || depth > 0 => {
+            b'"' | b'\'' if (depth == 0 && token_start) || (depth > 0 && !in_flow_plain) => {
                 index += 1;
                 while index < bytes.len() {
                     if byte == b'"' && bytes[index] == b'\\' {
@@ -2173,17 +2177,30 @@ fn find_value_indicator(text: &str, compat: bool) -> Option<usize> {
                     && !matches!(bytes[index + 1], b' ' | b'\t')
                     && !(depth > 0 && matches!(bytes[index + 1], b',' | b'[' | b']' | b'{' | b'}'))
                 {
-                    if compat && byte != b'!' && compat_name_stop(bytes, index + 1, name_start) {
+                    if compat
+                        && byte != b'!'
+                        && compat_name_stop(bytes, index + 1, name_start, depth > 0)
+                    {
                         name_stopped = true;
                         break;
                     }
                     index += 1;
                 }
             }
-            b'[' | b'{' if token_start || depth > 0 => depth += 1,
-            b']' | b'}' if depth > 0 => depth -= 1,
+            b'[' | b'{' if token_start || depth > 0 => {
+                depth += 1;
+                in_flow_plain = false;
+            }
+            b']' | b'}' if depth > 0 => {
+                depth -= 1;
+                in_flow_plain = false;
+            }
+            b',' if depth > 0 => in_flow_plain = false,
             b' ' | b'\t' => {}
-            _ if token_start && depth == 0 => in_plain = true,
+            // A `:` starts no plain scalar here if a quoted one follows: `{"a":"b"}`.
+            b':' if depth > 0 => {}
+            _ if depth > 0 => in_flow_plain = true,
+            _ if token_start => in_plain = true,
             _ => {}
         }
         token_start = std::mem::take(&mut name_stopped)

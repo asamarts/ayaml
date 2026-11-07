@@ -11,7 +11,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A mapping can no longer be written so that its hash collides with those of other mappings. The
   entries' hashes combine by XOR under a key anyone could compute, so entries could be chosen to
   cancel out, and 2 MiB of mappings used as keys took 30 seconds to read. The key is now random
-  for each process, so a `Value`'s `Hash` differs from one run to the next.
+  for each process, so the `Hash` of a `Value` holding a non-empty mapping differs from one run to
+  the next. Each kind of number now writes its own mark too: numbers of different kinds could write
+  the same bytes, so entries could cancel out under any key.
+- Equal tags now hash alike under a hasher that reads each write on its own, whatever the split
+  between handle and suffix.
+- `from_str` and the other typed readers now see two keys that differ only in the order of their
+  entries as duplicates, as `parse_value` does. A typed map could silently lose one of them.
+- In a flow collection used as a key, a quote after plain text, or in a name, no longer hides the
+  rest of the key from the check on a block scalar's indentation, so an indentation indicator on
+  that scalar is now read from the key's indentation, and a scalar that isn't indented enough is
+  an error.
 - Floats now hash by value, so many float keys no longer take quadratic time. They used to share
   one bucket, and 40,000 of them, in 0.3 MiB, took 19 seconds to read.
 - A depth limit on a collection used as a key now gives its location on `parse_value`,
