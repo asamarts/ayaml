@@ -1,0 +1,237 @@
+name: release
+
+# Publishes ayaml when a vMAJOR.MINOR.PATCH tag is pushed: the CI gate runs on the tag's commit,
+# the tag and the package are checked against that commit, crates.io Trusted Publishing mints a
+# short-lived token, and the bytes crates.io then serves are attested and attached to a GitHub
+# release with their checksums. RELEASING.md says how to cut a release and how to recover from a
+# failed run.
+#
+# Started by hand, it rehearses everything but the publish and the release against a tag that is
+# already published: the gate runs on the branch it was started from, the tag is checked and
+# packaged, and the package is compared with the bytes crates.io serves.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: A published release tag to rehearse, such as v0.1.1
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # cargo package's bytes depend on cargo's version, so the published crate can be rebuilt only
+  # with the toolchain that packaged it. Change this only in a release's own pull request.
+  RELEASE_TOOLCHAIN: "1.99.1"
+  TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  gate:
+    name: release gate
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  package:
+    name: package the tag
+    needs: gate
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      commit: ${{ steps.tag.outputs.commit }}
+      digest: ${{ steps.package.outputs.digest }}
+    steps:
+      # The checks come from the commit this run's workflow file comes from, and judge the tag.
+      # On a tag push they are the same commit.
+      - name: Check out the checks
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: trusted
+          persist-credentials: false
+      - name: Check out the tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: source
+          ref: refs/tags/${{ env.TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RELEASE_TOOLCHAIN }}
+      - name: Check the tag
+        id: tag
+        working-directory: source
+        run: |
+          set -euo pipefail
+          # The tag object itself, which a checkout can leave as a plain ref, and main as it is now.
+          git fetch --no-tags --force origin "refs/tags/$TAG:refs/tags/$TAG" "+refs/heads/main:refs/remotes/origin/main"
+          python3 ../trusted/tools/check_release.py tag "$TAG"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Package
+        id: package
+        working-directory: source
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+          COMMIT: ${{ steps.tag.outputs.commit }}
+        run: |
+          set -euo pipefail
+          cargo +"$RELEASE_TOOLCHAIN" package -p ayaml --locked
+          crate="target/package/ayaml-$VERSION.crate"
+          python3 ../trusted/tools/check_release.py package "$crate" "$COMMIT"
+          mkdir -p "$RUNNER_TEMP/built"
+          cp "$crate" "$RUNNER_TEMP/built/"
+          echo "digest=$(sha256sum "$crate" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Compare with the published bytes
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: source
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: python3 ../trusted/tools/check_release.py registry "target/package/ayaml-$VERSION.crate" "$VERSION" 0
+      - name: Keep the package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package
+          path: ${{ runner.temp }}/built
+          if-no-files-found: error
+          retention-days: 7
+          # Re-running all jobs packages the tag again, into the same run.
+          overwrite: true
+
+  publish:
+    name: publish to crates.io
+    needs: package
+    if: github.event_name == 'push' && github.repository == 'asamarts/ayaml' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    # crates.io accepts a token minted only for this environment of this workflow.
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.package.outputs.version }}
+      COMMIT: ${{ needs.package.outputs.commit }}
+      DIGEST: ${{ needs.package.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RELEASE_TOOLCHAIN }}
+      - name: Get the package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package
+          path: ${{ runner.temp }}/built
+      - name: Check the tag and the package again
+        id: check
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --force origin "refs/tags/$TAG:refs/tags/$TAG" "+refs/heads/main:refs/remotes/origin/main"
+          python3 tools/check_release.py tag "$TAG"
+          test "$(git rev-parse HEAD)" = "$COMMIT"
+          built="$RUNNER_TEMP/built/ayaml-$VERSION.crate"
+          test "$(sha256sum "$built" | cut -d' ' -f1)" = "$DIGEST"
+          # cargo publish packages again, so this checkout must give the same bytes.
+          cargo +"$RELEASE_TOOLCHAIN" package -p ayaml --locked
+          cmp "target/package/ayaml-$VERSION.crate" "$built"
+          set +e
+          python3 tools/check_release.py published "$VERSION"
+          answer=$?
+          set -e
+          case "$answer" in
+            0) echo "published=true" >> "$GITHUB_OUTPUT" ;;
+            1) echo "published=false" >> "$GITHUB_OUTPUT" ;;
+            *) exit 1 ;;
+          esac
+      - name: Mint a crates.io token
+        if: steps.check.outputs.published == 'false'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+      - name: Publish
+        if: steps.check.outputs.published == 'false'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo +"$RELEASE_TOOLCHAIN" publish -p ayaml --locked
+      - name: crates.io serves the package
+        run: python3 tools/check_release.py registry "$RUNNER_TEMP/built/ayaml-$VERSION.crate" "$VERSION" 600
+
+  release:
+    name: GitHub release
+    needs: [package, publish]
+    if: github.event_name == 'push' && github.repository == 'asamarts/ayaml' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.package.outputs.version }}
+      COMMIT: ${{ needs.package.outputs.commit }}
+      DIGEST: ${{ needs.package.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download what crates.io serves
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$COMMIT"
+          mkdir -p "$RUNNER_TEMP/dist"
+          crate="$RUNNER_TEMP/dist/ayaml-$VERSION.crate"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error --retry 3 \
+            --user-agent "ayaml-release (https://github.com/asamarts/ayaml)" \
+            --output "$crate" "https://static.crates.io/crates/ayaml/ayaml-$VERSION.crate"
+          python3 tools/check_release.py registry "$crate" "$VERSION" 600
+          test "$(sha256sum "$crate" | cut -d' ' -f1)" = "$DIGEST"
+          (cd "$RUNNER_TEMP/dist" && sha256sum "ayaml-$VERSION.crate" > SHA256SUMS)
+      - name: Attest the crate's provenance
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/dist/ayaml-${{ needs.package.outputs.version }}.crate
+      - name: The attestation verifies as the release notes say
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify "$RUNNER_TEMP/dist/ayaml-$VERSION.crate" --repo "$GITHUB_REPOSITORY" \
+            --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/tags/$TAG" \
+            --cert-oidc-issuer https://token.actions.githubusercontent.com \
+            --source-ref "refs/tags/$TAG" --source-digest "$COMMIT" --deny-self-hosted-runners
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/dist"
+          if gh release view "$TAG" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/assets.txt" 2>/dev/null; then
+            # A rerun: the release must already hold these bytes, and nothing changes it.
+            mkdir -p "$RUNNER_TEMP/existing"
+            gh release download "$TAG" --dir "$RUNNER_TEMP/existing" --pattern "ayaml-$VERSION.crate" --pattern SHA256SUMS
+            cmp "$RUNNER_TEMP/existing/ayaml-$VERSION.crate" "$dist/ayaml-$VERSION.crate"
+            cmp "$RUNNER_TEMP/existing/SHA256SUMS" "$dist/SHA256SUMS"
+            echo "::notice::release $TAG already holds ayaml-$VERSION.crate with sha256 $DIGEST"
+            exit 0
+          fi
+          {
+            python3 tools/check_release.py notes "$VERSION"
+            echo
+            python3 tools/check_release.py record "$TAG" "$COMMIT" "$DIGEST" "$ATTESTATION_URL"
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" --verify-tag --title "ayaml $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
+            "$dist/ayaml-$VERSION.crate" "$dist/SHA256SUMS"

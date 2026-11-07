@@ -4,6 +4,8 @@ on:
   push:
     branches: ["main"]
   pull_request:
+  # The release workflow runs this as its gate.
+  workflow_call:
 
 permissions:
   contents: read
@@ -19,8 +21,10 @@ jobs:
           - "1.88.0"
           - stable
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ matrix.toolchain }}
           components: rustfmt, clippy
@@ -43,8 +47,12 @@ jobs:
     name: YAML Test Suite
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
       - name: Default profile
         run: AYAML_STRICT_SUITE=1 cargo run --locked -p ayaml-conformance -- tests/fixtures tests/data/yaml-test-suite/src
       - name: Compatibility profile
@@ -54,8 +62,12 @@ jobs:
     name: allocation budgets
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
       - name: Allocation budgets
         run: tools/check_alloc_corpus.sh
       - name: Benchmarks compile
@@ -67,10 +79,13 @@ jobs:
     name: instruction counts
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
       - name: Install valgrind
         run: sudo rm -f /var/lib/man-db/auto-update && sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind
       - name: Compare with the base
@@ -82,8 +97,12 @@ jobs:
     name: plan check
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
       - name: Install aplan
         run: cargo install aplan --version 0.6.0 --locked
       - name: Check the plan
@@ -93,10 +112,16 @@ jobs:
     name: package and downstream smoke
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
       - name: Package
         run: cargo package -p ayaml --locked
+      - name: The package holds the commit's files
+        run: python3 tools/check_release.py package target/package/ayaml-*.crate "$(git rev-parse HEAD)"
       - name: Downstream smoke
         run: |
           set -e
@@ -120,9 +145,12 @@ jobs:
           - x86_64-pc-windows-msvc
           - x86_64-pc-windows-gnu
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
           targets: ${{ matrix.target }}
       - name: Check
         run: cargo check --locked --all-features --target ${{ matrix.target }}
@@ -135,9 +163,12 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
           components: rustfmt, clippy
       - name: Test
         run: cargo test --workspace --locked --all-features
@@ -150,18 +181,22 @@ jobs:
     name: dependency policy
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
       - name: Test the checks
         run: python3 tools/test_ci_checks.py
       - name: Classify dependencies
         run: python3 tools/check_deps.py
       - name: cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check
       - name: Install cargo-geiger
-        run: cargo install cargo-geiger --locked
+        run: cargo install cargo-geiger --version 0.14.0 --locked
       - name: Unsafe census
         run: cargo geiger --manifest-path "$GITHUB_WORKSPACE/crates/ayaml/Cargo.toml" --all-features --output-format Json > "${RUNNER_TEMP}/geiger.json"
       - name: Evaluate the census
@@ -171,19 +206,27 @@ jobs:
     name: semver checks
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - name: cargo-semver-checks
-        uses: obi1kenobi/cargo-semver-checks-action@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          package: ayaml
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - name: Install the pinned cargo-semver-checks
+        run: tools/install-semver-checks.sh "${RUNNER_TEMP}/semver-checks" >> "$GITHUB_PATH"
+      - name: cargo-semver-checks
+        run: cargo semver-checks --package ayaml
 
   minimal-versions:
     name: minimal versions
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: nightly
       - name: Select minimal versions
         run: cargo update -Z minimal-versions
       - name: Test minimal graph
@@ -193,11 +236,14 @@ jobs:
     name: secret scan
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: TruffleHog
-        uses: trufflesecurity/trufflehog@main
+        uses: trufflesecurity/trufflehog@31ce31ee1abbcc7dc8eee5764c17121c3044c8b2 # v3.99.7
         with:
           path: ./
+          # The scanner's image, by tag and digest. The action runs the latest one otherwise.
+          version: 3.99.7@sha256:0d003fc3abc4e1565eca8462b992001314de51451e96e3c44de80d116794d5d1
           extra_args: --only-verified

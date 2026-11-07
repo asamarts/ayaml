@@ -83,9 +83,10 @@ public checks of the same concerns.
 
 ## Releasing
 
-Until the automated workflow in task AY-004 exists, a release is done by hand: the version
-bump and changelog land through a pull request, a maintainer tags that commit on `main` as
-`vX.Y.Z`, and then publishes from a clean checkout of the tag with `cargo publish`.
+A release is published by the release workflow when a maintainer pushes a `vX.Y.Z` tag on
+`main`, after the version bump and changelog land through a pull request. Nobody publishes
+with `cargo publish` from a workstation. [`RELEASING.md`](RELEASING.md) gives the steps, the
+recovery from a failed run, and how to verify a release.
 
 ## Conventions
 

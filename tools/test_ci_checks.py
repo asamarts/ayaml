@@ -21,6 +21,8 @@ from unittest import mock
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import check_instructions
+import check_release
 import check_scheduled_runs
 import check_unsafe_census
 
@@ -482,6 +484,286 @@ class FuzzHostedTests(unittest.TestCase):
         self.assertIn("fuzz.log", names)
         self.assertEqual(crash, SECRET)
         self.assertIn(SECRET, log)
+
+
+def git(root: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(root), *args], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def crate(top: str, files: dict[str, bytes], extra: list[tarfile.TarInfo] = ()) -> bytes:
+    """A gzipped tarball holding FILES under TOP, as cargo package writes one."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for name, data in files.items():
+            info = tarfile.TarInfo(f"{top}/{name}")
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+        for info in extra:
+            archive.addfile(info)
+    return buffer.getvalue()
+
+
+class Release(unittest.TestCase):
+    """tools/check_release.py, against a scratch repository laid out as this one is."""
+
+    MANIFEST = b'[package]\nname = "ayaml"\nversion.workspace = true\n'
+    CHANGELOG = "# Changelog\n\n## [0.2.0] \u2014 2026-11-07\n\n- A change.\n\n## [0.1.0] - 2026-01-01\n\n- First.\n"
+
+    def setUp(self) -> None:
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name) / "repo"
+        (self.root / "crates/ayaml/src").mkdir(parents=True)
+        (self.root / "Cargo.toml").write_text('[workspace.package]\nversion = "0.2.0"\n')
+        (self.root / "crates/ayaml/Cargo.toml").write_bytes(self.MANIFEST)
+        (self.root / "crates/ayaml/src/lib.rs").write_text("//! ayaml\n")
+        (self.root / "README.md").write_text("# ayaml\n")
+        (self.root / "CHANGELOG.md").write_text(self.CHANGELOG, encoding="utf-8")
+        git(self.root.parent, "init", "-q", "-b", "main", str(self.root))
+        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("tag.gpgsign", "false"), ("commit.gpgsign", "false")]:
+            git(self.root, "config", key, value)
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "release")
+        self.commit = git(self.root, "rev-parse", "HEAD")
+        git(self.root, "update-ref", "refs/remotes/origin/main", self.commit)
+        git(self.root, "tag", "-a", "-m", "v0.2.0", "v0.2.0")
+
+    def refused(self, call, text: str) -> None:
+        with self.assertRaises(check_release.Refused) as caught:
+            call()
+        self.assertIn(text, str(caught.exception))
+
+    # tag
+
+    def test_an_annotated_tag_on_main_with_its_version_passes(self) -> None:
+        self.assertEqual(check_release.check_tag(self.root, "v0.2.0"), self.commit)
+
+    def test_a_tag_that_is_not_a_release_tag_is_refused(self) -> None:
+        for tag in ["0.2.0", "v0.2", "v0.2.0-rc.1", "v01.2.0", "v0.2.0\n"]:
+            self.refused(lambda: check_release.check_tag(self.root, tag), "isn't a release tag")
+
+    def test_a_lightweight_tag_is_refused(self) -> None:
+        git(self.root, "tag", "-d", "v0.2.0")
+        git(self.root, "tag", "v0.2.0")
+        self.refused(lambda: check_release.check_tag(self.root, "v0.2.0"), "lightweight")
+
+    def test_a_checkout_away_from_the_tag_is_refused(self) -> None:
+        (self.root / "README.md").write_text("# changed\n")
+        git(self.root, "commit", "-q", "-am", "later")
+        self.refused(lambda: check_release.check_tag(self.root, "v0.2.0"), "the checkout is at")
+
+    def test_a_dirty_checkout_is_refused(self) -> None:
+        (self.root / "stray.txt").write_text("x")
+        self.refused(lambda: check_release.check_tag(self.root, "v0.2.0"), "isn't clean")
+
+    def test_a_commit_off_main_is_refused(self) -> None:
+        git(self.root, "checkout", "-q", "--orphan", "side")
+        git(self.root, "commit", "-q", "-m", "side")
+        git(self.root, "tag", "-a", "-m", "v0.3.0", "v0.3.0")
+        (self.root / "Cargo.toml").write_text('[workspace.package]\nversion = "0.3.0"\n')
+        git(self.root, "commit", "-q", "-am", "bump")
+        git(self.root, "tag", "-f", "-a", "-m", "v0.3.0", "v0.3.0")
+        self.refused(lambda: check_release.check_tag(self.root, "v0.3.0"), "isn't on origin/main")
+
+    def test_a_tag_naming_another_version_is_refused(self) -> None:
+        git(self.root, "tag", "-a", "-m", "v0.2.1", "v0.2.1")
+        self.refused(lambda: check_release.check_tag(self.root, "v0.2.1"), "declares 0.2.0")
+
+    def test_a_version_without_a_changelog_section_is_refused(self) -> None:
+        text = self.CHANGELOG.replace("## [0.2.0] \u2014 2026-11-07\n\n- A change.\n\n", "")
+        self.refused(lambda: check_release.changelog_section(text, "0.2.0"), "has no section")
+        self.refused(lambda: check_release.changelog_section("## [0.2.0] - 2026-11-07\n\n## [0.1.0] - x\n", "0.2.0"), "is empty")
+        # A heading for 0.2.0 isn't one for 0.2.00 or 0.2.0-rc.1.
+        self.refused(lambda: check_release.changelog_section(self.CHANGELOG, "0.2"), "has no section")
+
+    def test_a_section_runs_to_the_next_heading(self) -> None:
+        self.assertEqual(check_release.changelog_section(self.CHANGELOG, "0.2.0"), "- A change.")
+        self.assertEqual(check_release.changelog_section(self.CHANGELOG, "0.1.0"), "- First.")
+
+    # package
+
+    def packaged(self, changes: dict[str, bytes | None] | None = None) -> dict[str, bytes]:
+        """The files cargo would package for the commit, with CHANGES: a path to None removes it."""
+        files = {
+            ".cargo_vcs_info.json": json.dumps({"git": {"sha1": self.commit}, "path_in_vcs": "crates/ayaml"}).encode(),
+            "Cargo.toml": b'[package]\nname = "ayaml"\nversion = "0.2.0"\n',
+            "Cargo.toml.orig": self.MANIFEST,
+            "Cargo.lock": b"# lock\n",
+            "README.md": b"# ayaml\n",
+            "src/lib.rs": b"//! ayaml\n",
+        }
+        for name, data in (changes or {}).items():
+            if data is None:
+                files.pop(name)
+            else:
+                files[name] = data
+        return files
+
+    def check_package(self, files: dict[str, bytes], name: str = "ayaml-0.2.0.crate", top: str = "ayaml-0.2.0", extra=()) -> str:
+        path = self.root.parent / name
+        path.write_bytes(crate(top, files, list(extra)))
+        return check_release.check_package(self.root, path, self.commit)
+
+    def test_a_package_of_the_commit_passes(self) -> None:
+        path = self.root.parent / "ayaml-0.2.0.crate"
+        digest = self.check_package(self.packaged())
+        self.assertEqual(digest, hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def test_a_file_the_commit_does_not_have_is_refused(self) -> None:
+        self.refused(lambda: self.check_package(self.packaged({"src/extra.rs": b"x"})), "not in")
+
+    def test_a_missing_or_changed_file_is_refused(self) -> None:
+        self.refused(lambda: self.check_package(self.packaged({"src/lib.rs": None})), "missing src/lib.rs")
+        self.refused(lambda: self.check_package(self.packaged({"src/lib.rs": b"changed"})), "differs from")
+        self.refused(lambda: self.check_package(self.packaged({"README.md": b"other"})), "differs from")
+        self.refused(lambda: self.check_package(self.packaged({"Cargo.toml.orig": b"x"})), "differs from")
+
+    def test_a_package_naming_another_commit_or_path_is_refused(self) -> None:
+        other = json.dumps({"git": {"sha1": "0" * 40}, "path_in_vcs": "crates/ayaml"}).encode()
+        self.refused(lambda: self.check_package(self.packaged({".cargo_vcs_info.json": other})), ".cargo_vcs_info.json")
+        dirty = json.dumps({"git": {"sha1": self.commit, "dirty": True}, "path_in_vcs": "crates/ayaml"}).encode()
+        self.refused(lambda: self.check_package(self.packaged({".cargo_vcs_info.json": dirty})), ".cargo_vcs_info.json")
+
+    def test_a_package_of_another_version_or_name_is_refused(self) -> None:
+        self.refused(lambda: self.check_package(self.packaged(), name="ayaml-0.2.1.crate"), "holds ayaml-0.2.0")
+        manifest = b'[package]\nname = "ayaml"\nversion = "0.2.1"\n'
+        self.refused(lambda: self.check_package(self.packaged({"Cargo.toml": manifest})), "packaged manifest")
+        self.refused(lambda: self.check_package(self.packaged(), top="other-0.2.0", name="ayaml-0.2.0.crate"), "not ayaml-VERSION")
+
+    def test_anything_but_plain_files_in_one_directory_is_refused(self) -> None:
+        link = tarfile.TarInfo("ayaml-0.2.0/src/link.rs")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "/etc/passwd"
+        self.refused(lambda: self.check_package(self.packaged(), extra=[link]), "isn't a plain file")
+        outside = tarfile.TarInfo("ayaml-0.2.0/../evil")
+        self.refused(lambda: self.check_package(self.packaged(), extra=[outside]), "outside its directory")
+        other = tarfile.TarInfo("other/file")
+        self.refused(lambda: self.check_package(self.packaged(), extra=[other]), "outside ayaml-0.2.0")
+        again = tarfile.TarInfo("ayaml-0.2.0/README.md")
+        self.refused(lambda: self.check_package(self.packaged(), extra=[again]), "twice")
+
+    def test_a_file_mode_cargo_would_not_package_as_written_is_refused(self) -> None:
+        os.symlink("lib.rs", self.root / "crates/ayaml/src/alias.rs")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "link")
+        self.commit = git(self.root, "rev-parse", "HEAD")
+        self.refused(lambda: self.check_package(self.packaged()), "has mode 120000")
+
+    # registry
+
+    def registry(self, served: bytes, entries: list[dict], index_misses: int = 0, download: int = 200):
+        calls = {"index": 0}
+
+        def fetch(url: str) -> tuple[int, bytes]:
+            if url == check_release.INDEX:
+                calls["index"] += 1
+                if calls["index"] <= index_misses:
+                    return 404, b""
+                return 200, "\n".join(json.dumps(entry) for entry in entries).encode()
+            if url == check_release.DOWNLOAD.format(name="ayaml", version="0.2.0"):
+                return download, served if download == 200 else b""
+            if url == check_release.VERSION_API.format(name="ayaml", version="0.2.0"):
+                return (200 if entries else 404), b""
+            raise AssertionError(url)
+
+        return fetch, calls
+
+    def check_registry(self, fetch, seconds: float = 60) -> str:
+        path = self.root.parent / "built.crate"
+        path.write_bytes(b"crate bytes")
+        return check_release.check_registry(path, "0.2.0", seconds, get=fetch, sleep=lambda _: None)
+
+    def entry(self, **fields) -> dict:
+        return {"name": "ayaml", "vers": "0.2.0", "cksum": hashlib.sha256(b"crate bytes").hexdigest(), "yanked": False, **fields}
+
+    def test_the_same_bytes_in_the_index_and_the_download_pass(self) -> None:
+        fetch, calls = self.registry(b"crate bytes", [self.entry(vers="0.1.0"), self.entry()], index_misses=3)
+        self.assertEqual(self.check_registry(fetch), hashlib.sha256(b"crate bytes").hexdigest())
+        self.assertEqual(calls["index"], 4)
+
+    def test_a_version_the_index_never_lists_is_refused(self) -> None:
+        fetch, _ = self.registry(b"crate bytes", [self.entry(vers="0.1.0")])
+        self.refused(lambda: self.check_registry(fetch, seconds=0), "didn't list ayaml 0.2.0")
+
+    def test_other_bytes_are_refused(self) -> None:
+        fetch, _ = self.registry(b"crate bytes", [self.entry(cksum="0" * 64)])
+        self.refused(lambda: self.check_registry(fetch), "the sparse index's checksum")
+        fetch, _ = self.registry(b"other bytes", [self.entry()])
+        self.refused(lambda: self.check_registry(fetch), "serves other bytes")
+        fetch, _ = self.registry(b"crate bytes", [self.entry()], download=403)
+        self.refused(lambda: self.check_registry(fetch), "answered 403")
+        fetch, _ = self.registry(b"crate bytes", [self.entry(yanked=True)])
+        self.refused(lambda: self.check_registry(fetch), "is yanked")
+
+    def test_published_answers_yes_no_or_unknown(self) -> None:
+        fetch, _ = self.registry(b"", [self.entry()])
+        self.assertIs(check_release.published("0.2.0", get=fetch), True)
+        fetch, _ = self.registry(b"", [])
+        self.assertIs(check_release.published("0.2.0", get=fetch), False)
+        self.assertIsNone(check_release.published("0.2.0", get=lambda url: (503, b"")))
+
+    def test_no_answer_is_never_taken_for_a_missing_version(self) -> None:
+        import http.client
+        import urllib.error
+
+        for failure in [
+            urllib.error.URLError("refused"),
+            TimeoutError("timed out"),
+            ConnectionResetError("reset"),
+            http.client.RemoteDisconnected("closed"),
+            http.client.IncompleteRead(b"par"),
+        ]:
+            with mock.patch.object(check_release.urllib.request, "urlopen", side_effect=failure), mock.patch("sys.stderr", io.StringIO()):
+                self.assertEqual(check_release.fetch("https://crates.io/x"), (0, b""), failure)
+                self.assertIsNone(check_release.published("0.2.0"), failure)
+                self.assertEqual(check_release.main(["published", "0.2.0"]), 2, failure)
+
+    def test_no_answer_or_a_broken_index_is_waited_out(self) -> None:
+        fetch, calls = self.registry(b"crate bytes", [self.entry()])
+        answers = iter([(0, b""), (200, b"{not json"), (200, b"\xff"), (200, b"[1]")])
+
+        def flaky(url: str) -> tuple[int, bytes]:
+            if url == check_release.INDEX:
+                answer = next(answers, None)
+                if answer is not None:
+                    return answer
+            return fetch(url)
+
+        self.assertEqual(self.check_registry(flaky), hashlib.sha256(b"crate bytes").hexdigest())
+        self.assertEqual(calls["index"], 1)
+        fetch, _ = self.registry(b"crate bytes", [self.entry()])
+        self.refused(lambda: self.check_registry(lambda url: (0, b"") if url == check_release.INDEX else fetch(url), seconds=0), "didn't list")
+
+    # record
+
+    def test_the_record_names_what_a_consumer_verifies(self) -> None:
+        digest = "a" * 64
+        text = check_release.record("v0.2.0", self.commit, digest, "https://github.com/asamarts/ayaml/attestations/1")
+        for part in [
+            "ayaml-0.2.0.crate",
+            digest,
+            self.commit,
+            "refs/tags/v0.2.0",
+            "asamarts/ayaml/.github/workflows/release.yml",
+            "https://github.com/asamarts/ayaml/.github/workflows/release.yml@refs/tags/v0.2.0",
+            "https://token.actions.githubusercontent.com",
+            "https://slsa.dev/provenance/v1",
+            "https://github.com/asamarts/ayaml/attestations/1",
+            "gh attestation verify ayaml-0.2.0.crate",
+        ]:
+            self.assertIn(part, text)
+        self.refused(lambda: check_release.record("v0.2", self.commit, digest), "isn't a release tag")
+        self.refused(lambda: check_release.record("v0.2.0", "abc", digest), "full commit id")
+        self.refused(lambda: check_release.record("v0.2.0", self.commit, "abc"), "sha256 digest")
+
+
+class InstructionsBase(unittest.TestCase):
+    def test_a_missing_or_zero_base_falls_back_to_the_parent(self) -> None:
+        for given in ["", "0" * 40, "  "]:
+            self.assertEqual(check_instructions.base_revision(given), "HEAD~1")
+        self.assertEqual(check_instructions.base_revision("abc123"), "abc123")
 
 
 if __name__ == "__main__":

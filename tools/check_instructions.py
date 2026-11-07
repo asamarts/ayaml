@@ -3,6 +3,9 @@
 
 usage: tools/check_instructions.py BASE_REV
 
+An empty BASE_REV, or the zero id that a tag push gives as its "before", means the
+parent of HEAD: a release run, from a tag or started by hand, has no base of its own.
+
 Builds tools/instruction-probe.rs against BASE_REV and against the working tree, and
 counts each operation on each input under callgrind. Counts don't depend on load, so
 this works on a shared runner where timing doesn't. They also miss cache and branch
@@ -147,11 +150,19 @@ def accepted_rises(base_rev: str) -> dict[tuple[str, str], float]:
     return accepted
 
 
+def base_revision(given: str) -> str:
+    """The revision to compare with: GIVEN, or HEAD's parent when there is none."""
+    given = given.strip()
+    if not given or set(given) == {"0"}:
+        return "HEAD~1"
+    return given
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__, file=sys.stderr)
         return 2
-    base_rev = sys.argv[1]
+    base_rev = base_revision(sys.argv[1])
     if shutil.which("valgrind") is None:
         print("could not run: valgrind is required", file=sys.stderr)
         return 2
