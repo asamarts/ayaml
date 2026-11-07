@@ -800,6 +800,11 @@ fn a_line_break_character_is_content_where_it_is_written() {
             (format!("[a{character}b]"), format!("[\"a{escape}b\"]")),
             (format!("{character}a"), format!("\"{escape}a\"")),
             (format!("a{character}\nb"), format!("\"a{escape} b\"")),
+            (format!("a{character}b: c"), format!("\"a{escape}b\": c")),
+            (
+                format!("- a b{character}c: d"),
+                format!("- \"a b{escape}c\": d"),
+            ),
         ] {
             let expected = ayaml::parse_value(&meaning).unwrap();
             let read =
@@ -816,18 +821,37 @@ fn a_line_break_character_is_content_where_it_is_written() {
 #[cfg(feature = "libyaml-compat")]
 #[test]
 fn a_name_before_a_separator_and_a_verbatim_tag_read_alike_in_both_modes() {
-    for (input, meaning) in [("&a:\tb", "b"), ("&a:\rb", "b"), ("[&a:]", "[~]")] {
+    for (input, meaning) in [
+        ("&a:\tb", "b"),
+        ("&a:\rb", "b"),
+        ("[&a:]", "[~]"),
+        // A byte order mark that starts the stream changes nothing about the name.
+        ("\u{feff}&a: b", "b"),
+    ] {
         let expected = ayaml::parse_value(meaning).unwrap();
         assert_eq!(ayaml::parse_value(input).unwrap(), expected, "{input:?}");
         let read: ayaml::Value = ayaml::compat::from_str(input).unwrap();
         assert_eq!(read, expected, "{input:?} in compat");
     }
+    // Compat reads a byte order mark in a comment, and the name before it still ends in `:`.
+    let read: ayaml::Value = ayaml::compat::from_str("&a: b\n# \u{feff}").unwrap();
+    assert_eq!(read, ayaml::Value::String("b".into()));
     let tag_of = |value: ayaml::Value| match value {
         ayaml::Value::Tagged(tagged) => tagged.tag.to_string(),
         other => panic!("{other:?}"),
     };
-    assert_eq!(tag_of(ayaml::parse_value("!<Foo> x").unwrap()), "Foo");
-    assert_eq!(tag_of(ayaml::compat::from_str("!<Foo> x").unwrap()), "Foo");
+    for (input, tag) in [
+        ("!<Foo> x", "Foo"),
+        ("!<a#b> x", "a#b"),
+        ("!<tag:x,1:y#z> v", "tag:x,1:y#z"),
+    ] {
+        assert_eq!(tag_of(ayaml::parse_value(input).unwrap()), tag, "{input:?}");
+        assert_eq!(
+            tag_of(ayaml::compat::from_str(input).unwrap()),
+            tag,
+            "{input:?} in compat"
+        );
+    }
 }
 
 /// In compat a flow `?` is an indicator whatever follows it, so a quote right after it opens, and
