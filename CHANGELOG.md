@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- A typed reader's error now names the path to what it rejected, as in
+  `tasks[1]: unknown field `efort`, expected `title` or `effort` at line 4 column 5`, on every
+  typed entry point. `Error::message` documents how a path reads. The span and `ErrorKind::Serde`
+  are as they were, and an error at the document's root gains nothing.
+
 ### Fixed
 
 - A mapping can no longer be written so that its hash collides with those of other mappings. The

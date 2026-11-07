@@ -29,7 +29,9 @@ Each layer has a narrow responsibility:
 - The **resolver** implements the documented scalar profile. Events always
   retain the original scalar text, style, tag, and span before resolution.
 - The **Serde layer** decodes from the same event stream and preserves source
-  spans through typed errors.
+  spans through typed errors. An error below the document's root also names the
+  path to what failed, as in `tasks[0].limits.cpu`. The path is built only as an
+  error travels outwards, so a read that succeeds pays nothing for it.
 - The **emitter** writes deterministic YAML with safe quoting and optional
   per-node presentation styles.
 

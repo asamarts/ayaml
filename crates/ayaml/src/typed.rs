@@ -712,6 +712,7 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
             NodeKind::Sequence(sequence) => {
                 let mut access = NodeSeqAccess {
                     iter: sequence.iter(),
+                    len: sequence.len(),
                 };
                 visitor.visit_seq(&mut access).and_then(|value| {
                     // A visitor that stops early, such as a tuple's, leaves
@@ -722,7 +723,7 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
             NodeKind::Mapping(entries) => {
                 let mut access = NodeMapAccess {
                     iter: entries.iter(),
-                    value: None,
+                    entry: None,
                 };
                 visitor.visit_map(&mut access).and_then(|value| {
                     check_consumed(access.iter.len(), entries.len(), "map").map(|()| value)
@@ -1081,6 +1082,7 @@ impl<'de, 'a> NodeValue<'de, 'a> {
 
 struct NodeSeqAccess<'de, 'a> {
     iter: std::slice::Iter<'a, Node<'de>>,
+    len: usize,
 }
 
 impl<'de, 'a> SeqAccess<'de> for NodeSeqAccess<'de, 'a> {
@@ -1096,7 +1098,7 @@ impl<'de, 'a> SeqAccess<'de> for NodeSeqAccess<'de, 'a> {
         let span = node.span;
         seed.deserialize(NodeDeserializer::new(node))
             .map(Some)
-            .map_err(|error| with_span(error, span))
+            .map_err(|error| with_span(error, span).inside_index(self.len - self.iter.len() - 1))
     }
 
     fn size_hint(&self) -> Option<usize> {
@@ -1106,7 +1108,8 @@ impl<'de, 'a> SeqAccess<'de> for NodeSeqAccess<'de, 'a> {
 
 struct NodeMapAccess<'de, 'a> {
     iter: std::slice::Iter<'a, (Node<'de>, Node<'de>)>,
-    value: Option<&'a Node<'de>>,
+    /// The entry whose key was read and whose value wasn't.
+    entry: Option<&'a (Node<'de>, Node<'de>)>,
 }
 
 impl<'de, 'a> MapAccess<'de> for NodeMapAccess<'de, 'a> {
@@ -1116,11 +1119,12 @@ impl<'de, 'a> MapAccess<'de> for NodeMapAccess<'de, 'a> {
         &mut self,
         seed: K,
     ) -> Result<Option<K::Value>, Self::Error> {
-        let Some((key, value)) = self.iter.next() else {
+        let Some(entry) = self.iter.next() else {
             return Ok(None);
         };
+        let key = &entry.0;
         let span = key.span;
-        self.value = Some(value);
+        self.entry = Some(entry);
         seed.deserialize(NodeDeserializer::new(key))
             .map(Some)
             .map_err(|error| with_span(error, span))
@@ -1130,12 +1134,12 @@ impl<'de, 'a> MapAccess<'de> for NodeMapAccess<'de, 'a> {
         &mut self,
         seed: V,
     ) -> Result<V::Value, Self::Error> {
-        let value = self.value.take().ok_or_else(|| {
+        let (key, value) = self.entry.take().ok_or_else(|| {
             crate::Error::new(crate::ErrorKind::Serde, "map value requested before key")
         })?;
         let span = value.span;
         seed.deserialize(NodeDeserializer::new(value))
-            .map_err(|error| with_span(error, span))
+            .map_err(|error| inside_key(with_span(error, span), key))
     }
 
     fn size_hint(&self) -> Option<usize> {
@@ -1164,11 +1168,18 @@ impl<'de, 'a> EnumAccess<'de> for NodeEnumAccess<'de, 'a> {
         let variant = seed
             .deserialize(NodeDeserializer::new(&node))
             .map_err(|error| with_span(error, self.variant_span))?;
-        Ok((variant, NodeVariantAccess { value: self.value }))
+        Ok((
+            variant,
+            NodeVariantAccess {
+                name: node,
+                value: self.value,
+            },
+        ))
     }
 }
 
 struct NodeVariantAccess<'de, 'a> {
+    name: Node<'de>,
     value: NodeValue<'de, 'a>,
 }
 
@@ -1180,10 +1191,11 @@ impl<'de, 'a> VariantAccess<'de> for NodeVariantAccess<'de, 'a> {
         if matches!(&node.kind, NodeKind::Null) {
             Ok(())
         } else {
-            Err(
+            Err(inside_key(
                 crate::Error::new(crate::ErrorKind::Serde, "expected a unit enum variant")
                     .with_span(node.span),
-            )
+                &self.name,
+            ))
         }
     }
 
@@ -1194,7 +1206,7 @@ impl<'de, 'a> VariantAccess<'de> for NodeVariantAccess<'de, 'a> {
         let node = self.value.node();
         let span = node.span;
         seed.deserialize(NodeDeserializer::new(node))
-            .map_err(|error| with_span(error, span))
+            .map_err(|error| inside_key(with_span(error, span), &self.name))
     }
 
     fn tuple_variant<V: Visitor<'de>>(
@@ -1202,7 +1214,9 @@ impl<'de, 'a> VariantAccess<'de> for NodeVariantAccess<'de, 'a> {
         _length: usize,
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        NodeDeserializer::new(self.value.node()).deserialize_any(visitor)
+        NodeDeserializer::new(self.value.node())
+            .deserialize_any(visitor)
+            .map_err(|error| inside_key(error, &self.name))
     }
 
     fn struct_variant<V: Visitor<'de>>(
@@ -1210,7 +1224,26 @@ impl<'de, 'a> VariantAccess<'de> for NodeVariantAccess<'de, 'a> {
         _fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        NodeDeserializer::new(self.value.node()).deserialize_any(visitor)
+        NodeDeserializer::new(self.value.node())
+            .deserialize_any(visitor)
+            .map_err(|error| inside_key(error, &self.name))
+    }
+}
+
+/// Say that an error came from inside the value of this key. A scalar key reads as its value,
+/// so `0x10:` and `16:` are one path, whichever typed reader reports it.
+#[cold]
+fn inside_key(error: Error, key: &Node<'_>) -> Error {
+    let mut node = resolve(key);
+    while let NodeKind::Tagged(_, inner) = &node.kind {
+        node = resolve(inner);
+    }
+    match &node.kind {
+        NodeKind::String(text) => error.inside_key(text),
+        NodeKind::Null => error.inside_key("null"),
+        NodeKind::Bool(value) => error.inside_key(&value.to_string()),
+        NodeKind::Number(value) => error.inside_key(&value.to_string()),
+        _ => error.inside_collection_key(),
     }
 }
 
