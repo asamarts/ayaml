@@ -450,9 +450,23 @@ class Text(GateCase):
                 result = self.gate("text", "PR_TITLE", "PR_BODY", env={"PR_TITLE": content, "PR_BODY": "Fine"})
                 self.assert_rejected(result, "PR_TITLE")
 
-    def test_clean_and_unset_text_passes(self) -> None:
-        result = self.gate("text", "PR_TITLE", "PR_BODY", env={"PR_TITLE": "A plain title"})
+    def test_clean_and_empty_text_passes(self) -> None:
+        result = self.gate("text", "PR_TITLE", "PR_BODY", env={"PR_TITLE": "A plain title", "PR_BODY": ""})
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_name_that_is_not_set_stops_the_gate(self) -> None:
+        # Given the text where a variable's name belongs, the gate would scan nothing and pass.
+        env = {name: value for name, value in self.env.items() if name not in {"PR_TITLE", "PR_BODY"}}
+        result = subprocess.run(
+            [sys.executable, str(GATE), "text", "PR_TITLE", "A title written out where its name belongs"],
+            cwd=self.repo,
+            env={**env, "PR_TITLE": "Fine"},
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("could not run", result.stderr)
+        self.assertIn("not set", result.stderr)
 
 
 class Hook(GateCase):

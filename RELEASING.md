@@ -1,8 +1,9 @@
 # Releasing ayaml
 
 A release is published by [`.github/workflows/release.yml`](.github/workflows/release.yml)
-when a maintainer pushes a `vMAJOR.MINOR.PATCH` tag. No one publishes from a workstation, and
-no long-lived crates.io token exists.
+when a maintainer pushes a `vMAJOR.MINOR.PATCH` tag, and no one publishes from a workstation.
+0.1.0 and 0.1.1 were published by hand, before this workflow, and the crates.io API tokens that
+could publish them still exist until step 3 of the one-time setup revokes them.
 
 ## What the workflow binds together
 
@@ -16,9 +17,12 @@ no long-lived crates.io token exists.
    `crates/ayaml`, the workspace `README.md`, and what cargo generates, and its
    `.cargo_vcs_info.json` must name the commit and no dirty state.
 4. **Publish.** Only for a tag pushed to `asamarts/ayaml`, in the `release` environment.
-   The job packages the tag again and compares it byte for byte with step 3's package.
+   The job packages the tag again and checks that the package's digest is step 3's.
    crates.io Trusted Publishing then mints a token that lasts minutes and is revoked when the
    job ends, and `cargo publish` runs. A version crates.io already has isn't published again.
+   Neither command builds the package to verify it, as they would by default: that runs the
+   dependencies' build scripts, and this job holds the credentials that mint the token. Step 3
+   built the same bytes without them.
 5. **Registry.** `tools/check_release.py registry` waits up to ten minutes for the sparse index
    to list the version. It then checks that the index's checksum and the bytes crates.io serves
    are step 3's package.
@@ -30,9 +34,11 @@ no long-lived crates.io token exists.
    the digest, repository, ref, commit, signing workflow, certificate identity, and issuer.
 
 The workflow never publishes from a pull request, a fork, a branch, or a dirty checkout. It
-refuses a tag whose commit isn't on `main`, so the code and the workflow that release it have
-been through review. The tag ruleset "protect release tags" stops anyone from moving or
-deleting a `v*` tag.
+refuses a tag whose commit isn't on `main`. That check runs from the tagged commit's own
+workflow and script, so it stops a mistake, not a tag on a commit that changes them: the
+`release` environment's approval does. Before approving a publish, check that the run's commit
+is on `main`. The tag ruleset "protect release tags" stops anyone from moving or deleting a `v*`
+tag.
 
 ## One-time setup
 
@@ -71,7 +77,7 @@ These are done in the web interfaces by an owner. Each is recorded here once don
    ```
 
 3. Watch the run under Actions → release. With a required reviewer, approve the publish job
-   when the gate and the package have passed.
+   when the gate and the package have passed and the run's commit is the one on `main`.
 
 ## Rehearsing
 
@@ -84,14 +90,22 @@ gh workflow run release.yml -R asamarts/ayaml -f tag=v0.1.1
 The gate runs on the branch it was started from. The tag's checks and package run on the
 tag, and the package is compared with the bytes crates.io serves for that version. Nothing is
 published or released. This shows that `RELEASE_TOOLCHAIN` still rebuilds a published crate
-byte for byte.
+byte for byte. A rehearsal runs apart from releases, so it can't cancel one that waits for
+approval.
+
+A rehearsal can't run the publish, attestation, and release jobs, since each writes something
+public. The first release is their first run. If the release job then fails the same way on
+every rerun, the version is on crates.io with no GitHub release, and since a rerun uses the
+tag's workflow, completing it takes the next patch version.
 
 ## When a run fails
 
-Every job can be rerun from the Actions page. Re-running the failed jobs keeps the jobs that
-passed, with their outputs and the package they kept. If a rerun can't find that package,
-rerun all jobs instead: the package job rebuilds the same bytes from the tag. A version and a
-tag are never reused, so a release that can't be completed becomes the next patch version.
+Every job can be rerun from the Actions page. Rerun the failed jobs, which keeps the jobs that
+passed and their outputs. Each later job rebuilds or downloads what it needs and checks it
+against the package job's digest, so a rerun needs nothing stored, however late it comes.
+Re-running all jobs runs the gate again, on toolchains and an advisory database that have moved
+on since, so it can fail for reasons the tag doesn't have. A version and a tag are never reused,
+so a release that can't be completed becomes the next patch version.
 
 - **The gate or the package job fails.** Nothing is published. If the cause is a flaky runner,
   rerun the failed jobs. If the tagged commit is wrong, leave the tag in place, fix `main`, and
@@ -110,8 +124,10 @@ tag are never reused, so a release that can't be completed becomes the next patc
   release the next patch version. crates.io never lets a version be published twice.
 - **The release job fails.** Rerun it. It downloads the crate from crates.io and attests it
   again, which adds a second attestation for the same digest. If the release exists, the job
-  checks that its assets are these bytes and changes nothing. If a draft was left without its
-  assets, delete the draft and rerun the job.
+  checks that it holds exactly the crate and SHA256SUMS, with these bytes, and changes nothing.
+  `gh` creates a release as a draft, uploads its assets, and then publishes it, so a run stopped
+  in between can leave a draft. One that holds both assets with these bytes is published. One
+  that holds anything else fails the job: delete the draft and rerun the job.
 
 ## Verifying a release
 
@@ -132,13 +148,15 @@ gh attestation verify ayaml-X.Y.Z.crate --repo asamarts/ayaml \
 `COMMIT` is the commit the release notes name, which `git rev-parse vX.Y.Z^{commit}` also
 gives. The attestation's predicate is `https://slsa.dev/provenance/v1`, `gh`'s default.
 
-To rebuild the package from the tag and compare it with crates.io:
+To rebuild the package from the tag and compare it with crates.io, from a checkout of `main`,
+whose `tools/check_release.py` a release before 0.1.2 doesn't have:
 
 ```sh
-git checkout vX.Y.Z
-cargo +1.99.1 package -p ayaml --locked   # the RELEASE_TOOLCHAIN of that tag
-python3 tools/check_release.py package target/package/ayaml-X.Y.Z.crate "$(git rev-parse HEAD)"
-python3 tools/check_release.py registry target/package/ayaml-X.Y.Z.crate X.Y.Z 0
+git worktree add ../ayaml-vX.Y.Z vX.Y.Z
+(cd ../ayaml-vX.Y.Z && cargo +1.99.1 package -p ayaml --locked)   # that tag's RELEASE_TOOLCHAIN
+crate=../ayaml-vX.Y.Z/target/package/ayaml-X.Y.Z.crate
+python3 tools/check_release.py package "$crate" "$(git rev-parse 'vX.Y.Z^{commit}')"
+python3 tools/check_release.py registry "$crate" X.Y.Z 0
 ```
 
 Releases up to 0.1.1 were published by hand, before this workflow, so they have no

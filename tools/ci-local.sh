@@ -174,7 +174,7 @@ job_sync() {
     for wf in .github/workflows/ci.yml .github/workflows/fuzz.yml; do
       while IFS= read -r cmd; do
         case "$cmd" in
-          "cargo install cargo-geiger --version 0.14.0 --locked"|"cargo install cargo-fuzz --version 0.13.2 --locked"|"cargo install aplan --version 0.6.0 --locked"|"sudo rm -f /var/lib/man-db/auto-update && sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind"|"tools/install-semver-checks.sh \"\$TMPDIR/semver-checks\" >> \"\$GITHUB_PATH\"") continue ;;
+          "cargo install cargo-geiger --version 0.14.0 --locked"|"cargo install cargo-fuzz --version 0.13.2 --locked"|"cargo install aplan --version 0.6.0 --locked"|"sudo rm -f /var/lib/man-db/auto-update && sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind"|"tools/install-semver-checks.sh \"\$TMPDIR/semver-checks\" >> \"\$GITHUB_PATH\""|"tools/install-cargo-deny.sh \"\$TMPDIR/cargo-deny\" >> \"\$GITHUB_PATH\"") continue ;;
         esac
         if ! grep -qF -- "$cmd" tools/ci-local.sh; then
           echo "not mirrored ($wf): $cmd"; missing=1
@@ -281,10 +281,13 @@ job_policy() {
   # Mirrors: python3 tools/test_ci_checks.py
   step "classify dependencies" python3 tools/check_deps.py
   # Mirrors: python3 tools/check_deps.py
-  if command -v cargo-deny >/dev/null; then
-    step "cargo-deny" cargo deny check
+  # The pinned cargo-deny that CI installs, checked against its digest, in this checkout's target.
+  local deny_dir
+  if deny_dir="$(tools/install-cargo-deny.sh "$PWD/target/ci-tools/cargo-deny")"; then
+    step "cargo-deny" env PATH="$deny_dir:$PATH" cargo deny --log-level warn --all-features check
+    # Mirrors: cargo deny --log-level warn --all-features check
   else
-    echo "  cargo-deny not installed"; job_failed=1
+    echo "  the pinned cargo-deny could not be installed"; job_failed=1
   fi
   if cargo geiger --version >/dev/null 2>&1; then
     local TMPDIR="$logdir"
