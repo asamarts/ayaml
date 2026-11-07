@@ -163,14 +163,6 @@ pub mod compat {
     /// libyaml-compatible consumers. Each branch corresponds to a documented
     /// compatibility deviation, not a general error-formatting rule.
     fn map_error(input: &str, error: Error) -> Error {
-        if error.kind() == ErrorKind::Parser
-            && error.message().contains("unterminated flow")
-            && let Some(marker) =
-                crate::position::LineIndex::counting_line_boms(input).marker(input, input.len())
-        {
-            return Error::new(ErrorKind::Parser, error.message())
-                .with_span(crate::span::Span::empty(marker));
-        }
         if bom_directive_desync(input) {
             return Error::new(
                 ErrorKind::Scanner,
@@ -186,9 +178,6 @@ pub mod compat {
             && bom_alias_desync(input)
         {
             return Error::new(ErrorKind::Alias, "unknown anchor");
-        }
-        if let Some(mapped) = map_flow_error(input, &error) {
-            return mapped;
         }
         if error.kind() == ErrorKind::Parser
             && error.message() == "unexpected token in mapping value"
@@ -211,35 +200,6 @@ pub mod compat {
             return Error::new(ErrorKind::Parser, "more than one document in stream");
         }
         error
-    }
-
-    fn map_flow_error(input: &str, error: &Error) -> Option<Error> {
-        let (closing, kind) = match error.message() {
-            "expected ',' or ']'" => (']', "sequence"),
-            "expected ',' or '}'" => ('}', "mapping"),
-            _ => return None,
-        };
-        let span = error.span()?;
-        let index = span.start().index();
-        let start = input[..index.min(input.len())]
-            .rfind(['[', '{'])
-            .unwrap_or(index);
-        let line_index = crate::position::LineIndex::counting_line_boms(input);
-        let start_marker = line_index.marker(input, start)?;
-        let error_marker = span.start();
-        Some(
-            Error::new(
-                ErrorKind::Parser,
-                format!(
-                    "did not find expected ',' or '{closing}' at line {} column {}, while parsing a flow {kind} at line {} column {}",
-                    error_marker.line(),
-                    error_marker.column(),
-                    start_marker.line(),
-                    start_marker.column(),
-                ),
-            )
-            .with_span(span),
-        )
     }
 
     fn bom_directive_desync(input: &str) -> bool {

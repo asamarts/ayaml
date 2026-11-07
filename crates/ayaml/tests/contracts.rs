@@ -1782,8 +1782,10 @@ fn a_bom_before_a_marker_or_directive_starts_a_document() {
     }
     // A column doesn't count them either, in default mode.
     let error = ayaml::parse_value("# c\n\u{feff}k: [\n").unwrap_err();
-    let start = error.span().unwrap().start();
-    assert_eq!((start.line(), start.column()), (2, 4), "{error}");
+    assert_eq!(
+        error.to_string(),
+        "unterminated flow sequence at line 3 column 1, opened at line 2 column 4"
+    );
     // A directive's document has no room for a mark before its `---`.
     for input in [
         "%YAML 1.2\n\u{feff}---\na\n",
