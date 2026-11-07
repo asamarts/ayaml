@@ -3,7 +3,7 @@
 Technical decisions made since this repository became the development home. Each
 record states what was decided and why, so a later reader can tell whether the
 reason still holds. Numbering continues from earlier records that aren't published,
-which is why it starts at D65.
+which is why it starts at D65 and skips numbers.
 
 ## D65 — Development happens here, through pull requests
 
@@ -206,3 +206,32 @@ didn't stop the fuzzer, without any file the run left, such as a slow unit, and 
 same corpus by running the same fuzzer, so encrypting it would add a secret and more steps for little
 gain. One run from before this decision printed an
 input, and its log and artifact were deleted on 2026-11-06.
+
+## D77 — A rehearsal creates and deletes a draft release, and attests nothing
+
+**Date:** 2026-11-07
+**Status:** Accepted
+
+**Decision.** Started by hand, `release.yml` rehearses the GitHub release too. It downloads the
+crate crates.io serves for the rehearsed tag, creates a draft release named `rehearsal-RUN-ATTEMPT`
+with that crate, `SHA256SUMS`, and the release notes, checks the draft as a rerun checks a release,
+and deletes it. The release job and the rehearsal run the same script, `tools/github_release.sh`.
+A rehearsal makes no attestation.
+
+**Alternatives.** Stop at the comparison with the registry, as before, which leaves the release
+job's first run to the first release. Attest the rehearsed crate as well, which would run the
+attestation step, but each rehearsal would add a permanent public record for a published crate,
+signed by a branch's workflow where the release notes name a tag's. Release a throwaway tag, which
+can't be removed once immutable releases are on.
+
+**Why.** The release job is the step that can leave a version on crates.io with no GitHub release,
+and it had never run. A draft is visible only to the repository's writers, makes no tag, and can be
+deleted with immutable releases on, so a rehearsal can run the job's commands and leave nothing. A
+public repository's attestations go to a transparency log that can't be edited, so an attestation
+can't be rehearsed and then taken back.
+
+**Consequences.** The rehearsal's job has `contents: write` for its draft. It builds nothing and runs
+only the scripts of the branch it was started from, and only a writer can start one. A run
+cancelled between creating and deleting the draft could leave it, so the job's last step deletes
+it, and only a draft with a rehearsal's name. The attestation and its check still run for the first
+time in the first release through the workflow.
