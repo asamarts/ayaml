@@ -721,6 +721,12 @@ class Release(unittest.TestCase):
                 self.assertIsNone(check_release.published("0.2.0"), failure)
                 self.assertEqual(check_release.main(["published", "0.2.0"]), 2, failure)
 
+    def test_an_unexpected_failure_is_no_answer_either(self) -> None:
+        # Exit 1 sends the workflow on to publish, so only crates.io's own "no" may give it.
+        for failure in [ValueError("bad"), UnicodeEncodeError("ascii", "é", 0, 1, "x"), check_release.Refused("x")]:
+            with mock.patch.object(check_release, "published", side_effect=failure), mock.patch("sys.stderr", io.StringIO()):
+                self.assertEqual(check_release.main(["published", "0.2.0"]), 2, failure)
+
     def test_no_answer_or_a_broken_index_is_waited_out(self) -> None:
         fetch, calls = self.registry(b"crate bytes", [self.entry()])
         answers = iter([(0, b""), (200, b"{not json"), (200, b"\xff"), (200, b"[1]")])
@@ -760,83 +766,142 @@ class Release(unittest.TestCase):
         self.refused(lambda: check_release.record("v0.2.0", self.commit, "abc"), "sha256 digest")
 
 
-WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
-USES = re.compile(r"\s*(?:-\s+)?uses:\s*(.+?)\s*")
-PINNED = re.compile(r"[\w.-]+/[\w./-]+@[0-9a-f]{40} # \S+")
+GITHUB = Path(__file__).resolve().parent.parent / ".github"
+WORKFLOWS = GITHUB / "workflows"
+# A `uses` key, quoted or not, in a block step or a flow mapping, and what it names.
+USES = re.compile(r"""(?:^|[\s{,])(?:-\s+)?["']?uses["']?\s*:\s*["']?([^\s"',}#]+)["']?""")
+COMMIT_REF = re.compile(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}")
+# The version a commit pin is said to be: a release, not a branch or a word such as `latest`.
+VERSION_COMMENT = re.compile(r"#\s*v\d+(?:\.\d+){0,2}\s*$")
 SCANNER_ACTION = re.compile(r"\s+(?:-\s+)?uses: trufflesecurity/trufflehog@[0-9a-f]{40} # v(\S+)")
-SCANNER_IMAGE = re.compile(r"\s+version: (\S+)@sha256:[0-9a-f]{64}")
+SCANNER_TAG = re.compile(r'\s+SCANNER_TAG: "([^"]+)"')
+SCANNER_DIGEST = re.compile(r"\s+SCANNER_DIGEST: sha256:[0-9a-f]{64}")
+SCANNER_VERSION = "version: ${{ env.SCANNER_TAG }}@${{ env.SCANNER_DIGEST }}"
+
+
+def workflow_files() -> list[Path]:
+    """The workflows, and the composite actions this repository holds, which pin actions too."""
+    found = [*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")]
+    found += [*GITHUB.glob("actions/**/action.yml"), *GITHUB.glob("actions/**/action.yaml")]
+    return sorted(found)
 
 
 def unpinned_actions(text: str) -> list[str]:
-    """Each action a workflow uses by anything but a full commit with its version beside it."""
+    """Each action used by anything but a full commit with its release beside it, and each image
+    used by anything but a digest."""
     found = []
     for line in text.splitlines():
-        used = USES.fullmatch(line)
-        if used and not used[1].startswith("./") and not PINNED.fullmatch(used[1]):
-            found.append(used[1])
+        # A comment starts at a `#` that begins the line or follows a blank.
+        comment = re.search(r"(?:^|\s)#", line)
+        code, note = (line, "") if comment is None else (line[: comment.start()], line[comment.start() :])
+        for used in USES.finditer(code):
+            name = used[1]
+            if name.startswith("./"):
+                continue
+            if name.startswith("docker://"):
+                pinned = "@sha256:" in name
+            else:
+                pinned = COMMIT_REF.fullmatch(name) is not None and VERSION_COMMENT.search(note) is not None
+            if not pinned:
+                found.append(line.strip())
     return found
 
 
 def scanner_versions(text: str) -> tuple[str, str]:
-    """The secret scan action's version, and the tag of the image its step pins, or "" for none."""
+    """The secret scan action's version, and the tag of the image its job pins, or "" where the
+    job doesn't pin one by tag and digest or the step doesn't run it."""
     lines = text.splitlines()
+    tag = next((match[1] for line in lines if (match := SCANNER_TAG.fullmatch(line))), "")
+    digest = any(SCANNER_DIGEST.fullmatch(line) for line in lines)
     for at, line in enumerate(lines):
         action = SCANNER_ACTION.fullmatch(line)
         if action:
+            step = []
             for later in lines[at + 1 :]:
                 if re.match(r"\s+- ", later):
                     break
-                image = SCANNER_IMAGE.fullmatch(later)
-                if image:
-                    return action[1], image[1]
-            return action[1], ""
+                step.append(later.strip())
+            runs_pinned = SCANNER_VERSION in step
+            return action[1], tag if digest and runs_pinned else ""
     raise AssertionError("no secret scan step")
 
 
 class WorkflowPins(unittest.TestCase):
     def test_every_action_is_pinned_to_a_commit_with_its_version(self) -> None:
-        files = sorted(WORKFLOWS.glob("*.yml"))
+        files = workflow_files()
         self.assertGreaterEqual(len(files), 4)
         for path in files:
             self.assertEqual(unpinned_actions(path.read_text()), [], path.name)
 
     def test_an_action_by_tag_or_branch_or_without_its_version_is_found(self) -> None:
         commit = "3d3c42e5aac5ba805825da76410c181273ba90b1"
-        text = (
-            "      - uses: actions/checkout@v7\n"
-            "      - uses: dtolnay/rust-toolchain@master\n"
-            f"        uses: actions/cache@{commit}\n"
-            f"      - uses: actions/checkout@{commit[:12]} # v7.0.1\n"
-            "      - uses: ./.github/workflows/ci.yml\n"
-            f"      - uses: actions/checkout@{commit} # v7.0.1\n"
-        )
-        self.assertEqual(
-            unpinned_actions(text),
-            [
-                "actions/checkout@v7",
-                "dtolnay/rust-toolchain@master",
-                f"actions/cache@{commit}",
-                f"actions/checkout@{commit[:12]} # v7.0.1",
-            ],
-        )
+        unpinned = [
+            "- uses: actions/checkout@v7",
+            "- uses: dtolnay/rust-toolchain@master",
+            f"uses: actions/cache@{commit}",
+            f"- uses: actions/checkout@{commit[:12]} # v7.0.1",
+            f"- uses: dtolnay/rust-toolchain@{commit} # master",
+            f"- uses: actions/checkout@{commit} # latest",
+            f"- uses: actions/checkout@{commit} # v7.0.1-beta",
+            f'- "uses": actions/checkout@v7',
+            f"- uses: 'actions/checkout@v7'",
+            "- {uses: actions/checkout@v7, with: {fetch-depth: 0}}",
+            "- name: x\n  uses: docker://alpine:3.20",
+        ]
+        pinned = [
+            "- uses: ./.github/workflows/ci.yml",
+            f"- uses: actions/checkout@{commit} # v7.0.1",
+            f"- uses: dtolnay/rust-toolchain@{commit} # v1",
+            f'- "uses": "actions/checkout@{commit}" # v7.0.1',
+            f"- {{uses: actions/checkout@{commit}, with: {{fetch-depth: 0}}}} # v7.0.1",
+            f"- uses: docker://alpine@sha256:{'0' * 64}",
+            "# uses: actions/checkout@v7 in a comment is no step",
+        ]
+        for line in unpinned:
+            self.assertEqual(unpinned_actions("      " + line), [line.splitlines()[-1].strip()], line)
+        for line in pinned:
+            self.assertEqual(unpinned_actions("      " + line), [], line)
+
+    def test_composite_actions_and_yaml_files_are_read(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            (root / "workflows").mkdir()
+            (root / "actions" / "setup").mkdir(parents=True)
+            for path in ["workflows/a.yml", "workflows/b.yaml", "actions/setup/action.yml", "actions/setup/x.yml"]:
+                (root / path).write_text("")
+            with mock.patch.object(sys.modules[__name__], "GITHUB", root), mock.patch.object(
+                sys.modules[__name__], "WORKFLOWS", root / "workflows"
+            ):
+                names = [str(path.relative_to(root)) for path in workflow_files()]
+        self.assertEqual(names, ["actions/setup/action.yml", "workflows/a.yml", "workflows/b.yaml"])
 
     def test_the_secret_scanner_runs_the_version_of_its_action(self) -> None:
         action, image = scanner_versions((WORKFLOWS / "ci.yml").read_text())
         self.assertEqual(image, action, "pin ghcr.io/trufflesecurity/trufflehog at the action's version, by its digest")
 
     def test_an_image_an_update_left_behind_or_without_a_digest_is_found(self) -> None:
-        step = (
+        job = (
+            "    env:\n"
+            "{env}"
+            "    steps:\n"
             "      - name: TruffleHog\n"
             f"        uses: trufflesecurity/trufflehog@{'e' * 40} # v3.99.8\n"
             "        with:\n"
             "          path: ./\n"
-            "          version: {}\n"
+            "          {version}\n"
             "      - name: Next\n"
-            f"          version: 3.99.8@sha256:{'0' * 64}\n"
+            f"          {SCANNER_VERSION}\n"
         )
-        self.assertEqual(scanner_versions(step.format(f"3.99.7@sha256:{'0' * 64}")), ("3.99.8", "3.99.7"))
-        self.assertEqual(scanner_versions(step.format("3.99.8")), ("3.99.8", ""))
-        self.assertEqual(scanner_versions(step.format(f"3.99.8@sha256:{'0' * 64}")), ("3.99.8", "3.99.8"))
+        digest = f"      SCANNER_DIGEST: sha256:{'0' * 64}\n"
+
+        def versions(tag: str, with_digest: bool = True, version: str = SCANNER_VERSION) -> tuple[str, str]:
+            env = f'      SCANNER_TAG: "{tag}"\n' + (digest if with_digest else "")
+            return scanner_versions(job.format(env=env, version=version))
+
+        self.assertEqual(versions("3.99.7"), ("3.99.8", "3.99.7"))
+        self.assertEqual(versions("3.99.8"), ("3.99.8", "3.99.8"))
+        self.assertEqual(versions("3.99.8", with_digest=False), ("3.99.8", ""))
+        self.assertEqual(versions("3.99.8", version="version: 3.99.8"), ("3.99.8", ""))
 
 
 class InstructionsBase(unittest.TestCase):

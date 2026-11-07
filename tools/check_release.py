@@ -9,7 +9,8 @@ usage:
       CRATE, as `cargo package` wrote it, holds exactly COMMIT's files of the package's
       directory, the workspace README, and what cargo generates, and it names COMMIT.
   tools/check_release.py published VERSION
-      Exits 0 if crates.io has VERSION, 1 if it doesn't, and 2 for any other answer.
+      Exits 0 if crates.io has VERSION, 1 if it doesn't, and 2 for any other answer, an error
+      in this script included.
   tools/check_release.py registry CRATE VERSION [SECONDS]
       Waits up to SECONDS, 300 by default, for the sparse index to list VERSION, then checks
       that its checksum and the bytes crates.io serves are CRATE's.
@@ -300,7 +301,12 @@ def main(argv: list[str]) -> int:
             case ["package", crate, commit]:
                 check_package(root, Path(crate), commit)
             case ["published", version]:
-                answer = published(version)
+                # 1 sends the workflow on to publish, so nothing but a clear "no" may give it.
+                try:
+                    answer = published(version)
+                except Exception as error:  # noqa: BLE001
+                    print(f"{PACKAGE} {version} on crates.io: unknown ({error!r})", file=sys.stderr)
+                    return 2
                 print(f"{PACKAGE} {version} on crates.io: {'unknown' if answer is None else answer}")
                 return 2 if answer is None else 0 if answer else 1
             case ["registry", crate, version, *rest] if len(rest) <= 1:

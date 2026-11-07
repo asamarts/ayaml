@@ -11,7 +11,9 @@ Commands:
 
     gate.py text NAME [NAME ...]
         Scan the text held in the named environment variables, such as a pull
-        request title and body. An unset variable counts as empty.
+        request title and body. A variable may be empty, but one that isn't set
+        stops the gate: given the text itself instead of a name, it would scan
+        nothing and pass.
 
     gate.py check-list
         Load the pattern list and report how many patterns each class has.
@@ -455,6 +457,12 @@ def command_scan(args: argparse.Namespace) -> int:
 
 
 def command_text(args: argparse.Namespace) -> int:
+    unset = [name for name in args.names if name not in os.environ]
+    if unset:
+        raise GateError(
+            f"{', '.join(unset)} not set; name the variables that hold the text, as in "
+            'PR_TITLE="$(cat title)" gate.py text PR_TITLE'
+        )
     patterns = load_patterns()
     scanner = find_scanner()
     findings = Findings()
