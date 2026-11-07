@@ -5,6 +5,13 @@ use std::fmt;
 
 use crate::span::{Location, Span};
 
+/// The longest path a message holds. A longer one keeps its deepest steps, after [`ELIDED`].
+const MAX_PATH_BYTES: usize = 1024;
+/// The most characters of one key a path shows.
+const MAX_KEY_CHARS: usize = 64;
+/// What starts a path that lost its outer steps.
+const ELIDED: &str = "…";
+
 /// Stable error categories.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -60,6 +67,8 @@ impl fmt::Display for ErrorKind {
 #[derive(Debug)]
 pub struct Error {
     kind: ErrorKind,
+    /// How much of `message` is the path to what a typed reader rejected, with the `: ` after it.
+    path_len: u32,
     span: Option<Span>,
     message: String,
     limit: Option<Box<crate::limits::LimitExceeded>>,
@@ -72,6 +81,7 @@ impl Error {
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
+            path_len: 0,
             span: None,
             message: message.into(),
             limit: None,
@@ -125,17 +135,124 @@ impl Error {
     }
 
     /// The human-readable message without location decoration.
+    ///
+    /// When a typed reader rejects something below the document's root, the message starts with
+    /// the path to it, as in `tasks[0].limits.cpu: invalid type: string "x", expected u32`. A
+    /// field is its name, an element is its index in brackets, and a key that isn't a short name
+    /// made of ASCII letters, digits, `_` and `-` is quoted in brackets, as in `ports["80"]`. A
+    /// key that is a collection is `[?]`. An enum's content adds the variant's name. A long key,
+    /// or a long path, is cut short with `…`.
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    /// Say that this error came from inside element `index` of a sequence.
+    #[cold]
+    pub(crate) fn inside_index(self, index: usize) -> Self {
+        self.inside(&format!("[{index}]"))
+    }
+
+    /// Say that this error came from inside the value of the mapping key with this text.
+    #[cold]
+    pub(crate) fn inside_key(self, key: &str) -> Self {
+        if is_short_name(key) {
+            self.inside(key)
+        } else {
+            self.inside(&quoted_key(key))
+        }
+    }
+
+    /// Say that this error came from inside the value of a key that is a collection.
+    #[cold]
+    pub(crate) fn inside_collection_key(self) -> Self {
+        self.inside("[?]")
+    }
+
+    /// Put one step in front of the path. Errors travel outwards, so the path grows from its
+    /// deepest step, and only the step that reads a value adds to it.
+    fn inside(mut self, step: &str) -> Self {
+        let path_len = self.path_len as usize;
+        if path_len == 0 {
+            self.message.insert_str(0, ": ");
+            self.message.insert_str(0, step);
+            self.path_len = (step.len() + 2) as u32;
+            return self;
+        }
+        if self.message.starts_with(ELIDED) {
+            return self;
+        }
+        let separator = if self.message.starts_with('[') {
+            ""
+        } else {
+            "."
+        };
+        let step = if path_len + step.len() + separator.len() > MAX_PATH_BYTES {
+            ELIDED
+        } else {
+            step
+        };
+        self.message.insert_str(0, separator);
+        self.message.insert_str(0, step);
+        self.path_len = (path_len + step.len() + separator.len()) as u32;
+        self
+    }
+}
+
+/// Whether a key can stand in a path as it is, with no doubt about where it ends.
+fn is_short_name(key: &str) -> bool {
+    let mut chars = key.chars();
+    key.len() <= MAX_KEY_CHARS
+        && chars
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|next| next.is_ascii_alphanumeric() || next == '_' || next == '-')
+}
+
+/// A key in brackets and quotes, with anything that could change how a terminal shows it escaped.
+fn quoted_key(key: &str) -> String {
+    let mut quoted = String::from("[\"");
+    let mut chars = key.chars();
+    for next in chars.by_ref().take(MAX_KEY_CHARS) {
+        match next {
+            '"' | '\\' => {
+                quoted.push('\\');
+                quoted.push(next);
+            }
+            _ if hides_text(next) => {
+                quoted.push_str(&format!("\\u{{{:x}}}", u32::from(next)));
+            }
+            _ => quoted.push(next),
+        }
+    }
+    if chars.next().is_some() {
+        quoted.push_str(ELIDED);
+    }
+    quoted.push_str("\"]");
+    quoted
+}
+
+/// Control characters, line separators, the byte order mark, and the marks that reorder text.
+fn hides_text(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{200e}'
+                | '\u{200f}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{feff}'
+        )
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.message)?;
+        // A key in the path isn't a location the message already gives.
         if let Some(span) = self.span
-            && !self.message.contains("at line ")
+            && !self.message[self.path_len as usize..].contains("at line ")
         {
             let location = span.start().location();
             write!(
@@ -199,6 +316,84 @@ mod tests {
         let inner = std::io::Error::other("inner");
         let error = Error::new(ErrorKind::Io, "outer").with_source(inner);
         assert!(error.source().is_some());
+    }
+
+    #[test]
+    fn a_path_joins_its_steps_and_stands_before_the_message() {
+        let error = Error::new(ErrorKind::Serde, "bad")
+            .inside_key("c")
+            .inside_index(2)
+            .inside_key("b")
+            .inside_key("a b")
+            .inside_index(0);
+        assert_eq!(error.message(), "[0][\"a b\"].b[2].c: bad");
+        assert_eq!(error.kind(), ErrorKind::Serde);
+        let error = Error::new(ErrorKind::Serde, "bad").inside_collection_key();
+        assert_eq!(error.message(), "[?]: bad");
+    }
+
+    #[test]
+    fn a_key_is_bare_only_if_it_is_a_short_name() {
+        for bare in ["a", "_a", "runs-on", "a_1", &"k".repeat(64)] {
+            let error = Error::new(ErrorKind::Serde, "bad").inside_key(bare);
+            assert_eq!(error.message(), format!("{bare}: bad"));
+        }
+        for (key, shown) in [
+            ("", "[\"\"]"),
+            ("80", "[\"80\"]"),
+            ("-a", "[\"-a\"]"),
+            ("a.b", "[\"a.b\"]"),
+            ("名前", "[\"名前\"]"),
+            ("a\"b\\c", "[\"a\\\"b\\\\c\"]"),
+            ("a\nb\u{1b}", "[\"a\\u{a}b\\u{1b}\"]"),
+            ("\u{85}\u{2028}\u{2029}", "[\"\\u{85}\\u{2028}\\u{2029}\"]"),
+            ("\u{200e}\u{200f}", "[\"\\u{200e}\\u{200f}\"]"),
+            (
+                "\u{202e}\u{2066}\u{feff}",
+                "[\"\\u{202e}\\u{2066}\\u{feff}\"]",
+            ),
+        ] {
+            let error = Error::new(ErrorKind::Serde, "bad").inside_key(key);
+            assert_eq!(error.message(), format!("{shown}: bad"));
+        }
+    }
+
+    #[test]
+    fn a_long_key_and_a_long_path_are_cut_short() {
+        let error = Error::new(ErrorKind::Serde, "bad").inside_key(&"é".repeat(65));
+        assert_eq!(error.message(), format!("[\"{}…\"]: bad", "é".repeat(64)));
+
+        let mut error = Error::new(ErrorKind::Serde, "bad");
+        let name = "k".repeat(64);
+        for _ in 0..100 {
+            error = error.inside_key(&name);
+        }
+        let (path, rest) = error.message().split_once(": ").expect("a path");
+        assert_eq!(rest, "bad");
+        assert!(path.starts_with("….k"), "{path}");
+        assert!(path.len() <= 1024 + 4, "{}", path.len());
+        let before = error.message().to_owned();
+        let error = error.inside_key("outer").inside_index(1);
+        assert_eq!(error.message(), before);
+
+        let mut error = Error::new(ErrorKind::Serde, "bad").inside_index(7);
+        for _ in 0..200 {
+            error = error.inside_index(1234567);
+        }
+        assert!(error.message().starts_with("…["), "{}", error.message());
+    }
+
+    #[test]
+    fn a_location_in_a_key_does_not_stand_for_the_message_s() {
+        let span = Span::new(Marker::new(4, 2, 3), Marker::new(5, 2, 4));
+        let error = Error::new(ErrorKind::Serde, "bad")
+            .with_span(span)
+            .inside_key("at line 9");
+        assert_eq!(error.to_string(), "[\"at line 9\"]: bad at line 2 column 3");
+        let error = Error::new(ErrorKind::Serde, "bad at line 1 column 1")
+            .with_span(span)
+            .inside_key("a");
+        assert_eq!(error.to_string(), "a: bad at line 1 column 1");
     }
 
     #[test]

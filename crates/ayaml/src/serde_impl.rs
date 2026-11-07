@@ -266,6 +266,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
                 let total = sequence.len();
                 let mut access = ValueSeqAccess {
                     iter: sequence.into_iter(),
+                    len: total,
                 };
                 let value = visitor.visit_seq(&mut access)?;
                 // A visitor that stops early, such as a tuple's, leaves
@@ -277,6 +278,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
                 let total = mapping.len();
                 let mut access = ValueMapAccess {
                     iter: mapping.into_iter(),
+                    key: None,
                     value: None,
                 };
                 let value = visitor.visit_map(&mut access)?;
@@ -345,6 +347,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
         match self.value {
             Value::Null => visitor.visit_seq(ValueSeqAccess {
                 iter: Vec::new().into_iter(),
+                len: 0,
             }),
             value => ValueDeserializer { value }.deserialize_any(visitor),
         }
@@ -355,6 +358,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
         match self.value {
             Value::Null => visitor.visit_map(ValueMapAccess {
                 iter: crate::mapping::Mapping::new().into_iter(),
+                key: None,
                 value: None,
             }),
             value => ValueDeserializer { value }.deserialize_any(visitor),
@@ -544,6 +548,7 @@ impl<'de> Deserializer<'de> for Value {
 
 struct ValueSeqAccess {
     iter: std::vec::IntoIter<Value>,
+    len: usize,
 }
 
 impl<'de> SeqAccess<'de> for ValueSeqAccess {
@@ -553,10 +558,12 @@ impl<'de> SeqAccess<'de> for ValueSeqAccess {
         &mut self,
         seed: T,
     ) -> Result<Option<T::Value>, Self::Error> {
-        self.iter
-            .next()
-            .map(|value| seed.deserialize(ValueDeserializer { value }))
-            .transpose()
+        let Some(value) = self.iter.next() else {
+            return Ok(None);
+        };
+        seed.deserialize(ValueDeserializer { value })
+            .map(Some)
+            .map_err(|error| error.inside_index(self.len - self.iter.len() - 1))
     }
 
     fn size_hint(&self) -> Option<usize> {
@@ -566,6 +573,8 @@ impl<'de> SeqAccess<'de> for ValueSeqAccess {
 
 struct ValueMapAccess {
     iter: indexmap::map::IntoIter<Value, Value>,
+    /// The text of the key just read, for a path, or `None` if the key is a collection.
+    key: Option<String>,
     value: Option<Value>,
 }
 
@@ -580,7 +589,18 @@ impl<'de> MapAccess<'de> for ValueMapAccess {
             return Ok(None);
         };
         self.value = Some(value);
-        seed.deserialize(ValueDeserializer { value: key }).map(Some)
+        match key {
+            // The map keeps the text, and a target copies it only if it needs its own.
+            Value::String(text) => seed
+                .deserialize(KeyDeserializer {
+                    text: self.key.insert(text),
+                })
+                .map(Some),
+            key => {
+                self.key = scalar_key_text(&key);
+                seed.deserialize(ValueDeserializer { value: key }).map(Some)
+            }
+        }
     }
 
     fn next_value_seed<V: serde::de::DeserializeSeed<'de>>(
@@ -591,10 +611,76 @@ impl<'de> MapAccess<'de> for ValueMapAccess {
             crate::Error::new(crate::ErrorKind::Serde, "map value requested before key")
         })?;
         seed.deserialize(ValueDeserializer { value })
+            .map_err(|error| match &self.key {
+                Some(key) => error.inside_key(key),
+                None => error.inside_collection_key(),
+            })
     }
 
     fn size_hint(&self) -> Option<usize> {
         Some(self.iter.len())
+    }
+}
+
+/// A scalar key's text as its value reads, or `None` for a key that is a collection.
+fn scalar_key_text(key: &Value) -> Option<String> {
+    match key {
+        Value::Null => Some("null".to_owned()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::String(text) => Some(text.clone()),
+        Value::Tagged(tagged) => scalar_key_text(&tagged.value),
+        Value::Sequence(_) | Value::Mapping(_) => None,
+    }
+}
+
+/// A string key or a variant's name, read without giving up its text.
+struct KeyDeserializer<'a> {
+    text: &'a str,
+}
+
+impl<'de> Deserializer<'de> for KeyDeserializer<'_> {
+    type Error = crate::Error;
+
+    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        visitor.visit_str(self.text)
+    }
+
+    fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        visitor.visit_some(self)
+    }
+
+    fn deserialize_newtype_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        visitor.visit_newtype_struct(self)
+    }
+
+    fn deserialize_bytes<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        visitor.visit_bytes(self.text.as_bytes())
+    }
+
+    fn deserialize_byte_buf<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.deserialize_bytes(visitor)
+    }
+
+    fn deserialize_enum<V: Visitor<'de>>(
+        self,
+        name: &'static str,
+        variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        ValueDeserializer {
+            value: Value::String(self.text.to_owned()),
+        }
+        .deserialize_enum(name, variants, visitor)
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        unit unit_struct seq tuple tuple_struct map struct identifier ignored_any
     }
 }
 
@@ -611,14 +697,21 @@ impl<'de> serde::de::EnumAccess<'de> for ValueEnumAccess {
         self,
         seed: V,
     ) -> Result<(V::Value, Self::Variant), Self::Error> {
-        let variant = seed.deserialize(ValueDeserializer {
-            value: Value::String(self.variant),
+        let variant = seed.deserialize(KeyDeserializer {
+            text: &self.variant,
         })?;
-        Ok((variant, ValueVariantAccess { value: self.value }))
+        Ok((
+            variant,
+            ValueVariantAccess {
+                name: self.variant,
+                value: self.value,
+            },
+        ))
     }
 }
 
 struct ValueVariantAccess {
+    name: String,
     value: Value,
 }
 
@@ -629,10 +722,10 @@ impl<'de> serde::de::VariantAccess<'de> for ValueVariantAccess {
         if matches!(self.value, Value::Null) {
             Ok(())
         } else {
-            Err(crate::Error::new(
-                crate::ErrorKind::Serde,
-                "expected a unit enum variant",
-            ))
+            Err(
+                crate::Error::new(crate::ErrorKind::Serde, "expected a unit enum variant")
+                    .inside_key(&self.name),
+            )
         }
     }
 
@@ -641,6 +734,7 @@ impl<'de> serde::de::VariantAccess<'de> for ValueVariantAccess {
         seed: T,
     ) -> Result<T::Value, Self::Error> {
         seed.deserialize(ValueDeserializer { value: self.value })
+            .map_err(|error| error.inside_key(&self.name))
     }
 
     fn tuple_variant<V: Visitor<'de>>(
@@ -648,7 +742,9 @@ impl<'de> serde::de::VariantAccess<'de> for ValueVariantAccess {
         _length: usize,
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        ValueDeserializer { value: self.value }.deserialize_any(visitor)
+        ValueDeserializer { value: self.value }
+            .deserialize_any(visitor)
+            .map_err(|error| error.inside_key(&self.name))
     }
 
     fn struct_variant<V: Visitor<'de>>(
@@ -656,7 +752,9 @@ impl<'de> serde::de::VariantAccess<'de> for ValueVariantAccess {
         _fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        ValueDeserializer { value: self.value }.deserialize_any(visitor)
+        ValueDeserializer { value: self.value }
+            .deserialize_any(visitor)
+            .map_err(|error| error.inside_key(&self.name))
     }
 }
 
