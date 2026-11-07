@@ -1608,7 +1608,7 @@ impl<'a> Scanner<'a> {
             let code = if comment_after_mark {
                 ""
             } else {
-                strip_comment(line)
+                strip_comment(line, self.compat_flow)
             };
             if code.trim_matches(is_blank).is_empty() {
                 end = previous_start;
@@ -2041,11 +2041,10 @@ fn leading_spaces(text: &str) -> usize {
     text.len() - text.trim_start_matches(' ').len()
 }
 
-/// Classify `text`, which starts at a line start: leading spaces, an optional
-/// `---`, block indicators (`- `, `? `, `: `), an optional implicit key with
-/// its `:`, and node properties. The last indicator or key decides the owner.
-/// `compat` ends anchor and alias names where the compat scanner does.
-fn line_shape(text: &str, compat: bool) -> LineShape {
+/// Where a line's key or node starts: `text` without a mark it starts with, the offset in that of
+/// what follows its leading spaces, an optional `---`, and block indicators (`- `, `? `, `: `), and
+/// the owner those say it has.
+fn block_prefix(text: &str, compat: bool) -> (&str, usize, Option<Owner>) {
     // In compat, a `---` after a mark is text, as the scanner reads it.
     let (text, marker_possible) = if compat {
         text.strip_prefix('\u{feff}')
@@ -2077,8 +2076,16 @@ fn line_shape(text: &str, compat: bool) -> LineShape {
         owner = Some(Owner::Block(index));
         index = skip_blanks(index + 1);
     }
+    (text, index, owner)
+}
+
+/// Classify `text`, which starts at a line start: what `block_prefix` reads, an optional implicit
+/// key with its `:`, and node properties. The last indicator or key decides the owner. `compat`
+/// ends anchor and alias names where the compat scanner does.
+fn line_shape(text: &str, compat: bool) -> LineShape {
+    let (text, index, owner) = block_prefix(text, compat);
     let rest = &text[index..];
-    if let Some(colon) = find_value_indicator(rest, compat) {
+    if let LineStop::Value(colon) = walk_line(rest, compat) {
         return if only_properties(&rest[colon + 1..], compat) {
             LineShape::Owner(Owner::Block(text[..index].chars().count()))
         } else {
@@ -2101,19 +2108,18 @@ fn only_properties(text: &str, compat: bool) -> bool {
                 || (token.starts_with('&')
                     && !(compat
                         && (1..token.len())
-                            .any(|index| compat_name_stop(token.as_bytes(), index, 1, false))))
+                            .any(|index| compat_name_stop(token.as_bytes(), index, 1))))
         })
 }
 
-/// Whether the compat scanner ends the anchor or alias name that starts at
-/// `name_start` before `bytes[index]`: libyaml stops at a `?`, and at a `:`
-/// followed by more name text, outside a flow collection (see `scan_anchor`).
-fn compat_name_stop(bytes: &[u8], index: usize, name_start: usize, in_flow: bool) -> bool {
+/// Whether the compat scanner, outside a flow collection, ends the anchor or alias name that
+/// starts at `name_start` before `bytes[index]`: libyaml stops at a `?`, and at a `:` followed by
+/// more name text (see `scan_anchor`).
+fn compat_name_stop(bytes: &[u8], index: usize, name_start: usize) -> bool {
     match bytes[index] {
         b'?' => true,
         b':' => {
-            !in_flow
-                && index > name_start
+            index > name_start
                 && bytes.get(index + 1).is_some_and(|next| {
                     !matches!(next, b' ' | b'\t' | b'[' | b']' | b'{' | b'}' | b',')
                 })
@@ -2122,122 +2128,167 @@ fn compat_name_stop(bytes: &[u8], index: usize, name_start: usize, in_flow: bool
     }
 }
 
-/// The byte offset of the first block mapping-value indicator (`:` followed
-/// by whitespace or the end) in `text`, skipping quoted scalars and flow
-/// collections. Stops at a comment.
-fn find_value_indicator(text: &str, compat: bool) -> Option<usize> {
+/// Where walking a line's tokens stopped, as a byte offset into it.
+#[derive(Debug, PartialEq, Eq)]
+enum LineStop {
+    /// A block mapping-value indicator: a `:` followed by whitespace or the end.
+    Value(usize),
+    /// A `#` that starts a comment.
+    Comment(usize),
+    /// The line ended first, or a flow collection ran past it.
+    End,
+}
+
+/// Walk `text` from the start of a token to its first value indicator or comment, skipping quoted
+/// scalars and flow collections.
+fn walk_line(text: &str, compat: bool) -> LineStop {
     let bytes = text.as_bytes();
-    let mut depth = 0_usize;
     let mut index = 0;
-    let mut token_start = true;
-    // Inside a plain scalar at depth 0, quotes, flow indicators, and
-    // property indicators are content: `a [b: |` has the key `a [b`.
+    // Inside a plain scalar, quotes, flow indicators, and property indicators are content:
+    // `a [b: |` has the key `a [b`.
     let mut in_plain = false;
-    // In a flow collection, a plain scalar runs to the next flow indicator or `: `, and quotes
-    // inside it, after any blank, are content too: `[a"b]: |` has the key `[a"b]`.
-    let mut in_flow_plain = false;
-    let mut name_stopped = false;
     while index < bytes.len() {
         let byte = bytes[index];
-        let ends_indicator = bytes
-            .get(index + 1)
-            .is_none_or(|next| matches!(next, b' ' | b'\t' | b',' | b'[' | b']' | b'{' | b'}'));
-        // A property may come right after a quoted key's `:`, as in `{"a":!t "b"}`.
-        let after_key_colon = depth > 0 && !in_flow_plain && index > 0 && bytes[index - 1] == b':';
         match byte {
-            b'#' if token_start => return None,
-            b':' if depth == 0
-                && bytes
-                    .get(index + 1)
-                    .is_none_or(|next| matches!(next, b' ' | b'\t')) =>
+            b'#' if index == 0 || matches!(bytes[index - 1], b' ' | b'\t') => {
+                return LineStop::Comment(index);
+            }
+            b':' if bytes
+                .get(index + 1)
+                .is_none_or(|next| matches!(next, b' ' | b'\t')) =>
             {
-                return Some(index);
+                return LineStop::Value(index);
             }
             _ if in_plain => {}
-            b'"' | b'\'' if (depth == 0 && token_start) || (depth > 0 && !in_flow_plain) => {
-                index += 1;
-                while index < bytes.len() {
-                    if byte == b'"' && bytes[index] == b'\\' {
-                        index += 2;
-                        continue;
-                    }
-                    if bytes[index] == byte {
-                        if byte == b'\'' && bytes.get(index + 1) == Some(&b'\'') {
-                            index += 2;
-                            continue;
-                        }
-                        break;
-                    }
-                    index += 1;
-                }
-            }
-            // A tag, anchor, or alias runs to the next blank (or flow
-            // indicator inside a flow collection); a `:` in it, as in
-            // `!: |` or `&a: x`, is part of the name. In compat an anchor or
-            // alias name ends where libyaml ends it, and a new token starts
-            // there: `&a:: |` is the key `:` anchored `a`.
-            b'!' | b'&' | b'*' if token_start || after_key_colon => {
+            b'"' | b'\'' => index = closing_quote(bytes, index),
+            // A tag, anchor, or alias runs to the next blank; a `:` in it, as in `!: |` or
+            // `&a: x`, is part of the name. In compat an anchor or alias name ends where libyaml
+            // ends it, and plain text starts there: `&a:: |` is the key `:` anchored `a`.
+            b'!' | b'&' | b'*' => {
                 let name_start = index + 1;
-                while index + 1 < bytes.len()
-                    && !matches!(bytes[index + 1], b' ' | b'\t')
-                    && !(depth > 0 && matches!(bytes[index + 1], b',' | b'[' | b']' | b'{' | b'}'))
-                {
-                    if compat
-                        && byte != b'!'
-                        && compat_name_stop(bytes, index + 1, name_start, depth > 0)
-                    {
-                        name_stopped = true;
+                while index + 1 < bytes.len() && !matches!(bytes[index + 1], b' ' | b'\t') {
+                    if compat && byte != b'!' && compat_name_stop(bytes, index + 1, name_start) {
                         break;
                     }
                     index += 1;
                 }
             }
-            b'[' | b'{' if token_start || depth > 0 => {
-                depth += 1;
-                in_flow_plain = false;
-            }
-            b']' | b'}' if depth > 0 => {
-                depth -= 1;
-                in_flow_plain = false;
-            }
-            b',' if depth > 0 => in_flow_plain = false,
+            b'[' | b'{' => match flow_collection_end(bytes, index, compat) {
+                Some(end) => index = end,
+                None => return LineStop::End,
+            },
             b' ' | b'\t' => {}
-            // These indicators end a plain scalar, and whatever follows them can be quoted. A `:`
-            // with text right after it starts one, unless a quoted key comes first: `{"a":"b"}`.
-            b':' if depth > 0 => in_flow_plain = !ends_indicator && (in_flow_plain || token_start),
-            b'?' if depth > 0 && !in_flow_plain && ends_indicator => {}
-            _ if depth > 0 => in_flow_plain = true,
-            _ if token_start => in_plain = true,
-            _ => {}
+            _ => in_plain = true,
         }
-        token_start = std::mem::take(&mut name_stopped)
-            || matches!(byte, b' ' | b'\t')
-            || (depth > 0 && matches!(byte, b',' | b'[' | b'{'));
+        index += 1;
+    }
+    LineStop::End
+}
+
+/// The offset of what closes the flow collection that opens at `open`, reading its tokens by the
+/// scanner's rules, or `None` if it doesn't close on this line. What's quoted, named, or plain in
+/// it can hold any of the indicators, so it takes all of these to find the end of a key. A `:` or
+/// `?` before a flow indicator is an indicator to the scanner too, but plain text would stop right
+/// there anyway, so only a blank after one counts here.
+fn flow_collection_end(bytes: &[u8], open: usize, compat: bool) -> Option<usize> {
+    let blank_follows = |index: usize| matches!(bytes.get(index + 1), Some(b' ' | b'\t'));
+    let mut depth = 0_usize;
+    let mut index = open;
+    // A `:` after a quoted scalar or a closed collection is an indicator whatever follows it, past
+    // any blanks: in `{"a" :"b"}`, `"b"` is quoted.
+    let mut after_json_like = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if matches!(byte, b' ' | b'\t') {
+            index += 1;
+            continue;
+        }
+        let mut json_like = false;
+        match byte {
+            // A comment, because without a blank before it this is an error.
+            b'#' => return None,
+            b'[' | b'{' => depth += 1,
+            b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+                json_like = true;
+            }
+            b',' => {}
+            b'"' | b'\'' => {
+                index = closing_quote(bytes, index);
+                json_like = true;
+            }
+            // A verbatim tag can hold flow indicators.
+            b'!' if bytes.get(index + 1) == Some(&b'<') => {
+                while index + 1 < bytes.len() && bytes[index] != b'>' {
+                    index += 1;
+                }
+            }
+            // Here no `:` ends a name. Libyaml's stop at a `?` in compat leaves an indicator that
+            // a name can't come before, so that's an error whichever way it's read.
+            b'!' | b'&' | b'*' => {
+                while bytes
+                    .get(index + 1)
+                    .is_some_and(|next| !matches!(next, b' ' | b'\t' | b',' | b']' | b'}'))
+                {
+                    index += 1;
+                }
+            }
+            b'?' if compat || blank_follows(index) => {}
+            b':' if after_json_like || blank_follows(index) => {}
+            // A plain scalar, in which quotes and names are content. A `:` ends it only if the
+            // arm above takes it, and otherwise this arm goes on from there.
+            _ => {
+                while let Some(&next) = bytes.get(index + 1) {
+                    if matches!(next, b',' | b'[' | b']' | b'{' | b'}' | b':')
+                        || (next == b'#' && matches!(bytes[index], b' ' | b'\t'))
+                    {
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+        }
+        after_json_like = json_like;
         index += 1;
     }
     None
 }
 
-/// `line` without a trailing comment (a `#` that starts a token).
-fn strip_comment(line: &str) -> &str {
-    let bytes = line.as_bytes();
-    let mut quote = None;
-    for (index, &byte) in bytes.iter().enumerate() {
-        match quote {
-            Some(open) if byte == open => quote = None,
-            Some(_) => {}
-            None if matches!(byte, b'"' | b'\'')
-                && (index == 0 || matches!(bytes[index - 1], b' ' | b'\t')) =>
-            {
-                quote = Some(byte);
+/// The offset of the quote that closes the scalar opening at `open`, or past the end if none does.
+fn closing_quote(bytes: &[u8], open: usize) -> usize {
+    let quote = bytes[open];
+    let mut index = open + 1;
+    while index < bytes.len() {
+        if quote == b'"' && bytes[index] == b'\\' {
+            index += 2;
+            continue;
+        }
+        if bytes[index] == quote {
+            if quote == b'\'' && bytes.get(index + 1) == Some(&b'\'') {
+                index += 2;
+                continue;
             }
-            None if byte == b'#' && (index == 0 || matches!(bytes[index - 1], b' ' | b'\t')) => {
-                return &line[..index];
-            }
-            None => {}
+            return index;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+/// `line` without a trailing comment.
+fn strip_comment(line: &str, compat: bool) -> &str {
+    let (text, mut from, _) = block_prefix(line, compat);
+    let mark = line.len() - text.len();
+    loop {
+        match walk_line(&text[from..], compat) {
+            LineStop::Value(colon) => from += colon + 1,
+            LineStop::Comment(comment) => return &line[..mark + from + comment],
+            LineStop::End => return line,
         }
     }
-    line
 }
 
 /// Check the stream's characters. A character outside `nb-json`
@@ -2485,7 +2536,7 @@ fn is_line_break(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Scanner, TokenKind};
+    use super::{LineStop, Scanner, TokenKind, closing_quote, strip_comment, walk_line};
     use crate::event::ScalarStyle;
     use crate::limits::Limits;
     use crate::tag::Tag;
@@ -2507,6 +2558,175 @@ mod tests {
             }
         }
         panic!("no scalar in {input:?}");
+    }
+
+    #[test]
+    fn a_line_walk_stops_where_the_scanner_would() {
+        // A key that ends at the last `:` on the line, in both modes.
+        for text in [
+            "a: c",
+            "a:",
+            "a:\tc",
+            "a#b: c",
+            "a \"b: c",
+            "a [b: c",
+            "&a !t k: c",
+            "&a\tk: c",
+            "\"a: b\": c",
+            "\"a\\\": b\": c",
+            "\"a\\\\\": c",
+            "'a: b': c",
+            "'\\': c",
+            "'a'': b': c",
+            "[a]: c",
+            "{a: b}: c",
+            "[a#b]: c",
+            "[\"]: \"]: c",
+            "[']: ']: c",
+            "['a'']: ']: c",
+            "[\"\\\"]: \"]: c",
+            "['\\']: c",
+            "{\"a\":\"]: \"}: c",
+            "{\"a\" :\"]: \"}: c",
+            "{\"a\"\t:\"]: \"}: c",
+            "{[a] :\"]: \"}: c",
+            "['a' :\"]: \"]: c",
+            "{\"a\"::\"b}: c",
+            "[x &a: \"]: \"]: c",
+            "[x !a: \"]: \"]: c",
+            "{x *a: \"]: \"}: c",
+            "{a:\t\"]: \"}: c",
+            "{a:\"b: c}: d",
+            "[&a,\"]: \"]: c",
+            "[&a\t\"]: \"]: c",
+            "{&a}: c",
+            "[!t,\"]: \"]: c",
+            "[&a:b \"]: \"]: c",
+            "[!<t:]> \"]: \"]: c",
+            "{!<t:]> : }: c",
+            "[a[b]]: c",
+        ] {
+            for compat in [false, true] {
+                assert_eq!(
+                    walk_line(text, compat),
+                    LineStop::Value(text.rfind(':').unwrap()),
+                    "{text:?} compat={compat}"
+                );
+            }
+        }
+        // A comment, which no later `:` or bracket changes.
+        for text in [
+            "# a: b",
+            "a # b: c",
+            "a\t# b: c",
+            "'a' # b: c",
+            "[a] # b: c",
+            "&a # b: c",
+        ] {
+            for compat in [false, true] {
+                assert_eq!(
+                    walk_line(text, compat),
+                    LineStop::Comment(text.find('#').unwrap()),
+                    "{text:?} compat={compat}"
+                );
+            }
+        }
+        // Nothing that ends a key on this line.
+        for text in [
+            "",
+            "a",
+            "a:b",
+            "a#b",
+            "!t",
+            "&a b",
+            "[",
+            "[a",
+            "\"a: b",
+            "'a",
+            "[\"a: b]: c",
+            "[a, # b]: c",
+            "[a # b]: c",
+            "[a\t# b]: c",
+            "&:b: c",
+            "[a[b]: c",
+            "[a{b}: c",
+            "{a: [b}: c",
+            "[!<t:]: c",
+            "!a:b: c",
+        ] {
+            for compat in [false, true] {
+                assert_eq!(
+                    walk_line(text, compat),
+                    LineStop::End,
+                    "{text:?} compat={compat}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_line_walk_reads_names_and_a_flow_question_mark_by_mode() {
+        let walk = |text: &str| (walk_line(text, false), walk_line(text, true));
+        let last = |text: &str| LineStop::Value(text.rfind(':').unwrap());
+        for text in ["&a:b: c", "*a:b: c", "&a?b: c", "&a?b \"c: d"] {
+            assert_eq!(
+                walk(text),
+                (LineStop::End, LineStop::Value(text.find(": ").unwrap())),
+                "{text:?}"
+            );
+        }
+        let text = "[?\"]: \"]: c";
+        assert_eq!(
+            walk(text),
+            (LineStop::Value(text.find(':').unwrap()), last(text))
+        );
+        let text = "{?\"a: b}: c";
+        assert_eq!(walk(text), (last(text), LineStop::End));
+        let text = "[?\t\"]: \"]: c";
+        assert_eq!(walk(text), (last(text), last(text)));
+    }
+
+    #[test]
+    fn a_closing_quote_is_the_one_the_scanner_stops_at() {
+        for (text, close) in [
+            ("\"a\"", 2),
+            ("'a'", 2),
+            ("\"a\"\"b\"", 2),
+            ("'a''b'", 5),
+            ("'a\\'", 3),
+            ("\"a\\\"b\"", 5),
+            ("\"a\\\\\"", 4),
+            ("\"a", 2),
+            ("'a''", 4),
+        ] {
+            assert_eq!(closing_quote(text.as_bytes(), 0), close, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_comment_comes_off_the_line_it_ends() {
+        for compat in [false, true] {
+            for (line, code) in [
+                ("a: b", "a: b"),
+                ("a: b # c: d", "a: b "),
+                ("a: # c", "a: "),
+                ("a: b: c # d", "a: b: c "),
+                ("# c", ""),
+                ("- # c", "- "),
+                ("- [' # ']: # c", "- [' # ']: "),
+                ("- [\"]: \"]: # c \"", "- [\"]: \"]: "),
+                ("? {\", \"}: # c \"", "? {\", \"}: "),
+                ("- a#b: # c", "- a#b: "),
+                ("\u{feff}a: # c", "\u{feff}a: "),
+                ("[a, # b", "[a, # b"),
+            ] {
+                assert_eq!(
+                    strip_comment(line, compat),
+                    code,
+                    "{line:?} compat={compat}"
+                );
+            }
+        }
     }
 
     #[test]

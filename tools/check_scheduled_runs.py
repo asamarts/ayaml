@@ -120,11 +120,13 @@ def update_issue(found: list[str]) -> None:
         )
         if issue["title"] == ISSUE_TITLE
     ]
-    reported = "\n".join(
-        text
+    # Whole lines, because one problem's text can start with another's.
+    reported = {
+        line.removeprefix("- ")
         for issue in issues
         for text in (issue["body"], *(comment["body"] for comment in issue["comments"]))
-    )
+        for line in text.splitlines()
+    }
     new = [problem for problem in found if problem not in reported]
     if not new:
         return

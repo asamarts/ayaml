@@ -713,12 +713,13 @@ fn many_keys_take_time_linear_in_their_number() {
             }),
         ];
         type Key = fn(usize) -> String;
-        let shapes: [(&str, Key); 7] = [
+        let shapes: [(&str, Key); 8] = [
             ("floats", |key| format!("{key}.5: x\n")),
             ("exponents", |key| format!("{key}e3: x\n")),
             ("integers", |key| format!("{key}: x\n")),
             ("strings", |key| format!("k{key}: x\n")),
             ("mappings", |key| format!("? {{k{key}: x}}\n: x\n")),
+            ("tags", |key| format!("? !t{key} x\n: x\n")),
             // Each is two numbers that once wrote the same bytes, so their hashes canceled out.
             ("opposite integers", |key| {
                 let (negative, positive) = (key + 1, (1_u128 << 64) - key as u128 - 1);

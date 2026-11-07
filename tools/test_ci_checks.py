@@ -260,6 +260,20 @@ class ScheduledRuns(unittest.TestCase):
         self.assertIn("advisories.yml has had no run", calls[-1][-1])
         self.assertNotIn("fuzz.yml", calls[-1][-1])
 
+    def test_a_problem_that_an_earlier_one_starts_with_is_still_filed(self) -> None:
+        # The first text is a prefix of the second, and it's the shorter one that's new.
+        earlier = "- fuzz.yml has had no run in the last 36 hours, and the last was at 2026-01-01T00:00:00+00:00"
+        status, calls = self.with_gh(
+            "[]",
+            "[]",
+            self.issues(earlier),
+            "",
+            arguments=["--open-issue"],
+        )
+        self.assertEqual(status, 1)
+        self.assertEqual(calls[-1][:3], ["issue", "comment", "7"])
+        self.assertIn("- fuzz.yml has had no run in the last 36 hours", calls[-1][-1].splitlines())
+
     def test_closed_issues_are_read_too(self) -> None:
         _, calls = self.with_gh("[]", "[]", self.issues("- x"), "", arguments=["--open-issue"])
         listed = next(call for call in calls if call[:2] == ["issue", "list"])
