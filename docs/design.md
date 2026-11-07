@@ -33,7 +33,8 @@ Each layer has a narrow responsibility:
   path to what failed, as in `tasks[0].limits.cpu`. The path is built only as an
   error travels outwards, so a read from the input that succeeds allocates and
   formats nothing for it. A read from a `Value` keeps each string key until its
-  value has been read, so a key read as a string or a field name is copied.
+  value has been read, so a key read as a string or a field name is copied, and
+  so is an enum variant's name, which an error inside the variant names.
 - The **emitter** writes deterministic YAML with safe quoting and optional
   per-node presentation styles.
 
