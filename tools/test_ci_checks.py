@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -757,6 +758,85 @@ class Release(unittest.TestCase):
         self.refused(lambda: check_release.record("v0.2", self.commit, digest), "isn't a release tag")
         self.refused(lambda: check_release.record("v0.2.0", "abc", digest), "full commit id")
         self.refused(lambda: check_release.record("v0.2.0", self.commit, "abc"), "sha256 digest")
+
+
+WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
+USES = re.compile(r"\s*(?:-\s+)?uses:\s*(.+?)\s*")
+PINNED = re.compile(r"[\w.-]+/[\w./-]+@[0-9a-f]{40} # \S+")
+SCANNER_ACTION = re.compile(r"\s+(?:-\s+)?uses: trufflesecurity/trufflehog@[0-9a-f]{40} # v(\S+)")
+SCANNER_IMAGE = re.compile(r"\s+version: (\S+)@sha256:[0-9a-f]{64}")
+
+
+def unpinned_actions(text: str) -> list[str]:
+    """Each action a workflow uses by anything but a full commit with its version beside it."""
+    found = []
+    for line in text.splitlines():
+        used = USES.fullmatch(line)
+        if used and not used[1].startswith("./") and not PINNED.fullmatch(used[1]):
+            found.append(used[1])
+    return found
+
+
+def scanner_versions(text: str) -> tuple[str, str]:
+    """The secret scan action's version, and the tag of the image its step pins, or "" for none."""
+    lines = text.splitlines()
+    for at, line in enumerate(lines):
+        action = SCANNER_ACTION.fullmatch(line)
+        if action:
+            for later in lines[at + 1 :]:
+                if re.match(r"\s+- ", later):
+                    break
+                image = SCANNER_IMAGE.fullmatch(later)
+                if image:
+                    return action[1], image[1]
+            return action[1], ""
+    raise AssertionError("no secret scan step")
+
+
+class WorkflowPins(unittest.TestCase):
+    def test_every_action_is_pinned_to_a_commit_with_its_version(self) -> None:
+        files = sorted(WORKFLOWS.glob("*.yml"))
+        self.assertGreaterEqual(len(files), 4)
+        for path in files:
+            self.assertEqual(unpinned_actions(path.read_text()), [], path.name)
+
+    def test_an_action_by_tag_or_branch_or_without_its_version_is_found(self) -> None:
+        commit = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+        text = (
+            "      - uses: actions/checkout@v7\n"
+            "      - uses: dtolnay/rust-toolchain@master\n"
+            f"        uses: actions/cache@{commit}\n"
+            f"      - uses: actions/checkout@{commit[:12]} # v7.0.1\n"
+            "      - uses: ./.github/workflows/ci.yml\n"
+            f"      - uses: actions/checkout@{commit} # v7.0.1\n"
+        )
+        self.assertEqual(
+            unpinned_actions(text),
+            [
+                "actions/checkout@v7",
+                "dtolnay/rust-toolchain@master",
+                f"actions/cache@{commit}",
+                f"actions/checkout@{commit[:12]} # v7.0.1",
+            ],
+        )
+
+    def test_the_secret_scanner_runs_the_version_of_its_action(self) -> None:
+        action, image = scanner_versions((WORKFLOWS / "ci.yml").read_text())
+        self.assertEqual(image, action, "pin ghcr.io/trufflesecurity/trufflehog at the action's version, by its digest")
+
+    def test_an_image_an_update_left_behind_or_without_a_digest_is_found(self) -> None:
+        step = (
+            "      - name: TruffleHog\n"
+            f"        uses: trufflesecurity/trufflehog@{'e' * 40} # v3.99.8\n"
+            "        with:\n"
+            "          path: ./\n"
+            "          version: {}\n"
+            "      - name: Next\n"
+            f"          version: 3.99.8@sha256:{'0' * 64}\n"
+        )
+        self.assertEqual(scanner_versions(step.format(f"3.99.7@sha256:{'0' * 64}")), ("3.99.8", "3.99.7"))
+        self.assertEqual(scanner_versions(step.format("3.99.8")), ("3.99.8", ""))
+        self.assertEqual(scanner_versions(step.format(f"3.99.8@sha256:{'0' * 64}")), ("3.99.8", "3.99.8"))
 
 
 class InstructionsBase(unittest.TestCase):

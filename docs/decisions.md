@@ -42,8 +42,9 @@ be able to edit what judges it.
 
 **Consequences.** Editing the workflow file can still weaken the job, and only review
 catches that. A change to the gate takes effect after it lands. GitHub gives no secrets to
-pull requests from forks or from Dependabot, so the job fails on them by design, and a
-maintainer who has read the change brings it onto a branch here.
+pull requests from forks, so the job fails on them by design, and a maintainer who has read
+the change brings it onto a branch here. Dependabot's pull requests read only Dependabot's
+secrets, and since 2026-11-07 the pattern list is one of those too, so the gate runs on them.
 
 ## D67 — Dependencies are checked against an allowlist
 

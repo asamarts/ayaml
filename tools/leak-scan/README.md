@@ -94,10 +94,12 @@ GitHub takes the workflow file itself from the change, so an edit to
 
 ## Pull requests from forks and bots
 
-GitHub doesn't give repository secrets to workflows on pull requests from forks or
-from Dependabot, so the job fails there by design. A maintainer who has read the
-change brings it onto a branch in this repository, keeping the author's commits,
-and the check runs there.
+GitHub doesn't give repository secrets to workflows on pull requests from forks, so
+the job fails there by design. A maintainer who has read the change brings it onto a
+branch in this repository, keeping the author's commits, and the check runs there.
+
+Dependabot's pull requests read only Dependabot's secrets, so the pattern list is kept
+there as well, under the same name. Update both copies whenever the list changes.
 
 ## Running it by hand
 
