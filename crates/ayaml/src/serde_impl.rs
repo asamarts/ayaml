@@ -288,6 +288,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
             Value::Tagged(tagged) => visitor.visit_enum(ValueEnumAccess {
                 variant: tagged.tag.serde_name(),
                 value: tagged.value,
+                in_path: false,
             }),
         }
     }
@@ -427,7 +428,11 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
                 ));
             }
         };
-        visitor.visit_enum(ValueEnumAccess { variant, value })
+        visitor.visit_enum(ValueEnumAccess {
+            variant,
+            value,
+            in_path: true,
+        })
     }
 
     /// Serde's float visitors take 64-bit integers but not wider ones, so a
@@ -642,7 +647,12 @@ struct KeyDeserializer<'a> {
 impl<'de> Deserializer<'de> for KeyDeserializer<'_> {
     type Error = crate::Error;
 
+    // A visitor may implement only the owned form, and the default for it reads the borrowed one.
     fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        visitor.visit_string(self.text.to_owned())
+    }
+
+    fn deserialize_identifier<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         visitor.visit_str(self.text)
     }
 
@@ -659,7 +669,7 @@ impl<'de> Deserializer<'de> for KeyDeserializer<'_> {
     }
 
     fn deserialize_bytes<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        visitor.visit_bytes(self.text.as_bytes())
+        visitor.visit_byte_buf(self.text.as_bytes().to_vec())
     }
 
     fn deserialize_byte_buf<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
@@ -680,13 +690,16 @@ impl<'de> Deserializer<'de> for KeyDeserializer<'_> {
 
     serde::forward_to_deserialize_any! {
         bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
-        unit unit_struct seq tuple tuple_struct map struct identifier ignored_any
+        unit unit_struct seq tuple tuple_struct map struct ignored_any
     }
 }
 
 struct ValueEnumAccess {
     variant: String,
     value: Value,
+    /// Whether an error inside names the variant. A target that isn't an enum takes the tag as a
+    /// tag, and the document has no key by that name.
+    in_path: bool,
 }
 
 impl<'de> serde::de::EnumAccess<'de> for ValueEnumAccess {
@@ -703,7 +716,7 @@ impl<'de> serde::de::EnumAccess<'de> for ValueEnumAccess {
         Ok((
             variant,
             ValueVariantAccess {
-                name: self.variant,
+                name: self.in_path.then_some(self.variant),
                 value: self.value,
             },
         ))
@@ -711,8 +724,19 @@ impl<'de> serde::de::EnumAccess<'de> for ValueEnumAccess {
 }
 
 struct ValueVariantAccess {
-    name: String,
+    /// The variant's name, if an error inside gives it.
+    name: Option<String>,
     value: Value,
+}
+
+impl ValueVariantAccess {
+    #[cold]
+    fn inside_variant(name: Option<&str>, error: crate::Error) -> crate::Error {
+        match name {
+            Some(name) => error.inside_key(name),
+            None => error,
+        }
+    }
 }
 
 impl<'de> serde::de::VariantAccess<'de> for ValueVariantAccess {
@@ -722,10 +746,10 @@ impl<'de> serde::de::VariantAccess<'de> for ValueVariantAccess {
         if matches!(self.value, Value::Null) {
             Ok(())
         } else {
-            Err(
-                crate::Error::new(crate::ErrorKind::Serde, "expected a unit enum variant")
-                    .inside_key(&self.name),
-            )
+            Err(Self::inside_variant(
+                self.name.as_deref(),
+                crate::Error::new(crate::ErrorKind::Serde, "expected a unit enum variant"),
+            ))
         }
     }
 
@@ -734,7 +758,7 @@ impl<'de> serde::de::VariantAccess<'de> for ValueVariantAccess {
         seed: T,
     ) -> Result<T::Value, Self::Error> {
         seed.deserialize(ValueDeserializer { value: self.value })
-            .map_err(|error| error.inside_key(&self.name))
+            .map_err(|error| Self::inside_variant(self.name.as_deref(), error))
     }
 
     fn tuple_variant<V: Visitor<'de>>(
@@ -744,7 +768,7 @@ impl<'de> serde::de::VariantAccess<'de> for ValueVariantAccess {
     ) -> Result<V::Value, Self::Error> {
         ValueDeserializer { value: self.value }
             .deserialize_any(visitor)
-            .map_err(|error| error.inside_key(&self.name))
+            .map_err(|error| Self::inside_variant(self.name.as_deref(), error))
     }
 
     fn struct_variant<V: Visitor<'de>>(
@@ -754,7 +778,7 @@ impl<'de> serde::de::VariantAccess<'de> for ValueVariantAccess {
     ) -> Result<V::Value, Self::Error> {
         ValueDeserializer { value: self.value }
             .deserialize_any(visitor)
-            .map_err(|error| error.inside_key(&self.name))
+            .map_err(|error| Self::inside_variant(self.name.as_deref(), error))
     }
 }
 

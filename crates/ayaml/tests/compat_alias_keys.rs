@@ -233,6 +233,17 @@ fn a_block_scalar_after_the_key_is_indented_from_the_key() {
     refused("x: &a: k\n*a: |\n  y\n");
 }
 
+/// The check on a block scalar's first line finds its owner by reading the lines before it, with
+/// the same names the scanner keeps. Read without them, this line owns less, and the scalar's text
+/// reads as content.
+#[test]
+fn a_block_scalar_after_a_key_keeps_its_header_check() {
+    assert_eq!(
+        refused("- &a: k\n- *a: : |\n  |*a*b: ").to_string(),
+        "unexpected '*' in block scalar header at line 3 column 4"
+    );
+}
+
 #[test]
 fn a_duplicate_is_found_at_its_mapping_as_libyaml_finds_it() {
     #[derive(Debug, Deserialize)]

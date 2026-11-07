@@ -737,6 +737,7 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
                         variant: tag.serde_name(),
                         variant_span: span,
                         value: NodeValue::Ref(value),
+                        in_path: false,
                     })
                     .map_err(|error| with_span(error, span));
             }
@@ -944,6 +945,7 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
                 variant,
                 variant_span,
                 value,
+                in_path: true,
             })
             .map_err(|error| with_span(error, span))
     }
@@ -1151,6 +1153,9 @@ struct NodeEnumAccess<'de, 'a> {
     variant: String,
     variant_span: Span,
     value: NodeValue<'de, 'a>,
+    /// Whether an error inside names the variant. A target that isn't an enum takes the tag as a
+    /// tag, and the document has no key by that name.
+    in_path: bool,
 }
 
 impl<'de, 'a> EnumAccess<'de> for NodeEnumAccess<'de, 'a> {
@@ -1171,7 +1176,7 @@ impl<'de, 'a> EnumAccess<'de> for NodeEnumAccess<'de, 'a> {
         Ok((
             variant,
             NodeVariantAccess {
-                name: node,
+                name: self.in_path.then_some(node),
                 value: self.value,
             },
         ))
@@ -1179,8 +1184,19 @@ impl<'de, 'a> EnumAccess<'de> for NodeEnumAccess<'de, 'a> {
 }
 
 struct NodeVariantAccess<'de, 'a> {
-    name: Node<'de>,
+    /// The variant's name, if an error inside gives it.
+    name: Option<Node<'de>>,
     value: NodeValue<'de, 'a>,
+}
+
+impl NodeVariantAccess<'_, '_> {
+    #[cold]
+    fn inside_variant(&self, error: Error) -> Error {
+        match &self.name {
+            Some(name) => inside_key(error, name),
+            None => error,
+        }
+    }
 }
 
 impl<'de, 'a> VariantAccess<'de> for NodeVariantAccess<'de, 'a> {
@@ -1191,10 +1207,9 @@ impl<'de, 'a> VariantAccess<'de> for NodeVariantAccess<'de, 'a> {
         if matches!(&node.kind, NodeKind::Null) {
             Ok(())
         } else {
-            Err(inside_key(
+            Err(self.inside_variant(
                 crate::Error::new(crate::ErrorKind::Serde, "expected a unit enum variant")
                     .with_span(node.span),
-                &self.name,
             ))
         }
     }
@@ -1206,7 +1221,7 @@ impl<'de, 'a> VariantAccess<'de> for NodeVariantAccess<'de, 'a> {
         let node = self.value.node();
         let span = node.span;
         seed.deserialize(NodeDeserializer::new(node))
-            .map_err(|error| inside_key(with_span(error, span), &self.name))
+            .map_err(|error| self.inside_variant(with_span(error, span)))
     }
 
     fn tuple_variant<V: Visitor<'de>>(
@@ -1216,7 +1231,7 @@ impl<'de, 'a> VariantAccess<'de> for NodeVariantAccess<'de, 'a> {
     ) -> Result<V::Value, Self::Error> {
         NodeDeserializer::new(self.value.node())
             .deserialize_any(visitor)
-            .map_err(|error| inside_key(error, &self.name))
+            .map_err(|error| self.inside_variant(error))
     }
 
     fn struct_variant<V: Visitor<'de>>(
@@ -1226,7 +1241,7 @@ impl<'de, 'a> VariantAccess<'de> for NodeVariantAccess<'de, 'a> {
     ) -> Result<V::Value, Self::Error> {
         NodeDeserializer::new(self.value.node())
             .deserialize_any(visitor)
-            .map_err(|error| inside_key(error, &self.name))
+            .map_err(|error| self.inside_variant(error))
     }
 }
 

@@ -1384,7 +1384,8 @@ impl<'a> Parser<'a> {
                 let key_line = key_tokens[0].span.start().line();
                 if key_tokens.iter().any(|token| {
                     token.span.start().line() != key_line || token.span.end().line() != key_line
-                }) {
+                }) && flow_brackets_match(key_tokens)
+                {
                     return Err(self.error(
                         key_tokens[0].span,
                         "implicit mapping keys must be on one line",
@@ -1588,7 +1589,7 @@ impl<'a> Parser<'a> {
                 self.emit(self.null_scalar_with(span, tag, anchor))?;
                 return Ok(Step::Return(index));
             }
-            return Err(self.error(self.empty_span(0), "expected a node"));
+            return Err(self.flow_error(tokens, 0, FlowLack::Node("expected a node".to_owned())));
         }
         let token = self.token(tokens, index);
         let span = token.span;
@@ -2017,6 +2018,14 @@ impl<'a> Parser<'a> {
             return Ok(Step::Return(0));
         }
         let value_end = self.find_flow_item_end(self.tokens(tokens), index);
+        // Only a `]` ends a value before it starts, since the other closers returned above.
+        if value_end == index {
+            return Err(self.flow_error(
+                tokens,
+                index,
+                FlowLack::Node("unexpected ] in node position".to_owned()),
+            ));
+        }
         let value = tokens.slice(index, value_end);
         state.index = value_end;
         let depth = state.depth + 1;
@@ -2370,6 +2379,27 @@ fn value_indicator_index(tokens: &[Token<'_>]) -> Option<usize> {
         }
     }
     None
+}
+
+/// Whether each closing bracket among these tokens closes the last one opened. When one doesn't,
+/// the parse of the key reports it, which says more than where the key began.
+#[cold]
+fn flow_brackets_match(tokens: &[Token<'_>]) -> bool {
+    let mut open = Vec::new();
+    tokens.iter().all(|token| match token.kind {
+        TokenKind::FlowSequenceStart => {
+            open.push(TokenKind::FlowSequenceEnd);
+            true
+        }
+        TokenKind::FlowMappingStart => {
+            open.push(TokenKind::FlowMappingEnd);
+            true
+        }
+        TokenKind::FlowSequenceEnd | TokenKind::FlowMappingEnd => {
+            open.pop().as_ref() == Some(&token.kind)
+        }
+        _ => true,
+    })
 }
 
 /// The longest implicit key, counted in characters from the key's first
