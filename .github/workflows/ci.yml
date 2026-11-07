@@ -241,9 +241,11 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: TruffleHog
-        uses: trufflesecurity/trufflehog@31ce31ee1abbcc7dc8eee5764c17121c3044c8b2 # v3.99.7
+        uses: trufflesecurity/trufflehog@ea68ca03c865c5f324e86e849ced20ed3cf9dbbb # v3.99.8
         with:
           path: ./
           # The scanner's image, by tag and digest. The action runs the latest one otherwise.
-          version: 3.99.7@sha256:0d003fc3abc4e1565eca8462b992001314de51451e96e3c44de80d116794d5d1
+          # Dependabot moves only the action, and tools/test_ci_checks.py fails until this names
+          # the same version: take the digest of ghcr.io/trufflesecurity/trufflehog at that tag.
+          version: 3.99.8@sha256:674b2f187620a19df77f44cf9a7d77efcc581a5662accef2f2739cbb46ba4a3a
           extra_args: --only-verified
