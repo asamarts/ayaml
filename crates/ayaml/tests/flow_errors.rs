@@ -293,6 +293,50 @@ fn a_token_where_a_node_belongs_names_itself_and_the_opening() {
     node_fails("[a, }", closing, "sequence", (1, 5), (1, 1));
 }
 
+/// A `]` ends a mapping's value before it starts, which isn't where the error may stop looking.
+#[test]
+fn a_stray_bracket_where_a_mapping_value_belongs_names_itself_and_the_opening() {
+    let problem = "unexpected ] in node position";
+    node_fails("{a: ]", problem, "mapping", (1, 5), (1, 1));
+    node_fails("{a: ]}", problem, "mapping", (1, 5), (1, 1));
+    node_fails("[{a: ]", problem, "mapping", (1, 6), (1, 2));
+    node_fails("a: 1\nb: 2\nc: {d: ]\n", problem, "mapping", (3, 8), (3, 4));
+}
+
+/// A key on two lines is refused where it starts, unless its brackets don't match: that's the
+/// failure, and it says more.
+#[test]
+fn a_malformed_collection_in_a_key_reports_the_collection() {
+    sequence_fails("[a\n}: 1", (2, 1), (1, 1));
+    mapping_fails("{a\n]: 1", (2, 1), (1, 1));
+    node_fails(
+        "[\n}: 1",
+        "unexpected } in node position",
+        "sequence",
+        (2, 1),
+        (1, 1),
+    );
+    for input in ["[a\n]: 1", "{a\n}: 1", "[\n]: 1", "[[a]\n]: 1"] {
+        for (name, error) in default_errors(input) {
+            assert_eq!(
+                error.to_string(),
+                "implicit mapping keys must be on one line at line 1 column 1",
+                "{name} on {input:?}"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn a_stray_bracket_before_an_alias_key_is_the_failure_in_compat() {
+    compat_failure_is(
+        "[\n}*a:",
+        "did not find expected node content at line 2 column 1, while parsing a flow sequence at line 1 column 1",
+        (2, 1),
+    );
+}
+
 #[test]
 fn outside_a_flow_collection_an_error_stays_as_it_was() {
     for (input, message, at) in [

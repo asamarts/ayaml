@@ -434,6 +434,130 @@ fn a_string_key_reads_the_same_whatever_the_target() {
     assert_eq!(keys.keys().next().unwrap().0, b"ab");
 }
 
+/// A visitor may implement only the owned form of a key, as these do, however they ask for it.
+#[test]
+fn a_string_key_reads_for_a_target_that_takes_only_the_owned_form() {
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct OwnedText<const HOW: u8>(String);
+    impl<'de, const HOW: u8> Deserialize<'de> for OwnedText<HOW> {
+        fn deserialize<D: Deserializer2<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Text<const HOW: u8>;
+            // Implementing the owned form alone is the case under test.
+            #[allow(clippy::serde_api_misuse)]
+            impl<const HOW: u8> Visitor<'_> for Text<HOW> {
+                type Value = OwnedText<HOW>;
+                fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    formatter.write_str("an owned string")
+                }
+                fn visit_string<E>(self, value: String) -> Result<OwnedText<HOW>, E> {
+                    Ok(OwnedText(value))
+                }
+            }
+            match HOW {
+                0 => deserializer.deserialize_string(Text::<HOW>),
+                1 => deserializer.deserialize_str(Text::<HOW>),
+                _ => deserializer.deserialize_any(Text::<HOW>),
+            }
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct OwnedBytes<const HOW: u8>(Vec<u8>);
+    impl<'de, const HOW: u8> Deserialize<'de> for OwnedBytes<HOW> {
+        fn deserialize<D: Deserializer2<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Bytes<const HOW: u8>;
+            impl<const HOW: u8> Visitor<'_> for Bytes<HOW> {
+                type Value = OwnedBytes<HOW>;
+                fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    formatter.write_str("an owned byte buffer")
+                }
+                fn visit_byte_buf<E>(self, value: Vec<u8>) -> Result<OwnedBytes<HOW>, E> {
+                    Ok(OwnedBytes(value))
+                }
+            }
+            if HOW == 0 {
+                deserializer.deserialize_byte_buf(Bytes::<HOW>)
+            } else {
+                deserializer.deserialize_bytes(Bytes::<HOW>)
+            }
+        }
+    }
+    fn only_key<K: DeserializeOwned + Ord>(input: &str) -> K {
+        let keys: BTreeMap<K, u8> =
+            ayaml::from_value(ayaml::parse_value(input).expect("a value")).expect("a map");
+        keys.into_keys().next().expect("a key")
+    }
+    assert_eq!(only_key::<OwnedText<0>>("ab: 1\n").0, "ab");
+    assert_eq!(only_key::<OwnedText<1>>("ab: 1\n").0, "ab");
+    assert_eq!(only_key::<OwnedText<2>>("ab: 1\n").0, "ab");
+    assert_eq!(only_key::<OwnedBytes<0>>("ab: 1\n").0, b"ab");
+    assert_eq!(only_key::<OwnedBytes<1>>("ab: 1\n").0, b"ab");
+}
+
+/// Reads a tagged node as a tag and a number, as a target that isn't an enum does.
+#[derive(Debug)]
+struct TagAndNumber;
+
+impl<'de> Deserialize<'de> for TagAndNumber {
+    fn deserialize<D: Deserializer2<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Reader;
+        impl<'de> Visitor<'de> for Reader {
+            type Value = TagAndNumber;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a tagged number")
+            }
+            fn visit_enum<A: serde::de::EnumAccess<'de>>(
+                self,
+                data: A,
+            ) -> Result<TagAndNumber, A::Error> {
+                let (_tag, value): (String, _) = data.variant()?;
+                serde::de::VariantAccess::newtype_variant::<u8>(value)?;
+                Ok(TagAndNumber)
+            }
+        }
+        deserializer.deserialize_any(Reader)
+    }
+}
+
+/// A tag isn't a key in the document, so a path to what's under it doesn't hold it. An enum's
+/// variant is, whichever way the document writes it.
+#[test]
+fn a_tag_on_a_target_that_is_not_an_enum_is_not_a_path_step() {
+    #[derive(Debug, Deserialize)]
+    enum Kind {
+        Left(u8),
+    }
+    for (name, error, _) in every_reader::<BTreeMap<String, TagAndNumber>>("a: !t x\n") {
+        let text = error.to_string();
+        assert!(text.starts_with("a: "), "{name}: {text}");
+    }
+    for (name, error, _) in every_reader::<BTreeMap<String, Kind>>("a: !Left x\n") {
+        let text = error.to_string();
+        assert!(text.starts_with("a.Left: "), "{name}: {text}");
+    }
+}
+
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn a_tag_is_not_a_path_step_for_a_duplicate_key_in_compat() {
+    for (input, expected) in [
+        (
+            "a: !t {b: 1, b: 2}\n",
+            "a: duplicate entry with key \"b\" at line 1 column 7",
+        ),
+        (
+            "- !t [{b: 1, b: 2}]\n",
+            "[0][0]: duplicate entry with key \"b\" at line 1 column 7",
+        ),
+        (
+            "a: !t {c: !u {b: 1, b: 2}}\n",
+            "a.c: duplicate entry with key \"b\" at line 1 column 14",
+        ),
+    ] {
+        let error = ayaml::compat::from_str::<Value>(input).expect_err("a duplicate");
+        assert_eq!(error.to_string(), expected, "{input:?}");
+    }
+}
+
 /// Reads one key and asks for its value twice, or asks for a value before reading any key.
 #[derive(Debug)]
 struct Greedy<const KEY_FIRST: bool>;

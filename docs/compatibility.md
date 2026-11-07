@@ -121,7 +121,9 @@ these places, on purpose:
   that `a` stands for, in a flow collection too. Default mode reads `a:` as the name, as
   YAML 1.2.2 says, so there it's an unknown anchor unless an anchor has that name. Compat keeps
   the colon in one case: an anchor earlier in the same document has that exact name, as in
-  `&a: x` then `*a:`. `*a : 1` means the same in both modes.
+  `&a: x` then `*a:`. `*a : 1` means the same in both modes. In a flow collection a name runs on
+  through a `:` with more text after it, so `{*a:b}` looks for an anchor named `a:b`, where libyaml
+  reads the key that `a` stands for and the value `b`.
 - Global, verbatim, and non-specific tags are kept, with their escapes as written.
   Tag forms that YAML 1.2.2 allows and libyaml's scanner refuses are accepted, such as
   `!#`, `!<tag:a,1:b#c>`, or `!` right before a flow indicator. `!` isn't a tag character, so
