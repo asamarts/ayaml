@@ -889,6 +889,15 @@ impl<'a> Scanner<'a> {
             if !(handle == "!" || handle == "!!" || named) {
                 return Err(self.error_at(start, format!("invalid %TAG handle {handle}")));
             }
+            // One document may give a handle one prefix, even the same one twice (YAML 1.2.2
+            // section 6.8.2.2).
+            if self
+                .pending_tag_handles
+                .iter()
+                .any(|(seen, _)| seen == handle)
+            {
+                return Err(self.error_at(start, format!("duplicate %TAG directive for {handle}")));
+            }
             // A prefix is `!` and URI characters (a local prefix), or URI
             // characters that do not start with `!` or a flow indicator.
             // libyaml allows a leading flow indicator, and so does compat.
@@ -1018,6 +1027,9 @@ impl<'a> Scanner<'a> {
     fn scan_tag(&mut self) -> Result<Option<Token<'a>>, Error> {
         let start = self.pos;
         self.pos += 1;
+        // A shorthand's handle needs a suffix after it (YAML 1.2.2 production 99), so `!!` and
+        // `!e!` alone are errors. `!` alone is the non-specific tag.
+        let mut no_suffix = false;
         let tag = if self.peek() == Some('!') {
             self.pos += 1;
             let suffix_start = self.pos;
@@ -1025,6 +1037,7 @@ impl<'a> Scanner<'a> {
             let prefix = self
                 .expand_tag_handle(start, "!!")?
                 .ok_or_else(|| self.error_at(start, "undefined secondary tag handle"))?;
+            no_suffix = self.pos == suffix_start;
             Tag::new(prefix, self.decode_tag_suffix(suffix_start)?)
         } else if self.peek() == Some('<') {
             self.pos += 1;
@@ -1045,6 +1058,11 @@ impl<'a> Scanner<'a> {
                 return Err(self.error_at(start, "unterminated verbatim tag"));
             }
             let suffix = &self.input[suffix_start..self.pos];
+            // A verbatim tag holds at least one character (production 97), and `!` alone names
+            // no local tag (example 6.25).
+            if suffix.is_empty() || suffix == "!" {
+                return Err(self.error_at(start, "a verbatim tag needs a name"));
+            }
             self.pos += 1;
             Tag::new("", suffix)
         } else {
@@ -1063,6 +1081,7 @@ impl<'a> Scanner<'a> {
                 let prefix = self.expand_tag_handle(start, handle)?.ok_or_else(|| {
                     self.error_at(start, format!("undefined tag handle {handle:?}"))
                 })?;
+                no_suffix = self.pos == suffix_start;
                 Tag::new(prefix, self.decode_tag_suffix(suffix_start)?)
             } else {
                 // `!` alone is the non-specific tag, which no `%TAG !` changes.
@@ -1082,6 +1101,9 @@ impl<'a> Scanner<'a> {
                 self.pos,
                 "a tag must be followed by whitespace or a line break",
             ));
+        }
+        if no_suffix {
+            return Err(self.error_at(start, "a tag's handle needs a suffix after it"));
         }
         self.make(TokenKind::Tag(tag), start, self.pos)
     }
@@ -1400,22 +1422,30 @@ impl<'a> Scanner<'a> {
         literal: bool,
     ) -> Result<Option<Token<'a>>, Error> {
         self.pos += 1;
-        let mut chomping = Chomping::Clip;
+        // At most one chomping and one indentation indicator, in either order, right after the
+        // `|` or `>` (YAML 1.2.2 production 162). Only blanks and a comment may follow them.
+        let mut chomping = None;
         let mut explicit_indent = None;
         loop {
             match self.peek() {
-                Some('+') => {
-                    chomping = Chomping::Keep;
+                Some(ch @ ('+' | '-')) if chomping.is_none() => {
+                    chomping = Some(if ch == '+' {
+                        Chomping::Keep
+                    } else {
+                        Chomping::Strip
+                    });
                     self.pos += 1;
                 }
-                Some('-') => {
-                    chomping = Chomping::Strip;
-                    self.pos += 1;
-                }
-                Some(ch @ '1'..='9') => {
+                Some(ch @ '1'..='9') if explicit_indent.is_none() => {
                     explicit_indent = Some(ch.to_digit(10).expect("digit") as usize);
                     self.pos += 1;
                 }
+                _ => break,
+            }
+        }
+        let chomping = chomping.unwrap_or(Chomping::Clip);
+        loop {
+            match self.peek() {
                 Some(' ' | '\t') => self.pos += 1,
                 Some('#') => {
                     let previous = self.input[..self.pos].chars().next_back();
@@ -1428,6 +1458,14 @@ impl<'a> Scanner<'a> {
                     while let Some(ch) = self.peek() {
                         if is_line_break(ch) {
                             break;
+                        }
+                        // A comment holds no mark (production 75), here as elsewhere. Compat
+                        // reads one, as libyaml does.
+                        if ch == '\u{feff}' && !self.compat_flow {
+                            return Err(self.error_at(
+                                self.pos,
+                                "a byte order mark can only start a document",
+                            ));
                         }
                         self.pos += ch.len_utf8();
                     }
