@@ -27,12 +27,26 @@ stream.
 
 Limits are inclusive at the accepted boundary. Input size, depth, alias expansion,
 tag expansion, a block scalar's size, and the least node cost have tests just below,
-at, and above their ceilings. AY-034 adds the same for the other limits.
+at, and above their default ceilings. `tests/limit_consistency.rs` sets `max_events`,
+`max_depth`, `max_anchors`, `max_scalar_bytes`, the fixed alias allowance,
+`max_alias_dereferences`, `max_documents`, `max_collection_entries`, `max_tag_expansion_bytes`,
+and `max_input_bytes` to small values, and checks each at the least value that accepts its input,
+one above, and every value below, on every reader that takes limits. AY-034 extends that to each
+place that counts, to `node_cost_bytes` and `alias_bytes_per_input_byte`, and to the readers that
+take the default limits only.
 
-Every reader that takes limits gives the same answer for the same input at the same limits, and
-refuses it at the same place. `tests/limit_consistency.rs` checks each limit that way, on every one
-of those readers, just below and at its boundary and one above it. The readers that build values
-differ from the event readers only where an alias copies its target, as the next sections say.
+Every reader that takes limits counts each limit the same way, so at the same limits they agree
+on whether an input keeps within them. The readers that build values differ from the event readers
+only where an alias copies its target, as the next sections say. An input that breaks one limit at
+one place is refused there by every reader, in one mode. With more than one problem, such as a
+limit broken in more than one place, two limits, or a limit and a syntax error, the readers can
+report different ones, because they don't check in the same order:
+
+- `parse_events` and the `Deserializer` read a stream a document at a time, and count its start
+  before they scan anything. They can stop at an earlier document than the readers that scan the
+  whole stream before they parse it.
+- `parse_value` and `parse_documents` build values as events arrive, and the typed readers build
+  them from a document's events once it is read, so they can meet two limits in a different order.
 
 ## What the limits count
 
@@ -47,10 +61,12 @@ differ from the event readers only where an alias copies its target, as the next
 
 A line break, a blank line, and a comment count as neither, so lines without content don't use up
 the limit. `a: 1` is 8 events, from the stream's start to its end, and 3 tokens. Tokens can
-outnumber events: each line of `- &a !t x` is 4 tokens and 1 event.
+outnumber events: each line of `- &a !t x` is 4 tokens and 1 event, and a second `...` line in a row
+is a token and no event. Either count over the limit is reported as `LimitKind::Events`.
 
 `max_depth` bounds the collections open at once. A `key: value` entry of a flow sequence is a
-mapping of one pair inside it, so `[a: [1]]` is 3 deep. The readers that build values count an
+mapping of one pair inside it, so `[a: [1]]` is 3 deep. A mapping's keys are inside it, as its
+values are, so `[a]: c` is 2 deep. The readers that build values count an
 alias as the copy of its target that it becomes, so the target's collections count where the alias
 is. An event reader sees the alias alone: `a: &x [[1]]` then `b: [*x]` is 3 deep there and 4 deep
 where values are built.

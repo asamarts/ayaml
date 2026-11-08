@@ -54,7 +54,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `max_events` now counts each event once, on every reader, and counts the tokens a read keeps
   against the same limit: scalars, anchors, aliases, tags, indicators, document markers, and
   directives. A line break, and so a blank or comment line, counts as neither, where each one
-  counted before, so a million of them between two entries refused a document of a few MiB. The
+  counted before, so a million of them between two entries refused a document of about 1 MB. The
   stream's start and end now count as the events they are on every reader, as they did on
   `parse_events` and the `Deserializer` alone, so an input exactly at the limit on another reader
   may need 2 more. `docs/limits.md` says what each limit counts.
@@ -169,10 +169,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `parse_events` and the `Deserializer` counted each event twice against `max_events`, so they
   refused an input at about half the limit that the other readers allowed. They count it once now,
-  and refuse an input at the same event as the other readers.
+  so they accept what the other readers accept at the same limits. Reading a document at a time,
+  they can still stop at an earlier document of a stream than the other readers, as
+  `docs/limits.md` says.
 - A `key: value` or `? key` entry of a flow sequence now counts toward `max_depth` as the mapping it
   is on the event readers too. `parse_events` read `[a: [1]]` under a `max_depth` of 2, which the
   readers that build values refuse.
+- A flow collection that is a block mapping's key now counts toward `max_depth` inside the mapping
+  on the event readers too. `parse_events` read `[a]: c` under a `max_depth` of 1, and a key of 128
+  nested sequences at the default limits, which the readers that build values refuse.
 - `max_scalar_bytes` now bounds a scalar's value as well as its text. A double-quoted `\L` or `\P`
   takes 2 bytes of text and 3 of value, so a scalar of them could hold half as much again as the
   limit.
@@ -182,6 +187,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The stream start and end events from `parse_events` now carry the places that the eager event
   reader gives them. The end said line 1, column 1, at the end of the input, and the start, after a
   byte order mark, the mark's place.
+- An empty node where the input ends, as after `a:`, and the end of its document, now carry their
+  line and column, and so do errors there: `a:` read into a struct with a number
+  field said `at line 1 column 1`, and now says `at line 2 column 1`. From `parse_events` and the
+  `Deserializer`, an empty node at the end of a document that the next `---` starts also had the
+  input's length as its offset.
 
 ## [0.1.1] — 2026-11-04
 

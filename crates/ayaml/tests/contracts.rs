@@ -297,6 +297,64 @@ fn event_stream_spans_documents_lazily() {
     );
 }
 
+/// A reader of a whole event stream.
+type ReadEvents = fn(&str) -> Vec<Event<'_>>;
+
+/// The line and column of a byte offset, counted from the text alone.
+fn place_of(input: &str, index: usize) -> (usize, usize) {
+    let before = &input[..index];
+    let line = before.matches('\n').count() + 1;
+    let column = before
+        .rsplit('\n')
+        .next()
+        .map_or(0, |text| text.chars().count())
+        + 1;
+    (line, column)
+}
+
+/// Every event's line and column agree with its offset, an empty node's and an implicit
+/// document end's too, where a document or the input ends.
+#[test]
+fn event_places_match_their_offsets() {
+    let inputs = [
+        "a:",
+        "a:\n",
+        "a:\n\n# c\n",
+        "- a:\n",
+        "a:\n--- b\n",
+        "a:\n\n# c\n\n--- b\n",
+        "---\n---\n",
+        "- a:\n--- !t\nx:\n  - y: 1\n    z:\n",
+        "a:\n...\n",
+        "a:\n...\n--- b:\n",
+    ];
+    let readers: &[(&str, ReadEvents)] = &[
+        ("parse_events", |input| {
+            ayaml::parse_events(input)
+                .expect("stream")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("events")
+        }),
+        #[cfg(feature = "libyaml-compat")]
+        ("compat::parse_events_with_limits", |input| {
+            ayaml::compat::parse_events_with_limits(input, &Limits::default()).expect("events")
+        }),
+    ];
+    for &(name, read) in readers {
+        for input in inputs {
+            for event in read(input) {
+                for marker in [event.span().start(), event.span().end()] {
+                    assert_eq!(
+                        (marker.line(), marker.column()),
+                        place_of(input, marker.index()),
+                        "{name} {input:?} {event:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn event_stream_defers_syntax_errors_to_items_and_enforces_global_document_limit() {
     let mut events = ayaml::parse_events("%YAML 1.2\n").expect("stream");

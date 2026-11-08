@@ -1,9 +1,12 @@
 //! The same input at the same limits gets the same answer from every reader that takes limits.
 //!
-//! Each case names a limit and the least value of it that accepts the input. One less refuses
-//! it, on every reader, with that limit's kind and at the same place. The least values are
-//! worked out by hand in each case's comment, from what `docs/limits.md` says each limit counts,
-//! not read off the parser.
+//! Each case names a limit and the least value of it that accepts the input. Every value below
+//! it refuses the input, on every reader, with that limit's kind. At one less, where each case
+//! breaks the limit at one place only, every reader refuses at that place. Further below, a
+//! stream can break the limit in more than one document, and the readers that read a document
+//! at a time may stop at an earlier one, as `docs/limits.md` says. The least values are worked
+//! out by hand in each case's comment, from what `docs/limits.md` says each limit counts, not
+//! read off the parser.
 
 use std::marker::PhantomData;
 
@@ -33,6 +36,10 @@ fn cursor(
 }
 
 fn readers() -> Vec<Reader> {
+    #[cfg_attr(
+        not(any(feature = "libyaml-compat", feature = "bench-internals")),
+        allow(unused_mut)
+    )]
     let mut readers = vec![
         Reader {
             name: "parse_events_with_limits",
@@ -154,6 +161,9 @@ struct Case {
     /// The least accepted value on event readers, which don't copy an alias's target. It's
     /// `least` unless the limit bounds what an alias copies.
     least_events: usize,
+    /// The input holds more than one document, which a reader of one document refuses
+    /// whatever the limits, so only the stream readers are asked.
+    several: bool,
 }
 
 const fn case(
@@ -168,6 +178,15 @@ const fn case(
         set,
         least,
         least_events: least,
+        several: false,
+    }
+}
+
+/// A case whose input holds more than one document.
+const fn stream(case: Case) -> Case {
+    Case {
+        several: true,
+        ..case
     }
 }
 
@@ -251,13 +270,44 @@ fn cases() -> Vec<Case> {
         // stream end.
         case("%YAML 1.2\n---\na\n...\n", LimitKind::Events, events, 6),
         // Three events for each document, and the stream's two.
-        case("a\n---\nb\n---\nc\n", LimitKind::Events, events, 11),
+        stream(case("a\n---\nb\n---\nc\n", LimitKind::Events, events, 11)),
+        // The first document has 12 events: its start and end, three mapping starts and ends,
+        // `a`, `b`, `c`, and the empty value. The second has 6: its start and end, the
+        // sequence's, `x` and `y`. With the stream's two, 20. Tokens: 6 for `a:`, `b:` and
+        // `c:`, the `---`, and 8 for the entries. From 7 to 12, a reader of a document at a time
+        // stops at an event of the first document, and the others at a token of the second.
+        stream(case(
+            "a:\n b:\n  c:\n---\n- &a !t x\n- &b !t y\n",
+            LimitKind::Events,
+            events,
+            20,
+        )),
         // Depth: the sequence, the pair's mapping inside it, and the inner sequence.
         case("[a: [1]]\n", LimitKind::Depth, depth, 3),
+        // The same with an explicit key.
         case("[? a : [1]]\n", LimitKind::Depth, depth, 3),
+        // A key's collection nests inside the pair's mapping, as a value's does.
         case("[[a]: 1]\n", LimitKind::Depth, depth, 3),
+        case("[? [a] : 1]\n", LimitKind::Depth, depth, 3),
+        // A block mapping's key is inside the mapping: the mapping, and the key's collection.
+        case("[a]: c\n", LimitKind::Depth, depth, 2),
+        case("{a: b}: c\n", LimitKind::Depth, depth, 2),
+        case("&x [a]: c\n", LimitKind::Depth, depth, 2),
+        // The sequence, the mapping in it, and the key's sequence.
+        case("- [a]: c\n", LimitKind::Depth, depth, 3),
+        // Two block sequences and the flow sequence.
         case("- - [1]\n", LimitKind::Depth, depth, 3),
+        // The mapping, the sequence, the flow mapping, and the flow sequence.
         case("a:\n  - {b: [c]}\n", LimitKind::Depth, depth, 4),
+        // The first document is 2 deep and the second 3. Below 2, a reader of a document at a
+        // time stops in the first document, and the others in the second, where the scanner
+        // meets a `[`.
+        stream(case(
+            "a:\n  - b\n---\n[[[1]]]\n",
+            LimitKind::Depth,
+            depth,
+            3,
+        )),
         // An alias where a value is built nests its target's two sequences inside the mapping and
         // `[*x]`. An event reader sees the alias alone.
         Case {
@@ -265,12 +315,13 @@ fn cases() -> Vec<Case> {
             ..case("a: &x [[1]]\nb: [*x]\n", LimitKind::Depth, depth, 4)
         },
         // Anchors count for the whole stream.
-        case(
+        stream(case(
             "&a 1\n---\n&b 2\n---\n&c 3\n",
             LimitKind::Anchors,
             anchors,
             3,
-        ),
+        )),
+        // Three anchors in one document, one of them on a key.
         case("[&a 1, &b {&c k: v}]\n", LimitKind::Anchors, anchors, 3),
         // A scalar's size is the larger of its text, quotes included, and its value: 8 bytes of
         // text, and 3 of value for each `\L`.
@@ -348,6 +399,7 @@ fn cases() -> Vec<Case> {
                 2 * 512 + (256 + 2 * 512),
             )
         },
+        // Each alias is one dereference, wherever its target is.
         Case {
             least_events: 0,
             ..case(
@@ -357,20 +409,17 @@ fn cases() -> Vec<Case> {
                 2,
             )
         },
-        case("a\n---\nb\n", LimitKind::Documents, documents, 2),
+        stream(case("a\n---\nb\n", LimitKind::Documents, documents, 2)),
+        // Three entries, and two pairs.
         case("[a, b, c]\n", LimitKind::CollectionEntries, entries, 3),
         case("a: 1\nb: 2\n", LimitKind::CollectionEntries, entries, 2),
         // `!!` stands for the 18 bytes of `tag:yaml.org,2002:`.
         case("!!str a\n", LimitKind::TagExpansion, tag_bytes, 18),
         // `!` stands for itself, once for each use.
         case("- !t a\n- !t b\n", LimitKind::TagExpansion, tag_bytes, 2),
+        // Five bytes.
         case("a: 1\n", LimitKind::InputBytes, input_bytes, 5),
     ]
-}
-
-/// Whether `input` holds more than one document, which a single-document reader refuses.
-fn several_documents(input: &str) -> bool {
-    ayaml::parse_documents(input).is_ok_and(|documents| documents.len() > 1)
 }
 
 #[test]
@@ -378,9 +427,11 @@ fn every_reader_gives_the_same_answer_at_the_same_limits() {
     let readers = readers();
     let mut failures = Vec::new();
     for case in cases() {
-        let several = several_documents(case.input);
         let mut places: Vec<(usize, &str, Option<Span>)> = Vec::new();
-        for reader in readers.iter().filter(|reader| reader.stream || !several) {
+        for reader in readers
+            .iter()
+            .filter(|reader| reader.stream || !case.several)
+        {
             let least = if reader.values {
                 case.least
             } else {
@@ -397,6 +448,16 @@ fn every_reader_gives_the_same_answer_at_the_same_limits() {
             }
             if least == 0 {
                 continue;
+            }
+            // Every value below one less refuses the input for the same limit, wherever.
+            for value in 0..least - 1 {
+                match accepts(value) {
+                    Err(error) if error.limit().map(|limit| limit.kind()) == Some(case.kind) => {}
+                    other => failures.push(format!(
+                        "{:?} {:?}: {} at {value}: {other:?}",
+                        case.input, case.kind, reader.name
+                    )),
+                }
             }
             match accepts(least - 1) {
                 Ok(()) => failures.push(format!(
@@ -439,7 +500,8 @@ fn every_reader_gives_the_same_answer_at_the_same_limits() {
 }
 
 /// The lazy and eager event readers give the same events, with the same places, the stream's
-/// start and end included.
+/// start and end included, and an empty node where a document or the input ends. An input they
+/// refuse, they refuse with the same error at the same place.
 #[cfg(feature = "bench-internals")]
 #[test]
 fn lazy_and_eager_events_match() {
@@ -453,13 +515,31 @@ fn lazy_and_eager_events_match() {
         "a\n---\nb\n",
         "%YAML 1.2\n---\na\n...\n",
         "- [a, b: c]\n",
+        "a:",
+        "a:\n",
+        "a:\n--- b\n",
+        "a:\n\n# c\n\n--- b\n",
+        "---\n---\n",
+        "- a:\n--- !t\nx:\n  - y: 1\n    z:\n",
+        "a:\n...\n--- b:\n",
+        // Refused.
+        "%YAML 1.2\n",
+        "a: [b\n",
+        "a:\n---\n[\n",
+        "a: 1\n---\nb: [\n",
     ] {
         let limits = Limits::default();
-        let eager = ayaml::internals::parse_events(input, &limits).expect("eager");
+        let eager = ayaml::internals::parse_events(input, &limits);
         let lazy = ayaml::parse_events_with_limits(input, &limits)
-            .expect("lazy")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("lazy");
-        assert_eq!(lazy, eager, "{input:?}");
+            .and_then(|stream| stream.collect::<Result<Vec<_>, _>>());
+        match (lazy, eager) {
+            (Ok(lazy), Ok(eager)) => assert_eq!(lazy, eager, "{input:?}"),
+            (Err(lazy), Err(eager)) => assert_eq!(
+                (lazy.to_string(), lazy.span()),
+                (eager.to_string(), eager.span()),
+                "{input:?}"
+            ),
+            (lazy, eager) => panic!("{input:?}: lazy {lazy:?}, eager {eager:?}"),
+        }
     }
 }
