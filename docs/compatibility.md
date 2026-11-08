@@ -110,7 +110,8 @@ Then the marker is text, and the line reads like a later line.
 
 A closing `]`, `}`, or quote may sit at any indentation in both modes, including
 under a block collection, where the grammar asks for indentation, and after tabs alone.
-libyaml accepts these too, and files commonly close a flow collection this way:
+libyaml accepts these too, but for a tab right after a plain scalar's line, as in
+`k: [a\n\t]`, and files commonly close a flow collection this way:
 
 ```yaml
 key: [
@@ -120,6 +121,14 @@ key: [
 
 Only a quoted scalar's own quote closes it there, so in `k: "a\n\t'"` the line is
 indented by a tab alone, which is an error.
+
+By default, any other line of a flow collection under a block collection is indented
+past the innermost one, whether a plain scalar goes on there or an entry starts there,
+so `k: [a\nb]` and `a:\n  b: [c,\n  d]` are errors. Compatibility mode reads such
+lines, as libyaml does, except where an implicit flow key's `:` sits on one, as in
+`k: {x\n: y}`, or only a tab indents a line that a plain scalar goes on to, as in
+`k: [a\n\tb]`. libyaml refuses those too. It reads an explicit key's `:` there, as in
+`k: {? x\n: y}`, and so does compatibility mode.
 
 Compatibility mode isn't an exact copy of libyaml. It follows YAML 1.2.2 instead in
 these places, on purpose:
@@ -149,15 +158,20 @@ these places, on purpose:
   span lines or have a line break before its `:`. `[-]` is an error.
 - An empty implicit key, such as `: a`, is valid.
 - Tabs are separation wherever they aren't indentation, as in `key:\t"a: b"`, `"a"\t: 1`, or
-  `-\t[1]`. A tab is indentation where it starts a line or follows a `-`, `?`, or `:`
-  indicator, `---`, or `...`, and a block indicator or an implicit key follows it, so `\ta: 1` and
-  `-\t- b` are errors. A nested flow collection's or quoted scalar's lines still need space
-  indentation, so `a: [\n\tb]` is an error.
+  `-\t[1]`. Only spaces indent. A tab stands where indentation would before a block indicator or an
+  implicit key, at a line's start or after a `-`, `?`, or `:` indicator, `---`, or `...`, so
+  `\ta: 1` and `-\t- b` are errors. A node that only tabs indent on its own line isn't indented
+  under the key or entry before it, so `k:\n\tv` is an error, as in libyaml. A flow collection's or
+  quoted scalar's lines under a block collection need space indentation too, so `a: [\n\tb]` is
+  an error.
 - A top-level block scalar may hold content at column 0. A `#` line past the scalar's parent and
   indented less than a blank line before it is that scalar's first content, so the blank line is
   too long and it's an error, where libyaml ends the scalar there.
 - A block scalar or a quoted scalar's continuation must be indented past its parent, so
-  `a:\n|` and `a: "b\nc"` are errors.
+  `a:\n|` and `a: "b\nc"` are errors. That holds for a quoted line that the other kind of quote
+  or `''` starts, as in `k: "a\n'b"`. By default, after a compact key or entry the parent is the
+  collection that it starts, so `- k: 'a\n b'` is an error. Compatibility mode measures those
+  lines against the line's indent, as libyaml reads files that align them with the key.
 - A comment must be separated from what precedes it, so `""#` and `|#` are errors.
 - An unknown directive is ignored, and a stream may start with `...`.
 - Integers are exact up to 128 bits.

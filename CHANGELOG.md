@@ -126,8 +126,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `k:\n  [\na\n  ]` and `---k: 'a\nb'` are now errors. Compat mode still reads the first.
   A comment line is exempt in every position, so `k: [\n# c\n  a\n  ]` now
   parses, and so is a closing `]`, `}`, or quote, as it was before, unless tabs alone indent a
-  quote. The check doesn't yet cover a plain scalar's own continuation lines inside a flow
-  collection, or every indentation of a quoted scalar's lines under nested collections.
+  quote. A later entry below holds plain scalars' lines and the innermost collection to it too.
 - A second tag or anchor on one node is now an error in both modes, so `&a &b c` and
   `!a !b c` are rejected. The second one used to replace the first.
 - An explicit key whose properties are alone on the `?` line may now hold an indentless
@@ -192,12 +191,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   field said `at line 1 column 1`, and now says `at line 2 column 1`. From `parse_events` and the
   `Deserializer`, an empty node at the end of a document that the next `---` starts also had the
   input's length as its offset.
-- A tab now separates wherever it doesn't indent a block collection, in both modes, as YAML 1.2.2
+- A tab now separates wherever it doesn't stand for indentation, in both modes, as YAML 1.2.2
   allows. A tab with a `: ` anywhere later on its line was refused as block structure, so
   `key:\t"a: b"`, `key:\t{a: 1}`, `a: "1"\t# note: x`, `"a"\t: 1`, `!t\ta: 1`, `[1]\t: x`,
   `-\t'a: b'`, `---\t{a: 1}`, and a tab before a comment holding `: ` on its own line were errors.
-  A tab is now refused only where it starts a line or follows a `-`, `?`, or `:` indicator, `---`,
-  or `...`, and a block indicator or an implicit key follows it, as in `\ta: 1` or `-\ta: 1`.
+  A tab is now refused where it starts a line or follows a `-`, `?`, or `:` indicator, `---`, or
+  `...`, and a block indicator or an implicit key follows it, as in `\ta: 1` or `-\ta: 1`. A later
+  entry below refuses a node that only tabs indent on its own line, as in `k:\n\tv`.
 - A `-` or `?` indicator with a tab after it, as in `\t-\tb` or `-\t-\tb`, is now refused after a
   tab, as it is with a space after it. It was read as an entry indented by the tab.
 - A closing quote on a line indented only with tabs now closes its scalar, as a closing `]` or `}`
@@ -254,6 +254,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (YAML 1.2.2 example 6.25). It read as the non-specific tag `!`, as libyaml reads it.
 - By default, a byte order mark in a comment after a block scalar's header is now an error, as it
   is in any other comment. Compat still reads one there, as libyaml does.
+- These lines are now held to the indentation YAML 1.2.2 gives them:
+  - a node on its own line that only tabs indent, under a key or an entry, as in `k:\n\tv`,
+    `k:\n\t{a: b}`, or `-\n\t[a]`, in both modes, as libyaml refuses it too. Only spaces indent,
+    and the node read as indented by the tab. The error says the tab doesn't count as
+    indentation. A space before the tab still indents it;
+  - by default, a flow collection's line under a block collection, which must be indented past the
+    innermost one, whether a plain scalar goes on there or an entry starts there, as in
+    `k: [a\nb]` or `a:\n  b: [c,\n  d]`. The error now names where the collection opened, since
+    one left open is the usual cause. Compat still reads such a line, as libyaml does, unless an
+    implicit flow key's `:` sits on it, as in `k: {x\n: y}` or `k: {"x"\n:y}`, or only a tab
+    indents a line that a plain scalar goes on to, as in `k: [a\n\tb]`. libyaml refuses both, and
+    compat now passes YAML Test Suite case VJP3#0. An explicit key's `:`, as in `k: {? x\n: y}`,
+    and a closing line, as in `k: [a\n\t]`, still read in compat, as libyaml reads the first;
+  - a quoted scalar's line that starts with the other kind of quote, or with `''` in a
+    single-quoted scalar, as in `k: "a\n'b"`, in both modes. Only the scalar's own closing quote
+    may sit left of the indent;
+  - by default, a quoted scalar's lines after a compact key or entry, which are now held to the
+    collection that the key or entry starts, as a plain scalar's are. `- k: 'a\n b'` needs three
+    spaces before `b`, and read with one. Compat still reads it, as libyaml does, since real files
+    align such lines with the key.
+- A document marker line now ends a plain scalar in a flow collection, which then refuses it, in
+  both modes, as libyaml does. `[a\n--- b]` read `a --- b`.
 
 ## [0.1.1] — 2026-11-04
 

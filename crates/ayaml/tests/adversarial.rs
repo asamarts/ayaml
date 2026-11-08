@@ -598,6 +598,9 @@ fn repeated_inputs(length: usize) -> Vec<String> {
         // Many tab runs on a line that starts with many byte order marks, which each run asks
         // about.
         format!("{}k: {}", half("\u{feff}"), half("'a'\t")),
+        // A key that runs on to a short line in a flow collection under a block collection, then
+        // many blank lines and many `:` between quoted scalars, which each look back at it.
+        format!("k: [x\ny{}{}]\n", half("\n"), half(",\"a\": \"\"")),
         format!("{}k: {}", half("\u{feff}"), half("[]\t")),
         // A tab after each of many block indicators on one line, each before a node that ends
         // before the line does.

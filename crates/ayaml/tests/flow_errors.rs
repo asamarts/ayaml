@@ -205,7 +205,9 @@ fn input_that_ends_inside_a_sequence_names_the_end_and_the_opening() {
     sequence_ends("[!!str", (1, 7), (1, 1));
     sequence_ends("[a #c\n", (2, 1), (1, 1));
     sequence_ends_lacking_a_node("[a,\n\n\n", (4, 1), (1, 1));
-    sequence_ends("- [a\n- b\n", (3, 1), (1, 3));
+    // The next line is indented past the block sequence, as a flow collection's lines must be,
+    // so the scalar runs on to the end.
+    sequence_ends("- [a\n  - b\n", (3, 1), (1, 3));
 }
 
 #[test]
@@ -228,7 +230,7 @@ fn input_that_ends_inside_a_mapping_names_the_end_and_the_opening() {
 fn a_token_where_a_separator_belongs_names_itself_and_the_opening() {
     sequence_fails("[a}", (1, 3), (1, 1));
     sequence_fails("[a: b c: d]", (1, 8), (1, 1));
-    sequence_fails("x: [a]\ny: [b\nz: 1\n", (3, 2), (2, 4));
+    sequence_fails("x: [a]\ny: [b\n  z: 1\n", (3, 4), (2, 4));
     sequence_fails("[{a: 1} b]", (1, 9), (1, 1));
     mapping_fails("{a]", (1, 3), (1, 1));
     mapping_fails("{a: 1]", (1, 6), (1, 1));
