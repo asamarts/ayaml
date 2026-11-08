@@ -21,7 +21,14 @@ if [[ "$(uname -s):$(uname -m)" != "Linux:x86_64" ]]; then
     exit 1
 fi
 
-if [[ -x "$binary" && "$("$binary" --version 2>/dev/null)" == "cargo-semver-checks $VERSION" ]]; then
+archive="cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz"
+kept="$install_dir/$archive"
+
+# An earlier run's binary is used only while the archive kept beside it has the pinned digest and
+# holds that very binary.
+if [[ -x "$binary" && -f "$kept" ]] &&
+    printf '%s  %s\n' "$LINUX_X64_SHA256" "$kept" | sha256sum --check --status - &&
+    tar -xzOf "$kept" cargo-semver-checks | cmp -s - "$binary"; then
     echo "$install_dir"
     exit 0
 fi
@@ -30,13 +37,13 @@ mkdir -p "$install_dir"
 work="$(mktemp -d "$install_dir/.download.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
-archive="cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz"
 curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error --retry 3 \
     --output "$work/$archive" \
     "https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v${VERSION}/${archive}"
 printf '%s  %s\n' "$LINUX_X64_SHA256" "$work/$archive" | sha256sum --check --quiet -
 tar -xzf "$work/$archive" -C "$work" cargo-semver-checks
 install -m 0755 "$work/cargo-semver-checks" "$binary"
+mv "$work/$archive" "$kept"
 
 if [[ "$("$binary" --version)" != "cargo-semver-checks $VERSION" ]]; then
     echo "error: the installed binary does not report version $VERSION" >&2

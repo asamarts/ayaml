@@ -226,12 +226,18 @@ can't be removed once immutable releases are on.
 
 **Why.** The release job is the step that can leave a version on crates.io with no GitHub release,
 and it had never run. A draft is visible only to the repository's writers, makes no tag, and can be
-deleted with immutable releases on, so a rehearsal can run the job's commands and leave nothing. A
+deleted with immutable releases on, so a rehearsal can run the job's download, checks, and gh
+calls on a draft and leave nothing. A
 public repository's attestations go to a transparency log that can't be edited, so an attestation
 can't be rehearsed and then taken back.
 
 **Consequences.** The rehearsal's job has `contents: write` for its draft. It builds nothing and runs
 only the scripts of the branch it was started from, and only a writer can start one. A run
 cancelled between creating and deleting the draft could leave it, so the job's last step deletes
-it, and only a draft with a rehearsal's name. The attestation and its check still run for the first
-time in the first release through the workflow.
+it, and only a draft with a rehearsal's name. The draft targets the default branch: GitHub's REST
+reference says a token that can't change workflows, as a job's can't, can't create a release
+whose target commit adds or changes workflow files relative to the default branch, and the first
+rehearsal, at `v0.1.1`'s commit, was refused with a 403. The release job's create names no
+target, so GitHub checks the default branch's own head. The attestation and its check, and the
+create that publishes a release, still run for the first time in the first release through the
+workflow.

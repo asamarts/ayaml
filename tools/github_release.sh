@@ -7,16 +7,19 @@
 #       Downloads the crate crates.io serves into DIST, checks it as `check_release.py registry`
 #       does and against DIGEST, and writes DIST/SHA256SUMS.
 #   tools/github_release.sh release TAG VERSION DIST NOTES
-#       Creates the release of TAG with the crate and SHA256SUMS of DIST and the notes in NOTES. A
-#       release that exists, as a rerun finds it, must hold exactly those assets with these bytes,
-#       and if it's a draft it's then published.
+#       Creates the release of TAG with the crate and SHA256SUMS of DIST and the notes in NOTES, and
+#       checks what it made. A release that exists, as a rerun finds it, must hold exactly those
+#       assets with these bytes, and if it's a draft it's then published.
 #   tools/github_release.sh rehearse NAME TARGET VERSION DIST NOTES
 #       Creates a draft named NAME the same way, checks it as a rerun checks a release, and deletes
-#       it. NAME is rehearsal-RUN-ATTEMPT, which no release tag can be. A draft makes no tag, but
-#       GitHub refused a job's token one whose tag would be made at a commit with other workflow
-#       files than the default branch's, so TARGET is the default branch.
+#       it. NAME is rehearsal-RUN-ATTEMPT, which no release tag can be. TARGET is the default
+#       branch: GitHub refuses a job's token a release, draft or not, whose target commit adds or
+#       changes workflow files relative to the default branch.
 #   tools/github_release.sh discard NAME
-#       Deletes the draft NAME, if a rehearsal stopped before it could, and nothing else.
+#       Deletes the draft NAME, if a rehearsal stopped before it could, and nothing else. It warns
+#       of any other rehearsal's draft that is still there.
+#
+# Each lookup tells a release that isn't there from an error of gh's, and stops on the error.
 set -euo pipefail
 
 tools="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,13 +43,27 @@ fetch() {
   (cd "$dist" && sha256sum "ayaml-$version.crate" > SHA256SUMS)
 }
 
-# Whether gh finds a release or a draft named NAME.
-exists() {
-  gh release view "$1" --json isDraft > /dev/null 2>&1
-}
-
-is_draft() {
-  [ "$(gh release view "$1" --json isDraft --jq .isDraft)" = true ]
+# Sets `found` to draft, published, or absent for NAME, which gh finds by its tag's name, draft or
+# not. Anything else gh says stops the script, since a release gh couldn't see may still be there.
+found=""
+look_up() {
+  local name="$1" answer errors
+  errors="$(mktemp)"
+  found=""
+  if answer="$(gh release view "$name" --json isDraft --jq .isDraft 2> "$errors")"; then
+    case "$answer" in
+      true) found=draft ;;
+      false) found=published ;;
+    esac
+  elif grep -qx 'release not found' "$errors"; then
+    found=absent
+  fi
+  if [ -z "$found" ]; then
+    cat "$errors" >&2
+    rm -f "$errors"
+    fail "gh couldn't say whether release $name is there; rerun the job"
+  fi
+  rm -f "$errors"
 }
 
 # NAME holds exactly the crate and SHA256SUMS of DIST, with these bytes.
@@ -66,58 +83,93 @@ release() {
   local tag="$1" version="$2" dist="$3" notes="$4"
   local digest
   digest="$(cut -d' ' -f1 "$dist/SHA256SUMS")"
-  # gh finds a draft too. gh creates a release as a draft, uploads its assets, and then publishes
-  # it, so a run stopped in between leaves a draft.
-  if exists "$tag"; then
-    check_assets "$tag" "$version" "$dist"
-    if is_draft "$tag"; then
+  look_up "$tag"
+  case "$found" in
+    absent)
+      gh release create "$tag" --verify-tag --title "ayaml $version" --notes-file "$notes" \
+        "$dist/ayaml-$version.crate" "$dist/SHA256SUMS"
+      look_up "$tag"
+      [ "$found" = published ] || fail "gh created the release $tag, but it is $found"
+      check_assets "$tag" "$version" "$dist"
+      echo "::notice::created the release $tag, which holds ayaml-$version.crate with sha256 $digest"
+      ;;
+    draft)
+      # gh creates a release as a draft, uploads its assets, and then publishes it, so a run
+      # stopped in between leaves a draft.
+      check_assets "$tag" "$version" "$dist"
       gh release edit "$tag" --draft=false
+      look_up "$tag"
+      [ "$found" = published ] || fail "the draft release $tag is still $found after it was published"
       echo "::notice::published the draft release $tag, which holds ayaml-$version.crate with sha256 $digest"
-    else
+      ;;
+    published)
+      check_assets "$tag" "$version" "$dist"
       echo "::notice::release $tag already holds ayaml-$version.crate with sha256 $digest"
-    fi
-    return
-  fi
-  gh release create "$tag" --verify-tag --title "ayaml $version" --notes-file "$notes" \
-    "$dist/ayaml-$version.crate" "$dist/SHA256SUMS"
+      ;;
+  esac
 }
 
 # The draft a rehearsal made, for the trap to delete if a step fails.
 draft=""
 
+# Deletes the draft `draft` if it's there. A release with a rehearsal's name that isn't a draft is
+# left for a writer to look at.
 discard_draft() {
-  if [ -n "$draft" ] && exists "$draft" && is_draft "$draft"; then
-    gh release delete "$draft" --yes
-  fi
+  [ -n "$draft" ] || return 0
+  look_up "$draft"
+  case "$found" in
+    draft)
+      gh release delete "$draft" --yes
+      look_up "$draft"
+      [ "$found" = absent ] || fail "the draft $draft is still there after its deletion"
+      echo "::notice::deleted the draft release $draft"
+      ;;
+    absent)
+      echo "::notice::there is no draft release $draft to delete"
+      ;;
+    published)
+      echo "::warning::release $draft is published, which a rehearsal never does, so it's left as it is; see RELEASING.md"
+      ;;
+  esac
+  draft=""
 }
 
 rehearse() {
   local name="$1" target="$2" version="$3" dist="$4" notes="$5"
+  local body
   [[ "$name" =~ $rehearsal_name ]] || fail "$name isn't a rehearsal's name, rehearsal-RUN-ATTEMPT"
-  ! exists "$name" || fail "a release named $name exists already"
+  look_up "$name"
+  [ "$found" = absent ] || fail "a release named $name exists already"
   draft="$name"
   trap discard_draft EXIT
   gh release create "$name" --draft --target "$target" --title "ayaml $version (rehearsal)" \
     --notes-file "$notes" "$dist/ayaml-$version.crate" "$dist/SHA256SUMS"
-  is_draft "$name" || fail "$name was created, but not as a draft"
+  look_up "$name"
+  [ "$found" = draft ] || fail "$name was created, but it is $found, not a draft"
   check_assets "$name" "$version" "$dist"
+  body="$(gh release view "$name" --json body --jq .body)"
   # Both sides without their trailing line breaks, which GitHub may not keep.
-  [ "$(gh release view "$name" --json body --jq .body)" = "$(cat "$notes")" ] ||
-    fail "the draft's notes aren't the notes it was given"
-  gh release delete "$name" --yes
-  draft=""
-  ! exists "$name" || fail "the draft $name is still there after its deletion"
+  [ "$body" = "$(cat "$notes")" ] || fail "the draft's notes aren't the notes it was given"
+  discard_draft
   echo "::notice::a draft release of ayaml $version held the crate and SHA256SUMS that crates.io serves, and is deleted"
 }
 
 discard() {
-  [[ "$1" =~ $rehearsal_name ]] || fail "$1 isn't a rehearsal's name, rehearsal-RUN-ATTEMPT"
-  draft="$1"
+  local name="$1" drafts other
+  [[ "$name" =~ $rehearsal_name ]] || fail "$name isn't a rehearsal's name, rehearsal-RUN-ATTEMPT"
+  draft="$name"
   discard_draft
+  # A rehearsal that stopped before this step, as one does when its runner is lost, leaves its draft.
+  drafts="$(gh release list --limit 100 --json tagName,isDraft --jq '.[] | select(.isDraft) | .tagName')"
+  for other in $drafts; do
+    if [[ "$other" =~ $rehearsal_name ]]; then
+      echo "::warning::the draft release $other of another rehearsal is still there; delete it under Releases once no rehearsal is running"
+    fi
+  done
 }
 
 usage() {
-  sed -n '2,20s/^# \{0,1\}//p' "$0" >&2
+  sed -n '2,/^set /{/^#/s/^# \{0,1\}//p;}' "$0" >&2
   exit 2
 }
 

@@ -22,7 +22,14 @@ if [[ "$(uname -s):$(uname -m)" != "Linux:x86_64" ]]; then
     exit 1
 fi
 
-if [[ -x "$binary" && "$("$binary" --version 2>/dev/null)" == "cargo-deny $VERSION" ]]; then
+name="cargo-deny-${VERSION}-x86_64-unknown-linux-musl"
+archive="$install_dir/$name.tar.gz"
+
+# An earlier run's binary is used only while the archive kept beside it has the pinned digest and
+# holds that very binary.
+if [[ -x "$binary" && -f "$archive" ]] &&
+    printf '%s  %s\n' "$LINUX_X64_SHA256" "$archive" | sha256sum --check --status - &&
+    tar -xzOf "$archive" "$name/cargo-deny" | cmp -s - "$binary"; then
     echo "$install_dir"
     exit 0
 fi
@@ -31,13 +38,13 @@ mkdir -p "$install_dir"
 work="$(mktemp -d "$install_dir/.download.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
-name="cargo-deny-${VERSION}-x86_64-unknown-linux-musl"
 curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error --retry 3 \
     --output "$work/$name.tar.gz" \
     "https://github.com/EmbarkStudios/cargo-deny/releases/download/${VERSION}/${name}.tar.gz"
 printf '%s  %s\n' "$LINUX_X64_SHA256" "$work/$name.tar.gz" | sha256sum --check --quiet -
 tar -xzf "$work/$name.tar.gz" -C "$work" "$name/cargo-deny"
 install -m 0755 "$work/$name/cargo-deny" "$binary"
+mv "$work/$name.tar.gz" "$archive"
 
 if [[ "$("$binary" --version)" != "cargo-deny $VERSION" ]]; then
     echo "error: the installed binary does not report version $VERSION" >&2
