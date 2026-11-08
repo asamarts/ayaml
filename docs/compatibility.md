@@ -96,8 +96,8 @@ column, as when libyaml detects the encoding itself, unless a marker follows it.
 Then the marker is text, and the line reads like a later line.
 
 A closing `]`, `}`, or quote may sit at any indentation in both modes, including
-under a block collection, where the grammar asks for indentation. libyaml accepts
-these too, and files commonly close a flow collection this way:
+under a block collection, where the grammar asks for indentation, and after tabs alone.
+libyaml accepts these too, and files commonly close a flow collection this way:
 
 ```yaml
 key: [
@@ -105,8 +105,8 @@ key: [
 ]
 ```
 
-The exception is a closing quote on a line indented only with tabs, when the quoted scalar
-starts on its key's or `-`'s line, which is still an error.
+Only a quoted scalar's own quote closes it there, so in `k: "a\n\t'"` the line is
+indented by a tab alone, which is an error.
 
 Compatibility mode isn't an exact copy of libyaml. It follows YAML 1.2.2 instead in
 these places, on purpose:
@@ -134,8 +134,11 @@ these places, on purpose:
   `{?\n:{}}` because only a JSON-like key allows an adjacent value. A flow mapping key may
   span lines or have a line break before its `:`. `[-]` is an error.
 - An empty implicit key, such as `: a`, is valid.
-- Tabs are separation wherever they aren't indentation. A nested flow collection's or
-  quoted scalar's lines still need space indentation, so `a: [\n\tb]` is an error.
+- Tabs are separation wherever they aren't indentation, as in `key:\t"a: b"`, `"a"\t: 1`, or
+  `-\t[1]`. A tab is indentation where it starts a line or follows a `-`, `?`, or `:`
+  indicator or `---`, and a block indicator or an implicit key follows it, so `\ta: 1` and
+  `-\t- b` are errors. A nested flow collection's or quoted scalar's lines still need space
+  indentation, so `a: [\n\tb]` is an error.
 - A top-level block scalar may hold content at column 0. A `#` line past the scalar's parent and
   indented less than a blank line before it is that scalar's first content, so the blank line is
   too long and it's an error, where libyaml ends the scalar there.
