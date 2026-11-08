@@ -554,6 +554,21 @@ fn resolve<'a, 'de>(mut node: &'a Node<'de>) -> &'a Node<'de> {
     node
 }
 
+/// The node a target that isn't an enum, a string, or any value reads: past aliases, and past a
+/// tag outside YAML's own `tag:yaml.org,2002:` names. That tag means what the application says,
+/// not something a number or a sequence can hold, so `!port 80` reads as `80` into a `u16`. A
+/// YAML tag that a node keeps, as a collection keeps `!!binary`, still reaches the target as an
+/// enum.
+fn untagged<'a, 'de>(node: &'a Node<'de>) -> &'a Node<'de> {
+    let mut node = resolve(node);
+    while let NodeKind::Tagged(tag, inner) = &node.kind
+        && !tag.is_core()
+    {
+        node = resolve(inner);
+    }
+    node
+}
+
 /// What a collection's tag adds to the size of an alias to it: the node that holds the tag, and
 /// its text, as the composer charges a tagged value.
 fn tag_cost(node: &Node<'_>, node_cost: usize) -> usize {
@@ -644,7 +659,9 @@ fn borrowed_or_owned<'de>(
         Cow::Owned(_) => None,
     };
     let candidate = raw.and_then(|raw| match style {
-        ScalarStyle::Plain => Some(raw),
+        // A plain scalar's text keeps the blanks before a comment or the line's end, and its
+        // value doesn't.
+        ScalarStyle::Plain => Some(raw.trim_end_matches([' ', '\t'])),
         ScalarStyle::SingleQuoted | ScalarStyle::DoubleQuoted => {
             raw.get(1..raw.len().saturating_sub(1))
         }
@@ -686,6 +703,18 @@ fn with_span(error: Error, span: Span) -> Error {
 
 struct NodeDeserializer<'de, 'a> {
     node: &'a Node<'de>,
+}
+
+/// Deserializer methods for targets that read a node as `deserialize_any` does, past an
+/// application tag (see `untagged`).
+macro_rules! plain_targets {
+    ($($method:ident)*) => {
+        $(
+            fn $method<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+                NodeDeserializer::new(untagged(self.node)).deserialize_any(visitor)
+            }
+        )*
+    };
 }
 
 impl<'de, 'a> NodeDeserializer<'de, 'a> {
@@ -827,7 +856,7 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
     }
 
     fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        let node = self.target();
+        let node = untagged(self.node);
         let span = node.span;
         if is_empty_scalar(node) {
             return visitor
@@ -846,7 +875,7 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
         _fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        let node = self.target();
+        let node = untagged(self.node);
         let span = node.span;
         if is_empty_scalar(node) {
             return visitor
@@ -860,7 +889,7 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
     }
 
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        let node = self.target();
+        let node = untagged(self.node);
         let span = node.span;
         if is_empty_scalar(node) {
             return visitor
@@ -957,7 +986,7 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
     /// 1.0 and a radix integer such as `0x1F` is rejected. Quoted scalars are
     /// strings and are not parsed this way.
     fn deserialize_f64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        let node = self.target();
+        let node = untagged(self.node);
         if let NodeKind::Number(number) = &node.kind
             && number.is_f64()
         {
@@ -984,16 +1013,46 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
                 .with_span(node.span));
             }
         }
-        self.deserialize_any(visitor)
+        NodeDeserializer::new(node).deserialize_any(visitor)
     }
 
     fn deserialize_f32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         self.deserialize_f64(visitor)
     }
 
+    fn deserialize_unit_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.deserialize_unit(visitor)
+    }
+
+    fn deserialize_tuple<V: Visitor<'de>>(
+        self,
+        _length: usize,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        NodeDeserializer::new(untagged(self.node)).deserialize_any(visitor)
+    }
+
+    fn deserialize_tuple_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _length: usize,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.deserialize_tuple(0, visitor)
+    }
+
+    plain_targets! {
+        deserialize_bool deserialize_i8 deserialize_i16 deserialize_i32 deserialize_i64
+        deserialize_i128 deserialize_u8 deserialize_u16 deserialize_u32 deserialize_u64
+        deserialize_u128 deserialize_unit
+    }
+
     serde::forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128
-        unit unit_struct tuple tuple_struct ignored_any
+        ignored_any
     }
 }
 
@@ -1237,14 +1296,20 @@ impl<'de, 'a> VariantAccess<'de> for NodeVariantAccess<'de, 'a> {
             .map_err(|error| self.inside_variant(error))
     }
 
+    /// A tag with no value, as in `!Point`, fills a struct variant's defaults, as an empty value
+    /// fills a struct. A bare name, as in `Point`, names a unit variant, so it fills none.
     fn struct_variant<V: Visitor<'de>>(
         self,
-        _fields: &'static [&'static str],
+        fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        NodeDeserializer::new(self.value.node())
-            .deserialize_any(visitor)
-            .map_err(|error| self.inside_variant(error))
+        let result = match &self.value {
+            NodeValue::Ref(node) => {
+                NodeDeserializer::new(node).deserialize_struct("", fields, visitor)
+            }
+            NodeValue::Null(node) => NodeDeserializer::new(node).deserialize_any(visitor),
+        };
+        result.map_err(|error| self.inside_variant(error))
     }
 }
 

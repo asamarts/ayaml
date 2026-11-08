@@ -254,6 +254,40 @@ struct ValueDeserializer {
     value: Value,
 }
 
+/// The value a target that isn't an enum, a string, or any value reads: past a tag outside YAML's
+/// own `tag:yaml.org,2002:` names, as the typed readers read a node.
+fn untagged(mut value: Value) -> Value {
+    loop {
+        match value {
+            Value::Tagged(tagged) if !tagged.tag.is_core() => value = tagged.value,
+            value => return value,
+        }
+    }
+}
+
+/// Deserializer methods for targets that read a value as `deserialize_any` does, past an
+/// application tag (see `untagged`).
+macro_rules! plain_targets {
+    ($($method:ident)*) => {
+        $(
+            fn $method<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+                ValueDeserializer { value: untagged(self.value) }.deserialize_any(visitor)
+            }
+        )*
+    };
+}
+
+/// `Value`'s deserializer methods, which a `ValueDeserializer` answers.
+macro_rules! to_value_deserializer {
+    ($($method:ident)*) => {
+        $(
+            fn $method<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+                ValueDeserializer { value: self }.$method(visitor)
+            }
+        )*
+    };
+}
+
 impl<'de> Deserializer<'de> for ValueDeserializer {
     type Error = crate::Error;
 
@@ -291,6 +325,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
                 variant: Cow::Owned(tagged.tag.serde_name()),
                 value: tagged.value,
                 in_path: false,
+                bare: false,
             }),
         }
     }
@@ -347,7 +382,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
     /// A null reads as an empty sequence. A `Value` cannot tell an empty
     /// scalar from `~`, so both are accepted.
     fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        match self.value {
+        match untagged(self.value) {
             Value::Null => visitor.visit_seq(ValueSeqAccess {
                 iter: Vec::new().into_iter(),
                 len: 0,
@@ -358,7 +393,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
 
     /// A null reads as an empty map.
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        match self.value {
+        match untagged(self.value) {
             Value::Null => visitor.visit_map(ValueMapAccess {
                 iter: crate::mapping::Mapping::new().into_iter(),
                 key: None,
@@ -396,18 +431,23 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
         _variants: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
+        let bare = matches!(
+            self.value,
+            Value::String(_) | Value::Bool(_) | Value::Number(_)
+        );
         let (variant, value) = enum_parts(self.value)?;
         visitor.visit_enum(ValueEnumAccess {
             variant: Cow::Owned(variant),
             value,
             in_path: true,
+            bare,
         })
     }
 
     /// Serde's float visitors take 64-bit integers but not wider ones, so a
     /// wide integer is handed over as the nearest float.
     fn deserialize_f64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        match self.value {
+        match untagged(self.value) {
             Value::Number(number) if number.is_wide() => {
                 visitor.visit_f64(number.as_f64().expect("an integer converts to f64"))
             }
@@ -419,9 +459,42 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
         self.deserialize_f64(visitor)
     }
 
+    fn deserialize_unit_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.deserialize_unit(visitor)
+    }
+
+    fn deserialize_tuple<V: Visitor<'de>>(
+        self,
+        _length: usize,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        ValueDeserializer {
+            value: untagged(self.value),
+        }
+        .deserialize_any(visitor)
+    }
+
+    fn deserialize_tuple_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        length: usize,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.deserialize_tuple(length, visitor)
+    }
+
+    plain_targets! {
+        deserialize_bool deserialize_i8 deserialize_i16 deserialize_i32 deserialize_i64
+        deserialize_i128 deserialize_u8 deserialize_u16 deserialize_u32 deserialize_u64
+        deserialize_u128 deserialize_unit
+    }
+
     serde::forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128
-        unit unit_struct tuple tuple_struct ignored_any
+        ignored_any
     }
 }
 
@@ -514,9 +587,39 @@ impl<'de> Deserializer<'de> for Value {
         ValueDeserializer { value: self }.deserialize_f32(visitor)
     }
 
+    fn deserialize_unit_struct<V: Visitor<'de>>(
+        self,
+        name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        ValueDeserializer { value: self }.deserialize_unit_struct(name, visitor)
+    }
+
+    fn deserialize_tuple<V: Visitor<'de>>(
+        self,
+        length: usize,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        ValueDeserializer { value: self }.deserialize_tuple(length, visitor)
+    }
+
+    fn deserialize_tuple_struct<V: Visitor<'de>>(
+        self,
+        name: &'static str,
+        length: usize,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        ValueDeserializer { value: self }.deserialize_tuple_struct(name, length, visitor)
+    }
+
+    to_value_deserializer! {
+        deserialize_bool deserialize_i8 deserialize_i16 deserialize_i32 deserialize_i64
+        deserialize_i128 deserialize_u8 deserialize_u16 deserialize_u32 deserialize_u64
+        deserialize_u128 deserialize_unit
+    }
+
     serde::forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128
-        unit unit_struct tuple tuple_struct ignored_any
+        ignored_any
     }
 }
 
@@ -678,6 +781,7 @@ impl<'de> Deserializer<'de> for KeyDeserializer<'_> {
             variant: self.text,
             value: Value::Null,
             in_path: true,
+            bare: true,
         })
     }
 
@@ -736,6 +840,9 @@ struct ValueEnumAccess<'a> {
     /// Whether an error inside names the variant. A target that isn't an enum takes the tag as a
     /// tag, and the document has no key by that name.
     in_path: bool,
+    /// Whether a scalar named the variant, so that it holds nothing, rather than a tag or a
+    /// mapping that gives what it holds.
+    bare: bool,
 }
 
 impl<'de, 'a> serde::de::EnumAccess<'de> for ValueEnumAccess<'a> {
@@ -761,6 +868,7 @@ impl<'de, 'a> serde::de::EnumAccess<'de> for ValueEnumAccess<'a> {
             ValueVariantAccess {
                 name,
                 value: self.value,
+                bare: self.bare,
             },
         ))
     }
@@ -770,6 +878,8 @@ struct ValueVariantAccess<'a> {
     /// The variant's name, if an error inside gives it.
     name: Option<Cow<'a, str>>,
     value: Value,
+    /// Whether a scalar named the variant (see `ValueEnumAccess`).
+    bare: bool,
 }
 
 impl ValueVariantAccess<'_> {
@@ -814,14 +924,20 @@ impl<'de> serde::de::VariantAccess<'de> for ValueVariantAccess<'_> {
             .map_err(|error| Self::inside_variant(self.name.as_deref(), error))
     }
 
+    /// A tag with no value, as in `!Point`, fills a struct variant's defaults, as a null fills a
+    /// struct. A bare name, as in `Point`, names a unit variant, so it fills none.
     fn struct_variant<V: Visitor<'de>>(
         self,
-        _fields: &'static [&'static str],
+        fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        ValueDeserializer { value: self.value }
-            .deserialize_any(visitor)
-            .map_err(|error| Self::inside_variant(self.name.as_deref(), error))
+        let Self { name, value, bare } = self;
+        let result = if bare {
+            ValueDeserializer { value }.deserialize_any(visitor)
+        } else {
+            ValueDeserializer { value }.deserialize_struct("", fields, visitor)
+        };
+        result.map_err(|error| Self::inside_variant(name.as_deref(), error))
     }
 }
 
@@ -1390,6 +1506,7 @@ mod tests {
             variant: Cow::Owned(name),
             value: Value::Null,
             in_path: false,
+            bare: true,
         };
         let (handed, variant) = access.variant_seed(Address).expect("a name");
         assert_eq!(handed, address, "the name was copied");
@@ -1400,6 +1517,7 @@ mod tests {
             variant: Cow::Borrowed(&key),
             value: Value::Null,
             in_path: true,
+            bare: true,
         };
         let (handed, variant) = access.variant_seed(Address).expect("a name");
         assert_ne!(handed, key.as_ptr().addr());

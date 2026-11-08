@@ -44,6 +44,11 @@ An invalid explicit core scalar is a resolution error.
   including non-string keys that compare equal after resolution.
 - Typed decoding follows the target Serde visitor: generated structs reject
   duplicate fields, while map-like visitors may keep the last value.
+- In typed decoding, a custom tag, one outside YAML's own `tag:yaml.org,2002:`
+  names, names an enum's variant, and a `Value` keeps it. Any other target,
+  such as a number, a sequence, or a struct, reads the node under it, so
+  `!port 80` reads into a `u16`. A tag with no value, as in `!Point`, fills a
+  struct variant as an empty value fills a struct.
 - A plain or quoted `<<` remains a literal key. Merge-key application is an
   explicit `Value::apply_merge_keys` operation, not an implicit parser effect.
 - Tags, anchors, aliases, directives, and document markers are preserved in the

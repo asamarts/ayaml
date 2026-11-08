@@ -203,6 +203,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A closing quote on a line indented only with tabs now closes its scalar, as a closing `]` or `}`
   there does, so `k: 'a\n\t'` reads `a `. Only the scalar's own quote counts, so `k: "a\n\t'"` is
   still an error.
+- A plain scalar's line may now start with `---` or `...` that isn't a document marker, in both
+  modes. Only one at column 0, with whitespace or the line's end after it, is a marker, so
+  `k: a\n  ...and so on`, `a\n ---x`, and `a\n---b` now parse, where the line ended the scalar and
+  was an error. In compat, a `...` followed by a byte order mark isn't one either, so
+  `0\n...\u{FEFF}` reads `"0 ...\u{FEFF}"`, as in libyaml. Default mode refuses a mark there.
+- A plain scalar's line may now hold a comment with a `:` in it, in both modes, so
+  `k: a\n  b # note: d` reads `a b`. The comment's `:` ended the scalar as if it were a key's.
+- By default, a plain scalar after a node property that ends in `:`, as in `&a: b`, may now go
+  on at its own line's indentation when the node starts its line or follows `---`, as it may in
+  compat. So `&a: b\nc` reads `b c`, where default mode ended the scalar at its first line and
+  refused the next.
+- A quoted scalar on its own line under a block collection, or in a flow collection that is, may
+  now go on at any column past that collection's, whatever the indentation of the line it opens
+  on, in both modes. So `k:\n  'a\n b'` and `k: [\n    'a\n  b']` now parse. Its lines are still
+  held to that column, and only spaces indent them, so `k:\n  'a\n\t\tb'`, which read `a b`, is
+  now an error, as `k: 'a\n\t\tb'` already was.
+- A comment may now follow a `%TAG` directive, in both modes, so `%TAG ! tag:x: # c` parses. The
+  directive's event keeps the comment in its value, as a `%YAML` directive's already did.
+- The typed readers now read a node with a custom tag, one outside YAML's own
+  `tag:yaml.org,2002:` names, into a target that isn't an enum, a string, or a `Value` as they
+  read it untagged. So `!port 80` reads into a `u16`, and `!list [1, 2]` into a `Vec`, where both
+  were type errors. This holds on every typed reader, `from_value` included. A YAML tag keeps its
+  meaning, so `!!str 5` is still a string, and an error read into a number.
+- A tag with no value, as in `!Point`, now reads into a struct variant as an empty value reads
+  into a struct, so its fields take their defaults, and so does a variant's name as a mapping key
+  with an empty value, as in `Point:`. A bare `Point` still names a unit variant, and is an error
+  there. So is `!Point ~`, except from `from_value`, which can't tell it from an empty value.
+- `&str` and `Cow<str>` targets now borrow a plain scalar that a comment or blanks follow on its
+  line, as in `x: abc # c`. The scalar's text held those blanks, so `&str` failed and `Cow` was
+  silently owned.
 
 ## [0.1.1] — 2026-11-04
 
