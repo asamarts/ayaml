@@ -28,10 +28,23 @@ struct Line {
 }
 
 impl Line {
-    fn new(tokens: &[Token<'_>], start: usize, end: usize) -> Self {
-        let indent = tokens
-            .get(start)
-            .map_or(0, |token| token.span.start().column().saturating_sub(1));
+    /// The line of `tokens[start..end]`, from `input`. Its indent is its first token's column,
+    /// less any tab before that token and what follows the tab: YAML indents with spaces alone
+    /// (production 63), so a tab there separates and `k:\n\tv` holds `v` at indent 0.
+    fn new(tokens: &[Token<'_>], start: usize, end: usize, input: &str) -> Self {
+        let indent = tokens.get(start).map_or(0, |token| {
+            let column = token.span.start().column().saturating_sub(1);
+            let offset = token.span.start().index();
+            let blanks = input.as_bytes()[..offset]
+                .iter()
+                .rev()
+                .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                .count();
+            match input[offset - blanks..offset].find('\t') {
+                Some(tab) => column.saturating_sub(blanks - tab),
+                None => column,
+            }
+        });
         Self { start, end, indent }
     }
 
@@ -86,6 +99,7 @@ struct Lines<'a> {
 /// them into per-line vectors. A block scalar consumes the rest of its line,
 /// so it flushes the logical line immediately.
 fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
+    let input = scanner.input();
     let chunk = match scanner.input_len() {
         0..=4096 => TOKEN_ARENA_SMALL_CHUNK,
         4097..=32768 => TOKEN_ARENA_MID_CHUNK,
@@ -105,7 +119,7 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
             }
             TokenKind::LineBreak => {
                 if tokens.len() > line_start {
-                    lines.push(Line::new(&tokens, line_start, tokens.len()));
+                    lines.push(Line::new(&tokens, line_start, tokens.len(), input));
                     line_start = tokens.len();
                 }
             }
@@ -119,14 +133,14 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
                 );
                 push_token(&mut tokens, token, chunk);
                 if block_scalar {
-                    lines.push(Line::new(&tokens, line_start, tokens.len()));
+                    lines.push(Line::new(&tokens, line_start, tokens.len(), input));
                     line_start = tokens.len();
                 }
             }
         }
     }
     if tokens.len() > line_start {
-        lines.push(Line::new(&tokens, line_start, tokens.len()));
+        lines.push(Line::new(&tokens, line_start, tokens.len(), input));
     }
     // Small token arenas gain more from exact capacity than the one-time copy
     // costs in peak memory. Large arenas keep their growth capacity so the
@@ -301,7 +315,7 @@ impl<'a> EventCursor<'a> {
                 );
             let start = tokens.len();
             tokens.extend(line_tokens);
-            lines.push(Line::new(&tokens, start, tokens.len()));
+            lines.push(Line::new(&tokens, start, tokens.len(), self.input));
             if is_end {
                 break;
             }
@@ -631,6 +645,9 @@ impl<'a> Parser<'a> {
             }
 
             let mut explicit_end = false;
+            // Whether the root is a block collection, which a line after it that a tab seems to
+            // indent was likely meant to be in.
+            let mut root_block = false;
             if explicit_start || index < self.lines.len() {
                 self.documents += 1;
                 self.limits
@@ -653,6 +670,13 @@ impl<'a> Parser<'a> {
                         matches!(kind, TokenKind::DocumentStart { .. })
                     })
                 {
+                    let tokens = self.line_tokens(index);
+                    root_block = tokens.first().is_some_and(|token| {
+                        matches!(
+                            token.kind,
+                            TokenKind::BlockEntry | TokenKind::Key | TokenKind::Value
+                        )
+                    }) || has_value_indicator(tokens);
                     let root = NodeBounds {
                         min_indent: 0,
                         sequence_indent: 0,
@@ -696,11 +720,21 @@ impl<'a> Parser<'a> {
                 })
                 && !self.line_starts_with(index, |kind| matches!(kind, TokenKind::DocumentEnd))
             {
-                return Err(self.error(
-                    self.line_first(index)
-                        .map_or_else(|| self.empty_span(index), |token| token.span),
-                    "unexpected content after document",
-                ));
+                let span = self
+                    .line_first(index)
+                    .map_or_else(|| self.empty_span(index), |token| token.span);
+                let error = self.error(span, "unexpected content after document");
+                // A node that only a tab seemed to indent under a key or an entry sits at its
+                // line's left edge, so it ends up here.
+                return Err(
+                    if root_block && tab_leads_line(self.input, span.start().index()) {
+                        error.with_context(
+                            ", indented by a tab, which YAML doesn't count as indentation",
+                        )
+                    } else {
+                        error
+                    },
+                );
             }
         }
         Ok(())
@@ -2482,6 +2516,13 @@ impl<'a> Parser<'a> {
     fn limit_at(&self, span: Span, limit: crate::limits::LimitExceeded) -> Error {
         Error::from(limit).with_span(span)
     }
+}
+
+/// Whether only blanks, a tab among them, come before `offset` on its line.
+fn tab_leads_line(input: &str, offset: usize) -> bool {
+    let before = &input[..offset];
+    let rest = before.trim_end_matches([' ', '\t']);
+    (rest.is_empty() || rest.ends_with(['\n', '\r'])) && before[rest.len()..].contains('\t')
 }
 
 fn value_indicator_index(tokens: &[Token<'_>]) -> Option<usize> {

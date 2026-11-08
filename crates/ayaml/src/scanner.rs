@@ -99,7 +99,14 @@ pub(crate) struct Scanner<'a> {
     /// The anchors in the stream, which count against `max_anchors`.
     anchors: usize,
     flow_level: usize,
-    flow_stack: Vec<char>,
+    /// Each open flow collection's opening indicator, where it is, and whether a `?` started its
+    /// current entry, which a `,` ends.
+    flow_stack: Vec<(char, usize, bool)>,
+    /// In compat, where the last plain scalar that continued onto a flow collection's line short
+    /// of its indent ended, and where that line's content starts. A key's `:` can't follow it.
+    short_flow_scalar: Option<(usize, usize)>,
+    /// Where the last token ended.
+    last_token_end: usize,
     flow_allow_zero_indent: Vec<bool>,
     previous_flow_end: bool,
     yaml_directive_seen: bool,
@@ -149,9 +156,9 @@ pub(crate) struct Scanner<'a> {
     counted_indent: (usize, usize),
     /// Where the outermost open flow collection starts.
     flow_start: usize,
-    /// The start of the last outermost flow collection whose owner a quoted scalar in it asked
-    /// for, and that owner.
-    flow_owner: (usize, Owner),
+    /// The start of the last outermost flow collection whose owner a quoted scalar or a line in it
+    /// asked for, that owner, and its column if it's a compact collection on the same line.
+    flow_owner: (usize, Owner, Option<usize>),
     /// Byte offsets of the non-printable characters that only a quoted
     /// scalar may hold, in order, and the first one not yet checked.
     quoted_only: Vec<usize>,
@@ -203,6 +210,8 @@ impl<'a> Scanner<'a> {
             anchors: 0,
             flow_level: 0,
             flow_stack: Vec::new(),
+            short_flow_scalar: None,
+            last_token_end: 0,
             flow_allow_zero_indent: Vec::new(),
             previous_flow_end: false,
             yaml_directive_seen: false,
@@ -227,7 +236,7 @@ impl<'a> Scanner<'a> {
             line_marks: (usize::MAX, 0),
             counted_indent: (usize::MAX, 0),
             flow_start: 0,
-            flow_owner: (usize::MAX, Owner::Unknown),
+            flow_owner: (usize::MAX, Owner::Unknown, None),
             quoted_only,
             quoted_only_next: 0,
         })
@@ -236,6 +245,11 @@ impl<'a> Scanner<'a> {
     /// The input length, used to choose a token-arena growth chunk.
     pub(crate) fn input_len(&self) -> usize {
         self.input.len()
+    }
+
+    /// The text being scanned.
+    pub(crate) fn input(&self) -> &'a str {
+        self.input
     }
 
     /// Return the next token, or `None` after the stream end has been emitted.
@@ -279,28 +293,36 @@ impl<'a> Scanner<'a> {
                 let start = self.pos;
                 self.consume_line_break();
                 if self.flow_level > 0 {
-                    if !self.compat_flow
-                        && matches!(self.flow_stack.last(), Some('[' | '{'))
+                    if matches!(self.flow_stack.last(), Some(('[' | '{', _, _)))
                         && self.flow_allow_zero_indent.last() == Some(&false)
                     {
                         let mut content = self.pos;
                         while matches!(self.input[content..].chars().next(), Some(' ' | '\t')) {
                             content += 1;
                         }
-                        let top = self.flow_stack.last().copied();
-                        let next = self.input[content..].chars().next();
-                        let closing = match top {
-                            Some('[') => ']',
-                            Some('{') => '}',
-                            _ => unreachable!("flow stack checked"),
+                        let Some(&(open, _, explicit)) = self.flow_stack.last() else {
+                            unreachable!("flow stack checked")
                         };
-                        if content == self.pos
-                            && next
-                                .is_some_and(|ch| !is_line_break(ch) && ch != closing && ch != '#')
-                        {
-                            return Err(
-                                self.error_at(content, "flow collection entries must be indented")
-                            );
+                        let next = self.input[content..].chars().next();
+                        let closing = if open == '[' { ']' } else { '}' };
+                        let spaces = leading_spaces(&self.input[self.pos..content]);
+                        let short = match self.flow_line_indent() {
+                            Some(required) => spaces < required,
+                            None => content == self.pos,
+                        };
+                        // By default every line with content is held to it but a closing one. Compat
+                        // holds only a line that an implicit flow key's `:` starts, as in
+                        // `k: {x\n: y}` or `k: {"x"\n:y}`, which libyaml refuses too. libyaml reads
+                        // an explicit key's, as in `k: {? x\n: y}`.
+                        let held = if self.compat_flow {
+                            next == Some(':')
+                                && !explicit
+                                && (self.colon_indicator(content) || self.previous_flow_end)
+                        } else {
+                            next.is_some_and(|ch| !is_line_break(ch) && ch != closing && ch != '#')
+                        };
+                        if short && held {
+                            return Err(self.flow_indent_error(content));
                         }
                     }
                     // Line breaks separate flow tokens but are not block
@@ -341,7 +363,7 @@ impl<'a> Scanner<'a> {
                     self.flow_start = start;
                 }
                 self.flow_level += 1;
-                self.flow_stack.push('[');
+                self.flow_stack.push(('[', start, false));
                 self.flow_allow_zero_indent
                     .push(self.may_continue_at_column_zero());
                 self.limits
@@ -362,7 +384,7 @@ impl<'a> Scanner<'a> {
                     self.flow_start = start;
                 }
                 self.flow_level += 1;
-                self.flow_stack.push('{');
+                self.flow_stack.push(('{', start, false));
                 self.flow_allow_zero_indent
                     .push(self.may_continue_at_column_zero());
                 self.limits
@@ -379,6 +401,9 @@ impl<'a> Scanner<'a> {
                 self.make(TokenKind::FlowMappingEnd, start, self.pos)
             }
             ',' => {
+                if let Some(top) = self.flow_stack.last_mut() {
+                    top.2 = false;
+                }
                 self.pos += 1;
                 self.make(TokenKind::FlowEntry, start, self.pos)
             }
@@ -392,12 +417,27 @@ impl<'a> Scanner<'a> {
             '?' if (self.compat_flow && self.flow_level > 0)
                 || self.indicator_follows(start, 1) =>
             {
+                if let Some(top) = self.flow_stack.last_mut() {
+                    top.2 = true;
+                }
                 self.pos += 1;
                 self.make_indicator(TokenKind::Key, start, self.pos)
             }
             ':' if self.colon_indicator(start)
                 || (self.flow_level > 0 && self.previous_flow_end) =>
             {
+                // In compat, an implicit key that ran onto a flow collection's line short of its
+                // indent can't take a `:`: the grammar refuses the line, and libyaml the key's
+                // lines. Only comments and line breaks may come between them.
+                if let Some((end, line)) = self.short_flow_scalar
+                    && self.last_token_end == end
+                    && self
+                        .flow_stack
+                        .last()
+                        .is_some_and(|&(_, _, explicit)| !explicit)
+                {
+                    return Err(self.flow_indent_error(line));
+                }
                 self.pos += 1;
                 self.make_indicator(TokenKind::Value, start, self.pos)
             }
@@ -458,6 +498,7 @@ impl<'a> Scanner<'a> {
             self.check_quoted_only(None)?;
         }
         self.previous_flow_end = false;
+        self.last_token_end = end;
         self.document_open = true;
         self.node_seen = true;
         self.indicator_end = end;
@@ -509,6 +550,7 @@ impl<'a> Scanner<'a> {
                 .check_scalar_bytes(raw.len().max(value.len()))
                 .map_err(|error| self.limit_at(start, error))?;
         }
+        self.last_token_end = end;
         self.previous_flow_end = matches!(
             kind,
             TokenKind::FlowSequenceEnd
@@ -802,6 +844,15 @@ impl<'a> Scanner<'a> {
         self.input
             .get(after..)
             .is_none_or(|rest| rest.chars().next().is_none_or(is_blank))
+    }
+
+    /// Whether a document marker, `---` or `...` with whitespace or the line's end after it,
+    /// starts the line at `position`, in column 0.
+    fn document_marker_starts_line(&self, position: usize) -> bool {
+        let rest = &self.input[position..];
+        (rest.starts_with("---") || rest.starts_with("..."))
+            && self.line_index.line_start(position) == position
+            && self.marker_follows(position, 3)
     }
 
     fn scan_directive(&mut self) -> Result<Option<Token<'a>>, Error> {
@@ -1187,8 +1238,10 @@ impl<'a> Scanner<'a> {
     /// The indent the lines of a quoted scalar that starts at `start` are held to, and whether they
     /// may sit at exactly it. The block collection that holds the scalar, or the outermost flow
     /// collection it is in, sets it: in `k:\n  'a\n b'` and `k: [\n    'a\n b']` the lines need only
-    /// pass `k`'s column (YAML 1.2.2 production 69). Where that isn't known, or isn't left of the
-    /// scalar's line, the line sets it, which is never looser.
+    /// pass `k`'s column (YAML 1.2.2 production 69). After a compact key or entry the collection
+    /// sits right of the line's indent, so by default in `- k: 'a\n   b'` and `- - 'a\n   b'` the
+    /// lines need three spaces. Where the collection isn't known, or isn't left of the scalar's
+    /// line, or after a compact key in compat, the line sets it.
     fn quoted_indent(&mut self, start: usize) -> (usize, bool) {
         if self.may_continue_at_column_zero() {
             return (0, true);
@@ -1203,17 +1256,80 @@ impl<'a> Scanner<'a> {
             indent = leading_spaces(self.after_line_boms(line_start, self.input.len()));
             self.counted_indent = (line_start, indent);
         }
-        let owner = if self.flow_level > 0 {
+        let (owner, compact) = if self.flow_level > 0 {
             if self.flow_owner.0 != self.flow_start {
-                self.flow_owner = (self.flow_start, self.owner_of(self.flow_start));
+                self.flow_owner = (
+                    self.flow_start,
+                    self.owner_of(self.flow_start),
+                    self.compact_column(self.flow_start),
+                );
             }
-            self.flow_owner.1
+            (self.flow_owner.1, self.flow_owner.2)
         } else {
-            self.owner_of(start)
+            (self.owner_of(start), self.compact_column(start))
         };
+        // Compat holds the lines to the line's indent there, as libyaml has no such check and
+        // real files align them with the key, as in `- k: "a\n  b"`.
+        if let Some(column) = compact
+            && column > indent
+            && !self.compat_flow
+        {
+            return (column, false);
+        }
         match owner {
             Owner::Block(parent) if parent < indent => (parent, false),
             _ => (indent, prefix.is_empty()),
+        }
+    }
+
+    /// The column of the block collection that a compact key or entry before `at` on its line
+    /// opens, as `k` in `- k: 'a` or the inner `-` in `- - 'a`. Only default mode holds a quoted
+    /// scalar to it, and there no mark takes a column.
+    fn compact_column(&self, at: usize) -> Option<usize> {
+        let line_start = self.line_index.line_start(at);
+        match self.shape_of_line(line_start, &self.input[line_start..at]) {
+            LineShape::Owner(Owner::Block(column)) => Some(column),
+            _ => None,
+        }
+    }
+
+    /// The spaces that a line of the outermost open flow collection needs before its content: one
+    /// more than the column of the innermost block collection holding it, as `k` in
+    /// `a:\n  k: [b,\n   c]` or in `- k: [b,\n   c]` (YAML 1.2.2 production 69). `None` where its
+    /// lines may start at column 0, at the root, or where that collection isn't known.
+    fn flow_line_indent(&mut self) -> Option<usize> {
+        if self.may_continue_at_column_zero() {
+            return None;
+        }
+        if self.flow_owner.0 != self.flow_start {
+            self.flow_owner = (
+                self.flow_start,
+                self.owner_of(self.flow_start),
+                self.compact_column(self.flow_start),
+            );
+        }
+        match self.flow_owner.1 {
+            Owner::Block(column) => Some(column + 1),
+            _ => None,
+        }
+    }
+
+    /// The error for a line of the innermost open flow collection, starting its content at `at`,
+    /// that isn't indented enough. Such a line most often follows a collection left open, so the
+    /// error names where that collection opened, as the parser's flow errors do.
+    fn flow_indent_error(&self, at: usize) -> Error {
+        let error = self.error_at(at, "flow collection entries must be indented");
+        let Some(&(open, opened, _)) = self.flow_stack.last() else {
+            return error;
+        };
+        let name = if open == '[' { "sequence" } else { "mapping" };
+        match self.line_index.marker(self.input, opened) {
+            Some(there) => error.with_context(&format!(
+                ", in the flow {name} opened at line {} column {}",
+                there.line(),
+                there.column()
+            )),
+            None => error,
         }
     }
 
@@ -1281,8 +1397,9 @@ impl<'a> Scanner<'a> {
         {
             return Err(self.error_at(self.pos, "document marker inside quoted scalar"));
         }
-        let closing = matches!(self.peek(), Some('"' | '\''));
-        if !closing && (indent < start_indent || (!allow_same_indent && indent == start_indent)) {
+        // Only the closing quote is exempt: a line that starts with the other kind of quote, or
+        // with `''` in a single-quoted scalar, is text and is held to the indent.
+        if !closes && (indent < start_indent || (!allow_same_indent && indent == start_indent)) {
             return Err(self.error_at(
                 self.pos,
                 "quoted scalar continuation must be indented more than its parent",
@@ -1854,6 +1971,7 @@ impl<'a> Scanner<'a> {
 
     fn scan_plain(&mut self) -> Result<Option<Token<'a>>, Error> {
         let start = self.pos;
+        self.short_flow_scalar = None;
         if self.peek() == Some('#') {
             return Err(self.error_at(
                 start,
@@ -1920,7 +2038,7 @@ impl<'a> Scanner<'a> {
                 }
             };
             let first_end = self.pos;
-            let Some(breaks) = self.try_plain_continuation(continuation) else {
+            let Some(breaks) = self.try_plain_continuation(continuation)? else {
                 break;
             };
             if value.is_none() {
@@ -1943,6 +2061,9 @@ impl<'a> Scanner<'a> {
         let end = self.pos;
         if end == start {
             return Err(self.error_at(start, "expected a token"));
+        }
+        if let Some((_, line)) = self.short_flow_scalar {
+            self.short_flow_scalar = Some((end, line));
         }
         let raw_text = &self.input[start..end];
         let raw = Cow::Borrowed(raw_text);
@@ -2029,9 +2150,21 @@ impl<'a> Scanner<'a> {
         self.block_prefix.1
     }
 
-    fn try_plain_continuation(&mut self, continuation: Continuation) -> Option<usize> {
+    fn try_plain_continuation(
+        &mut self,
+        continuation: Continuation,
+    ) -> Result<Option<usize>, Error> {
         let saved = self.pos;
         let mut breaks = 0;
+        // In a flow collection under a block collection, a line needs one more space than that
+        // collection's column, and a tab doesn't count. Compat refuses only a tab left of that
+        // column on a line that the scalar goes on to, as libyaml does, so `k: [a\n\tb]` is an
+        // error in both modes and `k: [a\nb]` by default only. A closing line, as in `k: [a\n\t]`,
+        // still reads.
+        let flow_indent = match continuation {
+            Continuation::Flow => self.flow_line_indent(),
+            _ => None,
+        };
         loop {
             if !self.peek().is_some_and(is_line_break) {
                 break;
@@ -2048,16 +2181,19 @@ impl<'a> Scanner<'a> {
         }
         if breaks == 0 || self.pos >= self.input.len() {
             self.pos = saved;
-            return None;
+            return Ok(None);
         }
         // In a flow collection, an indicator on the next line ends the scalar, and the line
         // breaks before it aren't part of the value.
+        // A document marker line ends it too, and the flow collection then refuses the marker, as
+        // in `[a\n--- b]`: no node holds one (YAML 1.2.2 production 206).
         if self.flow_level > 0
             && (matches!(self.peek(), Some(',' | ']' | '}'))
-                || (self.peek() == Some(':') && self.colon_indicator(self.pos)))
+                || (self.peek() == Some(':') && self.colon_indicator(self.pos))
+                || self.document_marker_starts_line(self.pos))
         {
             self.pos = saved;
-            return None;
+            return Ok(None);
         }
         let line_start = self.line_index.line_start(self.pos);
         let indent = self.input[line_start..self.pos]
@@ -2066,7 +2202,11 @@ impl<'a> Scanner<'a> {
             .count();
         let bom_line = self.input[self.pos..].starts_with('\u{feff}');
         let (allowed, allow_block_indicator) = match continuation {
-            Continuation::Flow => (true, false),
+            // By default a short line ends the scalar, and the flow collection then refuses it.
+            Continuation::Flow => (
+                self.compat_flow || flow_indent.is_none_or(|required| indent >= required),
+                false,
+            ),
             Continuation::Indent(minimum) => (indent >= minimum, true),
             Continuation::Line {
                 start_indent,
@@ -2094,9 +2234,23 @@ impl<'a> Scanner<'a> {
             || self.peek() == Some('#')
         {
             self.pos = saved;
-            return None;
+            return Ok(None);
         }
-        Some(breaks)
+        if let Some(required) = flow_indent
+            && let Some(tab) = self.input[line_start..self.pos].find('\t')
+            && tab < required
+        {
+            // Only compat gets here.
+            return Err(self.error_at(
+                line_start + tab,
+                "a tab cannot indent a flow collection's line under a block collection",
+            ));
+        }
+        if flow_indent.is_some_and(|required| indent < required) {
+            // Only compat gets here, and `scan_plain` sets where the scalar ends.
+            self.short_flow_scalar = Some((usize::MAX, self.pos));
+        }
+        Ok(Some(breaks))
     }
 
     /// Whether the line that `position` starts the content of ends a plain scalar rather than
@@ -2104,10 +2258,7 @@ impl<'a> Scanner<'a> {
     /// column 0 with whitespace or the line's end after it, and a comment's `:` isn't an indicator.
     fn looks_like_block_start(&self, position: usize, allow_block_indicator: bool) -> bool {
         let rest = &self.input[position..];
-        if (rest.starts_with("---") || rest.starts_with("..."))
-            && self.line_index.line_start(position) == position
-            && self.marker_follows(position, 3)
-        {
+        if self.document_marker_starts_line(position) {
             return true;
         }
         if rest.starts_with(": ") {

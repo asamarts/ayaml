@@ -21,6 +21,5 @@ JEF9#2   compat  json         compatibility mode: libyaml-compatible behavior
 JEF9#2   compat  tree         compatibility mode: libyaml-compatible behavior
 L24T#1   compat  json         compatibility mode: libyaml-compatible behavior
 L24T#1   compat  tree         compatibility mode: libyaml-compatible behavior
-VJP3#0   compat  class        compatibility mode: zero-indented flow continuation lines are accepted
 Y2GN#0   compat  json         compatibility mode: libyaml-compatible behavior
 Y2GN#0   compat  tree         compatibility mode: libyaml-compatible behavior
