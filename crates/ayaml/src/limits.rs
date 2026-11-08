@@ -57,9 +57,9 @@ pub enum LimitKind {
     ScalarBytes,
     /// Entries in one collection.
     CollectionEntries,
-    /// Events in one stream.
+    /// Events in one stream, or the tokens a reader keeps for one stream.
     Events,
-    /// Anchors in one document.
+    /// Anchors in one stream.
     Anchors,
     /// Alias dereferences in one stream.
     AliasDereferences,
@@ -162,15 +162,20 @@ pub struct Limits {
     pub node_cost_bytes: usize,
     /// Maximum documents in one stream.
     pub max_documents: usize,
-    /// Maximum bytes in one scalar, as written in the input. A block scalar's size runs from its
-    /// `|` or `>` through its last line, so its header, indentation, and trailing blank lines
-    /// count, and it is never less than the value it reads as.
+    /// Maximum bytes in one scalar: the larger of its text in the input and the value it reads
+    /// as. A block scalar's text runs from its `|` or `>` through its last line, so its header,
+    /// indentation, and trailing blank lines count. A double-quoted `\L` or `\P` takes 2 bytes of
+    /// text and 3 of value.
     pub max_scalar_bytes: usize,
     /// Maximum entries in one collection.
     pub max_collection_entries: usize,
-    /// Maximum events in one stream.
+    /// Maximum events in one stream, and maximum tokens a reader keeps for one stream. The events
+    /// are those [`parse_events`](crate::parse_events) yields, the stream's start and end
+    /// included, and every reader counts them alike. The tokens are the input's scalars, anchors,
+    /// aliases, tags, indicators, document markers, and directives. Neither count includes a
+    /// line break or a comment.
     pub max_events: usize,
-    /// Maximum anchors in one document.
+    /// Maximum anchors in one stream.
     pub max_anchors: usize,
     /// Maximum alias dereferences in one stream.
     pub max_alias_dereferences: usize,
@@ -257,7 +262,7 @@ impl Limits {
         self
     }
 
-    /// Set the maximum size of one scalar, as written in the input; see
+    /// Set the maximum size of one scalar, its text or its value, whichever is larger; see
     /// [`max_scalar_bytes`](Self::max_scalar_bytes).
     #[must_use]
     pub const fn with_max_scalar_bytes(mut self, value: usize) -> Self {
@@ -272,14 +277,15 @@ impl Limits {
         self
     }
 
-    /// Set the maximum number of events in one stream.
+    /// Set the maximum number of events, and of kept tokens, in one stream; see
+    /// [`max_events`](Self::max_events).
     #[must_use]
     pub const fn with_max_events(mut self, value: usize) -> Self {
         self.max_events = value;
         self
     }
 
-    /// Set the maximum number of anchors in one document.
+    /// Set the maximum number of anchors in one stream.
     #[must_use]
     pub const fn with_max_anchors(mut self, value: usize) -> Self {
         self.max_anchors = value;

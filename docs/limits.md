@@ -17,10 +17,10 @@ stream.
 | `alias_bytes_per_input_byte` | 16 | Additional allowance per input byte. |
 | `node_cost_bytes` | 256 | Estimated cost of one composed node, at least 1. |
 | `max_documents` | 10,000 | `Limits::compat()` uses 1. |
-| `max_scalar_bytes` | 32 MiB | Maximum bytes in one scalar, as written in the input. |
+| `max_scalar_bytes` | 32 MiB | Maximum bytes in one scalar, its text or its value, whichever is larger. |
 | `max_collection_entries` | 1,000,000 | Maximum entries in one collection. |
-| `max_events` | 1,000,000 | Maximum events or tokens in one stream. |
-| `max_anchors` | 100,000 | Maximum anchors in one document. |
+| `max_events` | 1,000,000 | Maximum events in one stream, and maximum tokens kept for one stream. |
+| `max_anchors` | 100,000 | Maximum anchors in one stream. |
 | `max_alias_dereferences` | 100,000 | Maximum alias dereferences in one stream. |
 | `max_output_bytes` | 64 MiB | Maximum bytes written by one emitter call. |
 | `max_tag_expansion_bytes` | 64 MiB | Maximum bytes that tag handles expand to in one stream. |
@@ -28,6 +28,37 @@ stream.
 Limits are inclusive at the accepted boundary. Input size, depth, alias expansion,
 tag expansion, a block scalar's size, and the least node cost have tests just below,
 at, and above their ceilings. AY-034 adds the same for the other limits.
+
+Every reader that takes limits gives the same answer for the same input at the same limits, and
+refuses it at the same place. `tests/limit_consistency.rs` checks each limit that way, on every one
+of those readers, just below and at its boundary and one above it. The readers that build values
+differ from the event readers only where an alias copies its target, as the next sections say.
+
+## What the limits count
+
+`max_events` bounds two counts, and an input that takes either over the limit is refused:
+
+- The events of the stream, as `parse_events` yields them: its start and end, each document's
+  start and end, each directive, collection start and end, scalar, and alias. Every reader counts
+  them alike, each event once, including the readers that build values without keeping events.
+- The tokens a read keeps: each scalar, anchor, alias, tag, document marker, and directive, and
+  each indicator, `-`, `?`, `:`, `,`, and the brackets and braces of flow collections. The eager
+  readers keep the tokens of the whole stream, so this count is what bounds their memory.
+
+A line break, a blank line, and a comment count as neither, so lines without content don't use up
+the limit. `a: 1` is 8 events, from the stream's start to its end, and 3 tokens. Tokens can
+outnumber events: each line of `- &a !t x` is 4 tokens and 1 event.
+
+`max_depth` bounds the collections open at once. A `key: value` entry of a flow sequence is a
+mapping of one pair inside it, so `[a: [1]]` is 3 deep. The readers that build values count an
+alias as the copy of its target that it becomes, so the target's collections count where the alias
+is. An event reader sees the alias alone: `a: &x [[1]]` then `b: [*x]` is 3 deep there and 4 deep
+where values are built.
+
+`max_anchors` counts every anchor in the stream, across its documents, although an alias sees only
+the anchors of its own document. So do `max_events`, `max_alias_dereferences`, and
+`max_tag_expansion_bytes`, and a reader of several documents charges all their aliases to one
+alias budget. `max_documents` and `max_collection_entries` count what their names say.
 
 The alias-expansion allowance is:
 
@@ -40,8 +71,12 @@ The input contribution is capped at `max_input_bytes`, so padding a document
 cannot multiply the alias budget without bound.
 
 An alias is charged `node_cost_bytes` for each node it copies, on top of the text it
-copies. A composed node takes about 100 bytes of memory, so the default of 256 covers
-it with room, and a smaller cost lets aliases copy more memory than the budget says.
+copies, and every reader that builds values charges it the same. A tag that a value keeps,
+as `Value::Tagged` does, is a node of its own, and its text counts too: an alias to
+`!t abc` is charged two nodes, the 2 bytes of `!t`, and the 3 of `abc`. A core tag that
+only restates the value, as `!!str` and `!!seq` do, adds nothing. A composed node takes
+about 100 bytes of memory, so the default of 256 covers it with room, and a smaller cost
+lets aliases copy more memory than the budget says.
 Against a 2 MiB budget, nested aliases of empty nodes built by `parse_value` held
 about 0.4 times the budget at the default cost, 1.2 times at 64, 2.7 times at 16, and
 65 times at 1, the least accepted cost, before the budget stopped them. At the default
@@ -55,9 +90,11 @@ Every tag written with a handle holds its own copy of the prefix that handle sta
 copies the tags of the node it names, and those bytes count against the alias budget with the rest
 of the copy.
 
-A scalar's size, for `max_scalar_bytes`, is its text in the input. A block scalar's
-runs from its `|` or `>` through its last line, so its header, indentation, and
-trailing blank lines count, and it is never less than the value it reads as.
+A scalar's size, for `max_scalar_bytes`, is the larger of its text in the input and the
+value it reads as. A quoted scalar's text includes its quotes. A block scalar's runs from
+its `|` or `>` through its last line, so its header, indentation, and trailing blank
+lines count. A value is never longer than its text, except where a double-quoted `\L` or
+`\P` takes 2 bytes of text and 3 of value.
 
 ## Memory
 
@@ -68,8 +105,8 @@ that document's tokens. Every other reader holds the tokens of the whole stream.
 - The index takes 8 bytes for each CR or LF in the input, so input of blank lines, a
   byte each, costs 8 times its size there. That is 8 bytes a line, or under 16 where
   lines end in CRLF. An error at the end of the input is placed without a second index.
-- A token takes about 100 bytes, and every token counts against `max_events`, so at
-  the default limit a read holds about 100 MB of tokens at most. The arena that holds
+- A token takes about 100 bytes, and every token a read keeps counts against `max_events`,
+  so at the default limit a read holds about 100 MB of tokens at most. The arena that holds
   them grows by a chunk of up to 8,192 tokens, or by a sixteenth of itself once that
   is more. Its copying stays linear in the tokens, and its spare capacity is at most a
   chunk or a sixteenth of it, whichever is larger.

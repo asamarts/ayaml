@@ -93,7 +93,10 @@ pub(crate) struct Scanner<'a> {
     pos: usize,
     line_index: LineIndex,
     limits: Limits,
+    /// The tokens a reader keeps, which count against `max_events`: every token but the stream's
+    /// start and end and the line breaks, which no reader stores.
     tokens: usize,
+    /// The anchors in the stream, which count against `max_anchors`.
     anchors: usize,
     flow_level: usize,
     flow_stack: Vec<char>,
@@ -413,7 +416,15 @@ impl<'a> Scanner<'a> {
         Ok(())
     }
 
-    /// Emit a block indicator. These tokens only advance the event count,
+    /// Count a token that a reader keeps against `max_events`.
+    fn count_token(&mut self, start: usize) -> Result<(), Error> {
+        self.tokens += 1;
+        self.limits
+            .check_events(self.tokens)
+            .map_err(|error| self.limit_at(start, error))
+    }
+
+    /// Emit a block indicator. These tokens only advance the token count,
     /// mark the document open, and clear flow adjacency.
     fn make_indicator(
         &mut self,
@@ -421,10 +432,7 @@ impl<'a> Scanner<'a> {
         start: usize,
         end: usize,
     ) -> Result<Option<Token<'a>>, Error> {
-        self.tokens += 1;
-        self.limits
-            .check_events(self.tokens)
-            .map_err(|error| self.limit_at(start, error))?;
+        self.count_token(start)?;
         if self.quoted_only_next < self.quoted_only.len() {
             self.check_quoted_only(None)?;
         }
@@ -436,12 +444,10 @@ impl<'a> Scanner<'a> {
     }
 
     /// Emit a line break. The parser uses only the token kind; the span still
-    /// belongs to the token for diagnostics and event consumers.
+    /// belongs to the token for diagnostics and event consumers. No reader
+    /// keeps a line break, so it doesn't count against `max_events`, and a
+    /// blank or comment line costs nothing there.
     fn make_line_break(&mut self, start: usize, end: usize) -> Result<Option<Token<'a>>, Error> {
-        self.tokens += 1;
-        self.limits
-            .check_events(self.tokens)
-            .map_err(|error| self.limit_at(start, error))?;
         if self.quoted_only_next < self.quoted_only.len() {
             self.check_quoted_only(None)?;
         }
@@ -459,10 +465,11 @@ impl<'a> Scanner<'a> {
         start: usize,
         end: usize,
     ) -> Result<Option<Token<'a>>, Error> {
-        self.tokens += 1;
-        self.limits
-            .check_events(self.tokens)
-            .map_err(|error| self.limit_at(start, error))?;
+        // No reader keeps the stream's start and end tokens: they become its
+        // stream events, which count as events.
+        if !matches!(kind, TokenKind::StreamStart | TokenKind::StreamEnd) {
+            self.count_token(start)?;
+        }
         if self.quoted_only_next < self.quoted_only.len() {
             let quoted = matches!(
                 kind,
@@ -473,9 +480,11 @@ impl<'a> Scanner<'a> {
             );
             self.check_quoted_only(quoted.then_some(start..end))?;
         }
-        if let TokenKind::Scalar { raw, .. } = &kind {
+        // A scalar's size is the larger of its text and its value: `\L` and
+        // `\P` take 2 bytes of text and 3 of value.
+        if let TokenKind::Scalar { value, raw, .. } = &kind {
             self.limits
-                .check_scalar_bytes(raw.len())
+                .check_scalar_bytes(raw.len().max(value.len()))
                 .map_err(|error| self.limit_at(start, error))?;
         }
         self.previous_flow_end = matches!(

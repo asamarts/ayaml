@@ -169,6 +169,8 @@ struct Parser<'a> {
     /// scanner does.
     compat: bool,
     documents: usize,
+    /// The events of the stream so far, its start and end included, which count against
+    /// `max_events`. A document-sized parse starts from the count before it.
     emitted: usize,
     /// Stop at a second document start, as a single-document entry point
     /// needs: the rest of the stream is never parsed.
@@ -186,7 +188,10 @@ pub(crate) struct EventCursor<'a> {
     stream_started: bool,
     stream_ended: bool,
     eof: bool,
+    /// The scanner's stream end, once read, so the stream end event has its place.
+    stream_end: Option<Span>,
     documents: usize,
+    /// The events counted so far, each once, as an eager parse of the stream counts them.
     events: usize,
 }
 
@@ -206,6 +211,7 @@ impl<'a> EventCursor<'a> {
             stream_started: false,
             stream_ended: false,
             eof: false,
+            stream_end: None,
             documents: 0,
             events: 0,
         })
@@ -223,40 +229,34 @@ impl<'a> EventCursor<'a> {
     fn next_event_inner(&mut self) -> Result<Option<Event<'a>>, Error> {
         if !self.stream_started {
             self.stream_started = true;
+            // The scanner's stream start is where an eager parse puts the event,
+            // after a byte order mark.
+            let span = match self.scanner.next_token()? {
+                Some(token) if matches!(token.kind, TokenKind::StreamStart) => token.span,
+                _ => Span::empty(crate::span::Marker::new(0, 1, 1)),
+            };
             self.events += 1;
-            let span = Span::empty(crate::span::Marker::new(0, 1, 1));
             self.limits
                 .check_events(self.events)
                 .map_err(|error| self.limit_at(span, error))?;
             return Ok(Some(Event::StreamStart { span }));
         }
         loop {
+            // Each event was counted when its document was parsed.
             if let Some(event) = self.queue.pop_front() {
-                self.events += 1;
-                self.limits
-                    .check_events(self.events)
-                    .map_err(|error| self.limit_at(event.span(), error))?;
                 return Ok(Some(event));
             }
             if self.stream_ended {
                 return Ok(None);
             }
             match self.load_chunk()? {
-                Some(events) => {
-                    self.events = self.events.saturating_add(events.len());
-                    let span = events.first().map_or_else(
-                        || Span::empty(crate::span::Marker::new(self.input.len(), 1, 1)),
-                        Event::span,
-                    );
-                    self.limits
-                        .check_events(self.events)
-                        .map_err(|error| self.limit_at(span, error))?;
-                    self.queue.extend(events);
-                }
+                Some(events) => self.queue.extend(events),
                 None => {
                     self.stream_ended = true;
+                    let span = self.stream_end.unwrap_or_else(|| {
+                        Span::empty(crate::span::Marker::new(self.input.len(), 1, 1))
+                    });
                     self.events += 1;
-                    let span = Span::empty(crate::span::Marker::new(self.input.len(), 1, 1));
                     self.limits
                         .check_events(self.events)
                         .map_err(|error| self.limit_at(span, error))?;
@@ -306,7 +306,7 @@ impl<'a> EventCursor<'a> {
         if lines.is_empty() {
             return Ok(None);
         }
-        let events = parse_lines(
+        let (events, counted) = parse_lines(
             Lines {
                 lines,
                 tokens,
@@ -315,7 +315,9 @@ impl<'a> EventCursor<'a> {
             },
             &self.limits,
             self.input,
+            self.events,
         )?;
+        self.events = counted;
         let documents = events
             .iter()
             .filter(|event| matches!(event, Event::DocumentStart { .. }))
@@ -352,6 +354,7 @@ impl<'a> EventCursor<'a> {
                 Some(token) if matches!(token.kind, TokenKind::StreamStart) => {}
                 Some(token) if matches!(token.kind, TokenKind::StreamEnd) => {
                     self.eof = true;
+                    self.stream_end = Some(token.span);
                     return Ok(if current.is_empty() {
                         None
                     } else {
@@ -381,11 +384,14 @@ impl<'a> EventCursor<'a> {
     }
 }
 
+/// Parse one document's lines for the pull cursor. Its events count on from the `counted` events
+/// before them, and the count after them comes back with them.
 fn parse_lines<'a>(
     lines: Lines<'a>,
     limits: &Limits,
     input: &'a str,
-) -> Result<Vec<Event<'a>>, Error> {
+    counted: usize,
+) -> Result<(Vec<Event<'a>>, usize), Error> {
     let event_capacity = event_capacity(&lines.lines, &lines.tokens);
     let mut parser = Parser {
         lines: lines.lines,
@@ -395,12 +401,12 @@ fn parse_lines<'a>(
         input,
         compat: false,
         documents: 0,
-        emitted: 0,
+        emitted: counted,
         single_document: false,
     };
     parser.parse_stream()?;
     match parser.sink {
-        EventSink::Events(events) => Ok(events),
+        EventSink::Events(events) => Ok((events, parser.emitted)),
         EventSink::Streaming(_) => unreachable!("event sink kind changed during parsing"),
     }
 }
@@ -466,14 +472,10 @@ fn parse_events_with_compat<'a>(
     } = read_lines(&mut scanner)?;
 
     let event_capacity = event_capacity(&lines, &tokens).saturating_add(2);
-    let mut events = Vec::with_capacity(event_capacity);
-    events.push(Event::StreamStart {
-        span: stream_start.unwrap_or_else(|| Span::empty(crate::span::Marker::new(0, 1, 1))),
-    });
     let mut parser = Parser {
         lines,
         token_arena: tokens,
-        sink: EventSink::Events(events),
+        sink: EventSink::Events(Vec::with_capacity(event_capacity)),
         limits: limits.clone(),
         input,
         compat: compat_flow,
@@ -481,15 +483,16 @@ fn parse_events_with_compat<'a>(
         emitted: 0,
         single_document,
     };
+    parser.emit(Event::StreamStart {
+        span: stream_start.unwrap_or_else(|| Span::empty(crate::span::Marker::new(0, 1, 1))),
+    })?;
     parser.parse_stream()?;
+    parser.emit(Event::StreamEnd {
+        span: stream_end
+            .unwrap_or_else(|| Span::empty(crate::span::Marker::new(input.len(), 1, 1))),
+    })?;
     match parser.sink {
-        EventSink::Events(mut events) => {
-            events.push(Event::StreamEnd {
-                span: stream_end
-                    .unwrap_or_else(|| Span::empty(crate::span::Marker::new(input.len(), 1, 1))),
-            });
-            Ok(events)
-        }
+        EventSink::Events(events) => Ok(events),
         EventSink::Streaming(_) => unreachable!("event sink kind changed during parsing"),
     }
 }
@@ -517,7 +520,18 @@ pub(crate) fn parse_documents(
         emitted: 0,
         single_document,
     };
+    // The composer ignores the stream events, but they count as an event parse counts them.
+    parser.emit(Event::StreamStart {
+        span: lines
+            .stream_start
+            .unwrap_or_else(|| Span::empty(crate::span::Marker::new(0, 1, 1))),
+    })?;
     parser.parse_stream()?;
+    parser.emit(Event::StreamEnd {
+        span: lines
+            .stream_end
+            .unwrap_or_else(|| Span::empty(crate::span::Marker::new(input.len(), 1, 1))),
+    })?;
     match parser.sink {
         EventSink::Streaming(composer) => composer.finish(),
         EventSink::Events(_) => unreachable!("event sink kind changed during parsing"),
@@ -1755,6 +1769,9 @@ impl<'a> Parser<'a> {
         depth: usize,
         stack: &mut Vec<Cont>,
     ) -> Result<Step<'a>, Error> {
+        // The pair is a mapping inside the sequence, so its key and value
+        // nest one level deeper than the sequence's items.
+        let depth = depth + 1;
         let start_span = self.token(tokens, start).span;
         self.limits
             .check_depth(depth)
@@ -1843,6 +1860,8 @@ impl<'a> Parser<'a> {
         depth: usize,
         stack: &mut Vec<Cont>,
     ) -> Result<Step<'a>, Error> {
+        // As in `flow_explicit_mapping`, the pair is one level deeper.
+        let depth = depth + 1;
         let start_span = self.token(tokens, start).span;
         self.limits
             .check_depth(depth)
@@ -2399,6 +2418,7 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Count one event against `max_events`, and pass it on.
     fn emit(&mut self, event: Event<'a>) -> Result<(), Error> {
         self.emitted = self.emitted.saturating_add(1);
         let span = event.span();
