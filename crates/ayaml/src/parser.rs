@@ -15,7 +15,7 @@ use crate::event::{Anchor, CollectionStyle, Event, ScalarStyle};
 use crate::limits::Limits;
 use crate::position::LineIndex;
 use crate::scanner::{Scanner, Token, TokenKind};
-use crate::span::Span;
+use crate::span::{Marker, Span};
 use crate::tag::Tag;
 use crate::value::Value;
 
@@ -175,6 +175,9 @@ struct Parser<'a> {
     /// Stop at a second document start, as a single-document entry point
     /// needs: the rest of the stream is never parsed.
     single_document: bool,
+    /// Where the lines end: the stream end, or for one document of a lazy read, the next
+    /// document's first token. An empty node after the last line is placed here.
+    end: Marker,
 }
 
 /// A document-bounded pull cursor used by the public event traversal.
@@ -233,7 +236,7 @@ impl<'a> EventCursor<'a> {
             // after a byte order mark.
             let span = match self.scanner.next_token()? {
                 Some(token) if matches!(token.kind, TokenKind::StreamStart) => token.span,
-                _ => Span::empty(crate::span::Marker::new(0, 1, 1)),
+                _ => Span::empty(Marker::new(0, 1, 1)),
             };
             self.events += 1;
             self.limits
@@ -253,9 +256,9 @@ impl<'a> EventCursor<'a> {
                 Some(events) => self.queue.extend(events),
                 None => {
                     self.stream_ended = true;
-                    let span = self.stream_end.unwrap_or_else(|| {
-                        Span::empty(crate::span::Marker::new(self.input.len(), 1, 1))
-                    });
+                    let span = self
+                        .stream_end
+                        .unwrap_or_else(|| Span::empty(Marker::new(self.input.len(), 1, 1)));
                     self.events += 1;
                     self.limits
                         .check_events(self.events)
@@ -306,6 +309,17 @@ impl<'a> EventCursor<'a> {
         if lines.is_empty() {
             return Ok(None);
         }
+        // The document ends where an eager parse would go on: at the next document's first
+        // token, or at the stream end. After a `...` line neither is read yet, and nothing
+        // past that line is placed.
+        let end = self
+            .pending_line
+            .as_ref()
+            .and_then(|line| line.first())
+            .map(|token| token.span.start())
+            .or_else(|| self.stream_end.map(Span::start))
+            .or_else(|| tokens.last().map(|token| token.span.end()))
+            .unwrap_or_else(|| Marker::new(self.input.len(), 1, 1));
         let (events, counted) = parse_lines(
             Lines {
                 lines,
@@ -316,6 +330,7 @@ impl<'a> EventCursor<'a> {
             &self.limits,
             self.input,
             self.events,
+            end,
         )?;
         self.events = counted;
         let documents = events
@@ -329,7 +344,7 @@ impl<'a> EventCursor<'a> {
                 Event::DocumentStart { span, .. } => Some(*span),
                 _ => None,
             })
-            .unwrap_or_else(|| Span::empty(crate::span::Marker::new(self.input.len(), 1, 1)));
+            .unwrap_or_else(|| Span::empty(Marker::new(self.input.len(), 1, 1)));
         self.limits
             .check_documents(self.documents)
             .map_err(|error| self.limit_at(span, error))?;
@@ -385,12 +400,13 @@ impl<'a> EventCursor<'a> {
 }
 
 /// Parse one document's lines for the pull cursor. Its events count on from the `counted` events
-/// before them, and the count after them comes back with them.
+/// before them, and the count after them comes back with them. `end` is where the lines stop.
 fn parse_lines<'a>(
     lines: Lines<'a>,
     limits: &Limits,
     input: &'a str,
     counted: usize,
+    end: Marker,
 ) -> Result<(Vec<Event<'a>>, usize), Error> {
     let event_capacity = event_capacity(&lines.lines, &lines.tokens);
     let mut parser = Parser {
@@ -403,6 +419,7 @@ fn parse_lines<'a>(
         documents: 0,
         emitted: counted,
         single_document: false,
+        end,
     };
     parser.parse_stream()?;
     match parser.sink {
@@ -472,6 +489,7 @@ fn parse_events_with_compat<'a>(
     } = read_lines(&mut scanner)?;
 
     let event_capacity = event_capacity(&lines, &tokens).saturating_add(2);
+    let end = stream_end.map_or_else(|| Marker::new(input.len(), 1, 1), Span::start);
     let mut parser = Parser {
         lines,
         token_arena: tokens,
@@ -482,14 +500,14 @@ fn parse_events_with_compat<'a>(
         documents: 0,
         emitted: 0,
         single_document,
+        end,
     };
     parser.emit(Event::StreamStart {
-        span: stream_start.unwrap_or_else(|| Span::empty(crate::span::Marker::new(0, 1, 1))),
+        span: stream_start.unwrap_or_else(|| Span::empty(Marker::new(0, 1, 1))),
     })?;
     parser.parse_stream()?;
     parser.emit(Event::StreamEnd {
-        span: stream_end
-            .unwrap_or_else(|| Span::empty(crate::span::Marker::new(input.len(), 1, 1))),
+        span: stream_end.unwrap_or_else(|| Span::empty(Marker::new(input.len(), 1, 1))),
     })?;
     match parser.sink {
         EventSink::Events(events) => Ok(events),
@@ -519,18 +537,21 @@ pub(crate) fn parse_documents(
         documents: 0,
         emitted: 0,
         single_document,
+        end: lines
+            .stream_end
+            .map_or_else(|| Marker::new(input.len(), 1, 1), Span::start),
     };
     // The composer ignores the stream events, but they count as an event parse counts them.
     parser.emit(Event::StreamStart {
         span: lines
             .stream_start
-            .unwrap_or_else(|| Span::empty(crate::span::Marker::new(0, 1, 1))),
+            .unwrap_or_else(|| Span::empty(Marker::new(0, 1, 1))),
     })?;
     parser.parse_stream()?;
     parser.emit(Event::StreamEnd {
         span: lines
             .stream_end
-            .unwrap_or_else(|| Span::empty(crate::span::Marker::new(input.len(), 1, 1))),
+            .unwrap_or_else(|| Span::empty(Marker::new(input.len(), 1, 1))),
     })?;
     match parser.sink {
         EventSink::Streaming(composer) => composer.finish(),
@@ -1438,9 +1459,10 @@ impl<'a> Parser<'a> {
                 value_index,
                 key,
             });
+            // The key is inside the mapping, as an explicit key and a value are.
             return Ok(Step::Call(Call::Inline {
                 tokens: key,
-                depth,
+                depth: depth + 1,
                 tag: None,
                 anchor: None,
             }));
@@ -2440,7 +2462,7 @@ impl<'a> Parser<'a> {
             let marker = token.span.start();
             return Span::empty(marker);
         }
-        Span::empty(crate::span::Marker::new(self.input.len(), 1, 1))
+        Span::empty(self.end)
     }
 
     fn last_span(&self, index: usize) -> Span {
@@ -2505,7 +2527,7 @@ const MAX_IMPLICIT_KEY_CHARS: usize = 1024;
 
 /// Whether an implicit key starting at `key` and ending before the `:` at
 /// `colon`, on the same line, is short enough.
-fn implicit_key_fits(key: crate::span::Marker, colon: crate::span::Marker) -> bool {
+fn implicit_key_fits(key: Marker, colon: Marker) -> bool {
     colon.column().saturating_sub(key.column()) <= MAX_IMPLICIT_KEY_CHARS
 }
 

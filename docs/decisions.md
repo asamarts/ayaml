@@ -256,18 +256,22 @@ lines, count as neither. `docs/limits.md` defines both counts.
 **Alternatives.** Count events alone, and add a `max_tokens` limit for the tokens: each name would
 say what it counts, but a patch release would grow the API, and a caller who raised one limit for
 a large stream would have to find and raise the other. Count events alone with no bound on tokens,
-which a stream could then outnumber three to one, as each line of `- !t x` does, so a read at
-the default limit could hold about 300 MB of tokens where it now holds about 100 MB.
+which could then outnumber events without bound: a second `...` line in a row is a token and no
+event, so a read could hold the tokens of a whole 32 MiB input, about 800 MB, where it now holds
+about 100 MB.
 
 **Why.** The eager readers keep every token of the stream, about 100 bytes each, and the token
 count is what bounds that memory. No reader keeps a line break, so counting them bounded nothing,
-and a million blank lines between two entries refused a document of a few MiB. The lazy readers
+and a million blank lines between two entries refused a document of about 1 MB. The lazy readers
 counted each event twice, once as its document was parsed and once as it was handed on, so the same
 input needed about twice the limit there.
 
-**Consequences.** The limit's name says less than it bounds, so its documentation says both. Every
-reader that takes limits refuses an input at the same event or token, and
-`tests/limit_consistency.rs` checks that on each of them.
+**Consequences.** The limit's name says less than it bounds, so its documentation says both, and
+either count over it is reported as `LimitKind::Events`. Every reader that takes limits counts both
+alike, so at the same limits they agree on whether an input keeps within it, and
+`tests/limit_consistency.rs` checks that on each of them. Where they refuse an input can still
+differ when it breaks the limit in more than one place: `parse_events` and the `Deserializer` read
+a stream a document at a time, and can stop in an earlier document. `docs/limits.md` says when.
 
 ## D79 — `max_anchors` counts the anchors of the whole stream
 

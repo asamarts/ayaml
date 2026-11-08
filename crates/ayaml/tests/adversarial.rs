@@ -889,11 +889,12 @@ fn an_alias_cannot_multiply_a_long_tag() {
 /// The nesting shapes the depth tests use, each with a different recursion
 /// profile in Serde (sequences, mappings) or the parser (block, flow,
 /// compact, aliases).
-const SHAPES: [&str; 8] = [
+const SHAPES: [&str; 9] = [
     "tagged flow mapping",
     "flow sequence",
     "flow mapping",
     "flow pair",
+    "flow key",
     "block sequence",
     "block mapping",
     "compact sequence",
@@ -920,6 +921,9 @@ fn nested(shape: &str, depth: usize) -> String {
             if depth % 2 == 1 { "[0]" } else { "0" },
             "]".repeat(depth / 2)
         ),
+        // A block mapping's key is inside the mapping, so a key of `depth - 1` nested
+        // sequences makes `depth` levels.
+        "flow key" => format!("{}0{}: 0\n", "[".repeat(depth - 1), "]".repeat(depth - 1)),
         "block sequence" => lines("-"),
         "block mapping" => lines("a:"),
         "compact sequence" => format!("{}0\n", "- ".repeat(depth)),
@@ -1150,7 +1154,7 @@ fn limited_readers(input: &str, limits: &Limits) -> Vec<(&'static str, Result<()
 /// `shape`. The event stream leaves aliases unexpanded, so an alias chain
 /// stays shallow there.
 fn assert_depth_error(shape: &str, name: &str, result: Result<(), ayaml::Error>) {
-    if stopped_at_a_tag(shape, &result) {
+    if stopped_where_json_cannot_follow(shape, &result) {
         return;
     }
     if shape == "alias chain" && name == "parse_events_with_limits" {
@@ -1178,7 +1182,7 @@ fn assert_depth_error_kind(name: &str, error: &ayaml::Error) {
 }
 
 /// No reader keeps a line break, so a blank or comment line doesn't count against `max_events`.
-/// Each one once did, so a million of them between two entries refused a document of a few MiB.
+/// Each one once did, so a million of them between two entries refused a document of about 1 MB.
 #[test]
 fn blank_and_comment_lines_do_not_count_against_max_events() {
     in_child!(|| {
@@ -1247,17 +1251,21 @@ fn every_entry_point_fits_a_small_stack_at_the_depth_cap() {
     },);
 }
 
-/// JSON has no form for a tag, so a reader into JSON stops at the first one. All that counts for
-/// it is not overflowing the stack.
-fn stopped_at_a_tag(shape: &str, result: &Result<(), ayaml::Error>) -> bool {
-    shape == "tagged flow mapping"
-        && result
-            .as_ref()
-            .is_err_and(|error| error.to_string().contains("expected any valid JSON value"))
+/// JSON has no form for a tag, nor for a key that isn't a string, so a reader into JSON stops at
+/// the first one. All that counts for it is not overflowing the stack.
+fn stopped_where_json_cannot_follow(shape: &str, result: &Result<(), ayaml::Error>) -> bool {
+    let expected = match shape {
+        "tagged flow mapping" => "expected any valid JSON value",
+        "flow key" => "expected a string key",
+        _ => return false,
+    };
+    result
+        .as_ref()
+        .is_err_and(|error| error.to_string().contains(expected))
 }
 
 fn assert_fits(shape: &str, name: &str, result: Result<(), ayaml::Error>) {
-    if !stopped_at_a_tag(shape, &result) {
+    if !stopped_where_json_cannot_follow(shape, &result) {
         result.unwrap_or_else(|error| panic!("{shape}, {name}: {error}"));
     }
 }
