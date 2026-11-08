@@ -93,27 +93,33 @@ then go into a draft release named `rehearsal-RUN-ATTEMPT`, with the release job
 for the attestation record. The draft is checked as a rerun checks a release: exactly the crate
 and SHA256SUMS, with these bytes, and the notes it was given. Then it's deleted (D77). A draft
 makes no tag and only the repository's writers can see it. The job's last step deletes it even
-when an earlier step failed. If a cancelled run leaves one anyway, delete it under Releases.
+when an earlier step failed or the run was cancelled, says what it did, and warns of any other
+rehearsal's draft that is still there, as a run whose runner was lost leaves one. Delete such a
+draft under Releases once no rehearsal is running.
 
 Nothing is published or released. A rehearsal shows that `RELEASE_TOOLCHAIN` still rebuilds a
 published crate byte for byte, and that `tools/github_release.sh`, which the release job runs
-too, still creates and checks a release. Started from a pull request's branch, it rehearses
-that branch's script. A rehearsal runs apart from releases, so it can't cancel one that waits
-for approval.
+too, still downloads and checks the crate and, with a job's token, creates, checks, and deletes
+a draft. Started from a pull request's branch, it rehearses that branch's script. A rehearsal
+runs apart from releases, so it can't cancel one that waits for approval.
 
 A rehearsal can't run the publish or the attestation, since each writes something public for
-good. The first release is their first run. If the release job then fails the same way on every
-rerun, the version is on crates.io with no GitHub release, and since a rerun uses the tag's
-workflow, completing it takes the next patch version.
+good. Nor does it run the script's `release` command: the create that gh publishes, and a
+rerun's publishing of a leftover draft. They share the rehearsal's lookups and checks, and the
+tests in `tools/test_ci_checks.py` run them against a fake gh. The first release is their first
+run. If the release job then fails the same way on every rerun, the version is on crates.io with
+no GitHub release, and since a rerun uses the tag's workflow, completing it takes the next patch
+version.
 
 ## When a run fails
 
-Every job can be rerun from the Actions page. Rerun the failed jobs, which keeps the jobs that
-passed and their outputs. Each later job rebuilds or downloads what it needs and checks it
-against the package job's digest, so a rerun needs nothing stored, however late it comes.
+Every job can be rerun from the Actions page for 30 days after the run started. Rerun the failed
+jobs, which keeps the jobs that passed and their outputs. Each later job rebuilds or downloads
+what it needs and checks it against the package job's digest, so a rerun needs nothing stored.
 Re-running all jobs runs the gate again, on toolchains and an advisory database that have moved
-on since, so it can fail for reasons the tag doesn't have. A version and a tag are never reused,
-so a release that can't be completed becomes the next patch version.
+on since, so it can fail for reasons the tag doesn't have. After 30 days GitHub reruns nothing,
+and the tag can't be pushed again. A version and a tag are never reused, so a release that
+can't be completed becomes the next patch version.
 
 - **The gate or the package job fails.** Nothing is published. If the cause is a flaky runner,
   rerun the failed jobs. If the tagged commit is wrong, leave the tag in place, fix `main`, and
@@ -135,7 +141,9 @@ so a release that can't be completed becomes the next patch version.
   checks that it holds exactly the crate and SHA256SUMS, with these bytes, and changes nothing.
   `gh` creates a release as a draft, uploads its assets, and then publishes it, so a run stopped
   in between can leave a draft. One that holds both assets with these bytes is published. One
-  that holds anything else fails the job: delete the draft and rerun the job.
+  that holds anything else fails the job: delete the draft and rerun the job. If gh can't say
+  whether the release is there, which isn't the same as gh finding none, the job changes nothing
+  and fails. Rerun it.
 
 ## Verifying a release
 

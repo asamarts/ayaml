@@ -507,29 +507,50 @@ def crate(top: str, files: dict[str, bytes], extra: list[tarfile.TarInfo] = ()) 
 
 
 FAKE_GH = r'''#!/usr/bin/env python3
-"""gh release, for the commands tools/github_release.sh runs, with releases kept in $GH_STATE."""
+"""gh release, for the commands tools/github_release.sh runs, with releases kept in $GH_STATE.
+
+The calls whose arguments start with GH_FAIL fail as an API error does, once GH_FAIL_AFTER of them
+have passed. GH_BROKEN makes one command misbehave: create-published, create-draft, and
+create-tampered make another release than the one asked for, and edit and delete change nothing."""
 import os, shutil, sys
 from pathlib import Path
 
 state = Path(os.environ["GH_STATE"])
+args = sys.argv[1:]
 with open(state / "calls", "a") as log:
-    log.write(" ".join(sys.argv[1:]) + "\n")
-group, verb, name, *rest = sys.argv[1:]
-assert group == "release", sys.argv
-release = state / "releases" / name
+    log.write(" ".join(args) + "\n")
+failing = os.environ.get("GH_FAIL")
+if failing and " ".join(args).startswith(failing):
+    counter = state / "matched"
+    matched = int(counter.read_text()) if counter.exists() else 0
+    counter.write_text(str(matched + 1))
+    if matched >= int(os.environ.get("GH_FAIL_AFTER", "0")):
+        sys.exit("HTTP 502: Bad Gateway (https://api.github.com/graphql)")
+broken = os.environ.get("GH_BROKEN", "")
+group, verb, *rest = args
+assert group == "release", args
+releases = state / "releases"
 
 
 def option(flag):
     return rest[rest.index(flag) + 1] if flag in rest else None
 
 
+if verb == "list":
+    assert option("--jq") == ".[] | select(.isDraft) | .tagName", rest
+    for release in sorted(releases.iterdir()):
+        if (release / "draft").read_text() == "true":
+            print(release.name)
+    sys.exit()
+name, *rest = rest
+release = releases / name
+# gh prints this, and exits 1, for a name that is neither a release's tag nor a draft's.
 if verb != "create" and not release.is_dir():
     sys.exit("release not found")
 if verb == "view":
     field = option("--json")
-    if option("--jq") is None:
-        print("{}")
-    elif field == "isDraft":
+    assert option("--jq") is not None, rest
+    if field == "isDraft":
         print((release / "draft").read_text())
     elif field == "assets":
         print(" ".join(sorted(path.name for path in (release / "assets").iterdir())))
@@ -541,10 +562,12 @@ elif verb == "download":
             shutil.copy(release / "assets" / rest[at + 1], option("--dir"))
 elif verb == "edit":
     assert rest == ["--draft=false"], rest
-    (release / "draft").write_text("false")
+    if broken != "edit":
+        (release / "draft").write_text("false")
 elif verb == "delete":
     assert rest == ["--yes"], rest
-    shutil.rmtree(release)
+    if broken != "delete":
+        shutil.rmtree(release)
 elif verb == "create":
     if release.exists():
         sys.exit("already exists")
@@ -553,12 +576,40 @@ elif verb == "create":
     (release / "assets").mkdir(parents=True)
     for path in files:
         shutil.copy(path, release / "assets")
+    if broken == "create-tampered":
+        [crate] = (release / "assets").glob("*.crate")
+        crate.write_bytes(b"other bytes")
     # GitHub keeps no trailing line break.
     (release / "body").write_text(Path(option("--notes-file")).read_text().rstrip("\n"))
-    (release / "draft").write_text("true" if "--draft" in rest else "false")
+    draft = {"create-published": False, "create-draft": True}.get(broken, "--draft" in rest)
+    (release / "draft").write_text("true" if draft else "false")
 else:
     sys.exit(f"unexpected gh release {verb}")
 '''
+
+FAKE_CURL = r'''#!/usr/bin/env python3
+"""curl, for fetch's download: it writes $FAKE_CRATE to --output, or fails if FAKE_CURL_FAILS is set."""
+import os, shutil, sys
+from pathlib import Path
+
+args = sys.argv[1:]
+with open(Path(os.environ["GH_STATE"]) / "calls", "a") as log:
+    log.write("curl " + args[-1] + "\n")
+if os.environ.get("FAKE_CURL_FAILS"):
+    sys.exit("curl: (22) The requested URL returned error: 403")
+shutil.copy(os.environ["FAKE_CRATE"], args[args.index("--output") + 1])
+'''
+
+FAKE_CHECK_RELEASE = r'''"""check_release.py, which exits with $FAKE_REGISTRY_EXIT."""
+import os, sys
+from pathlib import Path
+
+with open(Path(os.environ["GH_STATE"]) / "calls", "a") as log:
+    log.write("check_release.py " + " ".join(sys.argv[1:]) + "\n")
+sys.exit(int(os.environ.get("FAKE_REGISTRY_EXIT", "0")))
+'''
+
+API_ERROR = "HTTP 502: Bad Gateway"
 
 
 class GitHubRelease(unittest.TestCase):
@@ -572,18 +623,20 @@ class GitHubRelease(unittest.TestCase):
         self.root = Path(scratch.name)
         (self.root / "tools").mkdir()
         shutil.copy(Path(__file__).resolve().parent / "github_release.sh", self.root / "tools")
+        (self.root / "tools/check_release.py").write_text(FAKE_CHECK_RELEASE)
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        gh = self.bin / "gh"
-        gh.write_text(FAKE_GH)
-        gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
+        for name, text in (("gh", FAKE_GH), ("curl", FAKE_CURL)):
+            tool = self.bin / name
+            tool.write_text(text)
+            tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
         self.state = self.root / "state"
         (self.state / "releases").mkdir(parents=True)
         self.dist = self.root / "dist"
         self.dist.mkdir()
         (self.dist / self.CRATE).write_bytes(b"the crate")
-        digest = hashlib.sha256(b"the crate").hexdigest()
-        (self.dist / "SHA256SUMS").write_text(f"{digest}  {self.CRATE}\n")
+        self.digest = hashlib.sha256(b"the crate").hexdigest()
+        (self.dist / "SHA256SUMS").write_text(f"{self.digest}  {self.CRATE}\n")
         self.notes = self.root / "notes.md"
         self.notes.write_text("## Verification\n\nnotes\n")
 
@@ -597,18 +650,27 @@ class GitHubRelease(unittest.TestCase):
         (release / "body").write_text("notes")
         (release / "draft").write_text("true" if draft else "false")
 
+    def reset(self) -> None:
+        shutil.rmtree(self.state)
+        (self.state / "releases").mkdir(parents=True)
+
     def run_script(self, *args: str, **env: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             ["bash", str(self.root / "tools/github_release.sh"), *args],
             capture_output=True,
             text=True,
             cwd=self.root,
-            env={**os.environ, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}", "GH_STATE": str(self.state), **env},
+            env={**os.environ, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}", "GH_STATE": str(self.state), "TMPDIR": str(self.root), **env},
             check=False,
         )
 
-    def release(self) -> subprocess.CompletedProcess:
-        return self.run_script("release", "v0.2.0", "0.2.0", str(self.dist), str(self.notes))
+    def fetch(self, digest: str, **env: str) -> subprocess.CompletedProcess:
+        served = self.root / "served.crate"
+        served.write_bytes(b"the crate")
+        return self.run_script("fetch", "0.2.0", digest, str(self.root / "fetched"), FAKE_CRATE=str(served), **env)
+
+    def release(self, **env: str) -> subprocess.CompletedProcess:
+        return self.run_script("release", "v0.2.0", "0.2.0", str(self.dist), str(self.notes), **env)
 
     def rehearse(self, name: str = "rehearsal-7-1", **env: str) -> subprocess.CompletedProcess:
         return self.run_script("rehearse", name, "main", "0.2.0", str(self.dist), str(self.notes), **env)
@@ -620,9 +682,42 @@ class GitHubRelease(unittest.TestCase):
         path = self.state / "calls"
         return path.read_text().splitlines() if path.exists() else []
 
-    def test_a_release_is_created_from_its_tag_with_the_crate_and_its_sums(self) -> None:
+    def changes(self) -> list[str]:
+        return [call for call in self.calls() if call.split()[:2] in (["release", v] for v in ("create", "edit", "delete"))]
+
+    def test_fetch_downloads_the_crate_checks_it_and_writes_its_sums(self) -> None:
+        result = self.fetch(self.digest)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fetched = self.root / "fetched"
+        self.assertEqual((fetched / self.CRATE).read_bytes(), b"the crate")
+        # The name alone, so that `sha256sum --check` works wherever SHA256SUMS is downloaded to.
+        self.assertEqual((fetched / "SHA256SUMS").read_text(), f"{self.digest}  {self.CRATE}\n")
+        self.assertEqual(
+            self.calls(),
+            [
+                f"curl https://static.crates.io/crates/ayaml/{self.CRATE}",
+                f"check_release.py registry {fetched / self.CRATE} 0.2.0 600",
+            ],
+        )
+
+    def test_fetch_refuses_bytes_the_package_job_did_not_build_and_a_failed_check(self) -> None:
+        for name, digest, env in (
+            ("other bytes", hashlib.sha256(b"other").hexdigest(), {}),
+            ("registry check fails", self.digest, {"FAKE_REGISTRY_EXIT": "1"}),
+            ("download fails", self.digest, {"FAKE_CURL_FAILS": "1"}),
+        ):
+            with self.subTest(name):
+                self.reset()
+                shutil.rmtree(self.root / "fetched", ignore_errors=True)
+                result = self.fetch(digest, **env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((self.root / "fetched/SHA256SUMS").exists())
+        self.assertIn("serves other bytes", self.fetch(hashlib.sha256(b"other").hexdigest()).stderr)
+
+    def test_a_release_is_created_from_its_tag_and_checked(self) -> None:
         result = self.release()
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("created the release v0.2.0", result.stdout)
         self.assertEqual(self.releases(), {"v0.2.0": "false"})
         assets = self.state / "releases/v0.2.0/assets"
         self.assertEqual(sorted(path.name for path in assets.iterdir()), ["SHA256SUMS", self.CRATE])
@@ -630,6 +725,21 @@ class GitHubRelease(unittest.TestCase):
         [create] = [call for call in self.calls() if call.startswith("release create")]
         self.assertIn("--verify-tag", create)
         self.assertNotIn("--draft", create)
+        self.assertNotIn("--target", create)
+        self.assertIn("release download v0.2.0", self.calls()[-1])
+
+    def test_a_release_that_is_not_what_was_asked_for_fails_the_job(self) -> None:
+        for broken, message in (
+            ("create-tampered", None),
+            ("create-draft", "but it is draft"),
+        ):
+            with self.subTest(broken):
+                self.reset()
+                result = self.release(GH_BROKEN=broken)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertNotIn("::notice::", result.stdout)
+                if message:
+                    self.assertIn(message, result.stderr)
 
     def test_a_rerun_publishes_a_draft_that_holds_the_same_bytes(self) -> None:
         self.existing("v0.2.0", draft=True)
@@ -637,45 +747,101 @@ class GitHubRelease(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("published the draft release v0.2.0", result.stdout)
         self.assertEqual(self.releases(), {"v0.2.0": "false"})
-        self.assertFalse([call for call in self.calls() if call.startswith("release create")])
+        self.assertEqual(self.changes(), ["release edit v0.2.0 --draft=false"])
+
+    def test_a_draft_that_stays_a_draft_fails_the_job(self) -> None:
+        self.existing("v0.2.0", draft=True)
+        result = self.release(GH_BROKEN="edit")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("still draft", result.stderr)
 
     def test_a_rerun_leaves_a_published_release_as_it_is(self) -> None:
         self.existing("v0.2.0", draft=False)
         result = self.release()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("already holds", result.stdout)
-        self.assertFalse([call for call in self.calls() if call.split()[1] in ("create", "edit", "delete")])
+        self.assertIn("release download v0.2.0", self.calls()[-1])
+        self.assertEqual(self.changes(), [])
 
     def test_a_rerun_refuses_a_release_with_other_assets_or_bytes(self) -> None:
         sums = (self.dist / "SHA256SUMS").read_bytes()
-        for assets in (
-            {self.CRATE: b"the crate", "SHA256SUMS": sums, "extra": b""},
-            {self.CRATE: b"the crate"},
-            {self.CRATE: b"other bytes", "SHA256SUMS": sums},
-        ):
-            with self.subTest(assets=sorted(assets)):
-                shutil.rmtree(self.state / "releases")
-                (self.state / "releases").mkdir()
-                self.existing("v0.2.0", draft=True, assets=assets)
-                result = self.release()
-                self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertEqual(self.releases(), {"v0.2.0": "true"})
+        for draft in (True, False):
+            for assets in (
+                {self.CRATE: b"the crate", "SHA256SUMS": sums, "extra": b""},
+                {self.CRATE: b"the crate"},
+                {self.CRATE: b"other bytes", "SHA256SUMS": sums},
+                {self.CRATE: b"the crate", "SHA256SUMS": sums.replace(self.CRATE.encode(), b"/dist/" + self.CRATE.encode())},
+            ):
+                with self.subTest(draft=draft, assets=sorted(assets)):
+                    self.reset()
+                    self.existing("v0.2.0", draft=draft, assets=assets)
+                    result = self.release()
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertEqual(self.releases(), {"v0.2.0": "true" if draft else "false"})
+                    self.assertEqual(self.changes(), [])
+
+    def test_a_lookup_that_fails_changes_nothing_and_fails_the_job(self) -> None:
+        for state in ("absent", "draft", "published"):
+            with self.subTest(state):
+                self.reset()
+                if state != "absent":
+                    self.existing("v0.2.0", draft=state == "draft")
+                before = self.releases()
+                result = self.release(GH_FAIL="release view v0.2.0 --json isDraft")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(API_ERROR, result.stderr)
+                self.assertIn("couldn't say whether release v0.2.0 is there", result.stderr)
+                self.assertEqual(self.releases(), before)
+                self.assertEqual(self.changes(), [])
 
     def test_a_rehearsal_makes_a_draft_checks_it_and_leaves_nothing(self) -> None:
         self.existing("v0.1.1", draft=False)
         result = self.rehearse()
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(result.stdout.index("deleted the draft release rehearsal-7-1"), result.stdout.index("is deleted"))
         self.assertEqual(self.releases(), {"v0.1.1": "false"})
         [create] = [call for call in self.calls() if call.startswith("release create")]
         self.assertTrue(create.startswith("release create rehearsal-7-1 --draft --target main "), create)
         self.assertNotIn("--verify-tag", create)
-        self.assertIn("release delete rehearsal-7-1 --yes", self.calls())
+        self.assertEqual(self.changes(), [create, "release delete rehearsal-7-1 --yes"])
+        self.assertIn("release download rehearsal-7-1", " ".join(self.calls()))
+        self.assertEqual(self.calls()[-1], "release view rehearsal-7-1 --json isDraft --jq .isDraft")
         self.assertFalse([call for call in self.calls() if "v0.1.1" in call])
 
     def test_a_rehearsal_that_fails_a_check_deletes_its_draft(self) -> None:
-        result = self.rehearse(GH_BODY="other notes")
+        for name, env, message in (
+            ("other notes", {"GH_BODY": "other notes"}, "notes aren't the notes"),
+            ("other bytes", {"GH_BROKEN": "create-tampered"}, None),
+        ):
+            with self.subTest(name):
+                self.reset()
+                result = self.rehearse(**env)
+                self.assertEqual(result.returncode, 1)
+                if message:
+                    self.assertIn(message, result.stderr)
+                self.assertIn("deleted the draft release rehearsal-7-1", result.stdout)
+                self.assertEqual(self.releases(), {})
+
+    def test_a_rehearsal_whose_release_is_not_a_draft_fails_and_leaves_it(self) -> None:
+        result = self.rehearse(GH_BROKEN="create-published")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("notes aren't the notes", result.stderr)
+        self.assertIn("it is published, not a draft", result.stderr)
+        self.assertIn("::warning::release rehearsal-7-1 is published", result.stdout)
+        self.assertEqual(self.releases(), {"rehearsal-7-1": "false"})
+
+    def test_a_rehearsal_whose_draft_outlives_its_deletion_fails(self) -> None:
+        result = self.rehearse(GH_BROKEN="delete")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("still there after its deletion", result.stderr)
+
+    def test_a_rehearsal_whose_cleanup_cannot_look_fails(self) -> None:
+        # The lookups before the create and after it pass, the notes differ, and the trap's fails.
+        result = self.rehearse(GH_BODY="other notes", GH_FAIL="release view rehearsal-7-1 --json isDraft", GH_FAIL_AFTER="2")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("couldn't say whether release rehearsal-7-1 is there", result.stderr)
+        self.assertEqual(self.releases(), {"rehearsal-7-1": "true"})
+        result = self.run_script("discard", "rehearsal-7-1")
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.releases(), {})
 
     def test_a_rehearsal_takes_only_a_new_rehearsal_name(self) -> None:
@@ -684,18 +850,46 @@ class GitHubRelease(unittest.TestCase):
         for name in ("v0.2.0", "rehearsal-7-1", "rehearsal-7", "rehearsal-7-1-x"):
             with self.subTest(name=name):
                 self.assertEqual(self.rehearse(name).returncode, 1)
+        self.assertEqual(self.rehearse("rehearsal-8-1", GH_FAIL="release view rehearsal-8-1").returncode, 1)
         self.assertEqual(self.releases(), {"v0.2.0": "true", "rehearsal-7-1": "false"})
-        self.assertFalse([call for call in self.calls() if call.split()[1] in ("create", "edit", "delete")])
+        self.assertEqual(self.changes(), [])
 
     def test_discard_deletes_a_rehearsals_draft_and_nothing_else(self) -> None:
         self.existing("rehearsal-7-1", draft=True)
         self.existing("rehearsal-8-1", draft=False)
         self.existing("v0.2.0", draft=True)
-        self.assertEqual(self.run_script("discard", "rehearsal-7-1").returncode, 0)
-        self.assertEqual(self.run_script("discard", "rehearsal-8-1").returncode, 0)
-        self.assertEqual(self.run_script("discard", "rehearsal-9-1").returncode, 0)
+        for name, said in (
+            ("rehearsal-7-1", "::notice::deleted the draft release rehearsal-7-1"),
+            ("rehearsal-8-1", "::warning::release rehearsal-8-1 is published"),
+            ("rehearsal-9-1", "::notice::there is no draft release rehearsal-9-1"),
+        ):
+            with self.subTest(name):
+                result = self.run_script("discard", name)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(said, result.stdout)
         self.assertEqual(self.run_script("discard", "v0.2.0").returncode, 1)
         self.assertEqual(self.releases(), {"rehearsal-8-1": "false", "v0.2.0": "true"})
+        self.assertEqual(self.changes(), ["release delete rehearsal-7-1 --yes"])
+
+    def test_discard_warns_of_another_rehearsals_draft(self) -> None:
+        self.existing("rehearsal-6-1", draft=True)
+        self.existing("rehearsal-7-1", draft=True)
+        self.existing("v0.2.0", draft=True)
+        result = self.run_script("discard", "rehearsal-7-1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        warnings = [line for line in result.stdout.splitlines() if line.startswith("::warning::")]
+        self.assertEqual(len(warnings), 1, result.stdout)
+        self.assertIn("rehearsal-6-1 of another rehearsal", warnings[0])
+        self.assertEqual(self.releases(), {"rehearsal-6-1": "true", "v0.2.0": "true"})
+
+    def test_discard_that_cannot_look_fails(self) -> None:
+        for failing in ("release view rehearsal-7-1", "release list"):
+            with self.subTest(failing):
+                self.reset()
+                self.existing("rehearsal-7-1", draft=True)
+                result = self.run_script("discard", "rehearsal-7-1", GH_FAIL=failing)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(API_ERROR, result.stderr)
 
     def test_a_command_with_the_wrong_arguments_prints_the_usage(self) -> None:
         for args in ((), ("release", "v0.2.0"), ("discard",), ("publish", "v0.2.0")):
@@ -703,6 +897,8 @@ class GitHubRelease(unittest.TestCase):
                 result = self.run_script(*args)
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("tools/github_release.sh rehearse NAME", result.stderr)
+                self.assertIn("Each lookup tells", result.stderr)
+                self.assertNotIn("set -euo", result.stderr)
         self.assertEqual(self.calls(), [])
 
 
