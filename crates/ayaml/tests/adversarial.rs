@@ -1375,6 +1375,20 @@ fn empty_node_bomb() -> String {
     bomb
 }
 
+/// The benchmark harness's composer refuses a node cost of 0 as the public readers do.
+#[cfg(feature = "bench-internals")]
+#[test]
+fn the_internal_composer_rejects_a_node_cost_of_zero() {
+    let input = "a: &x [1, {b: 2}, ~]\nb: *x\n";
+    let events = ayaml::internals::parse_events(input, &Limits::default()).expect("events");
+    let zero = Limits::default().with_node_cost_bytes(0);
+    let error = ayaml::internals::compose_events(&events, input.len(), &zero).expect_err("cost 0");
+    assert_eq!(error.kind(), ErrorKind::Limit, "{error}");
+    assert!(error.to_string().contains("node_cost_bytes 0"), "{error}");
+    let one = Limits::default().with_node_cost_bytes(1);
+    ayaml::internals::compose_events(&events, input.len(), &one).expect("cost 1");
+}
+
 /// A `node_cost_bytes` of 0 would make every node an alias copies free, which turns the alias budget
 /// off, so it is a configuration error on every path that takes limits. 1, the least cost, is
 /// accepted, and the budget still stops a bomb of empty nodes there.
@@ -1530,29 +1544,35 @@ fn a_block_scalar_counts_its_header_toward_the_scalar_limit() {
 /// Set in a child of a memory test: the case it measures, as `case|reader`.
 const MEASURED: &str = "AYAML_ADVERSARIAL_MEASURED";
 
+/// Whether this host can measure a read's peak of memory, as only Linux resets it when asked.
+const MEASURES_MEMORY: bool = cfg!(target_os = "linux");
+
 /// How much more memory this process held at its peak during `read` than when `read` started, in
-/// bytes. Linux resets the peak when asked. Elsewhere, and if the reset fails, this is `None`.
-fn peak_growth(read: impl FnOnce()) -> Option<u64> {
-    let reset = cfg!(target_os = "linux") && std::fs::write("/proc/self/clear_refs", "5").is_ok();
-    let before = proc_self_number("status", "VmRSS:").filter(|_| reset);
+/// bytes. On Linux, which resets the peak when asked, a reset that fails fails the test.
+fn peak_growth(read: impl FnOnce()) -> u64 {
+    std::fs::write("/proc/self/clear_refs", "5").unwrap_or_else(|error| {
+        panic!("resetting the peak through /proc/self/clear_refs: {error}")
+    });
+    let before = proc_self_number("status", "VmRSS:").expect("VmRSS in /proc/self/status");
     read();
-    let peak = proc_self_number("status", "VmHWM:")?;
-    Some(peak.saturating_sub(before?) * 1024)
+    let peak = proc_self_number("status", "VmHWM:").expect("VmHWM in /proc/self/status");
+    peak.saturating_sub(before) * 1024
 }
+
+/// A read whose memory a test measures, which says whether it succeeded.
+type MeasuredRead = fn(&str) -> bool;
 
 /// The readers whose memory the tests below measure: one that builds a value, one that keeps
 /// nothing, and compat's.
-fn measured_readers() -> Vec<(&'static str, Reading)> {
+fn measured_readers() -> Vec<(&'static str, MeasuredRead)> {
     vec![
-        ("parse_value", |input| {
-            ayaml::parse_value(input).expect("parse_value");
-        }),
+        ("parse_value", |input| ayaml::parse_value(input).is_ok()),
         ("from_str_borrowed (IgnoredAny)", |input| {
-            ayaml::from_str_borrowed::<IgnoredAny>(input).expect("from_str_borrowed");
+            ayaml::from_str_borrowed::<IgnoredAny>(input).is_ok()
         }),
         #[cfg(feature = "libyaml-compat")]
         ("compat::from_str", |input| {
-            ayaml::compat::from_str::<Value>(input).expect("compat");
+            ayaml::compat::from_str::<Value>(input).is_ok()
         }),
     ]
 }
@@ -1573,12 +1593,23 @@ const BLOCK_SCALARS: [(&str, &str, &str, u64); 4] = [
 const FLOW_ENTRIES: usize = 200_000;
 const MOST_PER_TOKEN: u64 = 300;
 
-/// The input a memory case reads, and the most memory a read of it may hold at its peak.
-fn memory_case(case: &str) -> (String, u64) {
+/// Line breaks after an unclosed `[`, which fails at the end of the input, and the most memory a
+/// read may hold for each. The scanner's index holds 8 bytes a line, and the error's position is
+/// counted without a second index. When it was counted with one, a read held 16 bytes a line.
+const OPEN_LINES: usize = 4 << 20;
+const MOST_PER_LINE: u64 = 12;
+
+/// The input a memory case reads, the most memory a read of it may hold at its peak, and whether
+/// the read succeeds.
+fn memory_case(case: &str) -> (String, u64, bool) {
     if case == "flow sequence" {
         let tokens = 2 * FLOW_ENTRIES + 3;
         let input = format!("[{}a]\n", "a,".repeat(FLOW_ENTRIES));
-        return (input, MOST_PER_TOKEN * tokens as u64);
+        return (input, MOST_PER_TOKEN * tokens as u64, true);
+    }
+    if case == "unclosed flow sequence" {
+        let input = format!("[{}", "\n".repeat(OPEN_LINES));
+        return (input, MOST_PER_LINE * OPEN_LINES as u64, false);
     }
     let (_, header, unit, most) = BLOCK_SCALARS
         .into_iter()
@@ -1586,12 +1617,16 @@ fn memory_case(case: &str) -> (String, u64) {
         .unwrap_or_else(|| panic!("no memory case {case:?}"));
     let input = format!("{header}{}", unit.repeat((4 << 20) / unit.len()));
     let bound = most * input.len() as u64;
-    (input, bound)
+    (input, bound, true)
 }
 
 /// Measure each reader on `case`, each in a child of its own. A process keeps memory a read gave
 /// back, so a later read in the same process could reuse it and seem to need none.
 fn measure_in_children(case: &str) {
+    if !MEASURES_MEMORY {
+        println!("{case}: not measured, since only Linux resets a process's peak of memory");
+        return;
+    }
     for (reader, _) in measured_readers() {
         let mut command = child_command("measure_one_read", CHILD_DEADLINE + CHILD_GRACE);
         command.env(MEASURED, format!("{case}|{reader}"));
@@ -1619,10 +1654,13 @@ fn measure_one_read() {
             .into_iter()
             .find(|(name, _)| *name == reader)
             .unwrap_or_else(|| panic!("no reader {reader:?}"));
-        let (input, most) = memory_case(case);
-        let Some(growth) = peak_growth(|| read(&input)) else {
-            return;
-        };
+        let (input, most, succeeds) = memory_case(case);
+        let mut succeeded = !succeeds;
+        let growth = peak_growth(|| succeeded = read(&input));
+        assert_eq!(
+            succeeded, succeeds,
+            "{case}, {reader}: whether the read succeeded"
+        );
         let ratio = growth as f64 / input.len() as f64;
         println!("{case}, {reader}: {growth} bytes at the peak, {ratio:.2} times the input");
         assert!(
@@ -1647,4 +1685,10 @@ fn a_block_scalar_holds_memory_in_proportion_to_its_input() {
 #[test]
 fn tokens_hold_memory_in_proportion_to_their_number() {
     measure_in_children("flow sequence");
+}
+
+/// An error at the end of the input is placed without an index of its lines beside the scanner's.
+#[test]
+fn an_error_at_the_end_holds_one_index_of_lines() {
+    measure_in_children("unclosed flow sequence");
 }

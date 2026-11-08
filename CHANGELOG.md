@@ -35,9 +35,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   collection's opening or the first line. `Error::message` holds the rest, as in
   `unterminated flow sequence, opened at line 2 column 5`. Compat words these failures as libyaml
   does, as in `did not find expected ',' or ']' at line 3 column 1, while parsing a flow sequence
-  at line 2 column 5`, or `did not find expected node content` where a node belongs, including
-  where the input ends after `[`, `{`, `,`, `?` or `:`. It takes the opening from the parser, so a
-  bracket in a quoted scalar is never named. Its text differs from libyaml's in three ways: where
+  at line 2 column 5`, or `did not find expected node content` where a node belongs: where the
+  input ends after `[`, `{`, `,`, `?` or `:`, and at a `}` after `?` or `:` in a flow sequence.
+  After an empty `?` key in a flow sequence, libyaml takes the `:` or `,` that follows as part of
+  the pair and then asks for `,` or `]`, and so does compat. It takes the opening from the parser,
+  so a bracket in a quoted scalar is never named. Its text differs from libyaml's in three ways: where
   libyaml says it is parsing a flow node, compat names the collection; where the input ends
   without a line break, compat names the end of the last line, and libyaml the start of the next;
   and compat names an opening at line 1 column 1, which libyaml's binding leaves out. An error

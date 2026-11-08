@@ -396,41 +396,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
         _variants: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        let (variant, value) = match self.value {
-            Value::Tagged(tagged) => (tagged.tag.suffix().to_owned(), tagged.value),
-            Value::String(variant) => (variant, Value::Null),
-            // `true` and `1` name variants renamed to them.
-            Value::Bool(value) => (value.to_string(), Value::Null),
-            Value::Number(value) => (value.to_string(), Value::Null),
-            Value::Mapping(mapping) => {
-                let mut iter = mapping.into_iter();
-                let Some((key, value)) = iter.next() else {
-                    return Err(crate::Error::new(
-                        crate::ErrorKind::Serde,
-                        "enum mapping must contain one variant",
-                    ));
-                };
-                if iter.next().is_some() {
-                    return Err(crate::Error::new(
-                        crate::ErrorKind::Serde,
-                        "enum mapping must contain one variant",
-                    ));
-                }
-                let Value::String(variant) = key else {
-                    return Err(crate::Error::new(
-                        crate::ErrorKind::Serde,
-                        "enum variant key must be a string",
-                    ));
-                };
-                (variant, value)
-            }
-            _ => {
-                return Err(crate::Error::new(
-                    crate::ErrorKind::Serde,
-                    "enum value must be tagged or a single-entry mapping",
-                ));
-            }
-        };
+        let (variant, value) = enum_parts(self.value)?;
         visitor.visit_enum(ValueEnumAccess {
             variant: Cow::Owned(variant),
             value,
@@ -719,6 +685,49 @@ impl<'de> Deserializer<'de> for KeyDeserializer<'_> {
         bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
         unit unit_struct seq tuple tuple_struct map struct identifier ignored_any
     }
+}
+
+/// A value read as an enum: the variant's name and what it holds. A tag's suffix and a string are
+/// moved, not copied.
+fn enum_parts(value: Value) -> Result<(String, Value), crate::Error> {
+    Ok(match value {
+        Value::Tagged(tagged) => {
+            let TaggedValue { tag, value } = *tagged;
+            (tag.into_suffix(), value)
+        }
+        Value::String(variant) => (variant, Value::Null),
+        // `true` and `1` name variants renamed to them.
+        Value::Bool(value) => (value.to_string(), Value::Null),
+        Value::Number(value) => (value.to_string(), Value::Null),
+        Value::Mapping(mapping) => {
+            let mut iter = mapping.into_iter();
+            let Some((key, value)) = iter.next() else {
+                return Err(crate::Error::new(
+                    crate::ErrorKind::Serde,
+                    "enum mapping must contain one variant",
+                ));
+            };
+            if iter.next().is_some() {
+                return Err(crate::Error::new(
+                    crate::ErrorKind::Serde,
+                    "enum mapping must contain one variant",
+                ));
+            }
+            let Value::String(variant) = key else {
+                return Err(crate::Error::new(
+                    crate::ErrorKind::Serde,
+                    "enum variant key must be a string",
+                ));
+            };
+            (variant, value)
+        }
+        _ => {
+            return Err(crate::Error::new(
+                crate::ErrorKind::Serde,
+                "enum value must be tagged or a single-entry mapping",
+            ));
+        }
+    })
 }
 
 struct ValueEnumAccess<'a> {
@@ -1395,5 +1404,37 @@ mod tests {
         let (handed, variant) = access.variant_seed(Address).expect("a name");
         assert_ne!(handed, key.as_ptr().addr());
         assert!(matches!(variant.name, Some(Cow::Borrowed("Right"))));
+    }
+
+    /// A value read as an enum gives up its tag's suffix, or its string, as the variant's name,
+    /// without copying it.
+    #[test]
+    fn an_enum_s_name_is_moved_out_of_its_value() {
+        use super::enum_parts;
+        use crate::tag::{Tag, TaggedValue};
+
+        let suffix = String::from("Right");
+        let address = suffix.as_ptr().addr();
+        let tagged = Value::Tagged(Box::new(TaggedValue::new(
+            Tag::local(suffix),
+            Value::from(5_u64),
+        )));
+        let (name, value) = enum_parts(tagged).expect("a variant");
+        assert_eq!((name.as_str(), name.as_ptr().addr()), ("Right", address));
+        assert_eq!(value, Value::from(5_u64));
+
+        let text = String::from("Left");
+        let address = text.as_ptr().addr();
+        let (name, value) = enum_parts(Value::String(text)).expect("a variant");
+        assert_eq!((name.as_str(), name.as_ptr().addr()), ("Left", address));
+        assert!(value.is_null());
+
+        let key = String::from("Both");
+        let address = key.as_ptr().addr();
+        let mut mapping = crate::Mapping::new();
+        mapping.insert(Value::String(key), Value::from(1_u64));
+        let (name, value) = enum_parts(Value::Mapping(mapping)).expect("a variant");
+        assert_eq!((name.as_str(), name.as_ptr().addr()), ("Both", address));
+        assert_eq!(value, Value::from(1_u64));
     }
 }

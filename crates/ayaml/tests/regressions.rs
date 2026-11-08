@@ -165,6 +165,35 @@ fn spec_readings_by_default() {
     assert_eq!(parse("foo: |\n  x\n   "), json!({"foo": "x\n \n"}));
 }
 
+/// Compat ends a block scalar on a last line of spaces at the end of the input as libyaml does, in
+/// each chomping mode: spaces past the indentation are content without a line break after them, and
+/// a shorter line adds no break. The values are libyaml's.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_ends_a_block_scalar_on_a_last_line_of_spaces_as_libyaml_does() {
+    for (input, value) in [
+        ("k: |\n  a\n ", "a\n"),
+        ("k: |\n  a\n    ", "a\n  "),
+        ("k: |\n  a\n\n    ", "a\n\n  "),
+        ("k: |-\n  a\n ", "a"),
+        ("k: |-\n  a\n    ", "a\n  "),
+        ("k: |-\n  a\n\n    ", "a\n\n  "),
+        ("k: |+\n  a\n ", "a\n"),
+        ("k: |+\n  a\n\n ", "a\n\n"),
+        ("k: |+\n  a\n    ", "a\n  "),
+        ("k: |+\n  a\n\n    ", "a\n\n  "),
+        ("k: >\n  a\n ", "a\n"),
+        ("k: >\n  a\n    ", "a\n  "),
+        ("k: >-\n  a\n ", "a"),
+        ("k: >-\n  a\n    ", "a\n  "),
+        ("k: >+\n  a\n ", "a\n"),
+        ("k: >+\n  a\n    ", "a\n  "),
+        ("k: >+\n  a\n\n    ", "a\n\n  "),
+    ] {
+        assert_eq!(compat(input), json!({ "k": value }), "{input:?}");
+    }
+}
+
 /// `%XX` escapes in shorthand tags are decoded (suite 6CK3).
 #[test]
 fn tag_escapes_are_decoded() {

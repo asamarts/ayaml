@@ -468,6 +468,46 @@ fn compat_gives_the_wording_libyaml_gives_for_an_unclosed_sequence() {
     );
 }
 
+/// Compat words a flow sequence's failure as libyaml's parser does from where it stands, which an
+/// empty `?` key moves: libyaml takes the `:` or `,` after it into the pair, and then asks for a
+/// `,` or `]`. The problems are libyaml 0.2.5's; the locations are compat's own, the end of the
+/// last line where the input ends without a line break.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_words_a_flow_sequence_s_failure_from_libyaml_s_state() {
+    let separator = "did not find expected ',' or ']'";
+    let node = "did not find expected node content";
+    for (input, problem, failure, opening) in [
+        // After an empty `?` key, at the end of the input or at a `}`.
+        ("[? :", separator, (1, 5), (1, 1)),
+        ("[? ,", separator, (1, 5), (1, 1)),
+        ("[? :\n", separator, (2, 1), (1, 1)),
+        ("[a, ? :", separator, (1, 8), (1, 1)),
+        ("--- [? ,", separator, (1, 9), (1, 5)),
+        ("[? : }", separator, (1, 6), (1, 1)),
+        ("[?, }", separator, (1, 5), (1, 1)),
+        // A `}` where a key or a value starts is where libyaml looks for a node.
+        ("[a: }", node, (1, 5), (1, 1)),
+        ("[? }", node, (1, 4), (1, 1)),
+        ("[a, ? }", node, (1, 7), (1, 1)),
+        // Elsewhere the failure is the token that stands where a `,` belongs, even when the
+        // input then ends where a node would start.
+        ("[\"a\" \"b\",", separator, (1, 6), (1, 1)),
+        ("[\"a\" \"b\" [", separator, (1, 6), (1, 1)),
+    ] {
+        let (line, column) = failure;
+        let (opened_line, opened_column) = opening;
+        compat_failure_is(
+            input,
+            &format!(
+                "{problem} at line {line} column {column}, \
+                 while parsing a flow sequence at line {opened_line} column {opened_column}"
+            ),
+            failure,
+        );
+    }
+}
+
 #[cfg(feature = "libyaml-compat")]
 #[test]
 fn the_modes_keep_their_own_readings() {

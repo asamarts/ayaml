@@ -15,7 +15,7 @@ use crate::event::{Anchor, CollectionStyle, Event, ScalarStyle};
 use crate::limits::Limits;
 use crate::position::LineIndex;
 use crate::scanner::{Scanner, Token, TokenKind};
-use crate::span::{Marker, Span};
+use crate::span::Span;
 use crate::tag::Tag;
 use crate::value::Value;
 
@@ -2170,30 +2170,10 @@ impl<'a> Parser<'a> {
         };
         let from = opening.start();
         let there = format!("at line {} column {}", from.line(), from.column());
-        // An input that ends where an entry, a key or a value starts lacks a node, not a `,`, as
-        // libyaml words it.
-        let lack = match lack {
-            FlowLack::Separator if self.compat && failure.is_none() => {
-                let last = tokens
-                    .len()
-                    .checked_sub(1)
-                    .and_then(|last| self.token_at(tokens, last));
-                if last.is_some_and(|token| {
-                    matches!(
-                        token.kind,
-                        TokenKind::FlowSequenceStart
-                            | TokenKind::FlowMappingStart
-                            | TokenKind::FlowEntry
-                            | TokenKind::Key
-                            | TokenKind::Value
-                    )
-                }) {
-                    FlowLack::Node(String::new())
-                } else {
-                    FlowLack::Separator
-                }
-            }
-            lack => lack,
+        let lack = if self.compat {
+            self.libyaml_flow_lack(tokens, index, sequence, lack)
+        } else {
+            lack
         };
         // The failure's location goes between the two when the error is displayed.
         let (problem, context) = match lack {
@@ -2216,6 +2196,58 @@ impl<'a> Parser<'a> {
             FlowLack::Node(problem) => (problem, format!(", in the flow {name} opened {there}")),
         };
         self.error(span, problem).with_context(&context)
+    }
+
+    /// What libyaml's parser lacks where compat's flow collection fails at `index` of `tokens`, or
+    /// at the end of the input past them, for its wording. `sequence` is whether the innermost
+    /// open collection is a sequence.
+    fn libyaml_flow_lack(
+        &self,
+        tokens: Run,
+        index: usize,
+        sequence: bool,
+        lack: FlowLack,
+    ) -> FlowLack {
+        // The tokens before the failure on its logical line, which a run that starts at an item
+        // leaves out.
+        let line = &self.lines[tokens.line];
+        let at = line.start + tokens.start + index.min(tokens.len());
+        let before = |back: usize| {
+            at.checked_sub(back)
+                .filter(|&token| token >= line.start)
+                .map(|token| &self.token_arena[token].kind)
+        };
+        let failing = self.token_at(tokens, index).map(|token| &token.kind);
+        // In a flow sequence, libyaml takes the `:`, `,` or `]` after an empty `?` key as part of
+        // the pair, then ends the pair and asks for a `,` or `]` (`[? :`, `[? ,}`).
+        if sequence
+            && matches!(before(2), Some(TokenKind::Key))
+            && matches!(before(1), Some(TokenKind::Value | TokenKind::FlowEntry))
+            && !matches!(failing, Some(TokenKind::Value | TokenKind::FlowEntry))
+        {
+            return FlowLack::Separator;
+        }
+        // Where an entry, a key or a value starts, it asks for a node: at the end of the input
+        // (`[a,`, `{a:`), and at a `}` in a sequence (`[a: }`, `[? }`).
+        match lack {
+            FlowLack::Separator
+                if (failing.is_none()
+                    || sequence && matches!(failing, Some(TokenKind::FlowMappingEnd)))
+                    && matches!(
+                        before(1),
+                        Some(
+                            TokenKind::FlowSequenceStart
+                                | TokenKind::FlowMappingStart
+                                | TokenKind::FlowEntry
+                                | TokenKind::Key
+                                | TokenKind::Value
+                        )
+                    ) =>
+            {
+                FlowLack::Node(String::new())
+            }
+            lack => lack,
+        }
     }
 
     /// The innermost flow collection still open before `index` of `tokens`: its opening token's
@@ -2241,17 +2273,7 @@ impl<'a> Parser<'a> {
 
     /// An empty span at the end of the input, counted as the scanner counts it.
     fn end_of_input(&self) -> Span {
-        let index = if self.compat {
-            LineIndex::counting_line_boms(self.input)
-        } else {
-            LineIndex::new(self.input)
-        };
-        let end = self.input.len();
-        Span::empty(
-            index
-                .marker(self.input, end)
-                .unwrap_or_else(|| Marker::new(end, 1, 1)),
-        )
+        Span::empty(LineIndex::end_marker(self.input, self.compat))
     }
 
     /// A node's properties at the start of `run`, and how many tokens they are. A node
@@ -2748,10 +2770,15 @@ fn is_mapping_line(tokens: &[Token<'_>]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{TOKEN_ARENA_CHUNK, TOKEN_ARENA_SMALL_CHUNK, arena_growth, parse_events};
+    use super::{
+        TOKEN_ARENA_CHUNK, TOKEN_ARENA_MID_CHUNK, TOKEN_ARENA_SMALL_CHUNK, arena_growth,
+        parse_events, push_token,
+    };
     use crate::error::ErrorKind;
     use crate::event::Event;
     use crate::limits::Limits;
+    use crate::scanner::{Token, TokenKind};
+    use crate::span::{Marker, Span};
 
     fn events(input: &str) -> Vec<Event<'_>> {
         parse_events(input, &Limits::default()).expect("parse")
@@ -2800,6 +2827,41 @@ mod tests {
             .map(|n| n * TOKEN_ARENA_CHUNK)
             .sum();
         assert!(fixed > 35 * arena_copies(10_000_000, TOKEN_ARENA_CHUNK).0);
+    }
+
+    /// The arena grows only when it's full, and then by what `arena_growth` gives and no more, in
+    /// each chunk the parser uses. A `Vec` takes the capacity `reserve_exact` asks for.
+    #[test]
+    fn push_token_grows_a_full_arena_as_arena_growth_says() {
+        let token = Token {
+            kind: TokenKind::FlowEntry,
+            span: Span::empty(Marker::new(0, 1, 1)),
+        };
+        for chunk in [
+            TOKEN_ARENA_SMALL_CHUNK,
+            TOKEN_ARENA_MID_CHUNK,
+            TOKEN_ARENA_CHUNK,
+        ] {
+            let mut tokens = Vec::new();
+            let (mut capacity, mut growths) = (0, 0);
+            for _ in 0..40 * chunk {
+                let before = tokens.capacity();
+                push_token(&mut tokens, token.clone(), chunk);
+                if tokens.capacity() != before {
+                    assert_eq!(before + 1, tokens.len(), "{chunk}: grew before it was full");
+                    capacity += arena_growth(before, chunk);
+                    growths += 1;
+                }
+                assert_eq!(
+                    tokens.capacity(),
+                    capacity,
+                    "{chunk}: {} tokens",
+                    tokens.len()
+                );
+            }
+            // A chunk at a time to 17 chunks, then 15 sixteenths to 42 chunks.
+            assert_eq!(growths, 32, "{chunk}");
+        }
     }
 
     fn event_kinds(input: &str) -> Vec<&'static str> {
