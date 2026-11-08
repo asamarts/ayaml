@@ -578,6 +578,11 @@ fn repeated_inputs(length: usize) -> Vec<String> {
         format!("k: [{}]\n", all("\"a\",")),
         format!("[{}]\n", all("'a',")),
         format!("k: [\n{}{}]\n", half(" "), half("'a',")),
+        // Quoted scalars over two lines in a flow collection that a block collection holds, after
+        // many comment or blank lines, or after a long property. Each asks for that owner.
+        format!("k:\n{}  [{}]\n", half("#\n"), half("'a\n  ',")),
+        format!("k: &{} [{}]\n", half("a"), half("\"a\n  \",")),
+        format!("k:\n{}  [{}]\n", half("\n"), half("{a: 'a\n  '},")),
         // Runs of tabs, and many runs on one line.
         format!("k: [\n{}]\n", all("\t")),
         format!("[\n{}]\n", all("\t")),

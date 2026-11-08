@@ -3,6 +3,7 @@
 // These targets exist to be read and to fail, so no test looks at their fields.
 #![allow(dead_code)]
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Debug};
 use std::marker::PhantomData;
@@ -11,29 +12,21 @@ use ayaml::{Deserializer, Error, ErrorKind, Value};
 use serde::Deserialize;
 use serde::de::{DeserializeOwned, Deserializer as Deserializer2, IgnoredAny, MapAccess, Visitor};
 
-/// Every typed entry point, and whether it reports source spans.
-fn every_reader<T: DeserializeOwned + Debug>(input: &str) -> Vec<(&'static str, Error, bool)> {
-    fn failed<T: Debug>(
-        name: &'static str,
-        result: Result<T, Error>,
-        spans: bool,
-    ) -> (&'static str, Error, bool) {
-        match result {
-            Ok(value) => panic!("{name} read {value:?}"),
-            Err(error) => (name, error, spans),
-        }
-    }
+/// What every typed entry point reads from `input`, and whether it reports source spans.
+fn every_reading<T: DeserializeOwned + Debug>(
+    input: &str,
+) -> Vec<(&'static str, Result<T, Error>, bool)> {
     let seed = PhantomData::<T>;
     let first = |result: Result<Option<T>, Error>| result.map(|value| value.expect("a document"));
-    let mut readers = vec![
-        failed("from_str", ayaml::from_str::<T>(input), true),
-        failed("from_slice", ayaml::from_slice::<T>(input.as_bytes()), true),
-        failed(
+    let mut readings = vec![
+        ("from_str", ayaml::from_str::<T>(input), true),
+        ("from_slice", ayaml::from_slice::<T>(input.as_bytes()), true),
+        (
             "from_str_borrowed",
             ayaml::from_str_borrowed::<T>(input),
             true,
         ),
-        failed(
+        (
             "Deserializer::next_borrowed",
             first(
                 Deserializer::from_str(input)
@@ -42,7 +35,7 @@ fn every_reader<T: DeserializeOwned + Debug>(input: &str) -> Vec<(&'static str, 
             ),
             true,
         ),
-        failed(
+        (
             "Deserializer::next_seed_borrowed",
             first(
                 Deserializer::from_str(input)
@@ -51,12 +44,12 @@ fn every_reader<T: DeserializeOwned + Debug>(input: &str) -> Vec<(&'static str, 
             ),
             true,
         ),
-        failed(
+        (
             "Deserializer::next",
             first(Deserializer::from_str(input).expect("a stream").next::<T>()),
             false,
         ),
-        failed(
+        (
             "Deserializer::next_seed",
             first(
                 Deserializer::from_str(input)
@@ -68,30 +61,48 @@ fn every_reader<T: DeserializeOwned + Debug>(input: &str) -> Vec<(&'static str, 
     ];
     #[cfg(feature = "libyaml-compat")]
     {
-        readers.push(failed(
+        readings.push((
             "compat::from_str",
             ayaml::compat::from_str::<T>(input),
             true,
         ));
-        readers.push(failed(
+        readings.push((
             "compat::from_str_seed",
             ayaml::compat::from_str_seed(input, seed),
             true,
         ));
     }
     let value = ayaml::parse_value(input).expect("a value");
-    readers.push(failed(
-        "from_value",
-        ayaml::from_value::<T>(value.clone()),
-        false,
-    ));
-    readers.push(failed(
+    readings.push(("from_value", ayaml::from_value::<T>(value.clone()), false));
+    readings.push((
         "from_value_seed",
         ayaml::from_value_seed(value.clone(), seed),
         false,
     ));
-    readers.push(failed("T::deserialize", T::deserialize(value), false));
-    readers
+    readings.push(("T::deserialize", T::deserialize(value), false));
+    readings
+}
+
+/// Every typed entry point's error, and whether it reports source spans.
+fn every_reader<T: DeserializeOwned + Debug>(input: &str) -> Vec<(&'static str, Error, bool)> {
+    every_reading::<T>(input)
+        .into_iter()
+        .map(|(name, result, spans)| match result {
+            Ok(value) => panic!("{name} read {value:?}"),
+            Err(error) => (name, error, spans),
+        })
+        .collect()
+}
+
+/// Every typed entry point reads `expected` from `input`.
+#[track_caller]
+fn assert_reads<T: DeserializeOwned + Debug + PartialEq>(input: &str, expected: &T) {
+    for (name, result, _) in every_reading::<T>(input) {
+        match result {
+            Ok(value) => assert_eq!(&value, expected, "{name}: {input:?}"),
+            Err(error) => panic!("{name}: {input:?}: {error}"),
+        }
+    }
 }
 
 /// Every reader gives `path` before its message, keeps the Serde kind, and the readers that report
@@ -680,4 +691,206 @@ fn a_map_gives_each_value_once_and_only_after_its_key() {
             "{error}"
         );
     }
+}
+
+/// A tag outside YAML's own names means what the application says, so a target that isn't an
+/// enum, a string, or a `Value` reads the node under it, on every reader. A YAML tag still means
+/// what YAML says: `!!str 5` is a string.
+#[test]
+fn an_application_tag_leaves_a_plain_target_s_reading() {
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Server {
+        port: u16,
+    }
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Unit;
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Pair(u8, u8);
+    for input in [
+        "!port 5",
+        "!<tag:example.com,2000:port> 5",
+        "%TAG !e! tag:example.com,2000:\n--- !e!port 5",
+    ] {
+        assert_reads::<u32>(input, &5);
+        assert_reads::<Option<u32>>(input, &Some(5));
+    }
+    assert_reads::<Vec<u32>>("!list [1, 2]", &vec![1, 2]);
+    assert_reads::<Vec<u32>>("!list\n- 1\n- 2", &vec![1, 2]);
+    assert_reads::<Vec<u32>>("!list", &vec![]);
+    assert_reads::<(u8, u8)>("!pair [1, 2]", &(1, 2));
+    assert_reads::<Pair>("!pair [1, 2]", &Pair(1, 2));
+    assert_reads::<()>("!none ~", &());
+    assert_reads::<Unit>("!none ~", &Unit);
+    assert_reads::<bool>("!flag true", &true);
+    assert_reads::<f64>("!ratio 1.5", &1.5);
+    assert_reads::<BTreeMap<String, u16>>("!map {a: 1}", &BTreeMap::from([("a".to_owned(), 1)]));
+    assert_reads::<Server>("!server {port: 80}", &Server { port: 80 });
+    assert_reads::<Server>("port: !port 80", &Server { port: 80 });
+    // A `Value` keeps the tag, and an enum takes it as the variant.
+    let value = ayaml::from_str::<Value>("!port 5").expect("a value");
+    assert!(matches!(value, Value::Tagged(_)), "{value:?}");
+    for (name, error, _) in every_reader::<u32>("!!str 5") {
+        assert!(
+            error
+                .message()
+                .starts_with("invalid type: string \"5\", expected u32"),
+            "{name}: {error}"
+        );
+    }
+    // A YAML tag that a node keeps, as a collection keeps `!!binary`, isn't read past either.
+    for (name, error, _) in every_reader::<Vec<u32>>("!!binary [1, 2]") {
+        assert!(
+            error.message().starts_with("invalid type: enum"),
+            "{name}: {error}"
+        );
+    }
+}
+
+/// A tag with no value, as in `!Point`, fills a struct variant's defaults, as an empty value fills
+/// a struct. A bare name names a unit variant, so `Point` fills none, and neither does `!Point ~`
+/// on the readers that can tell it from an empty value.
+#[test]
+fn a_bare_tag_fills_a_struct_variant_s_defaults() {
+    #[derive(Debug, Deserialize, PartialEq)]
+    enum Shape {
+        Point {
+            #[serde(default)]
+            x: u32,
+        },
+        Line(u32),
+        #[serde(rename = "true")]
+        Flag {
+            #[serde(default)]
+            x: u32,
+        },
+        #[serde(rename = "1")]
+        One {
+            #[serde(default)]
+            x: u32,
+        },
+    }
+    #[derive(Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+    enum Key {
+        Point {
+            #[serde(default)]
+            x: u32,
+        },
+    }
+    assert_reads(
+        "- !Point\n- !Point {x: 2}\n- Point:\n- !Line 1",
+        &vec![
+            Shape::Point { x: 0 },
+            Shape::Point { x: 2 },
+            Shape::Point { x: 0 },
+            Shape::Line(1),
+        ],
+    );
+    // So does a scalar that names a variant renamed to it, or a key that names one.
+    for input in ["Point", "true", "1"] {
+        for (name, error, _) in every_reader::<Shape>(input) {
+            assert!(
+                error.message().contains("expected struct variant"),
+                "{name}: {input:?}: {error}"
+            );
+        }
+    }
+    for (name, error, _) in every_reader::<BTreeMap<Key, u32>>("Point: 1") {
+        assert!(
+            error.message().contains("expected struct variant"),
+            "{name}: {error}"
+        );
+    }
+    let error = ayaml::from_str::<Shape>("!Point ~").expect_err("an explicit null");
+    assert_eq!(
+        error.to_string(),
+        "Point: invalid type: unit value, expected struct variant Shape::Point at line 1 column 8"
+    );
+}
+
+/// A visitor that takes an enum through `deserialize_any`, as a hand-written one may, gets a tag's
+/// value as a struct variant's fields, so a tag with no value has none, on every reader.
+#[test]
+fn a_bare_tag_reached_through_any_fills_a_struct_variant() {
+    #[derive(Debug, PartialEq)]
+    struct Fields(usize);
+    struct Variant;
+    struct Count;
+    impl<'de> Visitor<'de> for Variant {
+        type Value = Fields;
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a struct variant")
+        }
+        fn visit_enum<A: serde::de::EnumAccess<'de>>(self, data: A) -> Result<Fields, A::Error> {
+            use serde::de::VariantAccess;
+            let (_, variant) = data.variant::<String>()?;
+            variant.struct_variant(&["x"], Count)
+        }
+    }
+    impl<'de> Visitor<'de> for Count {
+        type Value = Fields;
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("fields")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Fields, A::Error> {
+            let mut count = 0;
+            while map.next_entry::<String, u32>()?.is_some() {
+                count += 1;
+            }
+            Ok(Fields(count))
+        }
+    }
+    impl<'de> Deserialize<'de> for Fields {
+        fn deserialize<D: Deserializer2<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            deserializer.deserialize_any(Variant)
+        }
+    }
+    assert_reads("!Point", &Fields(0));
+    assert_reads("!Point {x: 1}", &Fields(1));
+}
+
+/// A plain scalar's text keeps the blanks before a comment or its line's end, and its value
+/// doesn't, so the value is still borrowed from the input.
+#[test]
+fn a_plain_scalar_before_a_comment_or_blanks_is_borrowed() {
+    #[derive(Debug, Deserialize)]
+    struct Borrowing<'a> {
+        #[serde(borrow)]
+        text: &'a str,
+        #[serde(borrow)]
+        cow: Cow<'a, str>,
+    }
+    for input in [
+        "text: abc # c\ncow: def\t# d: e\n",
+        "text: abc   \ncow: def\t\n",
+    ] {
+        let mut readings = Vec::new();
+        readings.push((
+            "from_str_borrowed",
+            ayaml::from_str_borrowed::<Borrowing<'_>>(input),
+        ));
+        readings.push((
+            "Deserializer::next_borrowed",
+            Deserializer::from_str(input)
+                .expect("a stream")
+                .next_borrowed()
+                .map(|value| value.expect("a document")),
+        ));
+        #[cfg(feature = "libyaml-compat")]
+        readings.push(("compat::from_str", ayaml::compat::from_str(input)));
+        for (name, reading) in readings {
+            let value = reading.unwrap_or_else(|error| panic!("{name}: {input:?}: {error}"));
+            assert_eq!((value.text, value.cow.as_ref()), ("abc", "def"), "{name}");
+            assert!(
+                matches!(value.cow, Cow::Borrowed(_)),
+                "{name}: {input:?} wasn't borrowed"
+            );
+        }
+    }
+    // Only blanks are dropped: by default a line separator is content, so the text still holds it.
+    let text: &str = ayaml::from_str_borrowed("a\u{2028}  # c").expect("a separator is content");
+    assert_eq!(text, "a\u{2028}");
+    // A value that isn't the text, as when lines fold, is still owned.
+    let folded =
+        ayaml::from_str_borrowed::<Borrowing<'_>>("text: a\ncow: b\n  c\n").expect("folded");
+    assert!(matches!(folded.cow, Cow::Owned(ref text) if text == "b c"));
 }

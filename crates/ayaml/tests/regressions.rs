@@ -1209,6 +1209,193 @@ fn a_closing_quote_may_follow_tabs_alone() {
     }
 }
 
+/// A comment may follow a `%TAG` directive's prefix, as it may follow `%YAML`'s version, and
+/// the directive then reads as it does without it. Only a comment may follow the prefix.
+#[test]
+fn a_comment_may_follow_a_tag_directive() {
+    for (input, without) in [
+        ("%TAG ! tag:x: # c\n--- !a 1", "%TAG ! tag:x:\n--- !a 1"),
+        (
+            "%TAG !e! tag:e: #c\n---\n!e!a b",
+            "%TAG !e! tag:e:\n---\n!e!a b",
+        ),
+        (
+            "%TAG !! tag:y:\t#: c\n--- !!a b",
+            "%TAG !! tag:y:\n--- !!a b",
+        ),
+        ("%TAG ! tag:x: #\n--- !a 1", "%TAG ! tag:x:\n--- !a 1"),
+    ] {
+        for ((mode, read), (_, expected)) in readings(input).into_iter().zip(readings(without)) {
+            let expected = expected.unwrap_or_else(|error| panic!("{without:?}: {error}"));
+            assert_eq!(read, Ok(expected), "{input:?} in {mode}");
+        }
+    }
+    for input in [
+        "%TAG ! tag:x: x # c\n--- a",
+        "%TAG ! tag:x: x\n--- a",
+        "%TAG ! tag:x: x#c\n--- a",
+        "%TAG ! # c\n--- a",
+    ] {
+        for (mode, read) in readings(input) {
+            let error = read.expect_err(input);
+            assert!(
+                error.starts_with("%TAG requires a handle and a prefix at line 1"),
+                "{input:?} in {mode}: {error}"
+            );
+        }
+    }
+}
+
+/// Each input reads as its `equal` does, in each mode.
+fn reads_as(cases: &[(&str, &str)]) {
+    for &(input, equal) in cases {
+        for ((mode, read), (_, expected)) in readings(input).into_iter().zip(readings(equal)) {
+            let expected = expected.unwrap_or_else(|error| panic!("{equal:?}: {error}"));
+            assert_eq!(read, Ok(expected), "{input:?} in {mode}");
+        }
+    }
+}
+
+/// Each input is refused with an error that starts with its message, in each mode.
+fn refused_with(cases: &[(&str, &str)]) {
+    for &(input, message) in cases {
+        for (mode, read) in readings(input) {
+            let error = read.expect_err(input);
+            assert!(error.starts_with(message), "{input:?} in {mode}: {error}");
+        }
+    }
+}
+
+/// A plain scalar's line may start with `---` or `...` unless that is a document marker: at
+/// column 0, with whitespace or the line's end after it (YAML 1.2.2 production 206).
+#[test]
+fn a_plain_scalar_line_may_start_with_marker_text() {
+    reads_as(&[
+        ("a\n ---", "'a ---'"),
+        ("a\n ---x", "'a ---x'"),
+        ("a\n---b", "'a ---b'"),
+        ("a\n  ...", "'a ...'"),
+        ("a\n ...\nb", "'a ... b'"),
+        ("1\n...)", "'1 ...)'"),
+        ("a\n\t---", "'a ---'"),
+        ("key: a\n  ---", "key: 'a ---'"),
+        ("k: a\n  ...and so on", "k: 'a ...and so on'"),
+        ("- a\n  --- b", "- 'a --- b'"),
+        // A marker still ends it.
+        ("a\n...", "a"),
+        ("a\n... # c", "a"),
+    ]);
+    for input in ["a\n---", "a\n--- b", "a\n---\tb", "a\n---\n b"] {
+        let documents = ayaml::parse_documents(input).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(documents.len(), 2, "{input:?}");
+    }
+    // `...` and then a mark isn't a marker either. Compat reads the mark as text, as libyaml does,
+    // and default mode refuses a mark there.
+    #[cfg(feature = "libyaml-compat")]
+    assert_eq!(
+        ayaml::compat::from_str::<ayaml::Value>("0\n...\u{feff}").unwrap(),
+        ayaml::Value::from("0 ...\u{feff}")
+    );
+    assert_eq!(
+        ayaml::parse_value("0\n...\u{feff}")
+            .unwrap_err()
+            .to_string(),
+        "a byte order mark can only start a document at line 2 column 4"
+    );
+}
+
+/// A `:` in a comment isn't a mapping indicator, so a plain scalar's line may hold one there.
+#[test]
+fn a_comment_colon_does_not_end_a_plain_scalar() {
+    reads_as(&[
+        ("a\nb #c: d", "'a b'"),
+        ("a\n b\t# c: d", "'a b'"),
+        ("k: a\n  b # note: d", "k: 'a b'"),
+        ("- a\n  b # c: d", "- 'a b'"),
+        ("c\n| #:", "'c |'"),
+        ("$\n? #:", "'$ ?'"),
+        ("a\n ... # c: d", "'a ...'"),
+        // A `:` before the comment still does.
+        ("k: a\nb: c # d: e", "{k: a, b: c}"),
+    ]);
+    // Without a blank before it, `#` is text, and the `: ` after it an indicator, so the line
+    // isn't the scalar's.
+    let after = "unexpected content after document";
+    refused_with(&[
+        ("a\nb#c: d", &format!("{after} at line 2 column 1")),
+        ("k: a\n  b#c: d", &format!("{after} at line 2 column 3")),
+    ]);
+}
+
+/// A node property may end in `:`, as in `&a:`, and that `:` isn't an indicator. So a plain
+/// scalar after one, on a line that the node starts or after `---`, goes on at its line's
+/// indentation in default mode, as it does in compat.
+#[test]
+fn a_plain_scalar_after_a_property_ending_in_a_colon_goes_on() {
+    reads_as(&[
+        ("&a: b\nc", "&a: 'b c'"),
+        ("--- &a: b\nc", "--- &a: 'b c'"),
+        ("!t: b\nc", "!t: 'b c'"),
+        ("&a: b\n c", "&a: 'b c'"),
+        ("- &a: b\n  c", "- &a: 'b c'"),
+    ]);
+    // A block indicator or a key before the scalar still holds its lines past them.
+    refused_with(&[
+        (
+            "- &a: b\nc",
+            "unexpected content after document at line 2 column 1",
+        ),
+        (
+            "k: b\nc",
+            "unexpected content after document at line 2 column 1",
+        ),
+        (
+            "&a k: b\nc",
+            "unexpected content after document at line 2 column 1",
+        ),
+    ]);
+}
+
+/// A quoted scalar on its own line, or in a flow collection that is, is measured against the
+/// block collection that holds it, not the line it opens on (YAML 1.2.2 production 69). Its
+/// lines need only pass that collection's column, as a flow collection's do.
+#[test]
+fn a_quoted_scalar_on_its_own_line_is_measured_against_its_parent() {
+    reads_as(&[
+        ("k:\n  'a\n b'", "k: 'a b'"),
+        ("k:\n  \"a\n b\"", "k: 'a b'"),
+        ("- \n    'a\n  b'", "- 'a b'"),
+        ("  k:\n      'a\n     b'", "k: 'a b'"),
+        ("'k':\n  'a\n b'", "k: 'a b'"),
+        ("k:\n  !t 'a\n b'", "k: !t 'a b'"),
+        ("k: !t\n  'a\n b'", "k: !t 'a b'"),
+        ("k:\n  &x\n  'a\n b'", "k: 'a b'"),
+        ("k:\n  'a\n \tb'", "k: 'a b'"),
+        ("k: [\n    'a\n  b']", "k: ['a b']"),
+        ("k: [\n    \"a\n b\"]", "k: ['a b']"),
+        ("k: [[\n    'a\n b']]", "k: [['a b']]"),
+        ("k: {\n    a: 'b\n  c'}", "k: {a: 'b c'}"),
+        ("k: [{\n    a: 'b\n  c'}]", "k: [{a: 'b c'}]"),
+        ("k:\n  [? \"x\n y\"]", "k: [? 'x y']"),
+        ("k:\n  [&a \"x\n y\"]", "k: ['x y']"),
+        ("k:\n  [a,\n b]", "k: [a, b]"),
+        ("- k:\n    [a,\n   b]", "- k: [a, b]"),
+    ]);
+    // The lines still have to pass it, and only spaces indent them.
+    let below = "quoted scalar continuation must be indented more than its parent";
+    let tabs = "tabs cannot be the only quoted-scalar indentation";
+    refused_with(&[
+        ("k:\n  'a\nb'", &format!("{below} at line 3 column 1")),
+        (
+            "  k:\n      'a\n  b'",
+            &format!("{below} at line 3 column 3"),
+        ),
+        ("k: [\n    'a\nb']", &format!("{below} at line 3 column 1")),
+        ("k:\n  'a\n\tb'", &format!("{tabs} at line 3 column 1")),
+        ("k:\n  'a\n\t\tb'", &format!("{tabs} at line 3 column 1")),
+    ]);
+}
+
 /// Two keys that differ only in the order of their entries are one key, whatever the target.
 #[test]
 fn keys_that_differ_only_in_order_are_duplicates_in_a_typed_map() {

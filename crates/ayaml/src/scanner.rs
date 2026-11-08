@@ -144,6 +144,11 @@ pub(crate) struct Scanner<'a> {
     checked_line_end: usize,
     /// The last line a quoted scalar's indent was counted on, and that indent.
     counted_indent: (usize, usize),
+    /// Where the outermost open flow collection starts.
+    flow_start: usize,
+    /// The start of the last outermost flow collection whose owner a quoted scalar in it asked
+    /// for, and that owner.
+    flow_owner: (usize, Owner),
     /// Byte offsets of the non-printable characters that only a quoted
     /// scalar may hold, in order, and the first one not yet checked.
     quoted_only: Vec<usize>,
@@ -217,6 +222,8 @@ impl<'a> Scanner<'a> {
             block_prefix: (usize::MAX, false),
             checked_line_end: 0,
             counted_indent: (usize::MAX, 0),
+            flow_start: 0,
+            flow_owner: (usize::MAX, Owner::Unknown),
             quoted_only,
             quoted_only_next: 0,
         })
@@ -326,6 +333,9 @@ impl<'a> Scanner<'a> {
         let ch = self.peek().expect("checked EOF");
         match ch {
             '[' => {
+                if self.flow_level == 0 {
+                    self.flow_start = start;
+                }
                 self.flow_level += 1;
                 self.flow_stack.push('[');
                 self.flow_allow_zero_indent
@@ -344,6 +354,9 @@ impl<'a> Scanner<'a> {
                 self.make(TokenKind::FlowSequenceEnd, start, self.pos)
             }
             '{' => {
+                if self.flow_level == 0 {
+                    self.flow_start = start;
+                }
                 self.flow_level += 1;
                 self.flow_stack.push('{');
                 self.flow_allow_zero_indent
@@ -836,10 +849,13 @@ impl<'a> Scanner<'a> {
         }
         if name == "TAG" {
             let mut parts = value.split(is_blank).filter(|part| !part.is_empty());
-            let (Some(handle), Some(prefix), None) = (parts.next(), parts.next(), parts.next())
-            else {
+            // Only a comment may follow the prefix, and the split leaves a blank before it.
+            let (Some(handle), Some(prefix)) = (parts.next(), parts.next()) else {
                 return Err(self.error_at(start, "%TAG requires a handle and a prefix"));
             };
+            if parts.next().is_some_and(|part| !part.starts_with('#')) {
+                return Err(self.error_at(start, "%TAG requires a handle and a prefix"));
+            }
             // A handle is `!`, `!!`, or word characters between two `!`s;
             // libyaml also allows `_`, and the compat scanner keeps that.
             let named = handle
@@ -1074,7 +1090,7 @@ impl<'a> Scanner<'a> {
 
     fn scan_single_quoted(&mut self) -> Result<Option<Token<'a>>, Error> {
         let start = self.pos;
-        let (start_indent, allow_same_indent) = self.quoted_indent(start);
+        let mut held = None;
         self.pos += 1;
         let mut value = String::new();
         loop {
@@ -1092,14 +1108,7 @@ impl<'a> Scanner<'a> {
                     }
                 }
                 ch if is_line_break(ch) => {
-                    self.scan_quoted_line_break(
-                        &mut value,
-                        '\'',
-                        start_indent,
-                        allow_same_indent,
-                        0,
-                        false,
-                    )?;
+                    self.scan_quoted_line_break(&mut value, '\'', start, &mut held, 0, false)?;
                 }
                 ch => {
                     value.push(ch);
@@ -1136,7 +1145,11 @@ impl<'a> Scanner<'a> {
             .unwrap_or(!self.node_seen)
     }
 
-    /// The indent a quoted scalar's lines are held to, and whether they may sit at exactly it.
+    /// The indent the lines of a quoted scalar that starts at `start` are held to, and whether they
+    /// may sit at exactly it. The block collection that holds the scalar, or the outermost flow
+    /// collection it is in, sets it: in `k:\n  'a\n b'` and `k: [\n    'a\n b']` the lines need only
+    /// pass `k`'s column (YAML 1.2.2 production 69). Where that isn't known, or isn't left of the
+    /// scalar's line, the line sets it, which is never looser.
     fn quoted_indent(&mut self, start: usize) -> (usize, bool) {
         if self.may_continue_at_column_zero() {
             return (0, true);
@@ -1151,15 +1164,29 @@ impl<'a> Scanner<'a> {
             indent = leading_spaces(self.after_line_boms(line_start, self.input.len()));
             self.counted_indent = (line_start, indent);
         }
-        (indent, prefix.is_empty())
+        let owner = if self.flow_level > 0 {
+            if self.flow_owner.0 != self.flow_start {
+                self.flow_owner = (self.flow_start, self.owner_of(self.flow_start));
+            }
+            self.flow_owner.1
+        } else {
+            self.owner_of(start)
+        };
+        match owner {
+            Owner::Block(parent) if parent < indent => (parent, false),
+            _ => (indent, prefix.is_empty()),
+        }
     }
 
+    /// Fold the line breaks at the current position into a quoted scalar's `value`, and check the
+    /// next line's indentation. `held` holds the scalar's `quoted_indent` once a line break has
+    /// asked for it, so a scalar that ends on its line never works it out.
     fn scan_quoted_line_break(
         &mut self,
         value: &mut String,
         quote: char,
-        start_indent: usize,
-        allow_same_indent: bool,
+        start: usize,
+        held: &mut Option<(usize, bool)>,
         protected_len: usize,
         escaped: bool,
     ) -> Result<(), Error> {
@@ -1182,6 +1209,10 @@ impl<'a> Scanner<'a> {
         if breaks == 0 {
             return Ok(());
         }
+        let (start_indent, allow_same_indent) = match *held {
+            Some(known) => known,
+            None => *held.insert(self.quoted_indent(start)),
+        };
         let line_start = self.input[..self.pos]
             .rfind(['\n', '\r'])
             .map_or(0, |index| index + 1);
@@ -1232,7 +1263,7 @@ impl<'a> Scanner<'a> {
 
     fn scan_double_quoted(&mut self) -> Result<Option<Token<'a>>, Error> {
         let start = self.pos;
-        let (start_indent, allow_same_indent) = self.quoted_indent(start);
+        let mut held = None;
         self.pos += 1;
         let mut value = String::new();
         let mut protected_len = 0;
@@ -1252,8 +1283,8 @@ impl<'a> Scanner<'a> {
                         self.scan_quoted_line_break(
                             &mut value,
                             '"',
-                            start_indent,
-                            allow_same_indent,
+                            start,
+                            &mut held,
                             protected_len,
                             true,
                         )?;
@@ -1299,8 +1330,8 @@ impl<'a> Scanner<'a> {
                     self.scan_quoted_line_break(
                         &mut value,
                         '"',
-                        start_indent,
-                        allow_same_indent,
+                        start,
+                        &mut held,
                         protected_len,
                         false,
                     )?;
@@ -1926,19 +1957,18 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// Whether a block indicator or a `: ` comes before `start` on its line, outside compat and
-    /// flow collections. A scalar asks once for each of its lines, and this reads the text once.
+    /// Whether a block indicator or a `:` value indicator comes before `start` on its line,
+    /// outside compat and flow collections. A `: ` in a node property, as in `&a: b`, is part of
+    /// its name. A scalar asks once for each of its lines, and this reads the text once.
     fn has_block_prefix(&mut self, start: usize) -> bool {
         if self.compat_flow || self.flow_level > 0 {
             return false;
         }
         if self.block_prefix.0 != start {
             let prefix = &self.input[self.line_index.line_start(start)..start];
-            let trimmed = prefix.trim_start_matches([' ', '\t']);
-            let found = trimmed.starts_with("- ")
-                || trimmed.starts_with("? ")
-                || trimmed.starts_with(": ")
-                || prefix.contains(": ");
+            let (text, index, owner) = block_prefix(prefix, false);
+            let found = matches!(owner, Some(Owner::Block(_)))
+                || matches!(walk_line(&text[index..], self.names()), LineStop::Value(_));
             self.block_prefix = (start, found);
         }
         self.block_prefix.1
@@ -2014,9 +2044,15 @@ impl<'a> Scanner<'a> {
         Some(breaks)
     }
 
+    /// Whether the line that `position` starts the content of ends a plain scalar rather than
+    /// continuing it: a document marker, or block structure. A `---` or `...` is a marker only at
+    /// column 0 with whitespace or the line's end after it, and a comment's `:` isn't an indicator.
     fn looks_like_block_start(&self, position: usize, allow_block_indicator: bool) -> bool {
         let rest = &self.input[position..];
-        if rest.starts_with("---") || rest.starts_with("...") {
+        if (rest.starts_with("---") || rest.starts_with("..."))
+            && self.line_index.line_start(position) == position
+            && self.marker_follows(position, 3)
+        {
             return true;
         }
         if rest.starts_with(": ") {
@@ -2026,13 +2062,15 @@ impl<'a> Scanner<'a> {
             return true;
         }
         let mut chars = rest.chars().peekable();
+        let mut previous = self.input[..position].chars().next_back();
         while let Some(ch) = chars.next() {
-            if is_line_break(ch) {
+            if is_line_break(ch) || (ch == '#' && previous.is_some_and(is_blank)) {
                 break;
             }
             if ch == ':' && chars.peek().is_none_or(|next| is_blank(*next)) {
                 return true;
             }
+            previous = Some(ch);
         }
         false
     }
