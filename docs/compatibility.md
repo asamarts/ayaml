@@ -45,10 +45,18 @@ An invalid explicit core scalar is a resolution error.
 - Typed decoding follows the target Serde visitor: generated structs reject
   duplicate fields, while map-like visitors may keep the last value.
 - In typed decoding, a custom tag, one outside YAML's own `tag:yaml.org,2002:`
-  names, names an enum's variant, and a `Value` keeps it. Any other target,
-  such as a number, a sequence, or a struct, reads the node under it, so
-  `!port 80` reads into a `u16`. A tag with no value, as in `!Point`, fills a
-  struct variant as an empty value fills a struct.
+  names, names an enum's variant, and a `Value` keeps it. A target that Serde
+  reads by its type, such as a number, a sequence, a struct, or what an enum
+  variant holds, reads the node under it, so `!port 80` reads into a `u16`. An
+  `Option` reads a tagged node as `Some`, since what it holds may take the tag.
+  A target that Serde reads through `deserialize_any`, such as an untagged or
+  internally tagged enum or a flattened field, gets the tag as an enum. A tag
+  with no value, as in `!Point`, fills a struct variant as an empty value fills
+  a struct.
+- A float target reads a number, and from the input a number's spelling with
+  a leading zero too, as in `01`, which resolves to a string. Other text, such
+  as `inf`, a spelling too large for a float, such as `1e999`, and a scalar
+  tagged as a string, such as `!!str 1.5`, are errors read into an `f64`.
 - A plain or quoted `<<` remains a literal key. Merge-key application is an
   explicit `Value::apply_merge_keys` operation, not an implicit parser effect.
 - Tags, anchors, aliases, directives, and document markers are preserved in the
@@ -141,7 +149,7 @@ these places, on purpose:
 - An empty implicit key, such as `: a`, is valid.
 - Tabs are separation wherever they aren't indentation, as in `key:\t"a: b"`, `"a"\t: 1`, or
   `-\t[1]`. A tab is indentation where it starts a line or follows a `-`, `?`, or `:`
-  indicator or `---`, and a block indicator or an implicit key follows it, so `\ta: 1` and
+  indicator, `---`, or `...`, and a block indicator or an implicit key follows it, so `\ta: 1` and
   `-\t- b` are errors. A nested flow collection's or quoted scalar's lines still need space
   indentation, so `a: [\n\tb]` is an error.
 - A top-level block scalar may hold content at column 0. A `#` line past the scalar's parent and

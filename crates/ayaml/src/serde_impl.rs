@@ -895,8 +895,9 @@ impl ValueVariantAccess<'_> {
 impl<'de> serde::de::VariantAccess<'de> for ValueVariantAccess<'_> {
     type Error = crate::Error;
 
+    /// A variant's value reads past an application tag, as a target that isn't an enum does.
     fn unit_variant(self) -> Result<(), Self::Error> {
-        if matches!(self.value, Value::Null) {
+        if matches!(untagged(self.value), Value::Null) {
             Ok(())
         } else {
             Err(Self::inside_variant(
@@ -916,11 +917,11 @@ impl<'de> serde::de::VariantAccess<'de> for ValueVariantAccess<'_> {
 
     fn tuple_variant<V: Visitor<'de>>(
         self,
-        _length: usize,
+        length: usize,
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
         ValueDeserializer { value: self.value }
-            .deserialize_any(visitor)
+            .deserialize_tuple(length, visitor)
             .map_err(|error| Self::inside_variant(self.name.as_deref(), error))
     }
 

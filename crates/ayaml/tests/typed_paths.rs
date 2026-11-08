@@ -746,6 +746,109 @@ fn an_application_tag_leaves_a_plain_target_s_reading() {
     }
 }
 
+/// An enum variant's value is a target too, so it reads past an application tag, whatever kind
+/// of variant it fills.
+#[test]
+fn an_application_tag_leaves_a_variant_s_value_s_reading() {
+    #[derive(Debug, Deserialize, PartialEq)]
+    enum Shape {
+        Nothing,
+        Line(u8),
+        Two(u8, u8),
+        Point { x: u8 },
+    }
+    assert_reads(
+        "- Nothing: !t\n- Nothing: !t ~\n- Line: !t 1\n- Two: !t [1, 2]\n- Point: !t {x: 1}",
+        &vec![
+            Shape::Nothing,
+            Shape::Nothing,
+            Shape::Line(1),
+            Shape::Two(1, 2),
+            Shape::Point { x: 1 },
+        ],
+    );
+    for (name, error, _) in every_reader::<Shape>("Nothing: !t 1") {
+        assert!(
+            error.message().contains("expected a unit enum variant"),
+            "{name}: {error}"
+        );
+    }
+}
+
+/// Two kinds of target still see an application tag. An `Option` reads a tagged node as `Some`,
+/// since what it holds may want the tag, and a target Serde reads through `deserialize_any`, as an
+/// untagged enum does, gets the tag as an enum.
+#[test]
+fn an_option_or_an_untagged_enum_still_sees_an_application_tag() {
+    #[derive(Debug, Deserialize, PartialEq)]
+    #[serde(untagged)]
+    enum Untagged {
+        Number(u32),
+    }
+    assert_reads::<Option<Vec<u32>>>("!list", &Some(vec![]));
+    assert_reads::<Option<u32>>("!port 5", &Some(5));
+    for (name, error, _) in every_reader::<Option<u32>>("!port ~") {
+        assert!(
+            error.message().starts_with("invalid type: unit value"),
+            "{name}: {error}"
+        );
+    }
+    for (name, error, _) in every_reader::<Untagged>("!t 5") {
+        assert!(
+            error.message().contains("do not support enum input"),
+            "{name}: {error}"
+        );
+    }
+}
+
+/// A float target reads a number, from its text where the input has it, so an integer wider than
+/// 64 bits reads too. Text that isn't a number's spelling, a spelling too large for a float, and a
+/// scalar tagged as a string, are errors on every reader, as a quoted number is.
+#[test]
+fn a_float_target_reads_only_numbers() {
+    for (input, expected) in [
+        ("1.5", 1.5),
+        ("+1.5", 1.5),
+        ("1e3", 1000.0),
+        ("5", 5.0),
+        (".inf", f64::INFINITY),
+        ("-.Inf", f64::NEG_INFINITY),
+        ("!t 1.5", 1.5),
+        (
+            "170141183460469231731687303715884105727",
+            1.7014118346046923e38,
+        ),
+    ] {
+        assert_reads::<f64>(input, &expected);
+    }
+    assert_reads::<f32>("1.5", &1.5);
+    for input in [
+        "inf",
+        "NaN",
+        "infinity",
+        "1e999",
+        "'1.5'",
+        "! 5",
+        "! 1.5",
+        "!!str 1.5",
+        "!!str 01",
+        "! 01",
+    ] {
+        for (name, error, _) in every_reader::<f64>(input) {
+            assert!(
+                error.message().starts_with("invalid type: string"),
+                "{name}: {input:?}: {error}"
+            );
+        }
+    }
+    for (name, error, _) in every_reader::<f32>("!!str 1.5") {
+        assert!(
+            error.message().starts_with("invalid type: string"),
+            "{name}: {error}"
+        );
+    }
+}
+
 /// A tag with no value, as in `!Point`, fills a struct variant's defaults, as an empty value fills
 /// a struct. A bare name names a unit variant, so `Point` fills none, and neither does `!Point ~`
 /// on the readers that can tell it from an empty value.
@@ -862,6 +965,9 @@ fn a_plain_scalar_before_a_comment_or_blanks_is_borrowed() {
     for input in [
         "text: abc # c\ncow: def\t# d: e\n",
         "text: abc   \ncow: def\t\n",
+        "text: abc  \r\ncow: def # c\r\n",
+        "{text: abc  , cow: def }",
+        "text: !t abc # c\ncow: &a def # d\n",
     ] {
         let mut readings = Vec::new();
         readings.push((
@@ -886,6 +992,9 @@ fn a_plain_scalar_before_a_comment_or_blanks_is_borrowed() {
             );
         }
     }
+    // So is a key, which a map borrows.
+    let keys: BTreeMap<&str, u32> = ayaml::from_str_borrowed("abc  : 1\n").expect("a key");
+    assert_eq!(keys, BTreeMap::from([("abc", 1)]));
     // Only blanks are dropped: by default a line separator is content, so the text still holds it.
     let text: &str = ayaml::from_str_borrowed("a\u{2028}  # c").expect("a separator is content");
     assert_eq!(text, "a\u{2028}");

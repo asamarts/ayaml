@@ -19,7 +19,7 @@ use crate::event::{Anchor, Event, ScalarStyle};
 use crate::limits::{AliasBudget, Limits};
 use crate::number::Number;
 use crate::parser;
-use crate::resolver::resolve_scalar;
+use crate::resolver::{float_from_text, resolve_scalar};
 use crate::span::{Marker, Span};
 use crate::tag::Tag;
 use crate::value::Value;
@@ -346,7 +346,12 @@ impl<'de> Builder<'de, '_> {
                 } => {
                     let resolved = resolve_scalar(value.as_ref(), style, tag.as_ref())
                         .map_err(|error| error.with_span(span))?;
-                    let node = node_from_value(resolved, &value, &raw, style, span);
+                    let mut node = node_from_value(resolved, &value, &raw, style, span);
+                    if tag.as_ref().is_some_and(|tag| {
+                        tag.is_core() || (tag.handle() == "!" && tag.suffix().is_empty())
+                    }) {
+                        forget_string_text(&mut node);
+                    }
                     let size = estimate_size(&node, self.limits.node_cost_bytes);
                     self.anchored(anchor.as_ref(), node, size, 0, Anchors::define)
                 }
@@ -622,6 +627,18 @@ fn node_from_value<'de>(
         }
     };
     Node::scalar(kind, scalar_text, style, span)
+}
+
+/// A string that a tag makes one, as in `!!str 01` or `! 01`, keeps no text, which only a float
+/// target reads from a string (see `deserialize_f64`), so that it reads as a string there too.
+fn forget_string_text(node: &mut Node<'_>) {
+    let node = match &mut node.kind {
+        NodeKind::Tagged(_, inner) => inner.as_mut(),
+        _ => node,
+    };
+    if matches!(node.kind, NodeKind::String(_)) {
+        node.text = None;
+    }
 }
 
 fn owned_node<'de>(value: Value, span: Span) -> Node<'de> {
@@ -994,23 +1011,36 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
                 .visit_f64(number.as_f64().expect("a float converts to f64"))
                 .map_err(|error| with_span(error, node.span));
         }
+        // A plain scalar reads from its text, so an integer wider than 64 bits reads, and so does
+        // a number spelling with a leading zero, as in `01`, which resolves to a string. Other text,
+        // such as `inf` or `1e999`, doesn't, and nor does a string that a tag makes one, which
+        // keeps no text.
         if node.style == ScalarStyle::Plain
-            && matches!(node.kind, NodeKind::Number(_) | NodeKind::String(_))
             && let Some(text) = node.text.as_deref()
         {
-            if let Ok(value) = text.parse::<f64>() {
-                return visitor
-                    .visit_f64(value)
-                    .map_err(|error| with_span(error, node.span));
-            }
-            if matches!(node.kind, NodeKind::Number(_)) {
-                // A radix integer is a number to the resolver, but not text that
-                // parses into a float.
-                return Err(crate::Error::new(
-                    crate::ErrorKind::Serde,
-                    format!("invalid type: integer `{text}`, expected f64"),
-                )
-                .with_span(node.span));
+            match &node.kind {
+                NodeKind::Number(_) => {
+                    if let Ok(value) = text.parse::<f64>() {
+                        return visitor
+                            .visit_f64(value)
+                            .map_err(|error| with_span(error, node.span));
+                    }
+                    // A radix integer is a number to the resolver, but not text that parses
+                    // into a float.
+                    return Err(crate::Error::new(
+                        crate::ErrorKind::Serde,
+                        format!("invalid type: integer `{text}`, expected f64"),
+                    )
+                    .with_span(node.span));
+                }
+                NodeKind::String(_) => {
+                    if let Some(value) = float_from_text(text) {
+                        return visitor
+                            .visit_f64(value)
+                            .map_err(|error| with_span(error, node.span));
+                    }
+                }
+                _ => {}
             }
         }
         NodeDeserializer::new(node).deserialize_any(visitor)
@@ -1264,8 +1294,10 @@ impl NodeVariantAccess<'_, '_> {
 impl<'de, 'a> VariantAccess<'de> for NodeVariantAccess<'de, 'a> {
     type Error = Error;
 
+    /// A variant's value reads past an application tag, as a target that isn't an enum does, so
+    /// `Nothing: !t` is the unit variant `Nothing`.
     fn unit_variant(self) -> Result<(), Self::Error> {
-        let node = resolve(self.value.node());
+        let node = untagged(self.value.node());
         if matches!(&node.kind, NodeKind::Null) {
             Ok(())
         } else {
@@ -1288,11 +1320,11 @@ impl<'de, 'a> VariantAccess<'de> for NodeVariantAccess<'de, 'a> {
 
     fn tuple_variant<V: Visitor<'de>>(
         self,
-        _length: usize,
+        length: usize,
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
         NodeDeserializer::new(self.value.node())
-            .deserialize_any(visitor)
+            .deserialize_tuple(length, visitor)
             .map_err(|error| self.inside_variant(error))
     }
 

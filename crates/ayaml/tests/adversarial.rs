@@ -595,6 +595,10 @@ fn repeated_inputs(length: usize) -> Vec<String> {
         all("'a'\t"),
         all("!t\t"),
         format!("k: {}", all("[]\t")),
+        // Many tab runs on a line that starts with many byte order marks, which each run asks
+        // about.
+        format!("{}k: {}", half("\u{feff}"), half("'a'\t")),
+        format!("{}k: {}", half("\u{feff}"), half("[]\t")),
         // A tab after each of many block indicators on one line, each before a node that ends
         // before the line does.
         all("-\t'a' "),

@@ -140,6 +140,13 @@ fn parse_float(text: &str) -> Option<Number> {
     parse_float_with(text, false)
 }
 
+/// The finite float that a core-schema number spelling stands for, a leading zero allowed, as in
+/// `01` or `01.5`, which resolve to strings. Other text, such as `inf`, gives `None`, and so does a
+/// spelling too large for a float, such as `1e999`.
+pub(crate) fn float_from_text(text: &str) -> Option<f64> {
+    parse_float_with(text, true).and_then(|number| number.as_f64())
+}
+
 fn parse_float_with(text: &str, allow_leading_zero: bool) -> Option<Number> {
     match text {
         ".inf" | ".Inf" | ".INF" | "+.inf" | "+.Inf" | "+.INF" => {
