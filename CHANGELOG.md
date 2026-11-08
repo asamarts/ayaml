@@ -38,7 +38,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   at line 2 column 5`, or `did not find expected node content` where a node belongs: where the
   input ends after `[`, `{`, `,`, `?` or `:`, and at a `}` after `?` or `:` in a flow sequence.
   After an empty `?` key in a flow sequence, libyaml takes the `:` or `,` that follows as part of
-  the pair and then asks for `,` or `]`, and so does compat. It takes the opening from the parser,
+  the pair and then asks for `,` or `]`, and so does compat. A `?` directly before a flow
+  indicator, as in `[?}` or `[?,`, is refused before that, in both modes, with its own error. It takes the opening from the parser,
   so a bracket in a quoted scalar is never named. Its text differs from libyaml's in three ways: where
   libyaml says it is parsing a flow node, compat names the collection; where the input ends
   without a line break, compat names the end of the last line, and libyaml the start of the next;
@@ -154,7 +155,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an error. `Tag::new` splits such a name at the core prefix, so `handle()` and `suffix()`
   return the core parts. A name the core schema doesn't define now reads as it does when
   written with `!!`: under `%TAG !y! tag:yaml.org,2002:app/`, `!y!Foo 1` is the string `1`,
-  and `!y!Foo [1]` selects the enum variant `app/Foo`, not `Foo`.
+  and `!y!Foo [1]` selects the enum variant that `!!app/Foo [1]` selects.
 - Scanning no longer takes time quadratic in the input on a long line holding any non-ASCII
   text, on long runs of tabs or many runs on one line, on many quoted scalars on one line of a
   flow collection, on a plain scalar with many lines after a long prefix or after a run of byte
@@ -273,9 +274,41 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - by default, a quoted scalar's lines after a compact key or entry, which are now held to the
     collection that the key or entry starts, as a plain scalar's are. `- k: 'a\n b'` needs three
     spaces before `b`, and read with one. Compat still reads it, as libyaml does, since real files
-    align such lines with the key.
+    align such lines with the key;
+  - by default, an empty line inside a multi-line scalar under a block collection that holds a tab
+    before the scalar's indentation, as in `k:\n  a\n\t\n  b`, `k: [a\n\t\n b]`, or `k: "a\n\t\n b"`
+    (production 70). Compat refuses it in a plain scalar, as libyaml does, and still reads it in
+    a quoted one, as libyaml does. An empty line after the scalar, as in `k: a\n\t\nj: b`, still
+    reads in both modes, as YAML 1.2.2 says, where libyaml refuses it after a plain scalar.
 - A document marker line now ends a plain scalar in a flow collection, which then refuses it, in
   both modes, as libyaml does. `[a\n--- b]` read `a --- b`.
+- These invalid forms are now errors in both modes, as YAML 1.2.2 says:
+  - a block collection on a `---` line, as in `--- a: b`, `--- - a`, or `--- ? a`, on every
+    entry point. A block collection starts after a line break, and libyaml refuses these too. The
+    eager readers read one at the start of the stream, and the `Deserializer` and `parse_events`
+    after another document too, where the eager readers' error named the document start as a
+    misplaced node. A block mapping now ends at a `---` or `...` line, so the error is the same on
+    every entry point. A scalar or a flow collection may still sit on the `---` line;
+  - a flow collection's `?` directly before a flow indicator, as in `[?]`, `{?}`, `{?,a}`, or
+    `[?[a]]`. It is neither a key's indicator, which needs a space or a line break after it, nor
+    a plain scalar. By default the first three read as an empty key, and a `?` before `[` or `{`
+    was already an error. Compat read each of them, `[?[a]]` as the key `[a]`, and libyaml reads
+    each but `[?]`, so compat now refuses what libyaml reads. Where libyaml refuses such an input
+    too, as in `[?}`, compat now gives this error, not libyaml's. `[? ]` and `{? }` still read,
+    and compat still reads `[?x]` as libyaml does.
+- By default, an empty line indented no more than the line a key starts no longer ends the key's
+  multi-line plain value, so `a:\n  k: x\n \n   y` reads `x\ny`, as compat and libyaml read it. It
+  was an error.
+- A tag now names an enum's variant by its whole name on every typed reader, `from_value`
+  included: a local tag by all of it after its first `!`, as readers built on libyaml name it, and
+  any other tag by its full name in angle brackets. A tag written with a `%TAG` handle selected the
+  variant named by its suffix alone, so under `%TAG !e! tag:x:`, `!e!B 5` read as the variant `B`,
+  while `!<tag:x:B> 5`, the same tag, named `tag:x:B`. Both now select the variant named
+  `<tag:x:B>`. A core tag names its whole name too, so `!!C {x: 1}` no longer reads as the variant
+  `C`. A local tag that a named handle writes is named as when written with `!`, so `!e!B` selects
+  `pre-B` under `%TAG !e! !pre-`, and `!e!bang` selects `!bang` under `%TAG !e! !!`, as libyaml
+  reads them. A `Value` holding the first, written through Serde as to JSON, names it `!pre-B`,
+  where it named `!<!pre-B>`.
 
 ## [0.1.1] — 2026-11-04
 

@@ -326,7 +326,7 @@ fn event_places_match_their_offsets() {
         "---\n---\n",
         "- a:\n--- !t\nx:\n  - y: 1\n    z:\n",
         "a:\n...\n",
-        "a:\n...\n--- b:\n",
+        "a:\n...\n---\nb:\n",
     ];
     let readers: &[(&str, ReadEvents)] = &[
         ("parse_events", |input| {

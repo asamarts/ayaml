@@ -27,6 +27,10 @@ const CORE_TAG_PREFIX: &str = "tag:yaml.org,2002:";
 /// The first byte of a byte order mark in UTF-8. Other characters start with it too.
 const BOM_FIRST_BYTE: u8 = 0xEF;
 
+/// The error for a tab on an empty line inside a scalar, before the scalar's indentation.
+const EMPTY_LINE_TAB: &str =
+    "a tab cannot indent an empty line inside a scalar under a block collection";
+
 /// The token vocabulary the scanner currently produces.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TokenKind<'a> {
@@ -411,7 +415,19 @@ impl<'a> Scanner<'a> {
                 self.pos += 1;
                 self.make_indicator(TokenKind::BlockEntry, start, self.pos)
             }
-            // In flow context libyaml treats every `?` as an explicit-key
+            // A flow `?` before a flow indicator is neither a key's indicator, which needs a
+            // space or a line break after it (`ns-flow-map-entry`, `ns-flow-pair`), nor a plain
+            // scalar, so `[?]`, `{?,a}`, and `[?[a]]` are errors. libyaml reads `{?}` and
+            // `[?[a]]`, and refuses `[?]` only because it drops the `]`.
+            '?' if self.flow_level > 0
+                && self.input[start + 1..].starts_with([',', '[', ']', '{', '}']) =>
+            {
+                Err(self.error_at(
+                    start,
+                    "a flow collection's `?` must be separated from what follows it",
+                ))
+            }
+            // In flow context libyaml treats every other `?` as an explicit-key
             // indicator. YAML 1.2.2 makes `?x` a plain scalar (HM87, 652Z);
             // the compatibility scanner keeps the libyaml reading.
             '?' if (self.compat_flow && self.flow_level > 0)
@@ -1351,15 +1367,30 @@ impl<'a> Scanner<'a> {
         }
         let mut breaks = 0;
         loop {
+            let line_start = self.pos;
             while matches!(self.peek(), Some(' ' | '\t')) {
                 self.pos += 1;
             }
-            if self.peek().is_some_and(is_line_break) {
-                self.consume_line_break();
-                breaks += 1;
-            } else {
+            if !self.peek().is_some_and(is_line_break) {
                 break;
             }
+            // By default an empty line can't hold a tab before the scalar's indentation
+            // (`l-empty`, YAML 1.2.2 production 70), as in `k: "a\n\t\n b"`. libyaml reads it, and
+            // so does compat.
+            if breaks > 0
+                && !self.compat_flow
+                && let Some(tab) = self.input[line_start..self.pos].find('\t')
+            {
+                let (start_indent, allow_same_indent) = match *held {
+                    Some(known) => known,
+                    None => *held.insert(self.quoted_indent(start)),
+                };
+                if tab < start_indent + usize::from(!allow_same_indent) {
+                    return Err(self.error_at(line_start + tab, EMPTY_LINE_TAB));
+                }
+            }
+            self.consume_line_break();
+            breaks += 1;
         }
         if breaks == 0 {
             return Ok(());
@@ -2082,29 +2113,26 @@ impl<'a> Scanner<'a> {
         )
     }
 
-    /// The indentation of the next line that isn't empty after the current position, without
-    /// changing scanner state. A line of spaces counts as that line.
+    /// The indentation of the next line after the current position that holds more than white
+    /// space, without changing scanner state. An empty line, whatever spaces or tabs it holds,
+    /// doesn't end a scalar, so `a:\n  k: x\n \n   y` goes on to `y`.
     fn next_content_indent(&self) -> Option<usize> {
         let mut index = self.pos;
-        while index < self.input.len() {
-            let ch = self.input[index..].chars().next().expect("in bounds");
-            if !is_line_break(ch) {
-                break;
-            }
-            index += ch.len_utf8();
-            if ch == '\r' && self.input[index..].starts_with('\n') {
+        let mut line_start = index;
+        while let Some(ch) = self.input[index..].chars().next() {
+            if is_line_break(ch) {
+                index += ch.len_utf8();
+                if ch == '\r' && self.input[index..].starts_with('\n') {
+                    index += 1;
+                }
+                line_start = index;
+            } else if is_blank(ch) {
                 index += 1;
+            } else {
+                return Some(leading_spaces(&self.input[line_start..index]));
             }
         }
-        if index >= self.input.len() {
-            return None;
-        }
-        let mut indent = 0;
-        while self.input[index..].starts_with(' ') {
-            index += 1;
-            indent += 1;
-        }
-        Some(indent)
+        None
     }
 
     /// How a plain scalar starting at `start` may continue on later lines.
@@ -2165,16 +2193,33 @@ impl<'a> Scanner<'a> {
             Continuation::Flow => self.flow_line_indent(),
             _ => None,
         };
+        // An empty line that the scalar goes on past can't hold a tab before its indentation
+        // (`l-empty`, YAML 1.2.2 production 70), as in `k:\n  a\n\t\n  b` and `k: [a\n\t\n b]`.
+        // libyaml refuses it too.
+        let empty_line_indent = match continuation {
+            Continuation::Indent(minimum) => Some(minimum),
+            Continuation::Flow => flow_indent,
+            Continuation::Line { .. } => None,
+        };
+        let mut empty_line_tab = None;
         loop {
             if !self.peek().is_some_and(is_line_break) {
                 break;
             }
             self.consume_line_break();
             breaks += 1;
+            let line_start = self.pos;
             while matches!(self.peek(), Some(' ' | '\t')) {
                 self.pos += 1;
             }
             if self.peek().is_some_and(is_line_break) {
+                if empty_line_tab.is_none()
+                    && let Some(required) = empty_line_indent
+                    && let Some(tab) = self.input[line_start..self.pos].find('\t')
+                    && tab < required
+                {
+                    empty_line_tab = Some(line_start + tab);
+                }
                 continue;
             }
             break;
@@ -2235,6 +2280,9 @@ impl<'a> Scanner<'a> {
         {
             self.pos = saved;
             return Ok(None);
+        }
+        if let Some(tab) = empty_line_tab {
+            return Err(self.error_at(tab, EMPTY_LINE_TAB));
         }
         if let Some(required) = flow_indent
             && let Some(tab) = self.input[line_start..self.pos].find('\t')

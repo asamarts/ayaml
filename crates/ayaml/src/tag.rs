@@ -62,16 +62,42 @@ impl Tag {
         self.is_core() && matches!(self.suffix(), "seq" | "map" | "set" | "omap" | "pairs")
     }
 
-    /// The tag's name in the Serde data model: a local tag's suffix (`Foo`
-    /// for `!Foo`) or, for any other tag, its full
-    /// name in angle brackets (`<tag:yaml.org,2002:set>` for `!!set`). A
-    /// local suffix that is empty or starts with `!` or `<` is bracketed too,
-    /// so that [`Tag::from_serde_name`] reads every name back.
+    /// The tag's name in the Serde data model: a local tag's name after its
+    /// `!` (`Foo` for `!Foo`, and for `!e!Foo` under `%TAG !e! !`) or, for
+    /// any other tag, its full name in angle brackets
+    /// (`<tag:yaml.org,2002:set>` for `!!set`). A local name that is empty
+    /// or starts with `!` or `<` is bracketed too, so that
+    /// [`Tag::from_serde_name`] reads every name back.
     pub(crate) fn serde_name(&self) -> String {
-        if self.handle == "!" && !self.suffix.is_empty() && !self.suffix.starts_with(['!', '<']) {
-            self.suffix.clone()
+        if let Some(prefix) = self.handle.strip_prefix('!') {
+            let name = format!("{prefix}{}", self.suffix);
+            if bare_serde_name(&name) {
+                return name;
+            }
+        }
+        format!("<{}{}>", self.handle, self.suffix)
+    }
+
+    /// The name of the enum variant this tag selects: a local tag's name after its first `!`, as
+    /// readers built on libyaml name it, so `!<!!x>` selects `!x`, or any other tag's full name in
+    /// angle brackets, as in [`Tag::serde_name`]. Unlike a Serde name, a local name is never
+    /// bracketed, so `Tag::local(name)` selects the variant `name`, which is how a variant is
+    /// written, and a local tag spelled `!%3Ctag:x:B%3E` selects the variant that `!<tag:x:B>`
+    /// selects.
+    pub(crate) fn variant_name(&self) -> String {
+        match self.handle.strip_prefix('!') {
+            Some(prefix) => format!("{prefix}{}", self.suffix),
+            None => format!("<{}{}>", self.handle, self.suffix),
+        }
+    }
+
+    /// [`Tag::variant_name`], which moves the suffix of a tag written with `!` rather than
+    /// copying it.
+    pub(crate) fn into_variant_name(self) -> String {
+        if self.handle == "!" {
+            self.suffix
         } else {
-            format!("<{}{}>", self.handle, self.suffix)
+            self.variant_name()
         }
     }
 
@@ -119,11 +145,6 @@ impl Tag {
     #[must_use]
     pub fn suffix(&self) -> &str {
         &self.suffix
-    }
-
-    /// The tag suffix, moved out of the tag.
-    pub(crate) fn into_suffix(self) -> String {
-        self.suffix
     }
 
     /// Whether this is a core-schema tag.
@@ -194,6 +215,11 @@ impl TaggedValue {
     }
 }
 
+/// Whether a local tag's name stands for itself in the Serde data model, unbracketed.
+fn bare_serde_name(name: &str) -> bool {
+    !name.is_empty() && !name.starts_with(['!', '<'])
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Tag, TaggedValue};
@@ -245,11 +271,35 @@ mod tests {
             Tag::core("set"),
             Tag::new("tag:example.com,2000:", "foo"),
             Tag::new("", "tag:x"),
+            Tag::new("!a-", "b"),
+            Tag::new("!", ""),
+            Tag::new("!!", "x"),
         ] {
             assert_eq!(Tag::from_serde_name(&tag.serde_name()), tag, "{tag}");
         }
         assert_eq!(Tag::local("Foo").serde_name(), "Foo");
+        // A local tag that a named handle wrote has the name it has when written with `!`.
+        assert_eq!(Tag::new("!a-", "b").serde_name(), "a-b");
         assert_eq!(Tag::core("set").serde_name(), "<tag:yaml.org,2002:set>");
+    }
+
+    #[test]
+    fn variant_names_read_back() {
+        for (tag, name) in [
+            (Tag::local("B"), "B"),
+            (Tag::new("!a-", "b"), "a-b"),
+            (Tag::new("", "!!x"), "!x"),
+            (Tag::new("!!", "x"), "!x"),
+            (Tag::local("<!x>"), "<!x>"),
+            (Tag::local(""), ""),
+            (Tag::new("tag:x:", "B"), "<tag:x:B>"),
+            (Tag::core("C"), "<tag:yaml.org,2002:C>"),
+        ] {
+            assert_eq!(tag.variant_name(), name, "{tag}");
+            assert_eq!(tag.clone().into_variant_name(), name, "{tag}");
+            // A variant is written under the local tag of its name, which selects it.
+            assert_eq!(Tag::local(name).variant_name(), name, "{tag}");
+        }
     }
 
     #[test]

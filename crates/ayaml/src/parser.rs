@@ -641,6 +641,18 @@ impl<'a> Parser<'a> {
                             "a document-start property cannot precede a same-line block mapping key",
                         ));
                     }
+                    // A block collection starts after a line break (`s-l+block-collection`), so
+                    // `--- a: b` and `--- - a` are errors, as in libyaml.
+                    let tokens = self.tokens(line);
+                    if rest_start == 0
+                        && (matches!(tokens[0].kind, TokenKind::BlockEntry)
+                            || is_mapping_line(tokens))
+                    {
+                        return Err(self.error(
+                            tokens[0].span,
+                            "a block collection cannot start on a `---` line",
+                        ));
+                    }
                 }
             }
 
@@ -2845,10 +2857,12 @@ enum Step<'a> {
 }
 
 fn is_mapping_line(tokens: &[Token<'_>]) -> bool {
-    tokens
-        .first()
-        .is_some_and(|token| matches!(token.kind, TokenKind::Key | TokenKind::Value))
-        || has_value_indicator(tokens)
+    match tokens.first().map(|token| &token.kind) {
+        Some(TokenKind::Key | TokenKind::Value) => true,
+        // A document marker ends the collection, whatever follows it on its line.
+        Some(TokenKind::DocumentStart { .. } | TokenKind::DocumentEnd) | None => false,
+        Some(_) => has_value_indicator(tokens),
+    }
 }
 
 #[cfg(test)]

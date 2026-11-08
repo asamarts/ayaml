@@ -45,7 +45,15 @@ An invalid explicit core scalar is a resolution error.
 - Typed decoding follows the target Serde visitor: generated structs reject
   duplicate fields, while map-like visitors may keep the last value.
 - In typed decoding, a custom tag, one outside YAML's own `tag:yaml.org,2002:`
-  names, names an enum's variant, and a `Value` keeps it. A target that Serde
+  names, names an enum's variant, and a `Value` keeps it. So does a collection's
+  tag among those names that the core schema doesn't define, as in `!!C {x: 1}`,
+  while a scalar under one is a string. A tag names the variant by its whole name:
+  a local tag by all of it after its first `!`, as `B` for `!B`, and any other tag
+  by its full name in angle brackets, as `<tag:x:B>` for `!<tag:x:B>`, which `!e!B`
+  under `%TAG !e! tag:x:` is too, or `<tag:yaml.org,2002:C>` for `!!C`.
+  Serialization writes a variant that holds a value under the local tag of its
+  name, as `!%3Ctag:x:B%3E` for one named `<tag:x:B>`, which selects it too, and
+  a unit variant as its name. A target that Serde
   reads by its type, such as a number, a sequence, a struct, or what an enum
   variant holds, reads the node under it, so `!port 80` reads into a `u16`. An
   `Option` reads a tagged node as `Some`, since what it holds may take the tag.
@@ -155,7 +163,9 @@ these places, on purpose:
 - In a flow collection, `[:a]` holds a plain scalar starting with `:`, `a:]` holds a key,
   and `a:?` is a plain scalar. `{?:{}}` is an error because `?:` starts a plain scalar, and
   `{?\n:{}}` because only a JSON-like key allows an adjacent value. A flow mapping key may
-  span lines or have a line break before its `:`. `[-]` is an error.
+  span lines or have a line break before its `:`. `[-]` is an error, and so is a `?` right
+  before a flow indicator, as in `{?}` or `[?[a]]`, where libyaml reads an empty key or the
+  key `[a]`.
 - An empty implicit key, such as `: a`, is valid.
 - Tabs are separation wherever they aren't indentation, as in `key:\t"a: b"`, `"a"\t: 1`, or
   `-\t[1]`. Only spaces indent. A tab stands where indentation would before a block indicator or an
@@ -163,7 +173,8 @@ these places, on purpose:
   `\ta: 1` and `-\t- b` are errors. A node that only tabs indent on its own line isn't indented
   under the key or entry before it, so `k:\n\tv` is an error, as in libyaml. A flow collection's or
   quoted scalar's lines under a block collection need space indentation too, so `a: [\n\tb]` is
-  an error.
+  an error. A tab on an empty line after a plain scalar is separation, as in `k: a\n\t\nj: b`,
+  where libyaml refuses it.
 - A top-level block scalar may hold content at column 0. A `#` line past the scalar's parent and
   indented less than a blank line before it is that scalar's first content, so the blank line is
   too long and it's an error, where libyaml ends the scalar there.

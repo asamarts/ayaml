@@ -487,7 +487,7 @@ fn compat_words_a_flow_sequence_s_failure_from_libyaml_s_state() {
         ("[a, ? :", separator, (1, 8), (1, 1)),
         ("--- [? ,", separator, (1, 9), (1, 5)),
         ("[? : }", separator, (1, 6), (1, 1)),
-        ("[?, }", separator, (1, 5), (1, 1)),
+        ("[? , }", separator, (1, 6), (1, 1)),
         // A `}` where a key or a value starts is where libyaml looks for a node.
         ("[a: }", node, (1, 5), (1, 1)),
         ("[? }", node, (1, 4), (1, 1)),

@@ -939,7 +939,9 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
         let node = self.target();
         let span = node.span;
         let (variant, variant_span, value) = match &node.kind {
-            NodeKind::Tagged(tag, value) => (tag.suffix().to_owned(), span, NodeValue::Ref(value)),
+            // A tag names the variant by its whole name (`Tag::variant_name`), so `!<tag:x:B>`
+            // and `!e!B` under `%TAG !e! tag:x:` select the same variant.
+            NodeKind::Tagged(tag, value) => (tag.variant_name(), span, NodeValue::Ref(value)),
             NodeKind::String(variant) => (
                 variant.as_ref().to_owned(),
                 span,
