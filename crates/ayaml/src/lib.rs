@@ -328,12 +328,14 @@ pub mod internals {
         crate::parser::parse_events(input, limits)
     }
 
-    /// Compose an already-collected event vector.
+    /// Compose an already-collected event vector. Like every entry point that takes limits, it
+    /// refuses limits that would turn a budget off.
     pub fn compose_events(
         events: &[Event<'_>],
         input_len: usize,
         limits: &Limits,
     ) -> Result<Vec<Value>, Error> {
+        limits.validate()?;
         crate::composer::compose_documents(events, input_len, limits)
     }
 }

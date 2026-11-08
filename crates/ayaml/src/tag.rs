@@ -121,6 +121,11 @@ impl Tag {
         &self.suffix
     }
 
+    /// The tag suffix, moved out of the tag.
+    pub(crate) fn into_suffix(self) -> String {
+        self.suffix
+    }
+
     /// Whether this is a core-schema tag.
     #[must_use]
     pub fn is_core(&self) -> bool {

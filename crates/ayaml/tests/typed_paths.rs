@@ -280,6 +280,19 @@ fn a_key_that_fails_names_what_holds_it() {
     assert_path::<BTreeMap<String, BTreeMap<u8, u8>>>("m:\n  x: 1\n", "m", (2, 3));
 }
 
+/// A key read as an enum names a variant with no content, so a variant that holds something fails
+/// inside the key, and the error names the variant from the key's text.
+#[test]
+fn a_key_read_as_an_enum_names_its_variant() {
+    #[derive(Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+    enum Side {
+        Left,
+        Right(u8),
+    }
+    assert_path::<BTreeMap<Side, u8>>("Right: 1\n", "Right", (1, 1));
+    assert_path::<BTreeMap<String, BTreeMap<Side, u8>>>("m:\n  Right: 1\n", "m.Right", (2, 3));
+}
+
 #[test]
 fn tuples_options_and_newtypes_add_only_what_they_hold() {
     #[derive(Debug, Deserialize)]

@@ -138,6 +138,52 @@ impl LineIndex {
         }
     }
 
+    /// The marker at the end of `input`, as the index that [`Self::new`] builds gives it, or the one
+    /// [`Self::counting_line_boms`] builds when `count_line_boms`. It holds no line starts, so an
+    /// error at the end of the input doesn't hold a second index beside the scanner's.
+    #[must_use]
+    pub(crate) fn end_marker(input: &str, count_line_boms: bool) -> Marker {
+        let bytes = input.as_bytes();
+        let (mut line, mut start, mut at) = (0, 0, 0);
+        while at < bytes.len() {
+            match bytes[at] {
+                b'\n' => {
+                    at += 1;
+                    line += 1;
+                    start = at;
+                }
+                b'\r' => {
+                    at += 1;
+                    if bytes.get(at) == Some(&b'\n') {
+                        at += 1;
+                    }
+                    line += 1;
+                    start = at;
+                }
+                _ => at += 1,
+            }
+        }
+        let end = input.len();
+        if line == 0 {
+            // One line, whose index holds one start, and whose columns may start past a mark.
+            let index = if count_line_boms {
+                Self::counting_line_boms(input)
+            } else {
+                Self::new(input)
+            };
+            return index
+                .marker(input, end)
+                .unwrap_or_else(|| Marker::new(end, 1, 1));
+        }
+        let mut last = &input[start..];
+        if !count_line_boms {
+            while let Some(rest) = last.strip_prefix('\u{feff}') {
+                last = rest;
+            }
+        }
+        Marker::new(end, line + 1, last.chars().count() + 1)
+    }
+
     /// The column of `index` on `line`.
     #[inline]
     fn column(&self, input: &str, line: usize, index: usize) -> usize {
@@ -287,6 +333,51 @@ mod tests {
         }
         assert_eq!(checked, 7 + 49 + 343 + 2401 + 16_807 + 20);
         assert_eq!(lines_at_most(b""), 1);
+    }
+
+    /// The end's marker is the one a whole index gives, in either mode, on every text of up to five
+    /// characters from line breaks, ASCII, marks, and other characters.
+    #[test]
+    fn the_end_is_where_an_index_puts_it() {
+        let check = |text: &str| {
+            for count_line_boms in [false, true] {
+                let index = if count_line_boms {
+                    LineIndex::counting_line_boms(text)
+                } else {
+                    LineIndex::new(text)
+                };
+                assert_eq!(
+                    Some(LineIndex::end_marker(text, count_line_boms)),
+                    index.marker(text, text.len()),
+                    "{text:?}, {count_line_boms}"
+                );
+            }
+        };
+        let alphabet = ["a", "\n", "\r", "é", "\u{2028}", "\u{feff}", "-"];
+        let mut texts = vec![String::new()];
+        check("");
+        let mut checked = 1;
+        for _ in 0..5 {
+            let mut longer = Vec::new();
+            for text in &texts {
+                for piece in alphabet {
+                    longer.push(format!("{text}{piece}"));
+                }
+            }
+            for text in &longer {
+                check(text);
+            }
+            checked += longer.len();
+            texts = longer;
+        }
+        assert_eq!(checked, 19_608);
+        for text in [
+            "\u{feff}---",
+            "\u{feff}--- a",
+            "\u{feff}\u{feff}x\n\u{feff}\u{feff}y",
+        ] {
+            check(text);
+        }
     }
 
     #[test]

@@ -42,8 +42,12 @@ cannot multiply the alias budget without bound.
 An alias is charged `node_cost_bytes` for each node it copies, on top of the text it
 copies. A composed node takes about 100 bytes of memory, so the default of 256 covers
 it with room, and a smaller cost lets aliases copy more memory than the budget says.
-Every entry point that takes limits refuses a cost of 0, which would make a copied
-collection of empty nodes free and so turn the alias budget off.
+Against a 2 MiB budget, nested aliases of empty nodes built by `parse_value` held
+about 0.4 times the budget at the default cost, 1.2 times at 64, 2.7 times at 16, and
+65 times at 1, the least accepted cost, before the budget stopped them. At the default
+budget of 256 MiB, the same factor comes to about 16 GiB. Every entry
+point that takes limits refuses a cost of 0, which would make a copied collection of
+empty nodes free and so turn the alias budget off.
 
 Every tag written with a handle holds its own copy of the prefix that handle stands for, so
 `max_tag_expansion_bytes` counts the whole prefix at each use, in `%TAG` handles and the built-in
@@ -57,20 +61,25 @@ trailing blank lines count, and it is never less than the value it reads as.
 
 ## Memory
 
-A read holds the input, an index of its line starts, and the tokens of one logical
-line at a time, besides what it builds:
+A read holds the input, an index of its line starts, and its tokens, besides what it
+builds. `parse_events` and the `Deserializer` read one document at a time and hold
+that document's tokens. Every other reader holds the tokens of the whole stream.
 
 - The index takes 8 bytes for each CR or LF in the input, so input of blank lines, a
   byte each, costs 8 times its size there. That is 8 bytes a line, or under 16 where
-  lines end in CRLF.
+  lines end in CRLF. An error at the end of the input is placed without a second index.
+- A token takes about 100 bytes, and every token counts against `max_events`, so at
+  the default limit a read holds about 100 MB of tokens at most. The arena that holds
+  them grows by a chunk of up to 8,192 tokens, or by a sixteenth of itself once that
+  is more. Its copying stays linear in the tokens, and its spare capacity is at most a
+  chunk or a sixteenth of it, whichever is larger.
 - A block scalar is built as it is read. At its peak a read of one takes about 5 times
   its input in resident memory for short lines, and about 10 times for blank lines,
   where the index costs most. Counting the capacity it reserves without touching, a
   literal scalar of blank lines reaches 12 times.
-- A token takes about 100 bytes. A flow collection is one logical line, so all its
-  tokens are held at once, and every token counts against `max_events`. The arena
-  that holds them grows by at least a sixteenth of itself, so its copying stays
-  linear in the tokens and it wastes at most a sixteenth.
+- Before it scans, a read notes the place of each DEL, C1 control, U+FFFE, and U+FFFF
+  in the input, since only a quoted scalar may hold them. Each takes 8 bytes, so a
+  run of DEL, a byte each, costs 8 times its size there.
 
 ## Single document versus stream
 

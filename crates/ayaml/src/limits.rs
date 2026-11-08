@@ -162,7 +162,9 @@ pub struct Limits {
     pub node_cost_bytes: usize,
     /// Maximum documents in one stream.
     pub max_documents: usize,
-    /// Maximum bytes in one scalar.
+    /// Maximum bytes in one scalar, as written in the input. A block scalar's size runs from its
+    /// `|` or `>` through its last line, so its header, indentation, and trailing blank lines
+    /// count, and it is never less than the value it reads as.
     pub max_scalar_bytes: usize,
     /// Maximum entries in one collection.
     pub max_collection_entries: usize,
@@ -239,7 +241,9 @@ impl Limits {
     }
 
     /// Set the estimated cost of one composed node. Every entry point rejects 0, which would make
-    /// a copied collection of nulls free and so turn the alias budget off.
+    /// a copied collection of nulls free and so turn the alias budget off. A cost below the
+    /// memory a node takes, about 100 bytes, lets aliases hold more memory than the budget: at 1,
+    /// aliases of empty nodes held about 65 times it before the budget stopped them.
     #[must_use]
     pub const fn with_node_cost_bytes(mut self, value: usize) -> Self {
         self.node_cost_bytes = value;
@@ -253,7 +257,8 @@ impl Limits {
         self
     }
 
-    /// Set the maximum scalar size.
+    /// Set the maximum size of one scalar, as written in the input; see
+    /// [`max_scalar_bytes`](Self::max_scalar_bytes).
     #[must_use]
     pub const fn with_max_scalar_bytes(mut self, value: usize) -> Self {
         self.max_scalar_bytes = value;
