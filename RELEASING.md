@@ -54,6 +54,8 @@ These are done in the web interfaces by an owner. Each is recorded here once don
    - repository `ayaml`;
    - workflow `release.yml`;
    - environment `release`.
+
+   *Done on 2026-11-08: crates.io lists that publisher for `ayaml`.*
 3. **After the first release through the workflow.** In the same settings, turn on "Trusted
    Publishing only", so that no API token can publish `ayaml`. Then revoke every crates.io API
    token that could.
