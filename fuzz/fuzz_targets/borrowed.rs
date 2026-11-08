@@ -25,10 +25,6 @@ fuzz_target!(|data: &[u8]| {
     match (streamed, composed) {
         (Ok(streamed), Ok(composed)) => assert_eq!(streamed, composed, "input={input:?}"),
         (Err(_), Err(_)) => {}
-        // After a block mapping document, the streamed path accepts a block collection on
-        // the next `---` line, and the composed path rejects it. AY-025 rejects these on
-        // every entry point.
-        (Ok(_), Err(_)) if collection_on_marker_line(input) => {}
         (streamed, composed) => {
             panic!("streamed {streamed:?}, composed {composed:?}, input={input:?}");
         }
@@ -45,17 +41,4 @@ fn streamed_documents(
         documents.push(document);
     }
     Ok(documents)
-}
-
-fn collection_on_marker_line(input: &str) -> bool {
-    input.split(['\n', '\r']).any(|line| {
-        line.strip_prefix("---").is_some_and(|rest| {
-            let content = rest.trim();
-            rest.starts_with([' ', '\t'])
-                && (content.starts_with(['-', '?', ':'])
-                    || content.ends_with(':')
-                    || content.contains(": ")
-                    || content.contains(":\t"))
-        })
-    })
 }

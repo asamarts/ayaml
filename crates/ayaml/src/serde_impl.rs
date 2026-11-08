@@ -791,13 +791,14 @@ impl<'de> Deserializer<'de> for KeyDeserializer<'_> {
     }
 }
 
-/// A value read as an enum: the variant's name and what it holds. A tag's suffix and a string are
-/// moved, not copied.
+/// A value read as an enum: the variant's name and what it holds. A tag names the variant by its
+/// whole name ([`Tag::variant_name`]), so `!<tag:x:B>` and `!e!B` under `%TAG !e! tag:x:` select
+/// the same variant. A local tag's suffix and a string are moved, not copied.
 fn enum_parts(value: Value) -> Result<(String, Value), crate::Error> {
     Ok(match value {
         Value::Tagged(tagged) => {
             let TaggedValue { tag, value } = *tagged;
-            (tag.into_suffix(), value)
+            (tag.into_variant_name(), value)
         }
         Value::String(variant) => (variant, Value::Null),
         // `true` and `1` name variants renamed to them.
