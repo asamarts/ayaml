@@ -35,7 +35,11 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Install the pinned scanner
-        run: echo "AYAML_GITLEAKS=$(trusted/tools/leak-scan/install-gitleaks.sh "$RUNNER_TEMP/gitleaks")" >> "$GITHUB_ENV"
+        # An assignment of its own keeps the script's exit status, so a failed download fails this
+        # step. Inside the echo it would leave the variable empty and fail the scan instead.
+        run: |
+          gitleaks="$(trusted/tools/leak-scan/install-gitleaks.sh "$RUNNER_TEMP/gitleaks")"
+          echo "AYAML_GITLEAKS=$gitleaks" >> "$GITHUB_ENV"
       - name: Scan commits, tree, and the branch or tag name
         working-directory: change
         env:

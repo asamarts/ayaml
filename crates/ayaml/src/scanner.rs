@@ -142,6 +142,9 @@ pub(crate) struct Scanner<'a> {
     block_prefix: (usize, bool),
     /// Where the line of the last tab checked for indenting a block collection ends.
     checked_line_end: usize,
+    /// The start of the last line a tab was checked on, and where the byte order marks that start
+    /// it end, so that a line's tabs look at its marks once.
+    line_marks: (usize, usize),
     /// The last line a quoted scalar's indent was counted on, and that indent.
     counted_indent: (usize, usize),
     /// Where the outermost open flow collection starts.
@@ -221,6 +224,7 @@ impl<'a> Scanner<'a> {
             indicator_end: usize::MAX,
             block_prefix: (usize::MAX, false),
             checked_line_end: 0,
+            line_marks: (usize::MAX, 0),
             counted_indent: (usize::MAX, 0),
             flow_start: 0,
             flow_owner: (usize::MAX, Owner::Unknown),
@@ -719,10 +723,12 @@ impl<'a> Scanner<'a> {
     fn tab_indents_block_collection(&mut self, tab: usize, content: usize) -> bool {
         let blanks_start = self.input[..tab].trim_end_matches([' ', '\t']).len();
         let line_start = self.line_index.line_start(blanks_start);
-        let indents = blanks_start == self.indicator_end
-            || self.input[line_start..blanks_start]
-                .chars()
-                .all(|ch| ch == '\u{feff}');
+        if self.line_marks.0 != line_start {
+            let rest = &self.input[line_start..];
+            let marks = rest.len() - rest.trim_start_matches('\u{feff}').len();
+            self.line_marks = (line_start, line_start + marks);
+        }
+        let indents = blanks_start == self.indicator_end || blanks_start <= self.line_marks.1;
         if !indents {
             return false;
         }
@@ -824,8 +830,19 @@ impl<'a> Scanner<'a> {
         }
         let value = Cow::Borrowed(self.input[value_start..self.pos].trim_end_matches(is_blank));
         // Directive names and parameters are `ns-char`s, which exclude the
-        // byte order mark; libyaml rejects it too.
-        if self.input[name_start..self.pos].contains('\u{feff}') {
+        // byte order mark; libyaml rejects it too. A comment after them may hold one in compat,
+        // as any comment may there, and as in libyaml.
+        let directive = &self.input[name_start..self.pos];
+        let checked = if self.compat_flow {
+            let comment = directive
+                .match_indices('#')
+                .find(|(at, _)| directive[..*at].ends_with([' ', '\t']))
+                .map_or(directive.len(), |(at, _)| at);
+            &directive[..comment]
+        } else {
+            directive
+        };
+        if checked.contains('\u{feff}') {
             return Err(self.error_at(start, "a directive cannot contain a byte order mark"));
         }
         if name == "YAML" {

@@ -224,12 +224,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The typed readers now read a node with a custom tag, one outside YAML's own
   `tag:yaml.org,2002:` names, into a target that isn't an enum, a string, or a `Value` as they
   read it untagged. So `!port 80` reads into a `u16`, and `!list [1, 2]` into a `Vec`, where both
-  were type errors. This holds on every typed reader, `from_value` included. A YAML tag keeps its
-  meaning, so `!!str 5` is still a string, and an error read into a number.
+  were type errors. This holds on every typed reader, `from_value` included, and for what an enum
+  variant holds, so `Pair: !t [1, 2]` reads into a tuple variant and `Nothing: !t` into a unit one. A
+  YAML tag keeps its meaning, so `!!str 5` is still a string, and an error read into a number. An
+  `Option` reads a tagged node as `Some`, since what it holds may take the tag, so `!port ~` is an
+  error read into an `Option<u32>`. A target that Serde reads through `deserialize_any`, such as
+  an untagged or internally tagged enum or a flattened field, still gets the tag as an enum.
 - A tag with no value, as in `!Point`, now reads into a struct variant as an empty value reads
   into a struct, so its fields take their defaults, and so does a variant's name as a mapping key
   with an empty value, as in `Point:`. A bare `Point` still names a unit variant, and is an error
-  there. So is `!Point ~`, except from `from_value`, which can't tell it from an empty value.
+  there. So is `!Point ~`, except from `from_value` and the `Deserializer` methods built on it,
+  which can't tell `~` from an empty value, tagged or not. They read `!list ~` into a `Vec` as
+  empty too, as they read `~`.
+- A float target no longer reads from the input text that isn't a number's spelling, such as `inf`
+  or `NaN`, a spelling too large for a float, such as `1e999`, or a scalar tagged as a string, such
+  as `!!str 1.5` or `! 5`. Each read as infinity, NaN, or a number, and is now an error, as it
+  already was from `from_value`. A spelling with a leading zero, as in `01`, still reads.
 - `&str` and `Cow<str>` targets now borrow a plain scalar that a comment or blanks follow on its
   line, as in `x: abc # c`. The scalar's text held those blanks, so `&str` failed and `Cow` was
   silently owned.

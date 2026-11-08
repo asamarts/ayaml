@@ -1166,6 +1166,9 @@ fn a_tab_cannot_indent_a_block_collection() {
         ("\t?\tb", 1, 1),
         ("-\t-\tb", 1, 2),
         ("k:\n\t-\tb", 2, 1),
+        // After a document end marker, as after `---`.
+        ("...\ta: 1", 1, 4),
+        ("--- a\n...\ta: 1", 2, 4),
     ] {
         let expected = format!(
             "tab cannot separate a block structural indicator at line {line} column {column}"
@@ -1174,6 +1177,37 @@ fn a_tab_cannot_indent_a_block_collection() {
             assert_eq!(read, Err(expected.clone()), "{input:?} in {mode}");
         }
     }
+    // A line's leading byte order marks are counted again on each line, after a tab on an earlier
+    // one. The modes count the mark's column differently, so only the line is checked.
+    for input in ["a:\tb\n...\n\u{feff}\t- c", "-\ta\n...\n\u{feff}\tc: d"] {
+        for (mode, read) in readings(input) {
+            let error = read.expect_err(input);
+            assert!(
+                error.starts_with("tab cannot separate a block structural indicator at line 3 "),
+                "{input:?} in {mode}: {error}"
+            );
+        }
+    }
+    // In compat, an anchor's name ends at a `?`, or at a `:` with more text after it, and an alias
+    // gives up a `:` that ends its name. Then what follows is a key, so the tab indents a mapping.
+    // By default the name runs on, so the tab only separates it.
+    #[cfg(feature = "libyaml-compat")]
+    for (input, line, column) in [
+        ("-\t&a:b: c", 1, 2),
+        ("-\t&a?b: c", 1, 2),
+        ("- &a x\n-\t*a: b", 2, 2),
+    ] {
+        let expected = format!(
+            "tab cannot separate a block structural indicator at line {line} column {column}"
+        );
+        let read =
+            ayaml::compat::from_str::<ayaml::Value>(input).map_err(|error| error.to_string());
+        assert_eq!(read, Err(expected), "{input:?}");
+    }
+    assert_eq!(
+        ayaml::parse_value("-\t&a:b: c").expect("a name"),
+        ayaml::parse_value("- c").expect("a sequence")
+    );
 }
 
 /// A closing quote may follow tabs alone on its line, as a closing `]` or `}` may. Only the
@@ -1228,6 +1262,42 @@ fn a_comment_may_follow_a_tag_directive() {
         for ((mode, read), (_, expected)) in readings(input).into_iter().zip(readings(without)) {
             let expected = expected.unwrap_or_else(|error| panic!("{without:?}: {error}"));
             assert_eq!(read, Ok(expected), "{input:?} in {mode}");
+        }
+    }
+    // A comment may hold a byte order mark in compat, as any comment may there, and the directive
+    // still may not. By default no comment may hold one.
+    #[cfg(feature = "libyaml-compat")]
+    for (input, without) in [
+        (
+            "%TAG ! tag:x: #\u{feff}\n--- !a 1",
+            "%TAG ! tag:x:\n--- !a 1",
+        ),
+        ("%YAML 1.2 # a\u{feff}\n--- a", "%YAML 1.2\n--- a"),
+        ("%FOO bar\t#\u{feff}\n--- a", "%FOO bar\n--- a"),
+    ] {
+        let read =
+            ayaml::compat::from_str::<ayaml::Value>(input).map_err(|error| error.to_string());
+        let expected = ayaml::compat::from_str::<ayaml::Value>(without).expect("no mark");
+        assert_eq!(read, Ok(expected), "{input:?}");
+        let error = ayaml::parse_value(input).expect_err(input);
+        assert!(
+            error
+                .to_string()
+                .starts_with("a directive cannot contain a byte order mark"),
+            "{input:?}: {error}"
+        );
+    }
+    for input in [
+        "%TAG ! tag:x:\u{feff}\n--- a",
+        "%TAG ! tag:x:\u{feff} # c\n--- a",
+        "%FOO b#\u{feff}\n--- a",
+    ] {
+        for (mode, read) in readings(input) {
+            let error = read.expect_err(input);
+            assert!(
+                error.starts_with("a directive cannot contain a byte order mark"),
+                "{input:?} in {mode}: {error}"
+            );
         }
     }
     for input in [
@@ -1393,6 +1463,12 @@ fn a_quoted_scalar_on_its_own_line_is_measured_against_its_parent() {
         ("k: [\n    'a\nb']", &format!("{below} at line 3 column 1")),
         ("k:\n  'a\n\tb'", &format!("{tabs} at line 3 column 1")),
         ("k:\n  'a\n\t\tb'", &format!("{tabs} at line 3 column 1")),
+        // Each outermost flow collection has its own owner, so a later one isn't held to an
+        // earlier one's.
+        (
+            "a: [\n    'x\n  y']\nb:\n  - [\n      'x\n  y']",
+            &format!("{below} at line 7 column 3"),
+        ),
     ]);
 }
 
