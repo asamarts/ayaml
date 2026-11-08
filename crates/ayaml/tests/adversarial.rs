@@ -889,10 +889,11 @@ fn an_alias_cannot_multiply_a_long_tag() {
 /// The nesting shapes the depth tests use, each with a different recursion
 /// profile in Serde (sequences, mappings) or the parser (block, flow,
 /// compact, aliases).
-const SHAPES: [&str; 7] = [
+const SHAPES: [&str; 8] = [
     "tagged flow mapping",
     "flow sequence",
     "flow mapping",
+    "flow pair",
     "block sequence",
     "block mapping",
     "compact sequence",
@@ -912,6 +913,13 @@ fn nested(shape: &str, depth: usize) -> String {
         "tagged flow mapping" => format!("{}0{}", "!t {a: ".repeat(depth), "}".repeat(depth)),
         "flow sequence" => format!("{}0{}", "[".repeat(depth), "]".repeat(depth)),
         "flow mapping" => format!("{}0{}", "{a: ".repeat(depth), "}".repeat(depth)),
+        // A pair in a flow sequence is a mapping inside it, so each `[a: ` is two levels.
+        "flow pair" => format!(
+            "{}{}{}",
+            "[a: ".repeat(depth / 2),
+            if depth % 2 == 1 { "[0]" } else { "0" },
+            "]".repeat(depth / 2)
+        ),
         "block sequence" => lines("-"),
         "block mapping" => lines("a:"),
         "compact sequence" => format!("{}0\n", "- ".repeat(depth)),
@@ -1167,6 +1175,24 @@ fn assert_depth_error_kind(name: &str, error: &ayaml::Error) {
             "{name}"
         );
     }
+}
+
+/// No reader keeps a line break, so a blank or comment line doesn't count against `max_events`.
+/// Each one once did, so a million of them between two entries refused a document of a few MiB.
+#[test]
+fn blank_and_comment_lines_do_not_count_against_max_events() {
+    in_child!(|| {
+        let lines = Limits::default().max_events + 1;
+        for line in ["\n", "#\n", "  # c\n"] {
+            let input = format!("a: 1\n{}b: 2\n", line.repeat(lines));
+            for (name, result) in entry_points(&input)
+                .into_iter()
+                .chain(limited_readers(&input, &Limits::default()))
+            {
+                result.unwrap_or_else(|error| panic!("{line:?}, {name}: {error}"));
+            }
+        }
+    });
 }
 
 /// a `max_depth` above the cap is a configuration error on every path
@@ -1680,7 +1706,7 @@ fn a_block_scalar_holds_memory_in_proportion_to_its_input() {
 }
 
 /// The scanner keeps a logical line's tokens in one arena, 104 bytes each, and counts every token
-/// against `max_events`. A flow collection is one logical line, so a long one holds memory in
+/// it keeps against `max_events`. A flow collection is one logical line, so a long one holds memory in
 /// proportion to its tokens, and the arena wastes at most a sixteenth of itself as it grows.
 #[test]
 fn tokens_hold_memory_in_proportion_to_their_number() {
