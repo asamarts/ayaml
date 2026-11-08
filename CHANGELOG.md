@@ -192,6 +192,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   field said `at line 1 column 1`, and now says `at line 2 column 1`. From `parse_events` and the
   `Deserializer`, an empty node at the end of a document that the next `---` starts also had the
   input's length as its offset.
+- A tab now separates wherever it doesn't indent a block collection, in both modes, as YAML 1.2.2
+  allows. A tab with a `: ` anywhere later on its line was refused as block structure, so
+  `key:\t"a: b"`, `key:\t{a: 1}`, `a: "1"\t# note: x`, `"a"\t: 1`, `!t\ta: 1`, `[1]\t: x`,
+  `-\t'a: b'`, `---\t{a: 1}`, and a tab before a comment holding `: ` on its own line were errors.
+  A tab is now refused only where it starts a line or follows a `-`, `?`, or `:` indicator, `---`,
+  or `...`, and a block indicator or an implicit key follows it, as in `\ta: 1` or `-\ta: 1`.
+- A `-` or `?` indicator with a tab after it, as in `\t-\tb` or `-\t-\tb`, is now refused after a
+  tab, as it is with a space after it. It was read as an entry indented by the tab.
+- A closing quote on a line indented only with tabs now closes its scalar, as a closing `]` or `}`
+  there does, so `k: 'a\n\t'` reads `a `. Only the scalar's own quote counts, so `k: "a\n\t'"` is
+  still an error.
 
 ## [0.1.1] — 2026-11-04
 

@@ -135,10 +135,13 @@ pub(crate) struct Scanner<'a> {
     bom_run: Cell<(usize, usize)>,
     /// Where the last checked run of blanks ends. Its later tabs get the first one's answer.
     tab_run_end: usize,
+    /// Where the last `-`, `?`, or `:` indicator, `---`, or `...` ends. Blanks right after it, as
+    /// at a line's start, are where a block collection's indentation would go.
+    indicator_end: usize,
     /// The start of the plain scalar last checked for a block prefix, and the answer.
     block_prefix: (usize, bool),
-    /// Where the last line checked for a `:` ends, and its last `:` indicator.
-    line_colon: (usize, Option<usize>),
+    /// Where the line of the last tab checked for indenting a block collection ends.
+    checked_line_end: usize,
     /// The last line a quoted scalar's indent was counted on, and that indent.
     counted_indent: (usize, usize),
     /// Byte offsets of the non-printable characters that only a quoted
@@ -210,8 +213,9 @@ impl<'a> Scanner<'a> {
             known_prefix: 0..0,
             bom_run: Cell::new((usize::MAX, 0)),
             tab_run_end: 0,
+            indicator_end: usize::MAX,
             block_prefix: (usize::MAX, false),
-            line_colon: (0, None),
+            checked_line_end: 0,
             counted_indent: (usize::MAX, 0),
             quoted_only,
             quoted_only_next: 0,
@@ -439,6 +443,7 @@ impl<'a> Scanner<'a> {
         self.previous_flow_end = false;
         self.document_open = true;
         self.node_seen = true;
+        self.indicator_end = end;
         let span = self.span(start, end)?;
         Ok(Some(Token { kind, span }))
     }
@@ -500,11 +505,13 @@ impl<'a> Scanner<'a> {
             TokenKind::DocumentEnd => {
                 self.document_open = false;
                 self.node_seen = false;
+                self.indicator_end = end;
             }
             TokenKind::DocumentStart { .. } => {
                 self.document_open = true;
                 self.node_seen = false;
                 self.directive_pending = false;
+                self.indicator_end = end;
             }
             TokenKind::Directive { .. } => self.directive_pending = true,
             TokenKind::Tag(_) | TokenKind::Anchor(_) => self.document_open = true,
@@ -639,7 +646,7 @@ impl<'a> Scanner<'a> {
                 '\t' => {
                     if self.flow_level == 0 && self.pos >= self.tab_run_end {
                         self.tab_run_end = self.end_of_blanks(self.pos);
-                        if self.tab_starts_block_structure(self.tab_run_end) {
+                        if self.tab_indents_block_collection(self.pos, self.tab_run_end) {
                             return Err(self.error_at(
                                 self.pos,
                                 "tab cannot separate a block structural indicator",
@@ -692,33 +699,26 @@ impl<'a> Scanner<'a> {
         position + rest.len() - rest.trim_start_matches([' ', '\t']).len()
     }
 
-    /// Whether the content after a run of tabs may be a block indicator or a key. A `:` anywhere
-    /// later on the line counts, even inside a quoted scalar, a flow collection, or a comment. The
-    /// last one answers for every run before it, so a line pays for one scan.
-    fn tab_starts_block_structure(&mut self, content: usize) -> bool {
-        let rest = &self.input.as_bytes()[content..];
-        if matches!(rest.first(), Some(b'-' | b'?'))
-            && rest
-                .get(1)
-                .is_none_or(|next| matches!(next, b' ' | b'\n' | b'\r'))
-        {
-            return true;
+    /// Whether the tab at `tab`, in blanks that end at `content`, would indent a block collection,
+    /// which only spaces may do (YAML 1.2.2 section 6.1). It would where the blanks start a line,
+    /// or follow a `-`, `?`, or `:` indicator, `---`, or `...`, and the content there starts a block
+    /// collection. Elsewhere, as after a key or a node property, a tab separates as a space does.
+    fn tab_indents_block_collection(&mut self, tab: usize, content: usize) -> bool {
+        let blanks_start = self.input[..tab].trim_end_matches([' ', '\t']).len();
+        let line_start = self.line_index.line_start(blanks_start);
+        let indents = blanks_start == self.indicator_end
+            || self.input[line_start..blanks_start]
+                .chars()
+                .all(|ch| ch == '\u{feff}');
+        if !indents {
+            return false;
         }
-        if content >= self.line_colon.0 {
-            let line_end = rest
-                .iter()
-                .position(|byte| matches!(byte, b'\n' | b'\r'))
-                .unwrap_or(rest.len());
-            let line = &rest[..line_end];
-            let colon = (0..line_end).rev().find(|&index| {
-                line[index] == b':'
-                    && line
-                        .get(index + 1)
-                        .is_none_or(|next| matches!(next, b' ' | b'\t'))
-            });
-            self.line_colon = (content + line_end, colon.map(|index| content + index));
+        // Each tab on a line checks a later part of it, so the line's end is found once.
+        if content >= self.checked_line_end {
+            let rest = &self.input[content..];
+            self.checked_line_end = content + rest.find(['\n', '\r']).unwrap_or(rest.len());
         }
-        self.line_colon.1.is_some_and(|colon| colon >= content)
+        starts_block_collection(&self.input[content..self.checked_line_end], self.names())
     }
 
     fn comment_is_legal(&self) -> bool {
@@ -1094,6 +1094,7 @@ impl<'a> Scanner<'a> {
                 ch if is_line_break(ch) => {
                     self.scan_quoted_line_break(
                         &mut value,
+                        '\'',
                         start_indent,
                         allow_same_indent,
                         0,
@@ -1156,6 +1157,7 @@ impl<'a> Scanner<'a> {
     fn scan_quoted_line_break(
         &mut self,
         value: &mut String,
+        quote: char,
         start_indent: usize,
         allow_same_indent: bool,
         protected_len: usize,
@@ -1188,7 +1190,13 @@ impl<'a> Scanner<'a> {
             .chars()
             .take_while(|ch| *ch == ' ' || *ch == '\t')
             .count();
-        if !allow_same_indent && indentation.contains('\t') && !indentation.contains(' ') {
+        // A closing quote may sit at any indentation, as a closing `]` or `}` may, so tabs alone
+        // can come before it. Only this scalar's quote closes it, and in a single-quoted scalar
+        // `''` is a quote in the text.
+        let closes =
+            self.peek() == Some(quote) && (quote == '"' || self.peek_second() != Some('\''));
+        if !allow_same_indent && !closes && indentation.contains('\t') && !indentation.contains(' ')
+        {
             return Err(self.error_at(
                 line_start,
                 "tabs cannot be the only quoted-scalar indentation",
@@ -1243,6 +1251,7 @@ impl<'a> Scanner<'a> {
                     if self.peek().is_some_and(is_line_break) {
                         self.scan_quoted_line_break(
                             &mut value,
+                            '"',
                             start_indent,
                             allow_same_indent,
                             protected_len,
@@ -1289,6 +1298,7 @@ impl<'a> Scanner<'a> {
                 ch if is_line_break(ch) => {
                     self.scan_quoted_line_break(
                         &mut value,
+                        '"',
                         start_indent,
                         allow_same_indent,
                         protected_len,
@@ -2278,6 +2288,77 @@ fn walk_line(text: &str, names: NameRules<'_, '_>) -> LineStop {
         index += 1;
     }
     LineStop::End
+}
+
+/// Whether `line`, from where a node starts to its line's end, starts a block collection: a block
+/// indicator, or an implicit key, which a `:` indicator follows on the line. The walk reads one
+/// node, after any properties, so that a line with many nodes is read about once in all. A quoted
+/// scalar, a flow collection, or an alias is a key only if the `:` comes right after it, and a
+/// plain scalar ends at its `:`. A block scalar's header takes the rest of its line.
+fn starts_block_collection(line: &str, names: NameRules<'_, '_>) -> bool {
+    let bytes = line.as_bytes();
+    let separated = |index: usize| {
+        bytes
+            .get(index + 1)
+            .is_none_or(|next| matches!(next, b' ' | b'\t'))
+    };
+    let skip_blanks = |mut index: usize| {
+        while matches!(bytes.get(index), Some(b' ' | b'\t')) {
+            index += 1;
+        }
+        index
+    };
+    if matches!(bytes.first(), Some(b'-' | b'?')) && separated(0) {
+        return true;
+    }
+    // Node properties, each running to a blank, or in compat to where libyaml ends an anchor's
+    // name. What follows a name that ends early is plain text.
+    let mut index = 0;
+    while let Some(&property @ (b'!' | b'&')) = bytes.get(index) {
+        let name_start = index + 1;
+        index = name_start;
+        while index < bytes.len()
+            && !matches!(bytes[index], b' ' | b'\t')
+            && !(names.compat && property == b'&' && compat_name_stop(bytes, index, name_start))
+        {
+            index += 1;
+        }
+        index = skip_blanks(index);
+    }
+    let end = match bytes.get(index) {
+        // An empty key, as in `: a` or `&a : b`.
+        Some(b':') if separated(index) => return true,
+        // A block indicator after properties is the parser's to refuse, and the rest of these
+        // can't start a plain scalar. Walking on from any of them would read on to the line's
+        // end, and again for each tab after the next indicator.
+        Some(b'-' | b'?') if separated(index) => return false,
+        None | Some(b'#' | b'|' | b'>' | b',' | b']' | b'}' | b'%' | b'@' | b'`') => return false,
+        Some(b'"' | b'\'') => {
+            let close = closing_quote(bytes, index);
+            if close >= bytes.len() {
+                // It goes on past this line, so it can't be an implicit key.
+                return false;
+            }
+            close + 1
+        }
+        Some(b'[' | b'{') => match flow_collection_end(bytes, index, names.compat) {
+            Some(close) => close + 1,
+            None => return false,
+        },
+        Some(b'*') => {
+            let name_end = (index..bytes.len())
+                .find(|&at| matches!(bytes[at], b' ' | b'\t'))
+                .unwrap_or(bytes.len());
+            // In compat an alias may give up its last `:`, which is then the key's indicator.
+            if let LineStop::Value(_) = walk_line(&line[index..name_end], names) {
+                return true;
+            }
+            name_end
+        }
+        Some(_) => return matches!(walk_line(&line[index..], names), LineStop::Value(_)),
+    };
+    let after = skip_blanks(end);
+    bytes.get(after) == Some(&b':') && separated(after)
 }
 
 /// The offset of what closes the flow collection that opens at `open`, reading its tokens by the

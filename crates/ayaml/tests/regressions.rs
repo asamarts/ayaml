@@ -1036,6 +1036,179 @@ fn valid_forms_beside_wrong_rejections_keep_their_reading() {
     }
 }
 
+/// Each mode's reading of `input`: the value, or the error's text.
+fn readings(input: &str) -> Vec<(&'static str, Result<ayaml::Value, String>)> {
+    vec![
+        (
+            "default",
+            ayaml::parse_value(input).map_err(|error| error.to_string()),
+        ),
+        #[cfg(feature = "libyaml-compat")]
+        (
+            "compat",
+            ayaml::compat::from_str::<ayaml::Value>(input).map_err(|error| error.to_string()),
+        ),
+    ]
+}
+
+/// A tab separates wherever it doesn't indent a block collection (YAML 1.2.2 section 6.1): after a
+/// key or a node property, and before a flow collection, a quoted scalar, a block scalar's header,
+/// or a comment, though a `: ` follows in one of them. Each reads as it does with a space, in
+/// each mode.
+#[test]
+fn a_tab_separates_where_it_does_not_indent() {
+    for (input, with_spaces) in [
+        // After `key:`, before a flow collection or a quoted value holding a colon, and after a
+        // quoted value before a comment holding one.
+        ("key:\t\"a: b\"", "key: \"a: b\""),
+        ("key:\t'a: b'", "key: 'a: b'"),
+        ("key:\t{a: 1}", "key: {a: 1}"),
+        ("key:\t[a: 1]", "key: [a: 1]"),
+        ("a: \"1\"\t# note: x", "a: \"1\" # note: x"),
+        // Before `:` after a quoted, empty, alias, or flow key, or a node property alone.
+        ("\"a\"\t: 1", "\"a\" : 1"),
+        ("''\t: 1", "'' : 1"),
+        ("- &a x\n- *a\t: 2", "- &a x\n- *a : 2"),
+        ("[1]\t: x", "[1] : x"),
+        ("{a: 1}\t: x", "{a: 1} : x"),
+        ("&x\t: 1", "&x : 1"),
+        ("!t\t: 1", "!t : 1"),
+        // Between a node property and a key or a flow collection, and after `---` before a flow
+        // collection or a property.
+        ("!t\ta: 1", "!t a: 1"),
+        ("- &x\ta: 1", "- &x a: 1"),
+        ("&x\t[1]", "&x [1]"),
+        ("---\t[1]", "--- [1]"),
+        ("---\t{a: 1}", "--- {a: 1}"),
+        ("---\t!:", "--- !:"),
+        // Where the only later `: ` is in a comment, whatever comes before the tab.
+        ("- a\t# c: d", "- a # c: d"),
+        ("k:\t# c: d\n  v", "k: # c: d\n  v"),
+        ("-\t# c: d\n  x", "- # c: d\n  x"),
+        ("\t# c: d\nx", " # c: d\nx"),
+        ("a: 1\n\t# c: d\nb: 2", "a: 1\n # c: d\nb: 2"),
+        ("a\n...\t# c: d", "a\n... # c: d"),
+        // After `---`, `-`, `?`, or `:`, or at a line's start, before a quoted scalar holding `: `
+        // or a flow collection.
+        ("---\t'a: b'", "--- 'a: b'"),
+        ("---\t\"a: b\"", "--- \"a: b\""),
+        ("-\t[1]", "- [1]"),
+        ("-\t'a: b'", "- 'a: b'"),
+        ("-\t\"a: b\"", "- \"a: b\""),
+        ("\t[1]", " [1]"),
+        ("\t{a: b}", " {a: b}"),
+        ("\t'a: b'", " 'a: b'"),
+        ("? a\n:\t'b: c'", "? a\n: 'b: c'"),
+        ("?\t[a]\n:\tb", "? [a]\n: b"),
+        // Or one that goes on to the next line, so it can't be a key.
+        ("-\t\"a: b\n  c\"", "- \"a: b\n  c\""),
+        ("k:\t'a: b\n  c'", "k: 'a: b\n  c'"),
+        ("-\t[a: b,\n  c]", "- [a: b,\n  c]"),
+        // Before a block scalar's header, with a `: ` in its comment.
+        ("---\t>\n a", "--- >\n a"),
+        ("-\t| # c: d\n  a", "- | # c: d\n  a"),
+        // A property's name may end in `:`.
+        ("-\t&a: b", "- &a: b"),
+        ("&x:\ta: b", "&x: a: b"),
+    ] {
+        for ((mode, read), (_, expected)) in readings(input).into_iter().zip(readings(with_spaces))
+        {
+            let expected = expected.unwrap_or_else(|error| panic!("{with_spaces:?}: {error}"));
+            assert_eq!(read, Ok(expected), "{input:?} in {mode}");
+        }
+    }
+    // A block scalar's header is judged on its own after a tab too, so a comment with no blank
+    // before it is the error, though a `: ` follows.
+    for (input, with_spaces) in [
+        ("---\t|#: c\n x", "--- |#: c\n x"),
+        ("-\t>#: c\n  x", "- >#: c\n  x"),
+    ] {
+        for ((mode, read), (_, expected)) in readings(input).into_iter().zip(readings(with_spaces))
+        {
+            assert!(
+                expected
+                    .as_ref()
+                    .is_err_and(|error| error.contains("comment")),
+                "{with_spaces:?} in {mode}: {expected:?}"
+            );
+            assert_eq!(read, expected, "{input:?} in {mode}");
+        }
+    }
+}
+
+/// A tab still can't indent a block collection: at a line's start, or after a `-`, `?`, or `:`
+/// indicator or `---`, before a block indicator or an implicit key, whichever blank follows that
+/// indicator.
+#[test]
+fn a_tab_cannot_indent_a_block_collection() {
+    for (input, line, column) in [
+        ("\ta: 1", 1, 1),
+        ("\t- a", 1, 1),
+        ("\t? a", 1, 1),
+        ("\t: a", 1, 1),
+        ("\t[1]: x", 1, 1),
+        ("-\ta: 1", 1, 2),
+        ("-\t- a", 1, 2),
+        ("- \t- a", 1, 3),
+        ("?\ta: 1", 1, 2),
+        ("-\t[1]: x", 1, 2),
+        ("-\t'a': b", 1, 2),
+        ("-\t\"a\"\t: b", 1, 2),
+        ("-\t&a b: c", 1, 2),
+        ("-\t!t : c", 1, 2),
+        ("- a\n-\t\"b\": c", 2, 2),
+        ("---\ta: 1", 1, 4),
+        ("key:\ta: b", 1, 5),
+        ("key:\t- a", 1, 5),
+        ("\u{feff}\t- a", 1, 1),
+        // A tab after the indicator, too.
+        ("\t-\tb", 1, 1),
+        ("\t?\tb", 1, 1),
+        ("-\t-\tb", 1, 2),
+        ("k:\n\t-\tb", 2, 1),
+    ] {
+        let expected = format!(
+            "tab cannot separate a block structural indicator at line {line} column {column}"
+        );
+        for (mode, read) in readings(input) {
+            assert_eq!(read, Err(expected.clone()), "{input:?} in {mode}");
+        }
+    }
+}
+
+/// A closing quote may follow tabs alone on its line, as a closing `]` or `}` may. Only the
+/// scalar's own quote closes it, and `''` is a quote in a single-quoted scalar's text.
+#[test]
+fn a_closing_quote_may_follow_tabs_alone() {
+    for (input, with_spaces) in [
+        ("k: 'a\n\t'", "k: 'a\n '"),
+        ("k: \"a\n\t\"", "k: \"a\n \""),
+        ("- 'a\n\t\t'", "- 'a\n '"),
+        ("k: 'a\n\n\t'", "k: 'a\n\n '"),
+        ("k: \"a\\\n\t\"", "k: \"a\\\n \""),
+    ] {
+        for ((mode, read), (_, expected)) in readings(input).into_iter().zip(readings(with_spaces))
+        {
+            let expected = expected.unwrap_or_else(|error| panic!("{with_spaces:?}: {error}"));
+            assert_eq!(read, Ok(expected), "{input:?} in {mode}");
+        }
+    }
+    for input in [
+        "k: 'a\n\tb'",
+        "k: 'a\n\t''b'",
+        "k: 'a\n\t\"'",
+        "k: \"a\n\t'\"",
+    ] {
+        for (mode, read) in readings(input) {
+            let error = read.expect_err(input);
+            assert!(
+                error.starts_with("tabs cannot be the only quoted-scalar indentation at line 2"),
+                "{input:?} in {mode}: {error}"
+            );
+        }
+    }
+}
+
 /// Two keys that differ only in the order of their entries are one key, whatever the target.
 #[test]
 fn keys_that_differ_only_in_order_are_duplicates_in_a_typed_map() {

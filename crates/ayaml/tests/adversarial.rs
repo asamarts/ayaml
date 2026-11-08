@@ -590,6 +590,14 @@ fn repeated_inputs(length: usize) -> Vec<String> {
         all("'a'\t"),
         all("!t\t"),
         format!("k: {}", all("[]\t")),
+        // A tab after each of many block indicators on one line, each before a node that ends
+        // before the line does.
+        all("-\t'a' "),
+        all("-\t[a] "),
+        all("-\t*a "),
+        all("-\t&a "),
+        all("-\t] "),
+        format!("{}\n", all("\t'a'\n")),
         // Blank lines, lines of spaces, and runs of spaces.
         format!("a{}b\n", all("\n")),
         format!("a{}b\n", all(" \n")),
