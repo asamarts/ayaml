@@ -241,6 +241,166 @@ fn tags_hold_uri_characters_only() {
     assert!(value.is_tagged());
 }
 
+/// A tag has to name one, in each mode. A shorthand's handle needs a suffix (production 99), and
+/// a verbatim tag needs a name, which `!` alone isn't (production 97, example 6.25).
+#[test]
+fn tag_names_are_checked() {
+    const SUFFIX: &str = "a tag's handle needs a suffix after it";
+    const VERBATIM: &str = "a verbatim tag needs a name";
+    // What follows a tag is checked first, so `!!!` is a `!` the suffix can't hold.
+    const ENDING: &str = "a tag must be followed by whitespace or a line break";
+    for (input, message, line, column) in [
+        ("!!!", ENDING, 1, 3),
+        ("- !!!a", ENDING, 1, 5),
+        ("!! a", SUFFIX, 1, 1),
+        ("!!", SUFFIX, 1, 1),
+        ("- !! a", SUFFIX, 1, 3),
+        ("[!!, a]", SUFFIX, 1, 2),
+        ("{!! : a}", SUFFIX, 1, 2),
+        ("? !!\n: a", SUFFIX, 1, 3),
+        ("%TAG !e! tag:x,2000:\n---\n!e! a", SUFFIX, 3, 1),
+        ("!<> a", VERBATIM, 1, 1),
+        ("!<!> a", VERBATIM, 1, 1),
+        ("- !<!> a", VERBATIM, 1, 3),
+        ("[!<>]", VERBATIM, 1, 2),
+    ] {
+        let expected = format!("{message} at line {line} column {column}");
+        for (mode, read) in readings(input) {
+            assert_eq!(read, Err(expected.clone()), "{input:?} in {mode}");
+        }
+    }
+    // Each keeps its name as written.
+    for (input, shown) in [
+        ("!<!foo> a", "!foo"),
+        ("!<!%41> a", "!%41"),
+        ("!<tag:x> a", "tag:x"),
+        ("!<tag:x#y> a", "tag:x#y"),
+        ("!<a+b.c-d:x> a", "a+b.c-d:x"),
+        ("!<Z9:> a", "Z9:"),
+        ("!<tag:x%2C%41> a", "tag:x%2C%41"),
+    ] {
+        for (mode, read) in readings(input) {
+            let value = read.unwrap_or_else(|error| panic!("{input:?} in {mode}: {error}"));
+            let ayaml::Value::Tagged(tagged) = value else {
+                panic!("{input:?} in {mode}: {value:?}");
+            };
+            assert_eq!(tagged.tag.to_string(), shown, "{input:?} in {mode}");
+        }
+    }
+    // `!` alone is the non-specific tag, and a named handle still takes a suffix.
+    for (mode, read) in readings("- ! a\n- !e!b c") {
+        assert!(read.is_err(), "an undefined handle in {mode}");
+    }
+    for (mode, read) in readings("%TAG !e! tag:x:\n---\n- ! a\n- !e!b c") {
+        read.unwrap_or_else(|error| panic!("{mode}: {error}"));
+    }
+}
+
+/// A document gives each handle one prefix (YAML 1.2.2 section 6.8.2.2), even the same prefix
+/// twice. The next document may give it another.
+#[test]
+fn a_tag_handle_has_one_prefix_in_a_document() {
+    for (input, handle, line) in [
+        ("%TAG !e! tag:a:\n%TAG !e! tag:b:\n---\n!e!x y", "!e!", 2),
+        ("%TAG ! tag:a:\n%TAG ! tag:b:\n--- a", "!", 2),
+        (
+            "%TAG !! tag:a:\n%TAG !e! tag:b:\n%TAG !! tag:a:\n--- a",
+            "!!",
+            3,
+        ),
+    ] {
+        let expected = format!("duplicate %TAG directive for {handle} at line {line} column 1");
+        for (mode, read) in readings(input) {
+            assert_eq!(read, Err(expected.clone()), "{input:?} in {mode}");
+        }
+    }
+    for (mode, read) in readings("%TAG !! tag:a:\n%TAG ! tag:a:\n--- a") {
+        assert_eq!(read, Ok(ayaml::Value::from("a")), "{mode}");
+    }
+    let values =
+        ayaml::parse_documents("%TAG !e! tag:a:\n--- !e!x 1\n...\n%TAG !e! tag:b:\n--- !e!x 2")
+            .expect("two documents");
+    let tags: Vec<String> = values
+        .iter()
+        .map(|value| match value {
+            ayaml::Value::Tagged(tagged) => tagged.tag.to_string(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(tags, ["tag:a:x", "tag:b:x"]);
+}
+
+/// A block scalar's header holds at most one chomping and one indentation indicator, in either
+/// order, right after the `|` or `>` (YAML 1.2.2 production 162). Only blanks and a comment may
+/// follow, in each mode.
+#[test]
+fn a_block_scalar_header_has_one_indicator_of_each_kind() {
+    for (input, found, column) in [
+        ("|++\n a", '+', 3),
+        ("|--\n a", '-', 3),
+        ("|+-\n a", '-', 3),
+        (">-+\n a", '+', 3),
+        ("|11\n  a", '1', 3),
+        ("|1+1\n  a", '1', 4),
+        ("|-2-\n  a", '-', 4),
+        ("|2+2\n  a", '2', 4),
+        ("| -\n a", '-', 3),
+        ("| 1\n a", '1', 3),
+        (">\t-\n a", '-', 3),
+        ("|  +\n a", '+', 4),
+        ("|2 -\n  a", '-', 4),
+        ("k: |+ 2\n  a", '2', 7),
+        ("- >1 1\n  a", '1', 6),
+        ("|0\n a", '0', 2),
+        ("|10\n  a", '0', 3),
+        (">-0\n a", '0', 3),
+    ] {
+        let expected =
+            format!("unexpected {found:?} in block scalar header at line 1 column {column}");
+        for (mode, read) in readings(input) {
+            assert_eq!(read, Err(expected.clone()), "{input:?} in {mode}");
+        }
+    }
+    for (input, value) in [
+        ("|2+\n  a\n", "a\n"),
+        ("|+2\n  a\n", "a\n"),
+        ("|2-\n  a\n", "a"),
+        ("|-2\n   a\n", " a"),
+        ("|- # c\n a\n", "a"),
+        ("|2 # c\n   a\n", " a\n"),
+        (">+\t# c\n a\n", "a\n"),
+    ] {
+        for (mode, read) in readings(input) {
+            assert_eq!(read, Ok(ayaml::Value::from(value)), "{input:?} in {mode}");
+        }
+    }
+}
+
+/// A comment after a block scalar's header holds no byte order mark by default, as any other
+/// comment doesn't (production 75). Compat reads one there, as it does in any other comment and as
+/// libyaml does.
+#[test]
+fn a_block_scalar_header_comment_holds_no_byte_order_mark() {
+    for (input, line, column) in [
+        ("| #\u{feff}\n a", 1, 4),
+        ("|- #a\u{feff}\n a", 1, 6),
+        ("k: > #\u{feff}\n  a", 1, 7),
+    ] {
+        assert_eq!(
+            ayaml::parse_value(input).map_err(|error| error.to_string()),
+            Err(format!(
+                "a byte order mark can only start a document at line {line} column {column}"
+            )),
+            "{input:?}"
+        );
+        #[cfg(feature = "libyaml-compat")]
+        {
+            let read = ayaml::compat::from_str::<ayaml::Value>(input);
+            read.unwrap_or_else(|error| panic!("{input:?} in compat: {error}"));
+        }
+    }
+}
+
 /// In block context a flow indicator does not end `-` or `?`.
 #[test]
 fn dash_and_question_mark_before_flow_indicators() {

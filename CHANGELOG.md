@@ -243,6 +243,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `&str` and `Cow<str>` targets now borrow a plain scalar that a comment or blanks follow on its
   line, as in `x: abc # c`. The scalar's text held those blanks, so `&str` failed and `Cow` was
   silently owned.
+- These invalid forms are now errors in both modes, as YAML 1.2.2 says, and as libyaml says too:
+  - a block scalar header with two chomping or two indentation indicators, as in `|++`, `|+-`, or
+    `|11`, or with blanks before an indicator, as in `| -`. The last of each kind counted, and an
+    indicator after blanks counted as one;
+  - a tag handle with no suffix, as in `!!` or `!e!`, and the empty verbatim tag `!<>`. Each read
+    as a tag named by the handle's prefix alone, or by nothing;
+  - a second `%TAG` for a handle in one document, even with the same prefix. The last one counted.
+- The verbatim tag `!<!>` is now an error in both modes, since `!` alone names no local tag
+  (YAML 1.2.2 example 6.25). It read as the non-specific tag `!`, as libyaml reads it.
+- By default, a byte order mark in a comment after a block scalar's header is now an error, as it
+  is in any other comment. Compat still reads one there, as libyaml does.
 
 ## [0.1.1] — 2026-11-04
 
