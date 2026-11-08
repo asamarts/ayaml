@@ -51,6 +51,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is 1. As for a `max_depth` above `MAX_DEPTH_CAP`, the error is `ErrorKind::Limit` with no
   structured value or span. `docs/limits.md` now says what a read holds in memory, and that a
   block scalar's size, for `max_scalar_bytes`, counts its header and indentation.
+- `max_events` now counts each event once, on every reader, and counts the tokens a read keeps
+  against the same limit: scalars, anchors, aliases, tags, indicators, document markers, and
+  directives. A line break, and so a blank or comment line, counts as neither, where each one
+  counted before, so a million of them between two entries refused a document of a few MiB. The
+  stream's start and end now count as the events they are on every reader, as they did on
+  `parse_events` and the `Deserializer` alone, so an input exactly at the limit on another reader
+  may need 2 more. `docs/limits.md` says what each limit counts.
+- `max_anchors` is now documented as counting the anchors of a stream, as every reader already
+  enforced it. It said one document.
 
 ### Fixed
 
@@ -157,6 +166,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   beyond the input: about 1 MiB of input could reach 2 GiB, with no limit applying. The new
   `Limits::max_tag_expansion_bytes`, 64 MiB by default, counts each use across a stream, and going
   over it is `LimitKind::TagExpansion`.
+
+- `parse_events` and the `Deserializer` counted each event twice against `max_events`, so they
+  refused an input at about half the limit that the other readers allowed. They count it once now,
+  and refuse an input at the same event as the other readers.
+- A `key: value` or `? key` entry of a flow sequence now counts toward `max_depth` as the mapping it
+  is on the event readers too. `parse_events` read `[a: [1]]` under a `max_depth` of 2, which the
+  readers that build values refuse.
+- `max_scalar_bytes` now bounds a scalar's value as well as its text. A double-quoted `\L` or `\P`
+  takes 2 bytes of text and 3 of value, so a scalar of them could hold half as much again as the
+  limit.
+- The typed readers that decode from the input now charge an alias to a tagged node for the node
+  that holds the tag, as `parse_value` and `Deserializer::next` do. They charged `node_cost_bytes` less for
+  each tag, so an alias to tagged nodes could copy more than the budget let `parse_value` copy.
+- The stream start and end events from `parse_events` now carry the places that the eager event
+  reader gives them. The end said line 1, column 1, at the end of the input, and the start, after a
+  byte order mark, the mark's place.
 
 ## [0.1.1] — 2026-11-04
 

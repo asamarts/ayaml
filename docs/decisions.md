@@ -241,3 +241,49 @@ rehearsal, at `v0.1.1`'s commit, was refused with a 403. The release job's creat
 target, so GitHub checks the default branch's own head. The attestation and its check, and the
 create that publishes a release, still run for the first time in the first release through the
 workflow.
+
+## D78 — `max_events` bounds events and kept tokens, and counts no line break
+
+**Date:** 2026-11-08
+**Status:** Accepted
+
+**Decision.** `max_events` stays one limit over two counts, and an input that takes either over it
+is refused. One is the stream's events as `parse_events` yields them, its start and end included,
+each counted once on every reader. The other is the tokens a read keeps: scalars, anchors,
+aliases, tags, indicators, document markers, and directives. Line breaks, and so blank and comment
+lines, count as neither. `docs/limits.md` defines both counts.
+
+**Alternatives.** Count events alone, and add a `max_tokens` limit for the tokens: each name would
+say what it counts, but a patch release would grow the API, and a caller who raised one limit for
+a large stream would have to find and raise the other. Count events alone with no bound on tokens,
+which a stream could then outnumber three to one, as each line of `- !t x` does, so a read at
+the default limit could hold about 300 MB of tokens where it now holds about 100 MB.
+
+**Why.** The eager readers keep every token of the stream, about 100 bytes each, and the token
+count is what bounds that memory. No reader keeps a line break, so counting them bounded nothing,
+and a million blank lines between two entries refused a document of a few MiB. The lazy readers
+counted each event twice, once as its document was parsed and once as it was handed on, so the same
+input needed about twice the limit there.
+
+**Consequences.** The limit's name says less than it bounds, so its documentation says both. Every
+reader that takes limits refuses an input at the same event or token, and
+`tests/limit_consistency.rs` checks that on each of them.
+
+## D79 — `max_anchors` counts the anchors of the whole stream
+
+**Date:** 2026-11-08
+**Status:** Accepted
+
+**Decision.** `max_anchors` counts every anchor in the stream, as every reader already enforced it.
+The documentation, which said one document, now says one stream.
+
+**Alternatives.** Count per document, as the documentation said, by resetting the count at each
+document's start. That matches the anchors an alias can see, but it loosens what every reader
+enforced: a stream of many documents could hold up to `max_events` anchors instead of 100,000.
+
+**Why.** No reader changes, and no limit loosens. `max_events`, `max_alias_dereferences`, and
+`max_tag_expansion_bytes` count per stream too, and so does the alias budget a reader of several
+documents shares between them.
+
+**Consequences.** A long stream of documents that each hold many anchors may need a higher
+`max_anchors`.
