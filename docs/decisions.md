@@ -336,9 +336,11 @@ of these forms that reads back as the same tag:
   characters, and has a `%` only before two hex digits, since a verbatim tag is read as written;
 - otherwise a shorthand under a `%TAG` directive that the writer adds to the document, as
   `%TAG !t0! tag:x:` and then `!t0!a%20b` for the tag `tag:x:a b`. The prefix and the suffix are
-  %-escaped, and read back unescaped. The tag is split where its handle's prefix ended, or else
-  after its last `:`, `/`, or `#`, or else before its last character. The handles are `!t0!`,
-  `!t1!`, and so on, past any handle that the event writer's input declares.
+  %-escaped, and read back unescaped. The tag is split where its handle's prefix ended, if it
+  keeps one, or else after its last `:`, `/`, or `#`, or else before its last character. A tag
+  that went through Serde keeps only its whole name, so the Serde writer may split it elsewhere
+  than the value writer, and both read back. The handles are `!t0!`, `!t1!`, and so on, past any
+  handle that the event writer's input declares.
 
 A tag that is neither local nor core and has fewer than two characters, as `Tag::new("x", "")`
 makes, has no form, since a shorthand needs a character on each side of its handle, and writing it
@@ -350,9 +352,12 @@ not be written back. Or decode %-escapes inside a verbatim tag when reading it, 
 That fixes `%20` without a directive, but YAML 1.2.2 reads a verbatim tag as written, it changes
 how existing documents read, and a prefix without a scheme would still need one of the other two.
 
-**Why.** Every tag the reader accepts then reads back as itself, and AY-025 can refuse verbatim
-tags that aren't tag names, as YAML 1.2.2's example 6.25 does, without making any tag unwritable.
-Output changes only for tags that didn't read back before.
+**Why.** Every tag that YAML can hold then reads back as itself, and AY-025 can refuse verbatim
+tags that aren't tag names, as YAML 1.2.2's example 6.25 does, without making any such tag
+unwritable. Until it does, the reader accepts a verbatim tag that isn't a tag name: `!<x>`, whose
+one-character name the writers refuse, and `!<foo>`, which they now write under a directive.
+Output changes only for tags whose old form didn't read back as the same tag, or wasn't a tag
+name.
 
 **Consequences.** A document that holds such a tag starts with the directives it needs, and a
 document after another one gets `...` before them, which YAML asks for. The lazy event writer,

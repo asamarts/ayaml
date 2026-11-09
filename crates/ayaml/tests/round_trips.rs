@@ -563,6 +563,13 @@ fn the_event_writer_keeps_each_document_apart() {
             "%TAG !t0! tag:z:\n%TAG !e! tag:x:\n--- [!t0!q a, !e!a%20b b]\n",
             "%TAG !t0! tag:z:\n%TAG !e! tag:x:\n%TAG !t1! tag:x:\n---\n[!<tag:z:q> a, !t1!a%20b b]\n",
         ),
+        // Each added handle comes after the last, past every handle that the input declares, as
+        // when the event writer writes the value writer's output again.
+        (
+            "%TAG !t0! tag:a:\n%TAG !t1! tag:b:\n--- [!t0!x%20y a, !t1!x%20y b]\n",
+            "%TAG !t0! tag:a:\n%TAG !t1! tag:b:\n%TAG !t2! tag:a:\n%TAG !t3! tag:b:\n---\n\
+             [!t2!x%20y a, !t3!x%20y b]\n",
+        ),
     ] {
         let text = source_events_text(source);
         assert_eq!(text, written, "{source:?}");
@@ -655,6 +662,45 @@ fn a_flow_key_takes_the_explicit_form_past_128_characters() {
                 assert_eq!(written.chars().count(), 128, "{text:?}");
             }
             reads_back(&value);
+        }
+    }
+    // The scalar style option quotes keys too, and its quotes count, a doubled `'` as two. So
+    // does a string key in a block mapping.
+    let quoted_cases = [
+        (
+            true,
+            tagged(Tag::local("t"), Value::from("k".repeat(123))),
+            tagged(Tag::local("t"), Value::from("k".repeat(124))),
+        ),
+        (
+            true,
+            Value::from(format!("'{}", "k".repeat(124))),
+            Value::from(format!("'{}", "k".repeat(125))),
+        ),
+        (
+            false,
+            Value::from("k".repeat(126)),
+            Value::from("k".repeat(127)),
+        ),
+    ];
+    for (flow, short, long) in quoted_cases {
+        let options = EmitterOptions::default()
+            .with_flow(flow)
+            .with_scalar_style(Some(ayaml::ScalarStyle::SingleQuoted));
+        let (open, close) = if flow { ("{", ": 1}") } else { ("", ": 1") };
+        for (key, explicit) in [(short, false), (long, true)] {
+            let mut mapping = ayaml::Mapping::new();
+            mapping.insert(key.clone(), Value::from(1_u64));
+            let value = Value::Mapping(mapping);
+            let text = Emitter::new(&limits, &options)
+                .value_to_string(&value)
+                .unwrap();
+            assert_eq!(text.starts_with(&format!("{open}? ")), explicit, "{text:?}");
+            if !explicit {
+                let written = &text[open.len()..text.rfind(close).unwrap()];
+                assert_eq!(written.chars().count(), 128, "{text:?}");
+            }
+            assert_eq!(ayaml::parse_value(&text).unwrap(), value, "{text:?}");
         }
     }
 }

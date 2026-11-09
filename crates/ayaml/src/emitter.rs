@@ -937,12 +937,18 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
     fn needs_explicit_key(&self, key: &Value) -> bool {
         match key {
             Value::Sequence(_) | Value::Mapping(_) | Value::Tagged(_) => true,
-            Value::String(text) => {
-                text.chars().count() > MAX_IMPLICIT_KEY_CHARS
-                    || (!plain_is_block_safe(text)
-                        && double_quoted(text).chars().count() > MAX_IMPLICIT_KEY_CHARS)
-            }
+            Value::String(text) => self.key_width(text) > MAX_IMPLICIT_KEY_CHARS,
             _ => false,
+        }
+    }
+
+    /// How many characters a string key takes as [`ValueWriter::emit_key`] writes it, in the
+    /// current flow context. Per-path styles don't apply to a key, but the scalar style option does.
+    fn key_width(&self, text: &str) -> usize {
+        match self.string_form(text, self.options.scalar_style) {
+            StringForm::Plain => text.chars().count(),
+            StringForm::SingleQuoted => text.chars().count() + text.matches('\'').count() + 2,
+            StringForm::DoubleQuoted => double_quoted(text).chars().count(),
         }
     }
 
@@ -961,8 +967,7 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
                     return false;
                 };
                 let text = match &tagged.value {
-                    Value::String(text) if plain_is_safe(text) => text.chars().count(),
-                    Value::String(text) => double_quoted(text).chars().count(),
+                    Value::String(text) => self.key_width(text),
                     Value::Bool(value) => {
                         if *value {
                             4
@@ -1319,9 +1324,27 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
         }
     }
 
-    fn emit_string(&mut self, value: &str) {
-        match self.scalar_style() {
+    /// How [`ValueWriter::emit_string`] writes `value` under `style`, in the current flow context.
+    fn string_form(&self, value: &str, style: Option<crate::event::ScalarStyle>) -> StringForm {
+        match style {
             Some(crate::event::ScalarStyle::SingleQuoted) if single_quoted_ok(value) => {
+                StringForm::SingleQuoted
+            }
+            Some(
+                crate::event::ScalarStyle::SingleQuoted
+                | crate::event::ScalarStyle::DoubleQuoted
+                | crate::event::ScalarStyle::Literal
+                | crate::event::ScalarStyle::Folded,
+            ) => StringForm::DoubleQuoted,
+            _ if self.in_flow && plain_is_safe(value) => StringForm::Plain,
+            _ if !self.in_flow && plain_is_block_safe(value) => StringForm::Plain,
+            _ => StringForm::DoubleQuoted,
+        }
+    }
+
+    fn emit_string(&mut self, value: &str) {
+        match self.string_form(value, self.scalar_style()) {
+            StringForm::SingleQuoted => {
                 self.push('\'');
                 for (index, part) in value.split('\'').enumerate() {
                     if index > 0 {
@@ -1331,19 +1354,18 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
                 }
                 self.push('\'');
             }
-            Some(
-                crate::event::ScalarStyle::SingleQuoted
-                | crate::event::ScalarStyle::DoubleQuoted
-                | crate::event::ScalarStyle::Literal
-                | crate::event::ScalarStyle::Folded,
-            ) => {
-                self.push_str(&double_quoted(value));
-            }
-            _ if self.in_flow && plain_is_safe(value) => self.push_str(value),
-            _ if !self.in_flow && plain_is_block_safe(value) => self.push_str(value),
-            _ => self.push_str(&double_quoted(value)),
+            StringForm::DoubleQuoted => self.push_str(&double_quoted(value)),
+            StringForm::Plain => self.push_str(value),
         }
     }
+}
+
+/// How the value writer writes a string scalar.
+#[derive(Clone, Copy)]
+enum StringForm {
+    Plain,
+    SingleQuoted,
+    DoubleQuoted,
 }
 
 /// Which of the default tag handles a document redefines with `%TAG`.
@@ -1523,6 +1545,9 @@ struct AddedHandles {
     handles: Vec<(String, String)>,
     /// The index in `handles` of each prefix.
     by_prefix: std::collections::BTreeMap<String, usize>,
+    /// The number of the next handle to try: one past the last one added, which may have skipped
+    /// declared handles.
+    next: usize,
 }
 
 impl TagDirectives {
@@ -1544,13 +1569,12 @@ impl TagDirectives {
         let index = match added.by_prefix.get(prefix) {
             Some(&index) => index,
             None => {
-                let mut number = added.handles.len();
                 let handle = loop {
-                    let handle = format!("!t{number}!");
+                    let handle = format!("!t{}!", added.next);
+                    added.next += 1;
                     if !self.declared.contains(&handle) {
                         break handle;
                     }
-                    number += 1;
                 };
                 added.handles.push((handle, prefix.to_owned()));
                 added
