@@ -42,6 +42,7 @@ blocked_by:
 - AY-066
 - AY-067
 - AY-069
+- AY-071
 tags:
 - milestone
 - v0.1.2
