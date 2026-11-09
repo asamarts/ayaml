@@ -3359,6 +3359,103 @@ fn a_tag_names_an_enum_s_variant_by_its_whole_name() {
     }
 }
 
+/// Every typed reader, the streamed one and compat's included.
+fn every_typed_reader<T>(input: &str) -> Vec<(&'static str, Result<T, String>)>
+where
+    T: for<'de> serde::Deserialize<'de>,
+{
+    let [owned, borrowed, from_value] = every_path::<T>(input);
+    let streamed = ayaml::Deserializer::from_str(input)
+        .and_then(|mut documents| documents.next::<T>())
+        .map_err(|error| error.to_string())
+        .and_then(|document| document.ok_or_else(|| "no document".to_owned()));
+    #[allow(unused_mut)]
+    let mut readers = vec![
+        ("from_str", owned),
+        ("from_str_borrowed", borrowed),
+        ("from_value", from_value),
+        ("Deserializer", streamed),
+    ];
+    #[cfg(feature = "libyaml-compat")]
+    readers.push((
+        "compat",
+        ayaml::compat::from_str::<T>(input).map_err(|error| error.to_string()),
+    ));
+    readers
+}
+
+/// An enum reads from a mapping of one entry whose key is a string naming the variant, as in
+/// `B: 5`, on every typed reader in both modes, and from no other mapping (D80): not an empty
+/// one, nor one of more entries, nor one whose key is null, a boolean, a number, a collection, or
+/// under a custom tag. A quoted key, a `!!str` key, and an alias of a string name the variant.
+#[test]
+fn an_enum_reads_one_mapping_form() {
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    enum Pick {
+        B(u32),
+        C {
+            x: u32,
+        },
+        #[serde(rename = "true")]
+        Yes(u32),
+        #[serde(rename = "1")]
+        One(u32),
+        D,
+    }
+    for (input, expected) in [
+        ("B: 5\n", Pick::B(5)),
+        ("{B: 5}\n", Pick::B(5)),
+        ("'B': 5\n", Pick::B(5)),
+        ("\"B\": 5\n", Pick::B(5)),
+        ("!!str B: 5\n", Pick::B(5)),
+        ("!!map {B: 5}\n", Pick::B(5)),
+        ("C: {x: 1}\n", Pick::C { x: 1 }),
+        ("C:\n  x: 1\n", Pick::C { x: 1 }),
+        ("'true': 5\n", Pick::Yes(5)),
+        ("'1': 5\n", Pick::One(5)),
+        ("D: ~\n", Pick::D),
+    ] {
+        for (reader, result) in every_typed_reader::<Pick>(input) {
+            assert_eq!(result.as_ref(), Ok(&expected), "{input:?} on {reader}");
+        }
+    }
+    for (input, problem) in [
+        ("{}\n", "enum mapping must contain one variant"),
+        ("{B: 5, D: ~}\n", "enum mapping must contain one variant"),
+        ("B: 5\nC: {x: 1}\n", "enum mapping must contain one variant"),
+        ("~: 5\n", "enum variant key must be a string"),
+        (": 5\n", "enum variant key must be a string"),
+        ("true: 5\n", "enum variant key must be a string"),
+        ("1: 5\n", "enum variant key must be a string"),
+        ("[B]: 5\n", "enum variant key must be a string"),
+        ("? {B: 1}\n: 5\n", "enum variant key must be a string"),
+        ("!x B: 5\n", "enum variant key must be a string"),
+    ] {
+        for (reader, result) in every_typed_reader::<Pick>(input) {
+            assert!(
+                result.as_ref().is_err_and(|error| error.contains(problem)),
+                "{input:?} on {reader}: {result:?}"
+            );
+        }
+    }
+    // An alias of a string names the variant as the string does.
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct Holder {
+        name: String,
+        pick: Pick,
+    }
+    for (reader, result) in every_typed_reader::<Holder>("name: &k B\npick: {*k : 5}\n") {
+        assert_eq!(
+            result,
+            Ok(Holder {
+                name: "B".to_owned(),
+                pick: Pick::B(5)
+            }),
+            "{reader}"
+        );
+    }
+}
+
 /// An empty line inside a multi-line scalar under a block collection can't hold a tab before the
 /// scalar's indentation (`l-empty`, YAML 1.2.2 production 70). Compat refuses it in a plain
 /// scalar, as libyaml does, and reads it in a quoted one, as libyaml does. An empty line after

@@ -291,3 +291,29 @@ documents shares between them.
 
 **Consequences.** A long stream of documents that each hold many anchors may need a higher
 `max_anchors`.
+
+## D80 — An enum reads from one mapping form: a single entry whose key is a string
+
+**Date:** 2026-11-08
+**Status:** Accepted
+
+**Decision.** Besides a tag and a scalar that names the variant, a typed reader takes an enum from
+one mapping form: a mapping of one entry whose key is a string naming the variant, as in `B: 5` or
+`C: {x: 1}`. A quoted key, a `!!str` key, and an alias of a string name the variant as the string
+does. Every other mapping is an error, on every typed reader and in both modes: an empty one, one
+of more entries, and one whose key is null, a boolean, a number, a collection, or under a custom
+tag. Every reader already did this, and `an_enum_reads_one_mapping_form` now holds it.
+
+**Alternatives.** Refuse every mapping form, as Serde readers built on libyaml do, so that only a
+tag selects a variant. That breaks files written as Serde's externally tagged form, which is the
+form `serde_json` and most Serde formats use, and AY-021's criteria expect it, as in `Point: ~`.
+Or name the variant by a boolean or number key's text, so that `true: 5` selects a variant named
+`true`. That reads a key by its text where every other typed read takes it as resolved, and a
+quoted key, as in `'true': 5`, already names that variant.
+
+**Why.** The single-entry form is how Serde writes an externally tagged enum to most formats, so
+YAML converted from them reads. A key that isn't a string can't be a variant's name as written, and
+a second entry has no variant to belong to.
+
+**Consequences.** Compat reads these enums differently from a Serde reader built on libyaml, which
+refuses the mapping form. `docs/compatibility.md` says which forms read.
