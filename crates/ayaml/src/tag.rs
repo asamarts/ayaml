@@ -14,6 +14,13 @@ const CORE_PREFIX: &str = "tag:yaml.org,2002:";
 /// hashing use the full tag (`handle` followed by `suffix`), so
 /// `!<tag:yaml.org,2002:str>` equals `!!str`, and a tag written with a
 /// `%TAG` handle equals the same tag written verbatim.
+///
+/// The writers write a local tag as `!name` and a core tag as `!!name`. Any
+/// other tag is written verbatim, as `!<name>`, when that reads back as the
+/// same tag, and otherwise as a shorthand under a `%TAG` directive that the
+/// writer adds to the document, such as `%TAG !t0! tag:x:` for `tag:x:a b`.
+/// A tag that is neither local nor core and has fewer than two characters has
+/// no form, and writing it is an error.
 #[derive(Clone, Debug)]
 pub struct Tag {
     handle: String,

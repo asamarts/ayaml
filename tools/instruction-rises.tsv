@@ -1,2 +1,4 @@
 # Accepted rises in tools/check_instructions.py, one per line and tab-separated:
 # OPERATION	WORKLOAD	PERCENT	REASON
+emit	tiny	8	D82: before its first line, the writer looks through the value for tags that need a %TAG directive, about 75 instructions a document
+emit	flow-depth-64	21	D82: the look for tags that need a %TAG directive costs about 60 instructions a collection, and this input is 64 nested collections around one scalar

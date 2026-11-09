@@ -322,3 +322,48 @@ and the key can follow that rule then.
 **Consequences.** Compat reads these enums differently from a Serde reader built on libyaml, which
 refuses an untagged mapping. `! B: 5` now names `B`, where it was an error. `docs/compatibility.md`
 says which forms read.
+
+## D82 — A writer gives a tag that no verbatim tag can hold a `%TAG` directive of its own
+
+**Date:** 2026-11-09
+**Status:** Accepted
+
+**Decision.** The value writer, the Serde writer, and the event writer write each tag in the first
+of these forms that reads back as the same tag:
+- `!name` for a local tag and `!!name` for a core tag, unless the document redefines that handle,
+  with each character that isn't a URI character %-escaped;
+- a verbatim tag, `!<name>`, when the name is local or starts with a URI scheme, holds only URI
+  characters, and has a `%` only before two hex digits, since a verbatim tag is read as written;
+- otherwise a shorthand under a `%TAG` directive that the writer adds to the document, as
+  `%TAG !t0! tag:x:` and then `!t0!a%20b` for the tag `tag:x:a b`. The prefix and the suffix are
+  %-escaped, and read back unescaped. The tag is split where its handle's prefix ended, if it
+  keeps one, or else after its last `:`, `/`, or `#`, or else before its last character. A tag
+  that went through Serde keeps only its whole name, so the Serde writer may split it elsewhere
+  than the value writer, and both read back. The handles are `!t0!`, `!t1!`, and so on, past any
+  handle that the event writer's input declares.
+
+A tag that is neither local nor core and has fewer than two characters, as `Tag::new("x", "")`
+makes, has no form, since a shorthand needs a character on each side of its handle, and writing it
+is an error. The event writer holds each document's text until the document ends, so that its
+directives come first.
+
+**Alternatives.** Refuse to write such a tag. That is simple, but some documents ayaml reads could
+not be written back. Or decode %-escapes inside a verbatim tag when reading it, as libyaml does.
+That fixes `%20` without a directive, but YAML 1.2.2 reads a verbatim tag as written, it changes
+how existing documents read, and a prefix without a scheme would still need one of the other two.
+
+**Why.** Every tag that YAML can hold then reads back as itself, and AY-025 can refuse verbatim
+tags that aren't tag names, as YAML 1.2.2's example 6.25 does, without making any such tag
+unwritable. Until it does, the reader accepts a verbatim tag that isn't a tag name: `!<x>`, whose
+one-character name the writers refuse, and `!<foo>`, which they now write under a directive.
+Output changes only for tags whose old form didn't read back as the same tag, or wasn't a tag
+name.
+
+**Consequences.** A document that holds such a tag starts with the directives it needs, and a
+document after another one gets `...` before them, which YAML asks for. The lazy event writer,
+`to_writer_event_stream`, needs memory for one document's text, which `max_output_bytes` bounds,
+where it needed memory for the nesting depth alone. A tag with no form, which was written as an
+invalid verbatim tag, is an error. The value writer and the Serde writer look through a document's
+value for tags that need a directive before they write its first line. That look stops where the
+writer would, at the depth limit, and costs about 60 instructions a collection and 75 a document,
+which `tools/instruction-rises.tsv` accepts for the smallest and the deepest inputs that CI counts.
