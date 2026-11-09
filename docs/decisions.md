@@ -291,3 +291,34 @@ documents shares between them.
 
 **Consequences.** A long stream of documents that each hold many anchors may need a higher
 `max_anchors`.
+
+## D80 — An enum reads from one mapping form: a single entry whose key is a string
+
+**Date:** 2026-11-08
+**Status:** Accepted
+
+**Decision.** Besides a tag and a scalar that names the variant, a typed reader takes an enum from
+one mapping form: a mapping of one entry whose key is a string naming the variant, as in `B: 5` or
+`C: {x: 1}`. A key is a string when it reads as one: plain or quoted, explicit, under `!!str` or the
+non-specific `!`, or an alias of one. A whole mapping read through an alias is read as the mapping
+is. Every other mapping is an error, on every typed reader and in both modes: an empty one, one of
+more entries, and one whose key is null, a boolean, a number, a collection, or under a custom tag,
+as in `!x B: 5`. Every reader did this already, except that it refused a key under `!`, and
+`an_enum_reads_one_mapping_form` now holds it.
+
+**Alternatives.** Refuse every mapping form, as Serde readers built on libyaml do, so that only a
+tag or a scalar names a variant. That breaks files written in Serde's externally tagged form, which
+`serde_json` and most Serde formats write, and AY-021's criteria expect it, as in `Point: ~`. Or
+name the variant by a null, boolean, or number key's text, as a struct's field is named, so that
+`true: 5` selects a variant renamed `true`, as the scalar `true` does.
+
+**Why.** The single-entry form is how Serde writes an externally tagged enum to most formats, so
+YAML converted from them reads. A second entry has no variant to belong to. A key that resolves to
+something other than a string is refused, though a field, and a variant named by a bare scalar,
+are named by its text. Refusing it can be relaxed later without breaking a file that reads, while
+reading it could not be taken back. AY-021 settles how every reader names a variant from a scalar,
+and the key can follow that rule then.
+
+**Consequences.** Compat reads these enums differently from a Serde reader built on libyaml, which
+refuses an untagged mapping. `! B: 5` now names `B`, where it was an error. `docs/compatibility.md`
+says which forms read.

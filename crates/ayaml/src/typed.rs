@@ -347,9 +347,10 @@ impl<'de> Builder<'de, '_> {
                     let resolved = resolve_scalar(value.as_ref(), style, tag.as_ref())
                         .map_err(|error| error.with_span(span))?;
                     let mut node = node_from_value(resolved, &value, &raw, style, span);
-                    if tag.as_ref().is_some_and(|tag| {
-                        tag.is_core() || (tag.handle() == "!" && tag.suffix().is_empty())
-                    }) {
+                    if tag
+                        .as_ref()
+                        .is_some_and(|tag| tag.is_core() || tag.is_non_specific())
+                    {
                         forget_string_text(&mut node);
                     }
                     let size = estimate_size(&node, self.limits.node_cost_bytes);
@@ -970,7 +971,12 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
                     .with_span(span));
                 }
                 let variant_span = key.span;
-                let NodeKind::String(variant) = &resolve(key).kind else {
+                let key = match &resolve(key).kind {
+                    // The non-specific tag makes a scalar a string, so `! B: 5` names `B`.
+                    NodeKind::Tagged(tag, inner) if tag.is_non_specific() => resolve(inner),
+                    _ => resolve(key),
+                };
+                let NodeKind::String(variant) = &key.kind else {
                     return Err(crate::Error::new(
                         crate::ErrorKind::Serde,
                         "enum variant key must be a string",

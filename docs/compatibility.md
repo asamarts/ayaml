@@ -45,17 +45,29 @@ An invalid explicit core scalar is a resolution error.
 - Typed decoding follows the target Serde visitor: generated structs reject
   duplicate fields, while map-like visitors may keep the last value.
 - In typed decoding, a custom tag, one outside YAML's own `tag:yaml.org,2002:`
-  names, names an enum's variant, and a `Value` keeps it. So does a collection's
-  tag among those names that the core schema doesn't define, as in `!!C {x: 1}`,
-  while a scalar under one is a string. A tag names the variant by its whole name:
+  names, names an enum's variant, and a `Value` keeps it. So does any of those
+  names on a collection but a collection tag such as `!!map`, which is dropped, as
+  in `!!C {x: 1}` or `!!str {x: 1}`, while a scalar under one that the core schema
+  doesn't define for a scalar, as in `!!C 5` or `!!seq a`, is a string. A tag
+  names the variant by its whole name:
   a local tag by all of it after its first `!`, as `B` for `!B`, and any other tag
   by its full name in angle brackets, as `<tag:x:B>` for `!<tag:x:B>`, which `!e!B`
   under `%TAG !e! tag:x:` is too, or `<tag:yaml.org,2002:C>` for `!!C`.
   Serialization writes a variant that holds a value under the local tag of its
   name, as `!%3Ctag:x:B%3E` for one named `<tag:x:B>`, which selects it too, and
-  a unit variant as its name. A target that Serde
+  a unit variant as its name. An enum also reads from a scalar that names a
+  variant, and from a mapping of one entry whose key is a string naming it, as
+  in `B: 5` or `! B: 5`, in both modes. Any other mapping is an error, such as
+  one of two entries, or one whose key is `1`, `true`, or under a custom tag, as
+  in `!x B: 5` (D80). Readers differ on a null, boolean, or number scalar today:
+  `from_str`, `Deserializer::next_borrowed`, and compat name the variant by the
+  scalar's text, so `~` names one renamed `~`, while `from_value` and
+  `Deserializer::next` name it by the value, so `True` names one renamed `true`
+  and a null names none. A target that Serde
   reads by its type, such as a number, a sequence, a struct, or what an enum
-  variant holds, reads the node under it, so `!port 80` reads into a `u16`. An
+  variant holds, reads the node under a custom tag, so `!port 80` reads into a
+  `u16`, while a collection under a YAML tag that it keeps, as in `!!C {x: 1}`,
+  reaches the target as an enum. An
   `Option` reads a tagged node as `Some`, since what it holds may take the tag.
   A target that Serde reads through `deserialize_any`, such as an untagged or
   internally tagged enum or a flattened field, gets the tag as an enum. A tag

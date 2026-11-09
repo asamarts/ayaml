@@ -309,6 +309,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `pre-B` under `%TAG !e! !pre-`, and `!e!bang` selects `!bang` under `%TAG !e! !!`, as libyaml
   reads them. A `Value` holding the first, written through Serde as to JSON, names it `!pre-B`,
   where it named `!<!pre-B>`.
+- An enum's mapping of one entry whose key is under the non-specific tag `!`, as in `! B: 5`, now
+  names the variant `B` on every typed reader, as `B: 5` does, since `!` makes a scalar a string.
+  It was the error "enum variant key must be a string". A key under any other tag but `!!str`, as
+  in `!x B: 5`, is still that error (D80).
 
 ## [0.1.1] — 2026-11-04
 

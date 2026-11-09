@@ -91,6 +91,12 @@ impl Tag {
         }
     }
 
+    /// Whether this is the non-specific tag `!`, which makes a scalar a string (YAML 1.2.2
+    /// section 6.9.1). It is the same as a local tag with an empty name.
+    pub(crate) fn is_non_specific(&self) -> bool {
+        self.handle == "!" && self.suffix.is_empty()
+    }
+
     /// [`Tag::variant_name`], which moves the suffix of a tag written with `!` rather than
     /// copying it.
     pub(crate) fn into_variant_name(self) -> String {
