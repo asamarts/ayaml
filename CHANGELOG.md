@@ -313,6 +313,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   names the variant `B` on every typed reader, as `B: 5` does, since `!` makes a scalar a string.
   It was the error "enum variant key must be a string". A key under any other tag but `!!str`, as
   in `!x B: 5`, is still that error (D80).
+- A stream of several documents written with `with_explicit_start(true)` had `---` twice before
+  each later document, which read back as an empty document more. Each document now gets one.
+- A tag that a verbatim tag can't hold now reads back as itself from every writer. Under
+  `%TAG !e! tag:x:`, `!e!a%20b` names `tag:x:a b`, which was written `!<tag:x:a%20b>` and read
+  back as another tag, since a verbatim tag is read as written. A tag from a prefix without a
+  scheme, as `!e!bar` under `%TAG !e! foo`, was written `!<foobar>`, which YAML doesn't allow. The
+  writers now write such a tag as a shorthand under a `%TAG` directive that they add to the
+  document, as `%TAG !t0! tag:x:` and then `!t0!a%20b` (D82). Every other tag is written as before.
+  A tag that is neither local nor core and has fewer than two characters, as `Tag::new("x", "")`
+  makes, has no form in YAML, and writing it is now an error, where it was written as `!<x>`. The
+  event writer now holds each document until it ends, to put the directives first, so it holds as
+  much as the largest document, which `max_output_bytes` bounds.
+- A tagged key in a flow mapping is now written as an explicit `? ` key once it and its tag pass
+  128 characters, as a string key already was, and as libyaml's emitter does. Readers built on
+  libyaml refuse an implicit key past 1024 characters, in a flow mapping too.
+- Serializing a struct whose flattened fields repeat a key, or a map that gives a key twice, is
+  now an error, "duplicate entry with key ...". The value kept one of the entries and dropped the
+  other.
+- A key or value whose `Display` fails is now an error from `to_value`, `to_string` and the other
+  writers. A key's text was cut where the failure came, and `collect_str` panicked.
 
 ## [0.1.1] — 2026-11-04
 

@@ -70,6 +70,18 @@ impl Mapping {
         self.map.insert(key, value)
     }
 
+    /// Insert a key that the mapping doesn't hold yet. For a key that it holds, return the key's
+    /// text and leave the mapping as it was.
+    pub(crate) fn insert_new(&mut self, key: Value, value: Value) -> Result<(), String> {
+        match self.map.entry(key) {
+            indexmap::map::Entry::Vacant(entry) => {
+                entry.insert(value);
+                Ok(())
+            }
+            indexmap::map::Entry::Occupied(entry) => Err(crate::value::key_text(entry.key())),
+        }
+    }
+
     /// Get a mutable entry for `key`, inserting lazily through [`Entry`].
     pub fn entry(&mut self, key: Value) -> Entry<'_> {
         Entry {

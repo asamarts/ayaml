@@ -7,8 +7,11 @@
 //! the value where the scalar appears. Otherwise the scalar is written
 //! double-quoted, which can hold any value. A plain scalar only falls back to
 //! quotes when its text resolves to a string, so quoting never changes a
-//! value's type. The writer reads one event ahead, so the lazy entry point
-//! needs memory for the nesting depth, not for the document.
+//! value's type. The writer reads one event ahead, and holds each document's
+//! text until the document ends, so that the `%TAG` directives that some tags
+//! need (see [`Tag`]) come before it. The lazy entry point therefore needs
+//! memory for the nesting depth and for one document's text, which
+//! `max_output_bytes` bounds.
 
 use std::borrow::Borrow;
 use std::io::Write;
@@ -16,9 +19,9 @@ use std::marker::PhantomData;
 
 use crate::EventStream;
 use crate::emitter::{
-    MAX_IMPLICIT_KEY_CHARS, Output, RedefinedHandles, block_scalar_ok, can_fold,
+    MAX_IMPLICIT_KEY_CHARS, Output, RedefinedHandles, TagDirectives, block_scalar_ok, can_fold,
     emit_double_quoted, expand_folded, is_printable, needs_explicit_indent, plain_text_ok,
-    single_quoted_ok, tag_token_with,
+    single_quoted_ok,
 };
 use crate::error::{Error, ErrorKind};
 use crate::event::{Anchor, CollectionStyle, Event, ScalarStyle};
@@ -62,7 +65,9 @@ pub fn to_writer_events<W: Write>(writer: &mut W, events: &[Event<'_>]) -> Resul
 /// Write a lazy event stream as it is parsed.
 ///
 /// The output is the same as [`to_string_events`] would produce for the
-/// collected events; memory use is bounded by the nesting depth.
+/// collected events. It holds one document's text at a time, since the
+/// document's `%TAG` directives come first, and otherwise needs memory for the
+/// nesting depth.
 pub fn to_writer_event_stream<W: Write>(
     writer: &mut W,
     stream: EventStream<'_>,
@@ -101,6 +106,8 @@ where
         limits,
         depth: 0,
         handles: RedefinedHandles::default(),
+        directives: TagDirectives::default(),
+        declared: Vec::new(),
         marker: PhantomData,
     };
     emitter.run()?;
@@ -212,6 +219,10 @@ struct EventWriter<'o, 'w, 'l, 'e, W: Write, I, B> {
     limits: &'l Limits,
     depth: usize,
     handles: RedefinedHandles,
+    /// The `%TAG` directives added to the document being written (D82).
+    directives: TagDirectives,
+    /// The named handles that the next document's own `%TAG` directives declare.
+    declared: Vec<String>,
     marker: PhantomData<Event<'e>>,
 }
 
@@ -287,7 +298,8 @@ where
                         match value.split([' ', '\t']).find(|part| !part.is_empty()) {
                             Some("!") => self.handles.primary = true,
                             Some("!!") => self.handles.secondary = true,
-                            _ => {}
+                            Some(handle) => self.declared.push(handle.to_owned()),
+                            None => {}
                         }
                     }
                     directives = true;
@@ -299,12 +311,31 @@ where
                         }
                         Some(root) => is_empty_plain(root),
                     };
+                    // The directives a tag needs are known only once the document is written,
+                    // so it is held until then, and they go in before it.
+                    self.directives = TagDirectives::declaring(std::mem::take(&mut self.declared));
+                    let held = self.output.hold();
                     // An empty root needs `---`, or the document would vanish.
-                    if *explicit || documents > 0 || directives || empty_root {
+                    let marker = *explicit || documents > 0 || directives || empty_root;
+                    if marker {
                         self.push("---\n")?;
                     }
                     let root = self.node_event()?;
                     self.node(root, Pos::Root)?;
+                    if !self.directives.is_empty() {
+                        let mut header = String::new();
+                        // A directive can't follow a document that `...` didn't end. The
+                        // document's own directives wrote one already, and cleared `open_ended`.
+                        if open_ended {
+                            header.push_str("...\n");
+                        }
+                        header.push_str(&self.directives.lines());
+                        if !marker {
+                            header.push_str("---\n");
+                        }
+                        self.output.insert_held(held, &header)?;
+                    }
+                    self.output.release()?;
                     let end = self.next()?;
                     match end.as_ref().map(Borrow::borrow) {
                         Some(Event::DocumentEnd { explicit, .. }) => {
@@ -329,7 +360,11 @@ where
     }
 
     /// `&anchor !tag`, or an empty string.
-    fn properties(&self, anchor: Option<&Anchor<'_>>, tag: Option<&Tag>) -> Result<String, Error> {
+    fn properties(
+        &mut self,
+        anchor: Option<&Anchor<'_>>,
+        tag: Option<&Tag>,
+    ) -> Result<String, Error> {
         let mut output = String::new();
         if let Some(anchor) = anchor {
             if !anchor_name_ok(anchor.as_str()) {
@@ -345,7 +380,7 @@ where
             if !output.is_empty() {
                 output.push(' ');
             }
-            output.push_str(&tag_token_with(tag, self.handles));
+            output.push_str(&self.directives.token(tag, self.handles)?);
         }
         Ok(output)
     }
@@ -670,7 +705,7 @@ where
     /// The text of a block-mapping key written in the implicit form, or
     /// `None` when the key needs `? `: collections, empty keys, block
     /// scalars, and keys longer than [`MAX_IMPLICIT_KEY_CHARS`].
-    fn implicit_key(&self, key: &Event<'_>) -> Result<Option<String>, Error> {
+    fn implicit_key(&mut self, key: &Event<'_>) -> Result<Option<String>, Error> {
         match key {
             Event::Alias { anchor, .. } => {
                 if !anchor_name_ok(anchor.as_str()) {

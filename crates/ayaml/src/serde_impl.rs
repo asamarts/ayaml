@@ -67,7 +67,7 @@ enum MaybeTag {
 
 /// Whether `value` displays as a [`TagKey`]: exactly `!` and then a name, in
 /// two writes.
-fn check_for_tag<T: ?Sized + fmt::Display>(value: &T) -> MaybeTag {
+fn check_for_tag<T: ?Sized + fmt::Display>(value: &T) -> Result<MaybeTag, crate::Error> {
     enum State {
         Empty,
         Bang,
@@ -93,14 +93,36 @@ fn check_for_tag<T: ?Sized + fmt::Display>(value: &T) -> MaybeTag {
         }
     }
     let mut state = State::Empty;
-    // Writing to a `State` cannot fail; a failing `Display` leaves a prefix.
-    let _ = fmt::write(&mut state, format_args!("{value}"));
-    match state {
+    // Writing to a `State` can't fail, so an error is the `Display`'s own, which would leave only
+    // the text written before it.
+    fmt::write(&mut state, format_args!("{value}")).map_err(|_| display_error())?;
+    Ok(match state {
         State::Empty => MaybeTag::NotTag(String::new()),
         State::Bang => MaybeTag::NotTag("!".to_owned()),
         State::Tag(name) => MaybeTag::Tag(name),
         State::NotTag(string) => MaybeTag::NotTag(string),
-    }
+    })
+}
+
+/// A `Display` that `collect_str` wrote failed. Its text so far is only a prefix, which would be
+/// written as if it were the whole.
+fn display_error() -> crate::Error {
+    crate::Error::new(
+        crate::ErrorKind::Serde,
+        "a value's `Display` implementation returned an error",
+    )
+}
+
+/// Add an entry that a `Serialize` gave to the mapping it builds. A key given twice, as by two
+/// flattened structs with a field of the same name, is an error: the mapping would keep one value,
+/// and the output would silently lose the other.
+fn insert_entry(mapping: &mut Mapping, key: Value, value: Value) -> Result<(), crate::Error> {
+    mapping.insert_new(key, value).map_err(|key| {
+        crate::Error::new(
+            crate::ErrorKind::Serde,
+            format!("duplicate entry with key {key}"),
+        )
+    })
 }
 
 impl<'de> Deserialize<'de> for Mapping {
@@ -987,6 +1009,13 @@ struct ValueStructVariantSerializer {
 }
 
 impl Serializer for ValueSerializer {
+    /// Serde's own `collect_str` panics when the `Display` fails.
+    fn collect_str<T: ?Sized + fmt::Display>(self, value: &T) -> Result<Value, Self::Error> {
+        let mut text = String::new();
+        fmt::write(&mut text, format_args!("{value}")).map_err(|_| display_error())?;
+        Ok(Value::String(text))
+    }
+
     type Ok = Value;
     type Error = crate::Error;
     type SerializeSeq = ValueSeqSerializer;
@@ -1203,8 +1232,11 @@ impl SerializeMap for ValueMapSerializer {
     fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> Result<(), Self::Error> {
         if let Some(tagged) = self.tagged.take() {
             // A second entry: the first key only looked like a tag.
-            self.mapping
-                .insert(Value::String(TagKey(&tagged.tag).to_string()), tagged.value);
+            insert_entry(
+                &mut self.mapping,
+                Value::String(TagKey(&tagged.tag).to_string()),
+                tagged.value,
+            )?;
         }
         if self.check_tag && self.mapping.is_empty() {
             self.check_tag = false;
@@ -1227,8 +1259,7 @@ impl SerializeMap for ValueMapSerializer {
         let key = self.key.take().ok_or_else(|| {
             crate::Error::new(crate::ErrorKind::Serde, "map value serialized before key")
         })?;
-        self.mapping.insert(key, value.serialize(ValueSerializer)?);
-        Ok(())
+        insert_entry(&mut self.mapping, key, value.serialize(ValueSerializer)?)
     }
     fn end(self) -> Result<Self::Ok, Self::Error> {
         match self.tagged {
@@ -1328,7 +1359,7 @@ impl Serializer for KeySerializer {
         ValueSerializer.serialize_newtype_variant(name, index, variant, value)
     }
     fn collect_str<T: ?Sized + fmt::Display>(self, value: &T) -> Result<Value, Self::Error> {
-        Ok(match check_for_tag(value) {
+        Ok(match check_for_tag(value)? {
             MaybeTag::Tag(name) => Value::from(TaggedValue::new(
                 Tag::new(TAG_KEY_HANDLE, name),
                 Value::Null,
@@ -1346,11 +1377,11 @@ impl SerializeStruct for ValueStructSerializer {
         key: &'static str,
         value: &T,
     ) -> Result<(), Self::Error> {
-        self.mapping.insert(
+        insert_entry(
+            &mut self.mapping,
             Value::String(key.to_owned()),
             value.serialize(ValueSerializer)?,
-        );
-        Ok(())
+        )
     }
     fn end(self) -> Result<Self::Ok, Self::Error> {
         Ok(Value::Mapping(self.mapping))
@@ -1365,11 +1396,11 @@ impl SerializeStructVariant for ValueStructVariantSerializer {
         key: &'static str,
         value: &T,
     ) -> Result<(), Self::Error> {
-        self.mapping.insert(
+        insert_entry(
+            &mut self.mapping,
             Value::String(key.to_owned()),
             value.serialize(ValueSerializer)?,
-        );
-        Ok(())
+        )
     }
     fn end(self) -> Result<Self::Ok, Self::Error> {
         Ok(Value::from(TaggedValue::new(

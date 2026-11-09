@@ -371,9 +371,7 @@ fn emit_value_with<W: Write>(
 ) -> Result<(), Error> {
     limits.validate()?;
     validate_options(&options)?;
-    let mut emitter = ValueWriter::new(&mut output, limits, options, styles);
-    emitter.emit_root(value);
-    emitter.finish()?;
+    write_document(&mut output, value, limits, options, styles, false)?;
     output.finish()
 }
 
@@ -389,14 +387,36 @@ fn emit_documents_to<W: Write>(
     limits.validate()?;
     validate_options(&options)?;
     for (index, value) in values.iter().enumerate() {
-        if index > 0 {
-            output.push_str("---\n")?;
-        }
-        let mut emitter = ValueWriter::new(&mut output, limits, options, styles);
-        emitter.emit_root(value);
-        emitter.finish()?;
+        write_document(&mut output, value, limits, options, styles, index > 0)?;
     }
     output.finish()
+}
+
+/// Write one document of a stream, `later` when another came before it: the `%TAG` directives
+/// that its tags need, one `---` where it needs one, and its root.
+fn write_document<W: Write>(
+    output: &mut Output<'_, W>,
+    value: &Value,
+    limits: &Limits,
+    options: EmitterOptions,
+    styles: &EmitterStyles,
+    later: bool,
+) -> Result<(), Error> {
+    let mut directives = TagDirectives::default();
+    directives.scan(value)?;
+    if !directives.is_empty() {
+        // A directive can't follow a document that `...` didn't end.
+        if later && !options.explicit_end {
+            output.push_str("...\n")?;
+        }
+        output.push_str(&directives.lines())?;
+        output.push_str("---\n")?;
+    } else if later || options.explicit_start {
+        output.push_str("---\n")?;
+    }
+    let mut emitter = ValueWriter::new(output, limits, options, styles, directives);
+    emitter.emit_root(value);
+    emitter.finish()
 }
 
 /// Serialize a value as YAML to a writer.
@@ -606,6 +626,8 @@ pub(crate) struct Output<'a, W: Write> {
     buffer: Vec<u8>,
     written: usize,
     limits: Limits,
+    /// Keep everything in `buffer` until [`Output::release`].
+    holding: bool,
 }
 
 impl<'a, W: Write> Output<'a, W> {
@@ -617,6 +639,7 @@ impl<'a, W: Write> Output<'a, W> {
             buffer: Vec::new(),
             written: 0,
             limits: limits.clone(),
+            holding: false,
         }
     }
 
@@ -632,11 +655,36 @@ impl<'a, W: Write> Output<'a, W> {
         let total = self.written.saturating_add(value.len());
         self.limits.check_output_bytes(total).map_err(Error::from)?;
         self.written = total;
-        if !self.buffered {
+        if !self.buffered && !self.holding {
             return self.writer.write_all(value.as_bytes()).map_err(io_error);
         }
         self.buffer.extend_from_slice(value.as_bytes());
-        if self.buffer.len() >= OUTPUT_CHUNK {
+        if self.buffer.len() >= OUTPUT_CHUNK && !self.holding {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Hold what is written from here on, until [`Output::release`], so that
+    /// [`Output::insert_held`] can put text before it. Returns the place to insert at.
+    pub(crate) fn hold(&mut self) -> usize {
+        self.holding = true;
+        self.buffer.len()
+    }
+
+    /// Put `text` at `place`, which [`Output::hold`] returned, before what was written since.
+    pub(crate) fn insert_held(&mut self, place: usize, text: &str) -> Result<(), Error> {
+        let total = self.written.saturating_add(text.len());
+        self.limits.check_output_bytes(total).map_err(Error::from)?;
+        self.written = total;
+        self.buffer.splice(place..place, text.bytes());
+        Ok(())
+    }
+
+    /// Stop holding, and write what was held as any other output.
+    pub(crate) fn release(&mut self) -> Result<(), Error> {
+        self.holding = false;
+        if !self.buffered || self.buffer.len() >= OUTPUT_CHUNK {
             self.flush()?;
         }
         Ok(())
@@ -699,6 +747,8 @@ struct ValueWriter<'a, 'w, 's, W: Write> {
     in_flow: bool,
     /// Writing a mapping key: per-path styles do not apply.
     in_key: bool,
+    /// The document's `%TAG` directives, which [`TagDirectives::scan`] found.
+    directives: TagDirectives,
 }
 
 impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
@@ -707,6 +757,7 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
         limits: &Limits,
         options: EmitterOptions,
         styles: &'s EmitterStyles,
+        directives: TagDirectives,
     ) -> Self {
         Self {
             output,
@@ -718,6 +769,7 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
             error: None,
             in_flow: false,
             in_key: false,
+            directives,
         }
     }
 
@@ -814,18 +866,27 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
             self.fail(nested_tag_error());
             return false;
         }
-        self.push_str(&tag_token(&tagged.tag));
-        true
+        match self
+            .directives
+            .token(&tagged.tag, RedefinedHandles::default())
+        {
+            Ok(token) => {
+                self.push_str(&token);
+                true
+            }
+            Err(error) => {
+                self.fail(error);
+                false
+            }
+        }
     }
 
     fn finish(self) -> Result<(), Error> {
         self.error.map_or(Ok(()), Err)
     }
 
+    /// Write the root node, after any `---` and directives.
     fn emit_root(&mut self, value: &Value) {
-        if self.options.explicit_start {
-            self.push_str("---\n");
-        }
         if self.style().flow.unwrap_or(self.options.flow) {
             self.emit_flow(value);
             self.push('\n');
@@ -870,6 +931,40 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
                 text.chars().count() > MAX_IMPLICIT_KEY_CHARS
                     || (!plain_is_block_safe(text)
                         && double_quoted(text).chars().count() > MAX_IMPLICIT_KEY_CHARS)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a flow-mapping key is a scalar whose text, with any tag, runs past
+    /// [`MAX_IMPLICIT_KEY_CHARS`]. YAML puts no limit on an implicit key in a flow mapping, but
+    /// readers built on libyaml refuse one past 1024 characters there too.
+    fn flow_key_is_long(&mut self, key: &Value) -> bool {
+        match key {
+            Value::String(_) => self.needs_explicit_key(key),
+            Value::Tagged(tagged) => {
+                // A tag with no form fails when it is written.
+                let Ok(token) = self
+                    .directives
+                    .token(&tagged.tag, RedefinedHandles::default())
+                else {
+                    return false;
+                };
+                let text = match &tagged.value {
+                    Value::String(text) if plain_is_safe(text) => text.chars().count(),
+                    Value::String(text) => double_quoted(text).chars().count(),
+                    Value::Bool(value) => {
+                        if *value {
+                            4
+                        } else {
+                            5
+                        }
+                    }
+                    Value::Number(number) => number.to_string().len(),
+                    // A null writes no text, and a collection is explicit already.
+                    _ => 0,
+                };
+                token.chars().count() + 1 + text > MAX_IMPLICIT_KEY_CHARS
             }
             _ => false,
         }
@@ -1178,8 +1273,7 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
                     }
                     // libyaml writes non-empty collection keys and long
                     // keys in the explicit form; so do we.
-                    let explicit = Self::needs_block_value(key)
-                        || (matches!(key, Value::String(_)) && self.needs_explicit_key(key));
+                    let explicit = Self::needs_block_value(key) || self.flow_key_is_long(key);
                     if explicit {
                         self.push_str("? ");
                     }
@@ -1242,8 +1336,6 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
     }
 }
 
-const CORE_PREFIX: &str = "tag:yaml.org,2002:";
-
 /// Which of the default tag handles a document redefines with `%TAG`.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct RedefinedHandles {
@@ -1253,74 +1345,286 @@ pub(crate) struct RedefinedHandles {
     pub(crate) secondary: bool,
 }
 
-/// Write a tag with the default handles.
-pub(crate) fn tag_token(tag: &crate::tag::Tag) -> String {
-    tag_token_with(tag, RedefinedHandles::default())
+/// How a tag is written (D82).
+#[derive(Debug)]
+pub(crate) enum TagForm {
+    /// As it stands: `!`, a `!` or `!!` shorthand, or a verbatim tag.
+    Token(String),
+    /// As a shorthand under a `%TAG` directive that the writer adds to the document: the prefix
+    /// that the directive's handle stands for, and the suffix after the handle.
+    Directive { prefix: String, suffix: String },
 }
 
-/// Write a tag. Local and core tags use the `!` and `!!` shorthands unless the
-/// document redefines that handle; every other tag is written verbatim
-/// (`!<...>`). Characters that a tag cannot hold raw are %-escaped, so a
-/// suffix such as `my variant` is written `!my%20variant`.
-pub(crate) fn tag_token_with(tag: &crate::tag::Tag, redefined: RedefinedHandles) -> String {
-    let suffix = tag.suffix();
-    let mut output = String::with_capacity(tag.handle().len() + suffix.len() + 3);
-    match tag.handle() {
+impl TagForm {
+    /// The form of `tag` in a document that redefines the handles in `redefined`.
+    ///
+    /// A local tag uses `!` and a core tag `!!`, unless the document redefines that handle. Any
+    /// other tag is written verbatim (`!<...>`) when that reads back as the same name: a verbatim
+    /// tag is read as written, so it can hold only URI characters, and only a `%` that starts an
+    /// escape, and only a local name or one with a URI scheme is a tag name there. Every other tag
+    /// gets a `%TAG` directive, whose prefix and shorthand suffix are read with their escapes
+    /// decoded, so they can hold any text. A tag of fewer than two characters that is neither local
+    /// nor written verbatim has no form: both parts of a directive's shorthand hold a character.
+    pub(crate) fn of(tag: &crate::tag::Tag, redefined: RedefinedHandles) -> Result<Self, Error> {
+        let (handle, suffix) = (tag.handle(), tag.suffix());
         // The non-specific tag `!` is not a shorthand.
-        "!" if suffix.is_empty() => output.push('!'),
-        "!" if !redefined.primary => {
+        if tag.is_non_specific() {
+            return Ok(Self::Token("!".to_owned()));
+        }
+        if let Some(rest) = handle.strip_prefix('!')
+            && !redefined.primary
+        {
+            let mut output = String::with_capacity(handle.len() + suffix.len());
             output.push('!');
-            escape_tag(suffix, false, &mut output);
+            escape_tag(rest, &mut output);
+            escape_tag(suffix, &mut output);
+            return Ok(Self::Token(output));
         }
-        CORE_PREFIX if !redefined.secondary && !suffix.is_empty() => {
+        if tag.is_core() && !suffix.is_empty() && !redefined.secondary {
+            let mut output = String::with_capacity(suffix.len() + 2);
             output.push_str("!!");
-            escape_tag(suffix, false, &mut output);
+            escape_tag(suffix, &mut output);
+            return Ok(Self::Token(output));
         }
-        handle => {
-            output.push_str("!<");
-            escape_tag(handle, true, &mut output);
-            escape_tag(suffix, true, &mut output);
-            output.push('>');
+        if verbatim_reads_back(handle, suffix) {
+            return Ok(Self::Token(format!("!<{handle}{suffix}>")));
+        }
+        if !handle.is_empty() && !suffix.is_empty() {
+            return Ok(Self::Directive {
+                prefix: handle.to_owned(),
+                suffix: suffix.to_owned(),
+            });
+        }
+        // A name kept whole: split it after its last `:`, `/` or `#`, or else before its last
+        // character, so that both parts hold one.
+        let name = if handle.is_empty() { suffix } else { handle };
+        match name.char_indices().next_back() {
+            Some((last, _)) if last > 0 => {
+                let cut = name[..last]
+                    .rfind([':', '/', '#'])
+                    .map_or(last, |index| index + 1);
+                Ok(Self::Directive {
+                    prefix: name[..cut].to_owned(),
+                    suffix: name[cut..].to_owned(),
+                })
+            }
+            _ => Err(Error::new(
+                ErrorKind::Emitter,
+                format!("YAML has no way to write the tag {name:?}"),
+            )),
         }
     }
-    output
 }
 
-/// %-escape `text` for a tag. A shorthand suffix may hold `ns-tag-char`
-/// characters raw (URI characters other than `!` and flow indicators), and
-/// the parser decodes its escapes, so a literal `%` is written `%25`. A
-/// verbatim tag may hold any URI character and is read back as written, so
-/// `%` stays raw there.
-fn escape_tag(text: &str, verbatim: bool, output: &mut String) {
-    for ch in text.chars() {
-        let raw = ch.is_ascii_alphanumeric()
-            || matches!(
-                ch,
-                '-' | '#'
-                    | ';'
-                    | '/'
-                    | '?'
-                    | ':'
-                    | '@'
-                    | '&'
-                    | '='
-                    | '+'
-                    | '$'
-                    | '_'
-                    | '.'
-                    | '~'
-                    | '*'
-                    | '\''
-                    | '('
-                    | ')'
-            )
-            || (verbatim && matches!(ch, '!' | ',' | '[' | ']' | '%'));
-        if raw {
-            output.push(ch);
+/// Whether `tag` takes a `%TAG` directive, or has no form, in a document that redefines no handle:
+/// [`TagForm::of`] without building the token.
+fn needs_directive(tag: &crate::tag::Tag) -> bool {
+    let (handle, suffix) = (tag.handle(), tag.suffix());
+    !(handle.starts_with('!')
+        || (tag.is_core() && !suffix.is_empty())
+        || verbatim_reads_back(handle, suffix))
+}
+
+/// Whether a verbatim tag holding `handle` and then `suffix` reads back as that name: a local name
+/// or one with a URI scheme, of URI characters and escapes alone (YAML 1.2.2 section 6.9.1).
+fn verbatim_reads_back(handle: &str, suffix: &str) -> bool {
+    let mut bytes = handle.bytes().chain(suffix.bytes());
+    let mut first = true;
+    let mut scheme = true;
+    let mut has_scheme = false;
+    let mut local = false;
+    while let Some(byte) = bytes.next() {
+        if first {
+            first = false;
+            local = byte == b'!';
+            scheme = byte.is_ascii_alphabetic();
+        } else if scheme && !has_scheme {
+            if byte == b':' {
+                has_scheme = true;
+            } else if !(byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')) {
+                scheme = false;
+            }
+        }
+        if byte == b'%' {
+            for _ in 0..2 {
+                if !bytes.next().is_some_and(|digit| digit.is_ascii_hexdigit()) {
+                    return false;
+                }
+            }
+        } else if !(is_uri_byte(byte) || matches!(byte, b'!' | b',' | b'[' | b']')) {
+            return false;
+        }
+    }
+    local || has_scheme
+}
+
+/// A URI character that a tag shorthand may hold raw (`ns-tag-char` without escapes): not `!`, a
+/// flow indicator, or `%`.
+fn is_uri_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'-' | b'#'
+                | b';'
+                | b'/'
+                | b'?'
+                | b':'
+                | b'@'
+                | b'&'
+                | b'='
+                | b'+'
+                | b'$'
+                | b'_'
+                | b'.'
+                | b'~'
+                | b'*'
+                | b'\''
+                | b'('
+                | b')'
+        )
+}
+
+/// %-escape `text` for a tag shorthand's suffix or a `%TAG` prefix, whose escapes the parser
+/// decodes: every byte but [`is_uri_byte`]'s, so a literal `%` is written `%25`.
+fn escape_tag(text: &str, output: &mut String) {
+    for byte in text.bytes() {
+        if is_uri_byte(byte) {
+            output.push(char::from(byte));
         } else {
-            let mut buffer = [0_u8; 4];
-            for byte in ch.encode_utf8(&mut buffer).bytes() {
-                let _ = write!(output, "%{byte:02X}");
+            let _ = write!(output, "%{byte:02X}");
+        }
+    }
+}
+
+/// The `%TAG` directives that the writer adds to one document, for the tags whose [`TagForm`] is a
+/// directive. Each handle is `!tN!`, numbered in order of first use, skipping any handle that the
+/// document declares itself.
+#[derive(Debug, Default)]
+pub(crate) struct TagDirectives {
+    /// Each added handle and the prefix it stands for.
+    added: Vec<(String, String)>,
+    /// The index in `added` of each prefix.
+    by_prefix: std::collections::HashMap<String, usize>,
+    /// Named handles that the document's own directives declare.
+    declared: Vec<String>,
+}
+
+impl TagDirectives {
+    /// No directives yet, in a document whose own directives declare `declared`.
+    pub(crate) fn declaring(declared: Vec<String>) -> Self {
+        Self {
+            declared,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.added.is_empty()
+    }
+
+    /// The handle that stands for `prefix`, added if there is none yet.
+    pub(crate) fn handle_for(&mut self, prefix: &str) -> &str {
+        let index = match self.by_prefix.get(prefix) {
+            Some(&index) => index,
+            None => {
+                let mut number = self.added.len();
+                let handle = loop {
+                    let handle = format!("!t{number}!");
+                    if !self.declared.contains(&handle) {
+                        break handle;
+                    }
+                    number += 1;
+                };
+                self.added.push((handle, prefix.to_owned()));
+                self.by_prefix
+                    .insert(prefix.to_owned(), self.added.len() - 1);
+                self.added.len() - 1
+            }
+        };
+        &self.added[index].0
+    }
+
+    /// Write `tag` in its form, adding a directive for it if it needs one.
+    pub(crate) fn token(
+        &mut self,
+        tag: &crate::tag::Tag,
+        redefined: RedefinedHandles,
+    ) -> Result<String, Error> {
+        Ok(match TagForm::of(tag, redefined)? {
+            TagForm::Token(token) => token,
+            TagForm::Directive { prefix, suffix } => {
+                let mut token = self.handle_for(&prefix).to_owned();
+                escape_tag(&suffix, &mut token);
+                token
+            }
+        })
+    }
+
+    /// The directives' lines.
+    pub(crate) fn lines(&self) -> String {
+        let mut output = String::new();
+        for (handle, prefix) in &self.added {
+            output.push_str("%TAG ");
+            output.push_str(handle);
+            output.push(' ');
+            // A local prefix keeps its `!`; a global one may start with any other character,
+            // escaped.
+            match prefix.strip_prefix('!') {
+                Some(rest) => {
+                    output.push('!');
+                    escape_tag(rest, &mut output);
+                }
+                None => escape_tag(prefix, &mut output),
+            }
+            output.push('\n');
+        }
+        output
+    }
+
+    /// Add a directive for each tag in `value` that needs one, in the order the writer meets them.
+    /// The walk keeps its place on the heap, so a deep value costs no native stack.
+    fn scan(&mut self, value: &Value) -> Result<(), Error> {
+        enum Place<'v> {
+            Sequence(&'v [Value], usize),
+            Mapping(&'v crate::mapping::Mapping, usize),
+        }
+        let mut places = Vec::new();
+        let mut next = Some(value);
+        loop {
+            while let Some(value) = next.take() {
+                match value {
+                    Value::Tagged(tagged) => {
+                        if needs_directive(&tagged.tag) {
+                            self.token(&tagged.tag, RedefinedHandles::default())?;
+                        }
+                        next = Some(&tagged.value);
+                    }
+                    Value::Sequence(items) => places.push(Place::Sequence(items, 0)),
+                    Value::Mapping(mapping) => places.push(Place::Mapping(mapping, 0)),
+                    _ => {}
+                }
+            }
+            match places.last_mut() {
+                None => return Ok(()),
+                Some(Place::Sequence(items, index)) => match items.get(*index) {
+                    Some(item) => {
+                        *index += 1;
+                        next = Some(item);
+                    }
+                    None => {
+                        places.pop();
+                    }
+                },
+                // Even places are keys and odd ones values.
+                Some(Place::Mapping(mapping, index)) => match mapping.get_index(*index / 2) {
+                    Some((key, value)) => {
+                        next = Some(if *index % 2 == 0 { key } else { value });
+                        *index += 1;
+                    }
+                    None => {
+                        places.pop();
+                    }
+                },
             }
         }
     }
@@ -1566,6 +1870,50 @@ mod tests {
                 .expect("parse sequence"),
             crate::Value::Sequence(vec![1_u64.into(), 2_u64.into(), 3_u64.into()])
         );
+    }
+}
+
+#[cfg(test)]
+mod tag_form_tests {
+    use super::{RedefinedHandles, TagForm, needs_directive};
+    use crate::tag::Tag;
+
+    /// `needs_directive` is `TagForm::of` without the token, so the two agree on every tag.
+    #[test]
+    fn needs_directive_agrees_with_the_tag_form() {
+        let tags = [
+            Tag::local("x"),
+            Tag::local("a b"),
+            Tag::local(""),
+            Tag::new("!", "x"),
+            Tag::new("!e-", "x"),
+            Tag::new("tag:yaml.org,2002:", "str"),
+            Tag::new("tag:yaml.org,2002:", ""),
+            Tag::new("tag:yaml.org,2002:", "a b"),
+            Tag::new("tag:x:", "y"),
+            Tag::new("tag:x:", "50%25"),
+            Tag::new("tag:x:", "50%"),
+            Tag::new("tag:x:", "50%2"),
+            Tag::new("tag:x:", "50%zz"),
+            Tag::new("tag:x:", "a b"),
+            Tag::new("tag:x:", "é"),
+            Tag::new("tag:x:", "[a],b"),
+            Tag::new("", "foobar"),
+            Tag::new("", "tag:x:y"),
+            Tag::new("", "1abc:x"),
+            Tag::new("", "a+b-c.d:x"),
+            Tag::new("", "a_b:x"),
+            Tag::new("foo", "bar"),
+            Tag::new("x", "y"),
+            Tag::new("x", ""),
+            Tag::new("", "x"),
+            Tag::new("", ""),
+        ];
+        for tag in tags {
+            let form = TagForm::of(&tag, RedefinedHandles::default());
+            let directive = !matches!(form, Ok(TagForm::Token(_)));
+            assert_eq!(needs_directive(&tag), directive, "{tag:?}: {form:?}");
+        }
     }
 }
 
