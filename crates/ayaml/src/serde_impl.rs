@@ -818,7 +818,16 @@ fn enum_parts(value: Value) -> Result<(String, Value), crate::Error> {
                     "enum mapping must contain one variant",
                 ));
             }
-            let Value::String(variant) = key else {
+            let variant = match key {
+                Value::String(variant) => Some(variant),
+                // The non-specific tag makes a scalar a string, so `! B: 5` names `B`.
+                Value::Tagged(tagged) if tagged.tag.is_non_specific() => match tagged.value {
+                    Value::String(variant) => Some(variant),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some(variant) = variant else {
                 return Err(crate::Error::new(
                     crate::ErrorKind::Serde,
                     "enum variant key must be a string",

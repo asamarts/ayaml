@@ -3359,22 +3359,32 @@ fn a_tag_names_an_enum_s_variant_by_its_whole_name() {
     }
 }
 
-/// Every typed reader, the streamed one and compat's included.
+/// The typed readers, through both of their paths: from a document's nodes, as `from_str`,
+/// `Deserializer::next_borrowed`, and compat read, and from a `Value`, as `from_value` and
+/// `Deserializer::next` read. The seeded readers take these paths too.
 fn every_typed_reader<T>(input: &str) -> Vec<(&'static str, Result<T, String>)>
 where
     T: for<'de> serde::Deserialize<'de>,
 {
+    fn first<T>(document: Result<Option<T>, ayaml::Error>) -> Result<T, String> {
+        document
+            .map_err(|error| error.to_string())
+            .and_then(|document| document.ok_or_else(|| "no document".to_owned()))
+    }
     let [owned, borrowed, from_value] = every_path::<T>(input);
-    let streamed = ayaml::Deserializer::from_str(input)
-        .and_then(|mut documents| documents.next::<T>())
-        .map_err(|error| error.to_string())
-        .and_then(|document| document.ok_or_else(|| "no document".to_owned()));
+    let streamed =
+        first(ayaml::Deserializer::from_str(input).and_then(|mut documents| documents.next::<T>()));
+    let streamed_nodes = first(
+        ayaml::Deserializer::from_str(input)
+            .and_then(|mut documents| documents.next_borrowed::<T>()),
+    );
     #[allow(unused_mut)]
     let mut readers = vec![
         ("from_str", owned),
         ("from_str_borrowed", borrowed),
         ("from_value", from_value),
-        ("Deserializer", streamed),
+        ("Deserializer::next", streamed),
+        ("Deserializer::next_borrowed", streamed_nodes),
     ];
     #[cfg(feature = "libyaml-compat")]
     readers.push((
@@ -3387,7 +3397,8 @@ where
 /// An enum reads from a mapping of one entry whose key is a string naming the variant, as in
 /// `B: 5`, on every typed reader in both modes, and from no other mapping (D80): not an empty
 /// one, nor one of more entries, nor one whose key is null, a boolean, a number, a collection, or
-/// under a custom tag. A quoted key, a `!!str` key, and an alias of a string name the variant.
+/// under a custom tag. A quoted key, an explicit one, one under `!!str` or the non-specific `!`,
+/// and an alias of a string name the variant, and so does the whole mapping through an alias.
 #[test]
 fn an_enum_reads_one_mapping_form() {
     #[derive(Debug, PartialEq, serde::Deserialize)]
@@ -3409,6 +3420,11 @@ fn an_enum_reads_one_mapping_form() {
         ("\"B\": 5\n", Pick::B(5)),
         ("!!str B: 5\n", Pick::B(5)),
         ("!!map {B: 5}\n", Pick::B(5)),
+        ("! B: 5\n", Pick::B(5)),
+        ("{! B : 5}\n", Pick::B(5)),
+        ("? B\n: 5\n", Pick::B(5)),
+        ("&a B: 5\n", Pick::B(5)),
+        ("{\"B\":5}\n", Pick::B(5)),
         ("C: {x: 1}\n", Pick::C { x: 1 }),
         ("C:\n  x: 1\n", Pick::C { x: 1 }),
         ("'true': 5\n", Pick::Yes(5)),
@@ -3430,6 +3446,10 @@ fn an_enum_reads_one_mapping_form() {
         ("[B]: 5\n", "enum variant key must be a string"),
         ("? {B: 1}\n: 5\n", "enum variant key must be a string"),
         ("!x B: 5\n", "enum variant key must be a string"),
+        ("! [B]: 5\n", "enum variant key must be a string"),
+        ("!!int 1: 5\n", "enum variant key must be a string"),
+        // A merge key is a key like any other until `apply_merge_keys` merges it.
+        ("<<: {B: 5}\n", "unknown variant `<<`"),
     ] {
         for (reader, result) in every_typed_reader::<Pick>(input) {
             assert!(
@@ -3438,20 +3458,79 @@ fn an_enum_reads_one_mapping_form() {
             );
         }
     }
-    // An alias of a string names the variant as the string does.
+    // A duplicate key is an error before the enum sees it, except in compat, which keeps both.
+    for (reader, result) in every_typed_reader::<Pick>("{B: 5, B: 6}\n") {
+        let problem = if reader == "compat" {
+            "enum mapping must contain one variant"
+        } else {
+            "duplicate"
+        };
+        assert!(
+            result.as_ref().is_err_and(|error| error.contains(problem)),
+            "{reader}: {result:?}"
+        );
+    }
+    // An alias names the variant as the string or the mapping it stands for does, and the forms
+    // read the same inside a struct, a sequence, or an `Option`.
     #[derive(Debug, PartialEq, serde::Deserialize)]
     struct Holder {
         name: String,
         pick: Pick,
     }
-    for (reader, result) in every_typed_reader::<Holder>("name: &k B\npick: {*k : 5}\n") {
+    for (input, pick) in [
+        ("name: &k B\npick: {*k : 5}\n", Ok(Pick::B(5))),
+        ("name: B\npick: &m {B: 5}\n", Ok(Pick::B(5))),
+        (
+            "name: B\npick: {B: 5, D: ~}\n",
+            Err("enum mapping must contain one variant"),
+        ),
+        (
+            "name: B\npick: {true: 5}\n",
+            Err("enum variant key must be a string"),
+        ),
+    ] {
+        for (reader, result) in every_typed_reader::<Holder>(input) {
+            match pick {
+                Ok(ref pick) => assert_eq!(
+                    result.as_ref().map(|holder| &holder.pick),
+                    Ok(pick),
+                    "{input:?} on {reader}"
+                ),
+                Err(problem) => assert!(
+                    result.as_ref().is_err_and(|error| error.contains(problem)),
+                    "{input:?} on {reader}: {result:?}"
+                ),
+            }
+        }
+    }
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct Shared {
+        first: Pick,
+        second: Pick,
+    }
+    for (reader, result) in every_typed_reader::<Shared>("first: &m {C: {x: 1}}\nsecond: *m\n") {
         assert_eq!(
             result,
-            Ok(Holder {
-                name: "B".to_owned(),
-                pick: Pick::B(5)
+            Ok(Shared {
+                first: Pick::C { x: 1 },
+                second: Pick::C { x: 1 }
             }),
             "{reader}"
+        );
+    }
+    for (reader, result) in every_typed_reader::<Vec<Option<Pick>>>("- B: 5\n- ~\n- {D: ~}\n") {
+        assert_eq!(
+            result,
+            Ok(vec![Some(Pick::B(5)), None, Some(Pick::D)]),
+            "{reader}"
+        );
+    }
+    for (reader, result) in every_typed_reader::<Vec<Pick>>("- {B: 5, D: ~}\n") {
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.contains("enum mapping must contain one variant")),
+            "{reader}: {result:?}"
         );
     }
 }

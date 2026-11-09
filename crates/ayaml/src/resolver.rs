@@ -22,7 +22,7 @@ pub(crate) fn resolve_scalar(
         // A custom tag keeps its payload resolved as if untagged:
         // `!Flag true` holds a bool. The non-specific
         // tag `!` makes a scalar a string (YAML 1.2.2 section 6.9.1).
-        let payload = if tag.handle() == "!" && tag.suffix().is_empty() {
+        let payload = if tag.is_non_specific() {
             Value::String(text.to_owned())
         } else {
             resolve_scalar(text, style, None)?
