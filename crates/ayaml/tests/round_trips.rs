@@ -681,3 +681,85 @@ fn a_writer_gets_its_output_in_chunks_not_a_write_for_each_token() {
         ayaml::to_string_events(&events).unwrap()
     );
 }
+
+/// `value` inside `depth` one-item sequences, or one-entry mappings.
+fn nested(mut value: Value, depth: usize, mappings: bool) -> Value {
+    for _ in 0..depth {
+        value = if mappings {
+            let mut mapping = ayaml::Mapping::new();
+            mapping.insert(Value::from("k"), value);
+            Value::Mapping(mapping)
+        } else {
+            Value::Sequence(vec![value])
+        };
+    }
+    value
+}
+
+/// Take a value of one-item collections and tags on tags apart a level at a time, which dropping
+/// it whole would do on the stack.
+fn take_apart(mut value: Value) {
+    loop {
+        value = match value {
+            Value::Sequence(mut items) => match items.pop() {
+                Some(item) => item,
+                None => return,
+            },
+            Value::Mapping(mapping) => match mapping.into_iter().next() {
+                Some((_, item)) => item,
+                None => return,
+            },
+            Value::Tagged(tagged) => tagged.value,
+            _ => return,
+        };
+    }
+}
+
+/// The writer looks for the tags that need a `%TAG` directive before it writes, and that look stops
+/// where the writer does: at a collection past the depth limit, and at a tag on a tagged value. So a
+/// value far deeper than the limit, or a long chain of tags on tags, is an error on a small stack,
+/// and a tag at the limit still gets its directive.
+#[test]
+fn the_look_for_directives_stops_where_the_writer_does() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            let limits = Limits::default().with_max_depth(8);
+            let tagged = || Value::from(TaggedValue::new(Tag::new("tag:x:", "a b"), "v".into()));
+            for (mappings, written) in [
+                (false, "- - - - - - - - !t0!a%20b v\n"),
+                (
+                    true,
+                    "k:\n  k:\n    k:\n      k:\n        k:\n          k:\n            k:\n              \
+                     k: !t0!a%20b v\n",
+                ),
+            ] {
+                let at_the_limit = nested(tagged(), 8, mappings);
+                assert_eq!(
+                    ayaml::to_string_value_with_limits(&at_the_limit, &limits).unwrap(),
+                    format!("%TAG !t0! tag:x:\n---\n{written}")
+                );
+                reads_back(&at_the_limit);
+
+                let deep = nested(tagged(), 100_000, mappings);
+                let error = ayaml::to_string_value_with_limits(&deep, &limits).unwrap_err();
+                assert_eq!(error.kind(), ayaml::ErrorKind::Limit, "{error}");
+                let mut bytes = Vec::new();
+                let error =
+                    ayaml::to_writer_value_with_limits(&mut bytes, &deep, &limits).unwrap_err();
+                assert_eq!(error.kind(), ayaml::ErrorKind::Limit, "{error}");
+                take_apart(deep);
+            }
+
+            let mut chain = tagged();
+            for _ in 0..100_000 {
+                chain = Value::from(TaggedValue::new(Tag::new("tag:x:", "a b"), chain));
+            }
+            let error = ayaml::to_string_value(&chain).unwrap_err();
+            assert_eq!(error.kind(), ayaml::ErrorKind::Emitter, "{error}");
+            take_apart(chain);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

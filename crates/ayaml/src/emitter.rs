@@ -394,6 +394,7 @@ fn emit_documents_to<W: Write>(
 
 /// Write one document of a stream, `later` when another came before it: the `%TAG` directives
 /// that its tags need, one `---` where it needs one, and its root.
+#[inline]
 fn write_document<W: Write>(
     output: &mut Output<'_, W>,
     value: &Value,
@@ -403,7 +404,7 @@ fn write_document<W: Write>(
     later: bool,
 ) -> Result<(), Error> {
     let mut directives = TagDirectives::default();
-    directives.scan(value)?;
+    directives.scan(value, limits.max_depth)?;
     if !directives.is_empty() {
         // A directive can't follow a document that `...` didn't end.
         if later && !options.explicit_end {
@@ -622,12 +623,15 @@ const OUTPUT_CHUNK: usize = 8 * 1024;
 /// writes into an in-memory buffer go straight through.
 pub(crate) struct Output<'a, W: Write> {
     writer: &'a mut W,
+    /// Collect writes in `buffer`: for a writer that isn't in memory, and while holding.
     buffered: bool,
+    /// The writer is an in-memory buffer, which needs no chunking.
+    direct: bool,
+    /// Write `buffer` out once it holds this many bytes: [`OUTPUT_CHUNK`], or never while holding.
+    flush_at: usize,
     buffer: Vec<u8>,
     written: usize,
     limits: Limits,
-    /// Keep everything in `buffer` until [`Output::release`].
-    holding: bool,
 }
 
 impl<'a, W: Write> Output<'a, W> {
@@ -636,10 +640,11 @@ impl<'a, W: Write> Output<'a, W> {
         Self {
             writer,
             buffered: true,
+            direct: false,
+            flush_at: OUTPUT_CHUNK,
             buffer: Vec::new(),
             written: 0,
             limits: limits.clone(),
-            holding: false,
         }
     }
 
@@ -647,6 +652,7 @@ impl<'a, W: Write> Output<'a, W> {
     pub(crate) fn direct(writer: &'a mut W, limits: &Limits) -> Self {
         Self {
             buffered: false,
+            direct: true,
             ..Self::new(writer, limits)
         }
     }
@@ -655,11 +661,11 @@ impl<'a, W: Write> Output<'a, W> {
         let total = self.written.saturating_add(value.len());
         self.limits.check_output_bytes(total).map_err(Error::from)?;
         self.written = total;
-        if !self.buffered && !self.holding {
+        if !self.buffered {
             return self.writer.write_all(value.as_bytes()).map_err(io_error);
         }
         self.buffer.extend_from_slice(value.as_bytes());
-        if self.buffer.len() >= OUTPUT_CHUNK && !self.holding {
+        if self.buffer.len() >= self.flush_at {
             self.flush()?;
         }
         Ok(())
@@ -668,7 +674,8 @@ impl<'a, W: Write> Output<'a, W> {
     /// Hold what is written from here on, until [`Output::release`], so that
     /// [`Output::insert_held`] can put text before it. Returns the place to insert at.
     pub(crate) fn hold(&mut self) -> usize {
-        self.holding = true;
+        self.buffered = true;
+        self.flush_at = usize::MAX;
         self.buffer.len()
     }
 
@@ -683,8 +690,9 @@ impl<'a, W: Write> Output<'a, W> {
 
     /// Stop holding, and write what was held as any other output.
     pub(crate) fn release(&mut self) -> Result<(), Error> {
-        self.holding = false;
-        if !self.buffered || self.buffer.len() >= OUTPUT_CHUNK {
+        self.buffered = !self.direct;
+        self.flush_at = OUTPUT_CHUNK;
+        if self.direct || self.buffer.len() >= OUTPUT_CHUNK {
             self.flush()?;
         }
         Ok(())
@@ -881,8 +889,10 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
         }
     }
 
-    fn finish(self) -> Result<(), Error> {
-        self.error.map_or(Ok(()), Err)
+    /// The first error, if writing failed. It borrows the writer rather than take it, which would
+    /// copy it.
+    fn finish(&mut self) -> Result<(), Error> {
+        self.error.take().map_or(Ok(()), Err)
     }
 
     /// Write the root node, after any `---` and directives.
@@ -1501,12 +1511,18 @@ fn escape_tag(text: &str, output: &mut String) {
 /// document declares itself.
 #[derive(Debug, Default)]
 pub(crate) struct TagDirectives {
-    /// Each added handle and the prefix it stands for.
-    added: Vec<(String, String)>,
-    /// The index in `added` of each prefix.
-    by_prefix: std::collections::HashMap<String, usize>,
+    /// The handles added so far, kept apart so that a document that adds none allocates nothing.
+    added: Option<Box<AddedHandles>>,
     /// Named handles that the document's own directives declare.
     declared: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct AddedHandles {
+    /// Each added handle and the prefix it stands for, in order.
+    handles: Vec<(String, String)>,
+    /// The index in `handles` of each prefix.
+    by_prefix: std::collections::BTreeMap<String, usize>,
 }
 
 impl TagDirectives {
@@ -1519,15 +1535,16 @@ impl TagDirectives {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.added.is_empty()
+        self.added.is_none()
     }
 
     /// The handle that stands for `prefix`, added if there is none yet.
     pub(crate) fn handle_for(&mut self, prefix: &str) -> &str {
-        let index = match self.by_prefix.get(prefix) {
+        let added = self.added.get_or_insert_with(Box::default);
+        let index = match added.by_prefix.get(prefix) {
             Some(&index) => index,
             None => {
-                let mut number = self.added.len();
+                let mut number = added.handles.len();
                 let handle = loop {
                     let handle = format!("!t{number}!");
                     if !self.declared.contains(&handle) {
@@ -1535,13 +1552,14 @@ impl TagDirectives {
                     }
                     number += 1;
                 };
-                self.added.push((handle, prefix.to_owned()));
-                self.by_prefix
-                    .insert(prefix.to_owned(), self.added.len() - 1);
-                self.added.len() - 1
+                added.handles.push((handle, prefix.to_owned()));
+                added
+                    .by_prefix
+                    .insert(prefix.to_owned(), added.handles.len() - 1);
+                added.handles.len() - 1
             }
         };
-        &self.added[index].0
+        &added.handles[index].0
     }
 
     /// Write `tag` in its form, adding a directive for it if it needs one.
@@ -1563,7 +1581,7 @@ impl TagDirectives {
     /// The directives' lines.
     pub(crate) fn lines(&self) -> String {
         let mut output = String::new();
-        for (handle, prefix) in &self.added {
+        for (handle, prefix) in self.added.iter().flat_map(|added| &added.handles) {
             output.push_str("%TAG ");
             output.push_str(handle);
             output.push(' ');
@@ -1581,53 +1599,74 @@ impl TagDirectives {
         output
     }
 
-    /// Add a directive for each tag in `value` that needs one, in the order the writer meets them.
-    /// The walk keeps its place on the heap, so a deep value costs no native stack.
-    fn scan(&mut self, value: &Value) -> Result<(), Error> {
-        enum Place<'v> {
-            Sequence(&'v [Value], usize),
-            Mapping(&'v crate::mapping::Mapping, usize),
+    /// Add a directive for each tag in `value` that needs one, in the order the writer meets them,
+    /// or fail at the first tag that has no form, as the writer would. The walk stops where the
+    /// writer does, at a collection past `max_depth` and at a tag on a tagged value, so its
+    /// recursion is no deeper than the writer's.
+    fn scan(&mut self, value: &Value, max_depth: usize) -> Result<(), Error> {
+        if may_hold_a_tag(value)
+            && let Err(tag) = self.scan_at(value, max_depth)
+        {
+            return TagForm::of(tag, RedefinedHandles::default()).map(|_| ());
         }
-        let mut places = Vec::new();
-        let mut next = Some(value);
-        loop {
-            while let Some(value) = next.take() {
-                match value {
-                    Value::Tagged(tagged) => {
-                        if needs_directive(&tagged.tag) {
-                            self.token(&tagged.tag, RedefinedHandles::default())?;
-                        }
-                        next = Some(&tagged.value);
-                    }
-                    Value::Sequence(items) => places.push(Place::Sequence(items, 0)),
-                    Value::Mapping(mapping) => places.push(Place::Mapping(mapping, 0)),
-                    _ => {}
-                }
-            }
-            match places.last_mut() {
-                None => return Ok(()),
-                Some(Place::Sequence(items, index)) => match items.get(*index) {
-                    Some(item) => {
-                        *index += 1;
-                        next = Some(item);
-                    }
-                    None => {
-                        places.pop();
-                    }
-                },
-                // Even places are keys and odd ones values.
-                Some(Place::Mapping(mapping, index)) => match mapping.get_index(*index / 2) {
-                    Some((key, value)) => {
-                        next = Some(if *index % 2 == 0 { key } else { value });
-                        *index += 1;
-                    }
-                    None => {
-                        places.pop();
-                    }
-                },
-            }
+        Ok(())
+    }
+
+    /// Add the directive that `tag` needs, apart from the walk so that the walk's frame stays small.
+    #[cold]
+    #[inline(never)]
+    fn add<'v>(&mut self, tag: &'v crate::tag::Tag) -> Result<(), &'v crate::tag::Tag> {
+        match self.token(tag, RedefinedHandles::default()) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(tag),
         }
     }
+
+    /// [`TagDirectives::scan`] with `depth_left` more collections to enter. Returns the tag with
+    /// no form that stopped it.
+    fn scan_at<'v>(
+        &mut self,
+        value: &'v Value,
+        depth_left: usize,
+    ) -> Result<(), &'v crate::tag::Tag> {
+        match value {
+            Value::Tagged(tagged) => {
+                if matches!(tagged.value, Value::Tagged(_)) {
+                    return Ok(());
+                }
+                if needs_directive(&tagged.tag) {
+                    self.add(&tagged.tag)?;
+                }
+                self.scan_at(&tagged.value, depth_left)
+            }
+            Value::Sequence(items) if depth_left > 0 => {
+                for item in items.iter().filter(|item| may_hold_a_tag(item)) {
+                    self.scan_at(item, depth_left - 1)?;
+                }
+                Ok(())
+            }
+            Value::Mapping(mapping) if depth_left > 0 => {
+                for (key, value) in mapping.iter() {
+                    for node in [key, value] {
+                        if may_hold_a_tag(node) {
+                            self.scan_at(node, depth_left - 1)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Whether `value` is a tag or a collection, which the scan for directives looks into: every other
+/// value is a scalar, which it can pass without a call.
+fn may_hold_a_tag(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Tagged(_) | Value::Sequence(_) | Value::Mapping(_)
+    )
 }
 
 /// YAML's printable character set (production 1, `c-printable`).

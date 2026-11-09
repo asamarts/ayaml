@@ -358,4 +358,7 @@ Output changes only for tags that didn't read back before.
 document after another one gets `...` before them, which YAML asks for. The lazy event writer,
 `to_writer_event_stream`, needs memory for one document's text, which `max_output_bytes` bounds,
 where it needed memory for the nesting depth alone. A tag with no form, which was written as an
-invalid verbatim tag, is an error.
+invalid verbatim tag, is an error. The value writer and the Serde writer look through a document's
+value for tags that need a directive before they write its first line. That look stops where the
+writer would, at the depth limit, and costs about 60 instructions a collection and 75 a document,
+which `tools/instruction-rises.tsv` accepts for the smallest and the deepest inputs that CI counts.
