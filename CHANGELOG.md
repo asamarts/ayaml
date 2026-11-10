@@ -122,7 +122,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   without an explicit `?`.
 - In default mode, a flow collection's or quoted scalar's lines may start at column 0, or be
   indented with tabs alone, when it's a document's root node or is nested in one. So
-  `[[x\n, y]]`, `!!seq [x\n, y]`, `  'a\nb'`, and `[\n\ta\n]` now parse. Under a block
+  `[[x\n, y]]`, `!!seq [x\n, y]`, `'a\nb'` indented by two spaces, and `[\n\ta\n]` now parse. Under a block
   collection the indentation of those lines is now checked, wherever the node starts, so
   `k:\n  [\na\n  ]` and `---k: 'a\nb'` are now errors. Compat mode still reads the first.
   A comment line is exempt in every position, so `k: [\n# c\n  a\n  ]` now
@@ -193,16 +193,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Deserializer`, an empty node at the end of a document that the next `---` starts also had the
   input's length as its offset.
 - A tab now separates wherever it doesn't stand for indentation, in both modes, as YAML 1.2.2
-  allows. A tab with a `: ` anywhere later on its line was refused as block structure, so
+  allows. A tab with a colon and a space anywhere later on its line was refused as block structure, so
   `key:\t"a: b"`, `key:\t{a: 1}`, `a: "1"\t# note: x`, `"a"\t: 1`, `!t\ta: 1`, `[1]\t: x`,
-  `-\t'a: b'`, `---\t{a: 1}`, and a tab before a comment holding `: ` on its own line were errors.
+  `-\t'a: b'`, `---\t{a: 1}`, and a tab before a comment holding a colon and a space on its own line were errors.
   A tab is now refused where it starts a line or follows a `-`, `?`, or `:` indicator, `---`, or
   `...`, and a block indicator or an implicit key follows it, as in `\ta: 1` or `-\ta: 1`. A later
   entry below refuses a node that only tabs indent on its own line, as in `k:\n\tv`.
 - A `-` or `?` indicator with a tab after it, as in `\t-\tb` or `-\t-\tb`, is now refused after a
   tab, as it is with a space after it. It was read as an entry indented by the tab.
 - A closing quote on a line indented only with tabs now closes its scalar, as a closing `]` or `}`
-  there does, so `k: 'a\n\t'` reads `a `. Only the scalar's own quote counts, so `k: "a\n\t'"` is
+  there does, so `k: 'a\n\t'` reads `a` followed by a space. Only the scalar's own quote counts, so `k: "a\n\t'"` is
   still an error.
 - A plain scalar's line may now start with `---` or `...` that isn't a document marker, in both
   modes. Only one at column 0, with whitespace or the line's end after it, is a marker, so
@@ -326,7 +326,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which YAML doesn't allow either, though ayaml still reads it. The
   event writer now holds each document until it ends, to put the directives first, so it holds as
   much as the largest document, which `max_output_bytes` bounds.
-- A tagged key in a flow mapping is now written as an explicit `? ` key once it and its tag pass
+- A tagged key in a flow mapping is now written with an explicit `?` and a space once it and its tag pass
   128 characters, as libyaml's emitter does. So is a string key that the scalar style option or a
   flow collection quotes, once it passes 128 characters with its quotes. Readers built on libyaml
   refuse an implicit key past 1024 characters, in a flow mapping too.

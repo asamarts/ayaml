@@ -101,7 +101,8 @@ recovery from a failed run, and how to verify a release.
   values in tests.
 - **Limits:** a new way to spend CPU or memory needs a limit, with tests just below,
   at, and above it.
-- **Plan:** tasks live under `aplan/tasks/` and `aplan check` validates them.
+- **Plan:** tasks live under `aplan/tasks/`; `aplan check` validates their structure and
+  `aplan verify` resolves their evidence against the repository. Both run in CI.
   Decisions that outlive a change go in [`docs/decisions.md`](docs/decisions.md).
 - **Security fixes:** state what to build in public text. Reproduction inputs for an
   unfixed problem wait until the fix ships.

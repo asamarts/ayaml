@@ -180,7 +180,7 @@ these places, on purpose:
   key `[a]`.
 - An implicit key in a flow mapping may run past 1024 characters, as YAML 1.2.2 allows, where
   libyaml refuses it. Elsewhere an implicit key takes at most 1024, as in libyaml. The writers use
-  `? ` for a key past 128 characters, as libyaml's emitter does.
+  `?` followed by a space for a key past 128 characters, as libyaml's emitter does.
 - An empty implicit key, such as `: a`, is valid.
 - Tabs are separation wherever they aren't indentation, as in `key:\t"a: b"`, `"a"\t: 1`, or
   `-\t[1]`. Only spaces indent. A tab stands where indentation would before a block indicator or an

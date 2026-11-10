@@ -20,7 +20,7 @@
 #
 # Only hosted CI runs macOS and Windows, semver checks, minimal versions, the secret
 # scan, and the check of a pull request's title and body. Only this script runs the
-# feature combinations and markdownlint.
+# feature combinations.
 #
 # The `sync` job checks that every single-line `run:` command in those workflows appears
 # in this file, as a command or a `# Mirrors:` comment. That catches a new command with
@@ -318,6 +318,7 @@ job_instructions() {
 job_plan() {
   if ! command -v aplan >/dev/null; then skip "aplan not installed"; return; fi
   step "plan check" aplan check
+  step "plan verify" aplan verify
 }
 
 # Strict suite in both parser modes.
@@ -330,7 +331,7 @@ job_suite() {
 
 job_docs-lint() {
   if command -v npx >/dev/null; then
-    step "markdownlint" npx --yes markdownlint-cli2@0.23.3 "README.md" "docs/*.md"
+    step "markdownlint" npx --yes markdownlint-cli2@0.23.3 README.md CHANGELOG.md CONTRIBUTING.md AGENTS.md RELEASING.md SECURITY.md "docs/*.md"
   else
     skip "npx not installed"
   fi
