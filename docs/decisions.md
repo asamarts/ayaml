@@ -330,6 +330,7 @@ says which forms read.
 
 **Decision.** The value writer, the Serde writer, and the event writer write each tag in the first
 of these forms that reads back as the same tag:
+
 - `!name` for a local tag and `!!name` for a core tag, unless the document redefines that handle,
   with each character that isn't a URI character %-escaped;
 - a verbatim tag, `!<name>`, when the name is local or starts with a URI scheme, holds only URI
@@ -367,3 +368,19 @@ invalid verbatim tag, is an error. The value writer and the Serde writer look th
 value for tags that need a directive before they write its first line. That look stops where the
 writer would, at the depth limit, and costs about 60 instructions a collection and 75 a document,
 which `tools/instruction-rises.tsv` accepts for the smallest and the deepest inputs that CI counts.
+
+## D83 — Documentation lint and plan verification are required gates
+
+**Date:** 2026-11-10
+**Status:** Accepted
+
+**Decision.** Hosted CI runs `markdownlint-cli2` over the maintained Markdown files, and the plan
+job runs `aplan verify` with full history as well as `aplan check`. The local gate mirrors both.
+
+**Why.** A markdown regression landed because only the local gate ran `markdownlint`, and `aplan
+check` is structural: it does not resolve the evidence citations in the plan. A cited test or
+commit can rot while the hosted plan job stays green.
+
+**Consequences.** A documentation-only change now waits for the lint job, and the plan job fetches
+the whole history because a shallow clone cannot resolve commit evidence. A new single-line
+`run:` command in a workflow still needs its local counterpart, which the `sync` job checks.

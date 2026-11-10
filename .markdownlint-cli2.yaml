@@ -1,2 +1,6 @@
 config:
   MD013: false
+  # A changelog repeats "Changed" and "Fixed" under each release, which is not a
+  # duplicate heading in the sense this rule guards against.
+  MD024:
+    siblings_only: true

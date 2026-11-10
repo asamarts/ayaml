@@ -100,6 +100,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # `aplan verify` resolves evidence commits, which a shallow clone does not hold.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
@@ -107,6 +109,18 @@ jobs:
         run: cargo install aplan --version 0.6.0 --locked
       - name: Check the plan
         run: aplan check
+      - name: Verify the plan's evidence
+        run: aplan verify
+
+  docs-lint:
+    name: documentation lint
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: markdownlint
+        run: npx --yes markdownlint-cli2@0.23.3 README.md CHANGELOG.md CONTRIBUTING.md AGENTS.md RELEASING.md SECURITY.md "docs/*.md"
 
   package:
     name: package and downstream smoke
