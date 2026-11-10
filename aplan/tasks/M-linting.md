@@ -28,5 +28,5 @@ scanner, typed-reader, and release work adds to that debt.
 
 - [ ] every member is closed with its required evidence
 - [ ] full-tree alint, MSRV and stable Clippy, rustdoc, rustfmt, and the production panic-prone-operation profile are blocking local and hosted checks
-- [ ] every maintained Rust, Python, shell, and hook source file is at most 2,000 lines, with no baseline, exclusion, or temporary ratchet left for the size rule
+- [ ] every maintained `.rs`, `.py`, `.sh`, and `.bash` file plus `tools/hooks/*` is at most 2,000 lines, with no baseline, exclusion, or temporary ratchet left for the size rule
 - [ ] the policy, intentional exceptions, update procedure, and local commands are documented
