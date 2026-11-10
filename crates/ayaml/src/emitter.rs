@@ -14,6 +14,7 @@ use std::io::Write;
 
 use crate::error::{Error, ErrorKind};
 use crate::limits::Limits;
+use crate::tag::{is_uri_byte, verbatim_reads_back};
 use crate::value::Value;
 
 /// Emitter presentation options.
@@ -1455,65 +1456,6 @@ fn needs_directive(tag: &crate::tag::Tag) -> bool {
     !(handle.starts_with('!')
         || (tag.is_core() && !suffix.is_empty())
         || verbatim_reads_back(handle, suffix))
-}
-
-/// Whether a verbatim tag holding `handle` and then `suffix` reads back as that name: a local name
-/// or one with a URI scheme, of URI characters and escapes alone (YAML 1.2.2 section 6.9.1).
-fn verbatim_reads_back(handle: &str, suffix: &str) -> bool {
-    let mut bytes = handle.bytes().chain(suffix.bytes());
-    let mut first = true;
-    let mut scheme = true;
-    let mut has_scheme = false;
-    let mut local = false;
-    while let Some(byte) = bytes.next() {
-        if first {
-            first = false;
-            local = byte == b'!';
-            scheme = byte.is_ascii_alphabetic();
-        } else if scheme && !has_scheme {
-            if byte == b':' {
-                has_scheme = true;
-            } else if !(byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')) {
-                scheme = false;
-            }
-        }
-        if byte == b'%' {
-            for _ in 0..2 {
-                if !bytes.next().is_some_and(|digit| digit.is_ascii_hexdigit()) {
-                    return false;
-                }
-            }
-        } else if !(is_uri_byte(byte) || matches!(byte, b'!' | b',' | b'[' | b']')) {
-            return false;
-        }
-    }
-    local || has_scheme
-}
-
-/// A URI character that a tag shorthand may hold raw (`ns-tag-char` without escapes): not `!`, a
-/// flow indicator, or `%`.
-fn is_uri_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric()
-        || matches!(
-            byte,
-            b'-' | b'#'
-                | b';'
-                | b'/'
-                | b'?'
-                | b':'
-                | b'@'
-                | b'&'
-                | b'='
-                | b'+'
-                | b'$'
-                | b'_'
-                | b'.'
-                | b'~'
-                | b'*'
-                | b'\''
-                | b'('
-                | b')'
-        )
 }
 
 /// %-escape `text` for a tag shorthand's suffix or a `%TAG` prefix, whose escapes the parser

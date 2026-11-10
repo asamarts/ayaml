@@ -13,7 +13,7 @@ use crate::event::ScalarStyle;
 use crate::limits::Limits;
 use crate::position::{LineIndex, starts_with_document_marker};
 use crate::span::Span;
-use crate::tag::Tag;
+use crate::tag::{Tag, verbatim_reads_back};
 
 /// A lexical token.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1129,6 +1129,20 @@ impl<'a> Scanner<'a> {
             // no local tag (example 6.25).
             if suffix.is_empty() || suffix == "!" {
                 return Err(self.error_at(start, "a verbatim tag needs a name"));
+            }
+            // A verbatim tag is read as written, so a `%` is part of the name only when it starts
+            // an escape, and the name must be one YAML can hold: a local tag or one with a scheme.
+            if !uri_text_ok(suffix) {
+                return Err(self.error_at(
+                    start,
+                    "a `%` in a verbatim tag must start a two-digit escape",
+                ));
+            }
+            if !verbatim_reads_back("", suffix) {
+                return Err(self.error_at(
+                    start,
+                    "a verbatim tag must name a local tag or a tag with a scheme",
+                ));
             }
             self.pos += 1;
             Tag::new("", suffix)

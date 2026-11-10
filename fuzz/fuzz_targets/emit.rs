@@ -25,10 +25,19 @@ fuzz_target!(|data: &[u8]| {
         .unwrap_or_else(|error| {
             panic!("event output does not parse: {error}; input={input:?} rendered={rendered:?}")
         });
+    // The writers add a `%TAG` directive for a tag that no verbatim tag can hold (D82), so the
+    // reparse can hold directives the input did not. Count the rest: a dropped or duplicated
+    // scalar, collection, alias, or marker event still fails.
+    let without_directives = |events: &[ayaml::Event<'_>]| {
+        events
+            .iter()
+            .filter(|event| !matches!(event, ayaml::Event::Directive { .. }))
+            .count()
+    };
     assert_eq!(
-        reparsed.len(),
-        events.len(),
-        "event count changed; input={input:?} rendered={rendered:?}"
+        without_directives(&reparsed),
+        without_directives(&events),
+        "non-directive event count changed; input={input:?} rendered={rendered:?}"
     );
 
     let stream = ayaml::parse_events_with_limits(input, &limits).expect("parsed above");

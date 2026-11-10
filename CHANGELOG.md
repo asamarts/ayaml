@@ -323,9 +323,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   document, as `%TAG !t0! tag:x:` and then `!t0!a%20b` (D82). Every other tag is written as before.
   A tag that is neither local nor core and has fewer than two characters, as `Tag::new("x", "")`
   makes, has no form in YAML, and writing it is now an error, where it was written as `!<x>`,
-  which YAML doesn't allow either, though ayaml still reads it. The
+  which YAML doesn't allow either, and the reader refuses it too. The
   event writer now holds each document until it ends, to put the directives first, so it holds as
   much as the largest document, which `max_output_bytes` bounds.
+- A verbatim tag that isn't a tag name is now an error in both modes: a name that is neither local
+  nor has a URI scheme, as `!<]>`, `!<b.>`, `!<foo>`, or `!<$:?>`, and a `%` that doesn't start two
+  hex digits, as in `!<tag:x:50%>`. The writers already refused such a name as a verbatim tag, so a
+  document that held one could be read but not written; the reader and the writers now agree.
+  `!<tag:x:50%25>` still names `tag:x:50%25`, and `!<tag:x$:?>` still names `tag:x$:?`.
 - A tagged key in a flow mapping is now written with an explicit `?` and a space once it and its tag pass
   128 characters, as libyaml's emitter does. So is a string key that the scalar style option or a
   flow collection quotes, once it passes 128 characters with its quotes. Readers built on libyaml

@@ -11,5 +11,6 @@
 !/fuzz/corpus/emit/
 !/fuzz/corpus/emit/block.yml
 !/fuzz/corpus/emit/alias.yml
+!/fuzz/corpus/emit/tag-directive.yml
 !/fuzz/corpus/borrowed/
 !/fuzz/corpus/borrowed/basic.yml

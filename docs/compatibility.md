@@ -171,7 +171,8 @@ these places, on purpose:
   Tag forms that YAML 1.2.2 allows and libyaml's scanner refuses are accepted, such as
   `!#`, `!<tag:a,1:b#c>`, or `!` right before a flow indicator. `!` isn't a tag character, so
   `!.!` and `!!!` are errors. A tag needs a name, so `!<!>` is an error too, where libyaml reads
-  the non-specific tag.
+  the non-specific tag. A verbatim tag names a local tag or a tag with a URI scheme, and each `%`
+  in it starts a two-digit escape, so `!<foo>`, `!<]>`, and `!<tag:x:50%>` are errors.
 - In a flow collection, `[:a]` holds a plain scalar starting with `:`, `a:]` holds a key,
   and `a:?` is a plain scalar. `{?:{}}` is an error because `?:` starts a plain scalar, and
   `{?\n:{}}` because only a JSON-like key allows an adjacent value. A flow mapping key may
