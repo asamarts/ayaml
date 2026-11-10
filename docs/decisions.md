@@ -355,8 +355,8 @@ how existing documents read, and a prefix without a scheme would still need one 
 
 **Why.** Every tag that YAML can hold then reads back as itself, and AY-025 refuses verbatim tags
 that aren't tag names, as YAML 1.2.2's example 6.25 does, without making any such tag unwritable.
-The reader and the writers agree: `!<x>` and `!<foo>` are errors, because a name is local or has a
-URI scheme, and each `%` starts a two-digit escape. Output changes only for tags whose old form
+The reader and the writers agree on which verbatim tags exist: `!<x>` and `!<foo>` are errors,
+because a verbatim name is local or has a URI scheme, and each `%` starts a two-digit escape. Output changes only for tags whose old form
 didn't read back as the same tag, or wasn't a tag name.
 
 **Consequences.** A document that holds such a tag starts with the directives it needs, and a
