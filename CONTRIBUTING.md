@@ -16,8 +16,9 @@ To report a vulnerability, follow [`SECURITY.md`](SECURITY.md) instead.
 ## Setting up a clone
 
 You need stable Rust and Rust 1.88, the oldest version ayaml supports. Fuzzing needs
-nightly and `cargo-fuzz`, the instruction check needs `valgrind`, and plan changes need
-`aplan` (`cargo install aplan --version 0.6.0 --locked`).
+nightly and `cargo-fuzz`, the instruction check needs `valgrind`, the unsafe census needs
+`cargo-geiger` 0.14.0, and plan changes need `aplan`
+(`cargo install aplan --version 0.6.0 --locked`).
 
 Maintainers also set up the leak gate, which needs a private pattern list. See
 [`tools/leak-scan/README.md`](tools/leak-scan/README.md). Pull requests from forks

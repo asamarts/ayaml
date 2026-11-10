@@ -1,5 +1,10 @@
 root: aplan
 traces_root: .
+# The one version declaration in the workspace manifest. `aplan version` reads the
+# version the artifact ships today and the work closed since the last release tag.
+version:
+  current:
+    command: [sed, -n, 's/^version = "\(.*\)"/\1/p', Cargo.toml]
 require_effort: true
 require_cut_membership: true
 deny_warnings: true
