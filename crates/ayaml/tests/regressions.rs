@@ -237,7 +237,8 @@ fn tags_hold_uri_characters_only() {
     rejects("!x\u{a0}y z\n");
     rejects("!<a b> x\n");
     rejects("!foo,bar x\n");
-    let value = ayaml::parse_value("!<$:?> x\n").expect("parse");
+    // `%`, `$`, `:`, and `?` are URI characters, so a name with a scheme may hold them.
+    let value = ayaml::parse_value("!<tag:x$:?> x\n").expect("parse");
     assert!(value.is_tagged());
 }
 
@@ -247,6 +248,8 @@ fn tags_hold_uri_characters_only() {
 fn tag_names_are_checked() {
     const SUFFIX: &str = "a tag's handle needs a suffix after it";
     const VERBATIM: &str = "a verbatim tag needs a name";
+    const NAME: &str = "a verbatim tag must name a local tag or a tag with a scheme";
+    const ESCAPE: &str = "a `%` in a verbatim tag must start a two-digit escape";
     // What follows a tag is checked first, so `!!!` is a `!` the suffix can't hold.
     const ENDING: &str = "a tag must be followed by whitespace or a line break";
     for (input, message, line, column) in [
@@ -263,6 +266,14 @@ fn tag_names_are_checked() {
         ("!<!> a", VERBATIM, 1, 1),
         ("- !<!> a", VERBATIM, 1, 3),
         ("[!<>]", VERBATIM, 1, 2),
+        ("!<]> a", NAME, 1, 1),
+        ("!<b.> a", NAME, 1, 1),
+        ("!<foo> a", NAME, 1, 1),
+        ("!<$:?> a", NAME, 1, 1),
+        ("!<1a:x> a", NAME, 1, 1),
+        ("- !<]> a", NAME, 1, 3),
+        ("!<tag:x:50%> a", ESCAPE, 1, 1),
+        ("!<tag:x:%2> a", ESCAPE, 1, 1),
     ] {
         let expected = format!("{message} at line {line} column {column}");
         for (mode, read) in readings(input) {
@@ -278,6 +289,7 @@ fn tag_names_are_checked() {
         ("!<a+b.c-d:x> a", "a+b.c-d:x"),
         ("!<Z9:> a", "Z9:"),
         ("!<tag:x%2C%41> a", "tag:x%2C%41"),
+        ("!<tag:x:50%25> a", "tag:x:50%25"),
     ] {
         for (mode, read) in readings(input) {
             let value = read.unwrap_or_else(|error| panic!("{input:?} in {mode}: {error}"));
@@ -3347,7 +3359,7 @@ fn a_tag_names_an_enum_s_variant_by_its_whole_name() {
         json!({ "!pre-B": 5 })
     );
     // A core tag names no variant but by its whole name.
-    for input in ["!!C {x: 1}\n", "!<B> 5\n"] {
+    for input in ["!!C {x: 1}\n", "!<tag:x:ZZZ> 5\n"] {
         for result in every_path::<Pick>(input) {
             assert!(
                 result

@@ -353,12 +353,11 @@ not be written back. Or decode %-escapes inside a verbatim tag when reading it, 
 That fixes `%20` without a directive, but YAML 1.2.2 reads a verbatim tag as written, it changes
 how existing documents read, and a prefix without a scheme would still need one of the other two.
 
-**Why.** Every tag that YAML can hold then reads back as itself, and AY-025 can refuse verbatim
-tags that aren't tag names, as YAML 1.2.2's example 6.25 does, without making any such tag
-unwritable. Until it does, the reader accepts a verbatim tag that isn't a tag name: `!<x>`, whose
-one-character name the writers refuse, and `!<foo>`, which they now write under a directive.
-Output changes only for tags whose old form didn't read back as the same tag, or wasn't a tag
-name.
+**Why.** Every tag that YAML can hold then reads back as itself, and AY-025 refuses verbatim tags
+that aren't tag names, as YAML 1.2.2's example 6.25 does, without making any such tag unwritable.
+The reader and the writers agree: `!<x>` and `!<foo>` are errors, because a name is local or has a
+URI scheme, and each `%` starts a two-digit escape. Output changes only for tags whose old form
+didn't read back as the same tag, or wasn't a tag name.
 
 **Consequences.** A document that holds such a tag starts with the directives it needs, and a
 document after another one gets `...` before them, which YAML asks for. The lazy event writer,
