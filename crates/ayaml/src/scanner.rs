@@ -170,6 +170,10 @@ pub(crate) struct Scanner<'a> {
     /// scalar may hold, in order, and the first one not yet checked.
     quoted_only: Vec<usize>,
     quoted_only_next: usize,
+    /// Whether the plain-scalar continuation fast path may reject a line. Tests turn it off to
+    /// compare the fast path with the full analysis.
+    #[cfg(test)]
+    fast_continuation: bool,
 }
 
 impl<'a> Scanner<'a> {
@@ -247,6 +251,8 @@ impl<'a> Scanner<'a> {
             flow_owner: (usize::MAX, Owner::Unknown, None),
             quoted_only,
             quoted_only_next: 0,
+            #[cfg(test)]
+            fast_continuation: true,
         })
     }
 
@@ -2112,7 +2118,12 @@ impl<'a> Scanner<'a> {
             // A scalar that starts after a block prefix cannot continue on a
             // line at or below the prefix's indentation. Reject that common
             // case before scanning the line prefix for an owner.
-            if self.has_block_prefix(start)
+            #[cfg(test)]
+            let fast_continuation = self.fast_continuation;
+            #[cfg(not(test))]
+            let fast_continuation = true;
+            if fast_continuation
+                && self.has_block_prefix(start)
                 && self
                     .next_content_indent()
                     .is_some_and(|indent| indent <= self.line_indent(start))
@@ -3061,12 +3072,13 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        Chomping, LineShape, LineStop, NameRules, Owner, Scanner, TokenKind, build_block_scalar,
-        closing_quote, line_shape, strip_comment, walk_line,
+        Chomping, LineShape, LineStop, NameRules, Owner, Scanner, Token, TokenKind,
+        build_block_scalar, closing_quote, line_shape, strip_comment, walk_line,
     };
     use crate::event::ScalarStyle;
     use crate::limits::Limits;
     use crate::tag::Tag;
+    use proptest::prelude::*;
 
     fn tokens(input: &str) -> Vec<TokenKind<'_>> {
         let mut scanner = Scanner::new(input, Limits::default()).expect("scanner");
@@ -3663,5 +3675,35 @@ mod tests {
         )
         .expect_err("input limit");
         assert_eq!(error.kind(), crate::error::ErrorKind::Limit);
+    }
+
+    fn scan_all<'a>(input: &'a str, fast: bool) -> Result<Vec<Token<'a>>, String> {
+        let mut scanner =
+            Scanner::new(input, Limits::default()).map_err(|error| error.to_string())?;
+        scanner.fast_continuation = fast;
+        let mut tokens = Vec::new();
+        while let Some(token) = scanner.next_token().map_err(|error| error.to_string())? {
+            tokens.push(token);
+        }
+        Ok(tokens)
+    }
+
+    const PLAIN_PIECES: &[&str] = &[
+        "a", "b", "c", "first", "second", " ", "  ", "\n", "\n\n", "\t", "k: ", "- ", "? ", ": ",
+        "!t ", "&a ", " # ", "#",
+    ];
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1024))]
+
+        #[test]
+        fn the_plain_scalar_fast_path_agrees_with_the_full_path(
+            input in prop::collection::vec(prop::sample::select(PLAIN_PIECES), 0..40)
+                .prop_map(|pieces| pieces.concat())
+        ) {
+            let fast = scan_all(&input, true);
+            let full = scan_all(&input, false);
+            prop_assert_eq!(fast, full, "input={:?}", input);
+        }
     }
 }

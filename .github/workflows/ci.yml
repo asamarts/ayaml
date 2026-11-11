@@ -87,7 +87,22 @@ jobs:
         with:
           toolchain: stable
       - name: Install valgrind
-        run: sudo rm -f /var/lib/man-db/auto-update && sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind
+        run: |
+          set -euo pipefail
+          if command -v valgrind >/dev/null; then
+            exit 0
+          fi
+          missing=0
+          for host in archive.ubuntu.com security.ubuntu.com azure.archive.ubuntu.com; do
+            getent hosts "$host" >/dev/null || missing=1
+          done
+          if [ "$missing" -ne 0 ]; then
+            # A hosted runner's Ubuntu-archive DNS can fail while other names resolve.
+            sudo sh -c 'printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf'
+          fi
+          sudo rm -f /var/lib/man-db/auto-update
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind
       - name: Compare with the base
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
