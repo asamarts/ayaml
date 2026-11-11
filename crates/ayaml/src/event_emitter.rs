@@ -20,8 +20,8 @@ use std::marker::PhantomData;
 use crate::EventStream;
 use crate::emitter::{
     MAX_IMPLICIT_KEY_CHARS, Output, RedefinedHandles, TagDirectives, block_scalar_ok, can_fold,
-    emit_double_quoted, expand_folded, is_printable, needs_explicit_indent, plain_text_ok,
-    single_quoted_ok,
+    emit_double_quoted, expand_folded, is_printable, looks_like_leading_zero_numeral,
+    needs_explicit_indent, plain_text_ok, single_quoted_ok,
 };
 use crate::error::{Error, ErrorKind};
 use crate::event::{Anchor, CollectionStyle, Event, ScalarStyle};
@@ -195,9 +195,17 @@ fn anchor_name_ok(name: &str) -> bool {
 
 /// Append a scalar on one line: plain or single-quoted when the text allows
 /// that style in this context, double-quoted otherwise.
-fn scalar_inline(value: &str, style: ScalarStyle, flow: bool, output: &mut String) {
+fn scalar_inline(
+    value: &str,
+    style: ScalarStyle,
+    flow: bool,
+    tag: Option<&Tag>,
+    output: &mut String,
+) {
+    let plain =
+        plain_text_ok(value, flow) && (tag.is_some() || !looks_like_leading_zero_numeral(value));
     match style {
-        ScalarStyle::Plain if plain_text_ok(value, flow) => output.push_str(value),
+        ScalarStyle::Plain if plain => output.push_str(value),
         ScalarStyle::SingleQuoted if single_quoted_ok(value) => {
             output.push('\'');
             for (index, part) in value.split('\'').enumerate() {
@@ -490,7 +498,7 @@ where
         if !text.is_empty() {
             text.push(' ');
         }
-        scalar_inline(value, style, false, &mut text);
+        scalar_inline(value, style, false, tag, &mut text);
         text.push('\n');
         self.push(&text)
     }
@@ -740,7 +748,7 @@ where
                 if !text.is_empty() {
                     text.push(' ');
                 }
-                scalar_inline(value, *style, false, &mut text);
+                scalar_inline(value, *style, false, tag.as_ref(), &mut text);
                 Ok((text.chars().count() <= MAX_IMPLICIT_KEY_CHARS).then_some(text))
             }
             _ => Ok(None),
@@ -788,7 +796,7 @@ where
                     true
                 } else {
                     let mut text = self.properties(anchor.as_ref(), tag.as_ref())?;
-                    scalar_inline(value, *style, true, &mut text);
+                    scalar_inline(value, *style, true, tag.as_ref(), &mut text);
                     text.chars().count() > MAX_IMPLICIT_KEY_CHARS
                 }
             }
@@ -819,7 +827,7 @@ where
                     text.push(' ');
                 }
                 if !(*style == ScalarStyle::Plain && value.is_empty()) {
-                    scalar_inline(value, *style, true, &mut text);
+                    scalar_inline(value, *style, true, tag.as_ref(), &mut text);
                 }
                 self.push(&text)?;
                 Ok(false)

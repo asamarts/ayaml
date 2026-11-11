@@ -1254,3 +1254,75 @@ fn compat_reads_a_marks_line_as_libyaml_does() {
         ayaml::parse_value("k: a b").expect("spelled out"),
     );
 }
+
+/// A leading-zero numeral is a string in YAML 1.2, but a YAML 1.1 reader may take it as octal.
+/// Every writer quotes it, with either sign, so older readers keep the text.
+#[test]
+fn leading_zero_strings_are_quoted_on_every_writer_path() {
+    let expected = |text: &str| format!("\"{text}\"\n");
+    for text in ["0644", "-0644", "+0644", "00", "-00", "0_644", "-0_0"] {
+        let value = Value::from(text);
+        let quoted = expected(text);
+
+        assert_eq!(
+            ayaml::to_string_value(&value).expect("to_string_value"),
+            quoted,
+            "{text:?}"
+        );
+        assert_eq!(
+            ayaml::to_string(&value).expect("to_string"),
+            quoted,
+            "{text:?}"
+        );
+
+        let mut output = Vec::new();
+        ayaml::to_writer_value(&mut output, &value).expect("to_writer_value");
+        assert_eq!(String::from_utf8(output).unwrap(), quoted, "{text:?}");
+
+        let mut output = Vec::new();
+        ayaml::to_writer(&mut output, &value).expect("to_writer");
+        assert_eq!(String::from_utf8(output).unwrap(), quoted, "{text:?}");
+
+        assert_eq!(
+            ayaml::to_string_documents(std::slice::from_ref(&value)).expect("to_string_documents"),
+            quoted,
+            "{text:?}"
+        );
+        let mut output = Vec::new();
+        ayaml::to_writer_documents(&mut output, std::slice::from_ref(&value))
+            .expect("to_writer_documents");
+        assert_eq!(String::from_utf8(output).unwrap(), quoted, "{text:?}");
+
+        let limits = Limits::default();
+        let flow = ayaml::EmitterOptions::default().with_flow(true);
+        let emitter = ayaml::Emitter::new(&limits, &flow);
+        assert_eq!(
+            emitter.value_to_string(&value).expect("flow value"),
+            quoted,
+            "{text:?}"
+        );
+        let mut output = Vec::new();
+        emitter
+            .value_to_writer(&mut output, &value)
+            .expect("flow writer");
+        assert_eq!(String::from_utf8(output).unwrap(), quoted, "{text:?}");
+
+        let source = format!("{text}\n");
+        let events: Vec<Event<'_>> = ayaml::parse_events(&source)
+            .expect("events")
+            .collect::<Result<_, _>>()
+            .expect("events");
+        assert_eq!(
+            ayaml::to_string_events(&events).expect("to_string_events"),
+            quoted,
+            "{text:?}"
+        );
+        let mut output = Vec::new();
+        ayaml::to_writer_events(&mut output, &events).expect("to_writer_events");
+        assert_eq!(String::from_utf8(output).unwrap(), quoted, "{text:?}");
+        let mut output = Vec::new();
+        ayaml::to_writer_event_stream(&mut output, ayaml::parse_events(&source).expect("events"))
+            .expect("to_writer_event_stream");
+        assert_eq!(String::from_utf8(output).unwrap(), quoted, "{text:?}");
+    }
+}

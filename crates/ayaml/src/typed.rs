@@ -592,9 +592,10 @@ impl<'de> Builder<'de, '_> {
 fn scalar_key_text<'de>(node: &Node<'de>) -> Option<Cow<'de, str>> {
     let node = resolve(node);
     match &node.kind {
-        NodeKind::Null | NodeKind::Bool(_) | NodeKind::Number(_) | NodeKind::String(_) => {
-            node.text.clone()
-        }
+        NodeKind::Null => Some(Cow::Borrowed("null")),
+        NodeKind::Bool(value) => Some(Cow::Owned(value.to_string())),
+        NodeKind::Number(value) => Some(Cow::Owned(value.to_string())),
+        NodeKind::String(value) => Some(value.clone()),
         _ => None,
     }
 }
