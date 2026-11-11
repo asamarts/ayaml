@@ -1681,7 +1681,10 @@ impl<'a> Scanner<'a> {
         // the scalar: in `- key: |2` that is the mapping at column 2, not the
         // line's indentation. Root scalars count from column 0, as libyaml
         // does.
-        let (detect_base, allow_base, explicit_base) = match self.owner_of(start) {
+        let owner = self.owner_of(start);
+        let root_like = matches!(&owner, Owner::Root)
+            || (matches!(&owner, Owner::Unknown) && prefix.is_empty());
+        let (detect_base, allow_base, explicit_base) = match owner {
             Owner::Root => (0, true, 0),
             Owner::Block(n) => (n, false, n),
             Owner::Unknown => (
@@ -1690,10 +1693,16 @@ impl<'a> Scanner<'a> {
                 if prefix.is_empty() { 0 } else { base_indent },
             ),
         };
-        let indent = explicit_indent.map_or_else(
-            || self.detect_block_indent(content_start, detect_base, allow_base),
-            |digits| Ok(explicit_base + digits),
-        )?;
+        let indent = match explicit_indent {
+            Some(digits) => Ok(if root_like && !self.compat_flow {
+                // A root node's indentation is the spec's -1, so an indicator of 1 keeps a
+                // column-0 line's first space (productions 170 and 174). libyaml counts from 0.
+                digits - 1
+            } else {
+                explicit_base + digits
+            }),
+            None => self.detect_block_indent(content_start, detect_base, allow_base),
+        }?;
 
         // When the indentation is detected, leading empty lines may not be
         // indented more than the first non-empty content line (YAML 1.2.2
@@ -1703,29 +1712,37 @@ impl<'a> Scanner<'a> {
         let mut probe = content_start;
         let mut first_content = None;
         while probe < self.input.len() {
-            let line_end = self.input[probe..]
-                .find(['\n', '\r'])
-                .map_or(self.input.len(), |offset| probe + offset);
-            let line = &self.input[probe..line_end];
-            if line.chars().all(|ch| ch == ' ' || ch == '\t') {
-                if line.contains('\t') && !line.contains(' ') {
-                    return Err(self.error_at(
-                        probe,
-                        "tabs are not allowed as leading block-scalar indentation",
-                    ));
-                }
-                probe = line_end;
-                if probe < self.input.len() {
-                    let ch = self.input[probe..].chars().next().expect("line break");
-                    probe += ch.len_utf8();
+            let spaces = self.count_spaces(probe);
+            let after_spaces = probe + spaces;
+            let next = self.input[after_spaces..].chars().next();
+            match next {
+                None => break,
+                Some(ch) if is_line_break(ch) => {
+                    probe = after_spaces + ch.len_utf8();
                     if ch == '\r' && self.input[probe..].starts_with('\n') {
                         probe += 1;
                     }
                 }
-                continue;
+                Some(_) => {
+                    // A dedented line is outside the scalar, so it is neither content nor a
+                    // leading empty line. A tab after the indentation is content, not space.
+                    if spaces < indent {
+                        let line_end = self.input[after_spaces..]
+                            .find(['\n', '\r'])
+                            .map_or(self.input.len(), |offset| after_spaces + offset);
+                        let rest = &self.input[after_spaces..line_end];
+                        if spaces == 0 && !rest.is_empty() && rest.chars().all(|ch| ch == '\t') {
+                            return Err(self.error_at(
+                                probe,
+                                "tabs are not allowed as leading block-scalar indentation",
+                            ));
+                        }
+                        break;
+                    }
+                    first_content = Some((probe, spaces));
+                    break;
+                }
             }
-            first_content = Some((probe, self.count_spaces(probe)));
-            break;
         }
         if let Some((_, first_spaces)) = first_content.filter(|_| explicit_indent.is_none()) {
             let mut leading = content_start;
@@ -1804,6 +1821,13 @@ impl<'a> Scanner<'a> {
                 continue;
             }
             if spaces < indent {
+                let rest = &self.input[line_start..];
+                if rest.starts_with('\t') && rest.trim_start_matches([' ', '\t']).starts_with('#') {
+                    return Err(self.error_at(
+                        line_start,
+                        "a tab cannot start a comment after a block scalar",
+                    ));
+                }
                 break;
             }
             if indent == 0 {
@@ -3491,8 +3515,9 @@ mod tests {
 
     #[test]
     fn block_scalar_indent_indicator_is_relative_to_the_header() {
+        // A root node's indentation is -1, so |2 takes one space off a four-space line.
         let (value, _, _) = scalar("|2\n    a\n");
-        assert_eq!(value, "  a\n");
+        assert_eq!(value, "   a\n");
     }
 
     #[test]

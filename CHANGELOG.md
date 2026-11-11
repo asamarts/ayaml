@@ -64,6 +64,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Block scalars now follow the grammar for whitespace-only lines. A scalar with no content lines
+  is empty, and the node after it parses; a comment at or below the parent's indentation ends it;
+  a tab after the content indentation is content, not an empty line or a comment; and a comment
+  line that starts with a tab directly after a scalar is rejected. A root block scalar's
+  explicit indentation indicator counts from the root's -1, so `|1\n y\n` keeps its space in
+  default mode; compat keeps libyaml's `y\n`.
 - Error diagnostics now agree across readers. A typed reader points at the duplicate key rather
   than its first occurrence, and a default-mode typed map reports scalar keys that differ only in
   type, as `1` and `"1"`, instead of keeping one silently. A complex or tagged duplicate key

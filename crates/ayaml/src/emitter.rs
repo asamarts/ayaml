@@ -904,14 +904,14 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
         } else if let Value::String(text) = value
             && self.use_block_scalar(text)
         {
-            self.emit_block_scalar(text, self.options.indent);
+            self.emit_block_scalar(text, self.options.indent, true);
         } else if let Value::Tagged(tagged) = value
             && let Value::String(text) = &tagged.value
             && self.use_block_scalar(text)
         {
             if self.push_tag(tagged) {
                 self.push(' ');
-                self.emit_block_scalar(text, self.options.indent);
+                self.emit_block_scalar(text, self.options.indent, true);
             }
         } else {
             match value {
@@ -1154,7 +1154,7 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
                     && self.use_block_scalar(text)
                 {
                     self.push(' ');
-                    self.emit_block_scalar(text, indent);
+                    self.emit_block_scalar(text, indent, false);
                 } else if Self::needs_block_value(&tagged.value) {
                     self.push('\n');
                     self.emit_node(&tagged.value, indent);
@@ -1165,7 +1165,7 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
                 }
             }
             Value::String(text) if self.use_block_scalar(text) => {
-                self.emit_block_scalar(text, indent);
+                self.emit_block_scalar(text, indent, false);
             }
             _ => {
                 self.emit_flow(value);
@@ -1188,7 +1188,14 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
         block_style && block_scalar_ok(text)
     }
 
-    fn emit_block_scalar(&mut self, text: &str, content_indent: usize) {
+    fn emit_block_scalar(&mut self, text: &str, content_indent: usize, root: bool) {
+        // A root node's indentation is -1 and an indicator is one digit, so keep a root
+        // scalar's content at most eight columns in.
+        let content_indent = if root {
+            content_indent.min(8)
+        } else {
+            content_indent
+        };
         let trailing = text.chars().rev().take_while(|ch| *ch == '\n').count();
         let body = &text[..text.len().saturating_sub(trailing)];
         let folded = matches!(self.scalar_style(), Some(crate::event::ScalarStyle::Folded))
@@ -1215,9 +1222,15 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
         let indicator = if folded { '>' } else { '|' };
         self.push(indicator);
         if needs_explicit_indent(text) {
-            // The indicator counts from the parent node: `content_indent` is
-            // always one indentation step below it.
-            self.push(char::from_digit(self.options.indent as u32, 10).expect("validated"));
+            // The indicator counts from the parent node. A root node's indentation is -1, so a
+            // root scalar needs one more than its content indentation; a nested scalar needs one
+            // indentation step.
+            let indicator = if root {
+                content_indent + 1
+            } else {
+                self.options.indent
+            };
+            self.push(char::from_digit(indicator as u32, 10).expect("validated"));
         }
         match chomping {
             Chomping::Strip => self.push('-'),

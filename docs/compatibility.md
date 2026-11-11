@@ -196,6 +196,9 @@ these places, on purpose:
 - A top-level block scalar may hold content at column 0. A `#` line past the scalar's parent and
   indented less than a blank line before it is that scalar's first content, so the blank line is
   too long and it's an error, where libyaml ends the scalar there.
+- A root block scalar's explicit indentation indicator counts from the root's -1, so `|1\n y\n`
+  keeps its space in default mode, as productions 170 and 174 say. Compat counts from 0, as
+  libyaml does, and reads `y\n`.
 - A block scalar or a quoted scalar's continuation must be indented past its parent, so
   `a:\n|` and `a: "b\nc"` are errors. That holds for a quoted line that the other kind of quote
   or `''` starts, as in `k: "a\n'b"`. By default, after a compact key or entry the parent is the
