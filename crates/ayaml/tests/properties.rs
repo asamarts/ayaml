@@ -346,3 +346,47 @@ proptest! {
         prop_assert_eq!(decoded, document, "output={:?}", output);
     }
 }
+
+proptest! {
+    /// Equal tags hash alike whatever form wrote them: a local tag with its own handle, a verbatim
+    /// tag, an expanded handle, or a core tag. The hasher is deterministic, and the test checks
+    /// every pair in each spelling group.
+    #[test]
+    fn equal_tag_spellings_hash_alike(suffix in tag_suffix()) {
+        use std::cmp::Ordering;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash(tag: &ayaml::Tag) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            tag.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        let groups = [
+            vec![
+                ayaml::Tag::local(suffix.as_str()),
+                ayaml::Tag::new("!", suffix.as_str()),
+                ayaml::Tag::new("", format!("!{suffix}")),
+            ],
+            vec![
+                ayaml::Tag::new("tag:x:", suffix.as_str()),
+                ayaml::Tag::new("", format!("tag:x:{suffix}")),
+            ],
+            vec![
+                ayaml::Tag::core(suffix.as_str()),
+                ayaml::Tag::new("tag:yaml.org,2002:", suffix.as_str()),
+                ayaml::Tag::new("", format!("tag:yaml.org,2002:{suffix}")),
+            ],
+        ];
+        for tags in groups {
+            for left in &tags {
+                for right in &tags {
+                    prop_assert_eq!(left, right);
+                    prop_assert_eq!(hash(left), hash(right));
+                    prop_assert_eq!(left.cmp(right), Ordering::Equal);
+                }
+            }
+        }
+    }
+}
