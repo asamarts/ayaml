@@ -76,8 +76,6 @@ rules:
         - "crates/ayaml/src/scanner.rs"
         - "crates/ayaml/src/parser.rs"
         - "crates/ayaml/src/emitter.rs"
-        - "crates/ayaml/tests/regressions.rs"
-        - "crates/ayaml/tests/contracts.rs"
     max_lines: 2000
     expect_matches: true
     level: error
@@ -97,17 +95,5 @@ rules:
     kind: file_max_lines
     paths: "crates/ayaml/src/emitter.rs"
     max_lines: 2325
-    expect_matches: true
-    level: error
-  - id: regressions-size-ratchet
-    kind: file_max_lines
-    paths: "crates/ayaml/tests/regressions.rs"
-    max_lines: 3644
-    expect_matches: true
-    level: error
-  - id: contracts-size-ratchet
-    kind: file_max_lines
-    paths: "crates/ayaml/tests/contracts.rs"
-    max_lines: 2182
     expect_matches: true
     level: error
