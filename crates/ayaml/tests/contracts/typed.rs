@@ -544,3 +544,19 @@ fn typed_mapping_keeps_source_key_order() {
         assert_order(&mapping);
     }
 }
+
+/// A null key and an empty-string key are different keys. Comparing a scalar key by its raw text
+/// made both the empty text of a null key and the text of an empty string, so the typed path
+/// reported a duplicate that `parse_value` accepts.
+#[test]
+fn a_null_key_and_an_empty_string_key_are_not_duplicates() {
+    let input = "s:\n:\n? >\n";
+    let composed = ayaml::parse_value(input).expect("composed");
+    let borrowed: Value = ayaml::from_str_borrowed(input).expect("borrowed");
+    assert_eq!(borrowed, composed);
+    assert_eq!(borrowed.as_mapping().expect("mapping").len(), 3);
+
+    // Two spellings of the same null are still one key.
+    let duplicate = ayaml::from_str::<Value>("~: 1\nnull: 2\n").expect_err("two null keys");
+    assert_eq!(duplicate.kind(), ErrorKind::DuplicateKey);
+}
