@@ -471,7 +471,7 @@ where
                 text.push(' ');
                 self.push(&text)?;
             }
-            return self.block_scalar(value, style, pos.content_indent());
+            return self.block_scalar(value, style, pos.content_indent(), matches!(pos, Pos::Root));
         }
         if style == ScalarStyle::Plain && value.is_empty() {
             if text.is_empty() {
@@ -500,15 +500,22 @@ where
         value: &str,
         style: ScalarStyle,
         content_indent: usize,
+        root: bool,
     ) -> Result<(), Error> {
+        let content_indent = if root {
+            content_indent.min(8)
+        } else {
+            content_indent
+        };
         let trailing = value.chars().rev().take_while(|ch| *ch == '\n').count();
         let body = &value[..value.len() - trailing];
         let folded = style == ScalarStyle::Folded && can_fold(body);
         let mut header = String::from(if folded { ">" } else { "|" });
         if needs_explicit_indent(value) {
-            // Content sits one step below the parent node; the indicator
-            // counts from the parent.
-            header.push(char::from_digit(STEP as u32, 10).expect("single digit"));
+            // Content sits one step below the parent node; a root node's indentation is -1, so
+            // a root scalar's indicator is one more than its content indentation.
+            let indicator = if root { content_indent + 1 } else { STEP };
+            header.push(char::from_digit(indicator as u32, 10).expect("single digit"));
         }
         if trailing == 0 {
             header.push('-');

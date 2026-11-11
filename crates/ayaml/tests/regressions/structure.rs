@@ -348,16 +348,19 @@ fn a_block_scalar_header_has_one_indicator_of_each_kind() {
             assert_eq!(read, Err(expected.clone()), "{input:?} in {mode}");
         }
     }
-    for (input, value) in [
-        ("|2+\n  a\n", "a\n"),
-        ("|+2\n  a\n", "a\n"),
-        ("|2-\n  a\n", "a"),
-        ("|-2\n   a\n", " a"),
-        ("|- # c\n a\n", "a"),
-        ("|2 # c\n   a\n", " a\n"),
-        (">+\t# c\n a\n", "a\n"),
+    for (input, default, compat) in [
+        ("|2+\n  a\n", " a\n", "a\n"),
+        ("|+2\n  a\n", " a\n", "a\n"),
+        ("|2-\n  a\n", " a", "a"),
+        ("|-2\n   a\n", "  a", " a"),
+        ("|- # c\n a\n", "a", "a"),
+        ("|2 # c\n   a\n", "  a\n", " a\n"),
+        (">+\t# c\n a\n", "a\n", "a\n"),
     ] {
+        // `compat` is only read when the compatibility feature is on.
+        let _ = compat;
         for (mode, read) in readings(input) {
+            let value = if mode == "compat" { compat } else { default };
             assert_eq!(read, Ok(ayaml::Value::from(value)), "{input:?} in {mode}");
         }
     }
@@ -1153,5 +1156,87 @@ fn valid_forms_beside_wrong_rejections_keep_their_reading() {
             expected,
             "{input:?} in compat"
         );
+    }
+}
+
+/// A whitespace-only line is not content when the scalar has no content lines: the scalar is
+/// empty and the next node parses. A comment at or below the parent's indent ends it.
+#[test]
+fn a_whitespace_only_line_is_not_content_without_content_lines() {
+    assert_eq!(parse("k: |\n  \nx: 1\n"), json!({"k": "", "x": 1}));
+    assert_eq!(parse("k: |\n  \n# c\nx: 1\n"), json!({"k": "", "x": 1}));
+    assert_eq!(parse("k: |\n  \n...\n"), json!({"k": ""}));
+}
+
+/// The leading-empty check measures against the first line with content, and a tab after the
+/// indentation is content rather than an empty line.
+#[test]
+fn a_tab_after_the_indent_is_content_for_leading_lines() {
+    assert_eq!(parse("k: |\n  \t\n"), json!({"k": "\t\n"}));
+    rejects("k: |\n    \n  \t\n");
+}
+
+/// A root block scalar's explicit indicator counts from the spec's root indentation of -1, so
+/// `|1` keeps the first space of a one-space line. Compat keeps libyaml's count from 0.
+#[test]
+fn a_root_indent_indicator_counts_from_minus_one() {
+    for (input, default, compat) in [
+        ("|1\n y\n", " y\n", "y\n"),
+        ("|2\n  y\n", " y\n", "y\n"),
+        ("|2\n    a\n", "   a\n", "  a\n"),
+    ] {
+        // `compat` is only read when the compatibility feature is on.
+        let _ = compat;
+        assert_eq!(parse(input), json!(default), "{input:?}");
+        #[cfg(feature = "libyaml-compat")]
+        assert_eq!(
+            ayaml::compat::from_str::<ayaml::Value>(input)
+                .expect("compat")
+                .as_str(),
+            Some(compat),
+            "{input:?} in compat"
+        );
+    }
+}
+
+/// A tab at or past an explicit content indent is content, not the start of a comment.
+#[test]
+fn an_explicit_indent_makes_a_tab_content_not_a_comment() {
+    assert_eq!(parse("|2\n  \t# c\n"), json!(" \t# c\n"));
+    #[cfg(feature = "libyaml-compat")]
+    assert_eq!(
+        ayaml::compat::from_str::<ayaml::Value>("|2\n  \t# c\n")
+            .expect("compat")
+            .as_str(),
+        Some("\t# c\n")
+    );
+}
+
+/// A comment line that starts with a tab directly after a block scalar is not a comment. The
+/// grammar wants the `#` at the line's first column or after spaces, not after a tab.
+#[test]
+fn a_tab_cannot_start_a_comment_after_a_block_scalar() {
+    for input in ["|\n x\n\t# c\n", "k: |\n  x\n\t# c\n", "k: |\n  \n\t# c\n"] {
+        let error = ayaml::parse_value(input).expect_err("a tabbed comment");
+        assert!(error.message().contains("tab"), "{input:?}: {error}");
+    }
+}
+
+/// A root block scalar's explicit indicator counts from the root's -1, so the writers add one to
+/// the content indentation they use. A leading space or tab must read back.
+#[test]
+fn a_root_block_scalar_reads_back_after_an_indicator_from_minus_one() {
+    for text in [" foo\n", "\n\t{\n", "  bar\n"] {
+        let value = ayaml::Value::from(text);
+        for written in [
+            ayaml::to_string_value(&value).expect("value writer"),
+            ayaml::to_string(&value).expect("serde writer"),
+        ] {
+            assert_eq!(
+                ayaml::parse_value(&written).expect("reparse"),
+                value,
+                "{text:?} wrote {written:?}"
+            );
+        }
     }
 }

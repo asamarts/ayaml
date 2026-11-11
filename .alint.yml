@@ -82,7 +82,7 @@ rules:
   - id: scanner-size-ratchet
     kind: file_max_lines
     paths: "crates/ayaml/src/scanner.rs"
-    max_lines: 3642
+    max_lines: 3667
     expect_matches: true
     level: error
   - id: parser-size-ratchet
@@ -94,6 +94,6 @@ rules:
   - id: emitter-size-ratchet
     kind: file_max_lines
     paths: "crates/ayaml/src/emitter.rs"
-    max_lines: 2325
+    max_lines: 2338
     expect_matches: true
     level: error
