@@ -84,9 +84,9 @@ alint check --fail-on-warning
 tools/ci-local.sh alint
 ```
 
-Five files predate the 2,000-line ceiling and carry a non-growth ratchet in `.alint.yml`:
-the scanner, parser, emitter, and two integration-test modules. Fix the tree or remove a
-ratchet in the change that shrinks the file; there is no baseline. `--changed` is not the
+Three source files predate the 2,000-line ceiling and carry a non-growth ratchet in
+`.alint.yml`: the scanner, parser, and emitter. Fix the tree or remove a ratchet in the
+change that shrinks the file; there is no baseline. `--changed` is not the
 gate: it depends on a base revision and lets a shape violation that is already on the base
 survive.
 
