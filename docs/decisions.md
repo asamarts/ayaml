@@ -374,7 +374,8 @@ which `tools/instruction-rises.tsv` accepts for the smallest and the deepest inp
 **Status:** Accepted
 
 **Decision.** Hosted CI runs `markdownlint-cli2` over the maintained Markdown files, and the plan
-job runs `aplan verify` with full history as well as `aplan check`. The local gate mirrors both.
+job runs `aplan verify` with full history and `aplan version` as well as `aplan check`. The local
+gate mirrors all three.
 
 **Why.** A markdown regression landed because only the local gate ran `markdownlint`, and `aplan
 check` is structural: it does not resolve the evidence citations in the plan. A cited test or

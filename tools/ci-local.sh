@@ -319,6 +319,7 @@ job_plan() {
   if ! command -v aplan >/dev/null; then skip "aplan not installed"; return; fi
   step "plan check" aplan check
   step "plan verify" aplan verify
+  step "plan version" aplan version
 }
 
 # Strict suite in both parser modes.
@@ -331,7 +332,7 @@ job_suite() {
 
 job_docs-lint() {
   if command -v npx >/dev/null; then
-    step "markdownlint" npx --yes markdownlint-cli2@0.23.3 README.md CHANGELOG.md CONTRIBUTING.md AGENTS.md RELEASING.md SECURITY.md "docs/*.md"
+    step "markdownlint" npx --yes markdownlint-cli2@0.23.3 README.md CHANGELOG.md CONTRIBUTING.md AGENTS.md RELEASING.md SECURITY.md fuzz/README.md tools/leak-scan/README.md tests/fixtures/compat/README.md tests/real-world/README.md "docs/*.md"
   else
     skip "npx not installed"
   fi
