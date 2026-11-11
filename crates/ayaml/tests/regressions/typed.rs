@@ -557,3 +557,71 @@ fn explicit_core_tags_follow_the_core_schema() {
     // Untagged, a leading zero keeps the scalar a string.
     assert_eq!(ayaml::parse_value("01\n").expect("parse"), "01");
 }
+
+/// A drop-in compat reader shouldn't refuse forms that default mode and libyaml each read. These
+/// are the small scanner/parser meetings AY-067 lists: flow `?` before `-` or a `!` tag, anchors
+/// that end at `?` or `:`, a block scalar under an anchored `:` key, a NEL comment, a BOM marker,
+/// and a quoted scalar below a BOM key.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_reads_what_default_mode_and_libyaml_read() {
+    let compat = |input: &str| {
+        ayaml::compat::from_str::<ayaml::Value>(input)
+            .unwrap_or_else(|error| panic!("{input:?}: {error}"))
+    };
+    let default = |input: &str| {
+        ayaml::parse_value(input).unwrap_or_else(|error| panic!("{input:?}: {error}"))
+    };
+
+    // A flow `?` before `-` is an explicit key whose key is the scalar `-`.
+    assert_eq!(compat("[?-]"), default("[{'-': null}]"));
+    assert_eq!(compat("{?-}"), default("{'-': null}"));
+    // `!!!` is libyaml's tag `!!` with suffix `!`; it only has to be read, not constructed.
+    assert!(compat("[?!!!,]").as_sequence().is_some());
+
+    // A name that stops on `?` or `:` must not leave a token that fails. These read as default
+    // mode reads the whole name.
+    for input in ["[&a:a?]", "{&a:b?}", "&a\u{85}?"] {
+        assert_eq!(compat(input), default(input), "{input:?}");
+    }
+
+    // A block scalar may sit at the parent's column under an anchored `:` key, as libyaml reads
+    // it.
+    assert_eq!(compat("&a::\n|"), default("{':': ''}"));
+    assert_eq!(compat("&a::\n|\n x"), default("{':': 'x'}"));
+
+    // NEL, LS, and PS are content in compat, but a `:` before one stays in the name, as default
+    // mode reads it.
+    for input in [
+        "&a:\u{85}\n  ---",
+        "&a:\u{85}\n  b: c",
+        "&a:\u{85}\n  b",
+        "&::\u{2028}",
+        "&\":\u{85}",
+    ] {
+        assert_eq!(compat(input), default(input), "{input:?}");
+    }
+
+    // A NEL in a comment after a flow `?` ends the comment, as libyaml's line break does.
+    assert_eq!(compat("{?# \u{85}}"), default("{null: null}"));
+
+    // Outside a flow collection, a `:` before a flow indicator ends a name and becomes text.
+    assert_eq!(compat("&r:}"), ayaml::Value::from(":}"));
+
+    // A `...` that ends a line after a stream-start BOM is a document marker, as in default mode.
+    assert_eq!(
+        compat("\u{feff}...\n...\u{2028}"),
+        ayaml::Value::from("...\u{2028}")
+    );
+
+    // A comment right after a flow `?` is a comment, as libyaml reads it. The second form's key
+    // is spelled `:` rather than null only because the tag is an unknown core tag; the read is
+    // accepted either way.
+    assert_eq!(compat("{?#\n}"), default("{null: null}"));
+    assert!(compat("[?#\n::]").as_sequence().is_some());
+
+    // A mark that starts the key's line must not tighten a quoted scalar's own indent check.
+    for input in ["# c\n\u{feff}k:\n  'a\n b'", "# c\n\u{feff}k:\n  ['a\n b']"] {
+        assert_eq!(compat(input), default(input), "{input:?}");
+    }
+}

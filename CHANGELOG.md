@@ -68,6 +68,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- In compat mode, inputs that default mode and libyaml both read no longer fail where the two
+  rules meet. This covers a flow `?` before `-` or a `!` tag, anchors ending at `?` or `:`, a
+  block scalar under an anchored `:` key, NEL comments and anchors, a `...` marker after a
+  stream-start BOM, and quoted scalars below a BOM key. The compatibility notes say where a
+  reading remains a deliberate deviation.
 - Typed readers now compare scalar mapping keys by their resolved value, so a null key and an
   empty-string key are distinct, while two spellings of the same scalar remain duplicates.
 - Serializing a deeply nested Rust value now returns a depth error before it can exhaust the

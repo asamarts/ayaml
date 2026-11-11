@@ -1635,7 +1635,29 @@ impl<'a> Parser<'a> {
             let indentless_sequence = next_indent == indent
                 && self
                     .line_starts_with(current_index, |kind| matches!(kind, TokenKind::BlockEntry));
-            if current_index < self.lines.len() && (next_indent > indent || indentless_sequence) {
+            // libyaml allows a block scalar at the parent's column as a mapping value, as in
+            // `&a::\n|`. The scanner has already established that this line is the scalar.
+            let block_scalar = self.compat
+                && self.line_starts_with(current_index, |kind| {
+                    matches!(
+                        kind,
+                        TokenKind::Scalar {
+                            style: ScalarStyle::Literal | ScalarStyle::Folded,
+                            ..
+                        }
+                    )
+                })
+                && self
+                    .line_first(current_index)
+                    .is_some_and(|token| token.span.start().column() == 1)
+                && current_index > 0
+                && self
+                    .line_tokens(current_index - 1)
+                    .iter()
+                    .any(|token| matches!(token.kind, TokenKind::Anchor(_)));
+            if current_index < self.lines.len()
+                && (next_indent > indent || indentless_sequence || block_scalar)
+            {
                 return Ok(Step::Call(Call::Node {
                     index: current_index,
                     indent: self.lines[current_index].indent,

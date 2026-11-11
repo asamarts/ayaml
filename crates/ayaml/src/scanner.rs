@@ -360,6 +360,15 @@ impl<'a> Scanner<'a> {
                 ));
             }
         }
+        if self.flow_level == 0
+            && self.compat_flow
+            && self.pos == 3
+            && self.initial_bom
+            && self.input[self.pos..].starts_with("...\n")
+            && let Some(token) = self.scan_document_marker()?
+        {
+            return Ok(Some(token));
+        }
         if self.flow_level == 0 && self.at_line_start() {
             if let Some(token) = self.scan_document_marker()? {
                 return Ok(Some(token));
@@ -419,7 +428,18 @@ impl<'a> Scanner<'a> {
                 self.pos += 1;
                 self.make(TokenKind::FlowEntry, start, self.pos)
             }
-            '-' if self.indicator_follows(start, 1) => {
+            '-' if self.indicator_follows(start, 1)
+                && !(self.compat_flow
+                    && self.flow_level > 0
+                    && self
+                        .flow_stack
+                        .last()
+                        .is_some_and(|&(_, _, explicit)| explicit)
+                    && matches!(
+                        self.input[start + 1..].chars().next(),
+                        Some(',' | ']' | '}')
+                    )) =>
+            {
                 self.pos += 1;
                 self.make_indicator(TokenKind::BlockEntry, start, self.pos)
             }
@@ -767,8 +787,11 @@ impl<'a> Scanner<'a> {
                     self.pos += 1;
                 }
                 '#' if self.comment_is_legal() => {
+                    let flow_key = self.compat_flow
+                        && self.flow_level > 0
+                        && self.input[..self.pos].ends_with('?');
                     while let Some(ch) = self.peek() {
-                        if is_line_break(ch) {
+                        if is_line_break(ch) || (flow_key && ch == '\u{85}') {
                             break;
                         }
                         if ch == '\u{feff}' && !self.compat_flow {
@@ -778,6 +801,9 @@ impl<'a> Scanner<'a> {
                             ));
                         }
                         self.pos += ch.len_utf8();
+                    }
+                    if flow_key && self.peek() == Some('\u{85}') {
+                        self.pos += '\u{85}'.len_utf8();
                     }
                 }
                 _ if is_line_break(ch) => return Ok(()),
@@ -841,7 +867,7 @@ impl<'a> Scanner<'a> {
             || after_line_start_bom
             || (self.compat_flow
                 && self.flow_level > 0
-                && previous.is_some_and(|ch| matches!(ch, '[' | '{' | ',')))
+                && previous.is_some_and(|ch| matches!(ch, '[' | '{' | ',' | '?')))
     }
 
     fn consume_line_break(&mut self) {
@@ -858,7 +884,10 @@ impl<'a> Scanner<'a> {
         // `BOM---` is a plain scalar rather than an explicit document start.
         // By default a BOM is not content.
         if self.compat_flow && start == 3 && self.initial_bom {
-            return Ok(None);
+            let rest = &self.input[start..];
+            if !rest.starts_with("...") || !rest[3..].chars().next().is_some_and(is_line_break) {
+                return Ok(None);
+            }
         }
         let rest = &self.input[start..];
         if rest.starts_with("---") && self.marker_follows(start, 3) {
@@ -1038,12 +1067,15 @@ impl<'a> Scanner<'a> {
             // collection: libyaml reads that `:` as a value indicator, which
             // this scanner wouldn't, so stopping would match neither reading.
             if self.compat_flow && ch == '?' {
-                break;
+                let after = self.input[self.pos + 1..].chars().next();
+                if after.is_some_and(|next| !matches!(next, '[' | ']' | '{' | '}' | ',')) {
+                    break;
+                }
             }
             if self.compat_flow && self.flow_level == 0 && ch == ':' && self.pos > name_start {
                 let after = self.input[self.pos + 1..].chars().next();
                 if after.is_some_and(|next| {
-                    !is_blank(next) && !matches!(next, '[' | ']' | '{' | '}' | ',')
+                    !is_blank(next) && !matches!(next, '\u{85}' | '\u{2028}' | '\u{2029}')
                 }) {
                     break;
                 }
@@ -1128,6 +1160,19 @@ impl<'a> Scanner<'a> {
             self.pos += 1;
             let suffix_start = self.pos;
             self.consume_tag_suffix();
+            // libyaml reads `!!!` as the core tag with the suffix `!`; the YAML 1.2.2 tag
+            // character set ends the suffix before it. Keep libyaml's reading in compat.
+            if self.compat_flow
+                && self.flow_level > 0
+                && self
+                    .flow_stack
+                    .last()
+                    .is_some_and(|&(_, _, explicit)| explicit)
+                && self.pos == suffix_start
+                && self.peek() == Some('!')
+            {
+                self.pos += 1;
+            }
             let prefix = self
                 .expand_tag_handle(start, "!!")?
                 .ok_or_else(|| self.error_at(start, "undefined secondary tag handle"))?;
@@ -1313,7 +1358,7 @@ impl<'a> Scanner<'a> {
             indent = leading_spaces(self.after_line_boms(line_start, self.input.len()));
             self.counted_indent = (line_start, indent);
         }
-        let (owner, compact) = if self.flow_level > 0 {
+        let (mut owner, compact) = if self.flow_level > 0 {
             if self.flow_owner.0 != self.flow_start {
                 self.flow_owner = (
                     self.flow_start,
@@ -1325,6 +1370,14 @@ impl<'a> Scanner<'a> {
         } else {
             (self.owner_of(start), self.compact_column(start))
         };
+        if self.compat_flow
+            && self.previous_line_starts_with_bom(line_start)
+            && let Owner::Block(parent) = owner
+        {
+            // A mark at the start of the key's line is a column in libyaml, but libyaml has no
+            // check on a quoted scalar's continuation lines. Use the parent without that column.
+            owner = Owner::Block(parent.saturating_sub(1));
+        }
         // Compat holds the lines to the line's indent there, as libyaml has no such check and
         // real files align them with the key, as in `- k: "a\n  b"`.
         if let Some(column) = compact
@@ -2005,6 +2058,21 @@ impl<'a> Scanner<'a> {
         }
     }
 
+    /// Whether the nearest non-empty line before `line_start` starts with a byte order mark.
+    fn previous_line_starts_with_bom(&self, line_start: usize) -> bool {
+        let mut end = line_start;
+        while end > 0 {
+            let previous_start = self.line_index.line_start(end.saturating_sub(1));
+            let line = &self.input[previous_start..end];
+            if line.trim_matches(is_blank).is_empty() {
+                end = previous_start;
+                continue;
+            }
+            return line.trim_start_matches(is_blank).starts_with('\u{feff}');
+        }
+        false
+    }
+
     /// The text of `start..end`, a line's start onward, past any byte order marks there. They
     /// take up no column, except in compat, which keeps libyaml's reading of them as a column.
     fn after_line_boms(&self, start: usize, end: usize) -> &'a str {
@@ -2573,12 +2641,20 @@ fn only_properties(text: &str, compat: bool) -> bool {
 /// more name text (see `scan_anchor`).
 fn compat_name_stop(bytes: &[u8], index: usize, name_start: usize) -> bool {
     match bytes[index] {
-        b'?' => true,
+        b'?' => bytes
+            .get(index + 1)
+            .is_some_and(|next| !matches!(next, b'[' | b']' | b'{' | b'}' | b',')),
         b':' => {
-            index > name_start
-                && bytes.get(index + 1).is_some_and(|next| {
-                    !matches!(next, b' ' | b'\t' | b'[' | b']' | b'{' | b'}' | b',')
-                })
+            if index <= name_start {
+                return false;
+            }
+            let rest = std::str::from_utf8(&bytes[index + 1..]).unwrap_or("");
+            rest.chars().next().is_some_and(|next| {
+                !matches!(
+                    next,
+                    ' ' | '\t' | '[' | ']' | '{' | '}' | ',' | '\u{85}' | '\u{2028}' | '\u{2029}'
+                )
+            })
         }
         _ => false,
     }

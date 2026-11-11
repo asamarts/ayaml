@@ -143,7 +143,9 @@ feature does not change the root parsing functions; choose the compatibility
 entry points explicitly.
 
 libyaml counts a column for a byte-order mark at the start of a line, so in
-compatibility mode a `---` or `...` right after one is text, not a marker. On a
+compatibility mode a `---` right after one, or a `...` followed by more text on
+its line, is text, not a marker. A `...` that ends its line is a marker, as in
+default mode, so `\u{feff}...\n...\u{2028}` reads the second line's text. On a
 later line, the mark's column also counts for block structure, so a block
 collection after it is one column deeper. The stream's first mark takes up no
 column, as when libyaml detects the encoding itself, unless a marker follows it.
@@ -174,12 +176,15 @@ lines, as libyaml does, except where an implicit flow key's `:` sits on one, as 
 Compatibility mode isn't an exact copy of libyaml. It follows YAML 1.2.2 instead in
 these places, on purpose:
 
-- NEL, LS, and PS are content; libyaml reads them as line breaks.
+- NEL, LS, and PS are content; libyaml reads them as line breaks. A NEL in a comment
+  after a flow `?` still ends that comment, as libyaml's line break does.
 - A byte-order mark past the start of the stream behaves as described above.
 - Anchor and alias names may hold any `ns-anchor-char`, where libyaml takes only
-  alphanumerics, `_`, and `-`, so `&a: b` differs. As in libyaml, though, a `?` ends a
-  name, and outside a flow collection so does a `:` followed by more text, so `&a:b` is
-  the string `:b` here and an empty node in default mode.
+  alphanumerics, `_`, and `-`, so `&a: b` differs. As in libyaml, a `?` ends a name
+  when text follows it; a trailing `?` before a flow indicator or the end stays in the
+  name, as default mode reads it. Outside a flow collection, a `:` followed by text or
+  a flow indicator ends a name, so `&a:b` is the string `:b` here and `&r:}` is `:}`;
+  a `:` before NEL, LS, or PS stays, as default mode reads it.
 - As in libyaml, an alias directly followed by `:` is a mapping key, so `*a: 1` has the key
   that `a` stands for, in a flow collection too. Default mode reads `a:` as the name, as
   YAML 1.2.2 says, so there it's an unknown anchor unless an anchor has that name. Compat keeps
@@ -191,7 +196,8 @@ these places, on purpose:
 - Global, verbatim, and non-specific tags are kept, with their escapes as written.
   Tag forms that YAML 1.2.2 allows and libyaml's scanner refuses are accepted, such as
   `!#`, `!<tag:a,1:b#c>`, or `!` right before a flow indicator. `!` isn't a tag character, so
-  `!.!` and `!!!` are errors. A tag needs a name, so `!<!>` is an error too, where libyaml reads
+  `!.!` and `!!!` are errors, except that `!!!` after a flow `?` is the core tag `!!` with
+  suffix `!`, which libyaml reads. A tag needs a name, so `!<!>` is an error too, where libyaml reads
   the non-specific tag. A verbatim tag names a local tag or a tag with a URI scheme, and each `%`
   in it starts a two-digit escape, so `!<foo>`, `!<]>`, and `!<tag:x:50%>` are errors.
 - In a flow collection, `[:a]` holds a plain scalar starting with `:`, `a:]` holds a key,
@@ -199,7 +205,9 @@ these places, on purpose:
   `{?\n:{}}` because only a JSON-like key allows an adjacent value. A flow mapping key may
   span lines or have a line break before its `:`. `[-]` is an error, and so is a `?` right
   before a flow indicator, as in `{?}` or `[?[a]]`, where libyaml reads an empty key or the
-  key `[a]`.
+  key `[a]`. A flow `?` followed by `-` and a flow indicator reads as an explicit key
+  whose key is the scalar `-`, as in `[?-]` or `{?-}`; a comment may follow the `?`;
+  and `!!!` after it is the core tag `!!` with suffix `!`, read as libyaml does.
 - An implicit key in a flow mapping may run past 1024 characters, as YAML 1.2.2 allows, where
   libyaml refuses it. Elsewhere an implicit key takes at most 1024, as in libyaml. The writers use
   `?` followed by a space for a key past 128 characters, as libyaml's emitter does.
@@ -219,10 +227,15 @@ these places, on purpose:
   keeps its space in default mode, as productions 170 and 174 say. Compat counts from 0, as
   libyaml does, and reads `y\n`.
 - A block scalar or a quoted scalar's continuation must be indented past its parent, so
-  `a:\n|` and `a: "b\nc"` are errors. That holds for a quoted line that the other kind of quote
+  `a:\n|` and `a: "b\nc"` are errors. A block scalar under a key with an anchor may sit at
+  the parent's column, as in `&a::\n|`, which libyaml reads as the key `:` with an empty
+  value. That holds for a quoted line that the other kind of quote
   or `''` starts, as in `k: "a\n'b"`. By default, after a compact key or entry the parent is the
   collection that it starts, so `- k: 'a\n b'` is an error. Compatibility mode measures those
   lines against the line's indent, as libyaml reads files that align them with the key.
+- A byte-order mark at the start of a key's line doesn't tighten a quoted scalar below
+  it: the mark's column counts for block structure but not for the quoted scalar's own
+  continuation check, as libyaml has no such check.
 - A comment must be separated from what precedes it, so `""#` and `|#` are errors.
 - An unknown directive is ignored, and a stream may start with `...`.
 - Integers are exact up to 128 bits.
