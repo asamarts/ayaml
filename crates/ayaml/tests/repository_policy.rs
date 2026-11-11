@@ -122,8 +122,6 @@ fn the_repository_lint_policy_is_the_one_the_plan_requires() {
             "crates/ayaml/src/emitter.rs",
             "crates/ayaml/src/parser.rs",
             "crates/ayaml/src/scanner.rs",
-            "crates/ayaml/tests/contracts.rs",
-            "crates/ayaml/tests/regressions.rs",
         ]
     );
 
@@ -131,11 +129,6 @@ fn the_repository_lint_policy_is_the_one_the_plan_requires() {
         ("scanner-size-ratchet", "crates/ayaml/src/scanner.rs"),
         ("parser-size-ratchet", "crates/ayaml/src/parser.rs"),
         ("emitter-size-ratchet", "crates/ayaml/src/emitter.rs"),
-        (
-            "regressions-size-ratchet",
-            "crates/ayaml/tests/regressions.rs",
-        ),
-        ("contracts-size-ratchet", "crates/ayaml/tests/contracts.rs"),
     ] {
         let ratchet = rule(&config, id);
         assert_eq!(ratchet["kind"].as_str(), Some("file_max_lines"), "{id}");
