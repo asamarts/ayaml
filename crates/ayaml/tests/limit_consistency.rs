@@ -14,6 +14,7 @@ use ayaml::{Deserializer, Error, ErrorKind, LimitKind, Limits, Span, Value};
 use serde::de::IgnoredAny;
 
 type Read = fn(&str, &Limits) -> Result<(), Error>;
+type Emit = fn(&Value, &[ayaml::Event<'static>], &Limits) -> Result<usize, Error>;
 
 /// A reader that takes limits.
 struct Reader {
@@ -164,6 +165,12 @@ struct Case {
     /// The input holds more than one document, which a reader of one document refuses
     /// whatever the limits, so only the stream readers are asked.
     several: bool,
+    /// The limit is looser as its value grows, so `least` is the largest accepted value and
+    /// values above it are refused.
+    decreasing: bool,
+    /// Event readers don't copy an alias's target, so an alias-budget limit doesn't apply to
+    /// them.
+    events: bool,
 }
 
 const fn case(
@@ -179,6 +186,8 @@ const fn case(
         least,
         least_events: least,
         several: false,
+        decreasing: false,
+        events: true,
     }
 }
 
@@ -186,6 +195,23 @@ const fn case(
 const fn stream(case: Case) -> Case {
     Case {
         several: true,
+        ..case
+    }
+}
+
+/// A case whose boundary is a maximum: larger values are refused.
+const fn decreasing(case: Case) -> Case {
+    Case {
+        decreasing: true,
+        ..case
+    }
+}
+
+/// A case that only the readers that build values are asked, because an event reader does not
+/// copy what an alias names.
+const fn values_only(case: Case) -> Case {
+    Case {
+        events: false,
         ..case
     }
 }
@@ -213,6 +239,21 @@ fn alias_bytes(limits: Limits, value: usize) -> Limits {
         .with_max_alias_expansion_bytes(value)
 }
 
+/// A node cost, with the fixed alias allowance that bounds it.
+fn node_cost(limits: Limits, value: usize) -> Limits {
+    limits
+        .with_node_cost_bytes(value)
+        .with_alias_bytes_per_input_byte(0)
+        .with_max_alias_expansion_bytes(257)
+}
+
+/// The per-input-byte allowance alone, with no fixed allowance.
+fn alias_per_byte(limits: Limits, value: usize) -> Limits {
+    limits
+        .with_alias_bytes_per_input_byte(value)
+        .with_max_alias_expansion_bytes(0)
+}
+
 fn dereferences(limits: Limits, value: usize) -> Limits {
     limits.with_max_alias_dereferences(value)
 }
@@ -235,6 +276,11 @@ fn input_bytes(limits: Limits, value: usize) -> Limits {
 
 /// The cases. An event count includes the stream's start and end; a token count is the
 /// scalars, properties, indicators, markers and directives. `max_events` bounds both.
+///
+/// `max_output_bytes` applies to emitters rather than readers, and is covered by
+/// `every_emitter_gives_the_same_output_limit_answer`. An event reader does not copy an alias's
+/// target, so `node_cost_bytes` and `alias_bytes_per_input_byte` are asked only of readers that
+/// build values.
 fn cases() -> Vec<Case> {
     vec![
         // Events: stream start, document start, mapping start, `a`, `1`, mapping end, document
@@ -399,6 +445,22 @@ fn cases() -> Vec<Case> {
                 2 * 512 + (256 + 2 * 512),
             )
         },
+        // A node's cost is charged against the alias budget. A number's text adds nothing, so
+        // with a fixed allowance of 257, 257 is the largest accepted node cost.
+        values_only(decreasing(case(
+            "a: &x 1\nb: *x\n",
+            LimitKind::AliasExpansion,
+            node_cost,
+            257,
+        ))),
+        // The input is 14 bytes and the alias copies a 256-byte node. With no fixed allowance,
+        // 19 bytes per input byte is the least that reaches it.
+        values_only(case(
+            "a: &x 1\nb: *x\n",
+            LimitKind::AliasExpansion,
+            alias_per_byte,
+            19,
+        )),
         // Each alias is one dereference, wherever its target is.
         Case {
             least_events: 0,
@@ -413,6 +475,23 @@ fn cases() -> Vec<Case> {
         // Three entries, and two pairs.
         case("[a, b, c]\n", LimitKind::CollectionEntries, entries, 3),
         case("a: 1\nb: 2\n", LimitKind::CollectionEntries, entries, 2),
+        // Each place that counts entries: flow and block mappings, flow and block sequences,
+        // explicit keys, and the short-block fast paths.
+        case("{a: 1, b: 2}\n", LimitKind::CollectionEntries, entries, 2),
+        case("- a\n- b\n", LimitKind::CollectionEntries, entries, 2),
+        case(
+            "? a\n: 1\n? b\n: 2\n",
+            LimitKind::CollectionEntries,
+            entries,
+            2,
+        ),
+        case(
+            "a: 1\nb: 2\nc: 3\n",
+            LimitKind::CollectionEntries,
+            entries,
+            3,
+        ),
+        case("- a\n- b\n- c\n", LimitKind::CollectionEntries, entries, 3),
         // `!!` stands for the 18 bytes of `tag:yaml.org,2002:`.
         case("!!str a\n", LimitKind::TagExpansion, tag_bytes, 18),
         // `!` stands for itself, once for each use.
@@ -430,15 +509,45 @@ fn every_reader_gives_the_same_answer_at_the_same_limits() {
         let mut places: Vec<(usize, &str, Option<Span>)> = Vec::new();
         for reader in readers
             .iter()
-            .filter(|reader| reader.stream || !case.several)
+            .filter(|reader| (reader.stream || !case.several) && (case.events || reader.values))
         {
-            let least = if reader.values {
+            let boundary = if reader.values {
                 case.least
             } else {
                 case.least_events
             };
             let accepts = |value| (reader.read)(case.input, &(case.set)(Limits::default(), value));
-            for value in [least, least + 1] {
+            if case.decreasing {
+                // At and below the bound accept; values above it refuse with this limit.
+                for value in [boundary.saturating_sub(1), boundary] {
+                    if let Err(error) = accepts(value) {
+                        failures.push(format!(
+                            "{:?} {:?}: {} refused {value}: {error}",
+                            case.input, case.kind, reader.name
+                        ));
+                    }
+                }
+                for value in [boundary + 1, boundary + 2] {
+                    match accepts(value) {
+                        Ok(()) => failures.push(format!(
+                            "{:?} {:?}: {} accepted {value}",
+                            case.input, case.kind, reader.name
+                        )),
+                        Err(error) => {
+                            let kind = error.limit().map(|limit| limit.kind());
+                            if error.kind() != ErrorKind::Limit || kind != Some(case.kind) {
+                                failures.push(format!(
+                                    "{:?} {:?}: {} refused {value} with {error}",
+                                    case.input, case.kind, reader.name
+                                ));
+                            }
+                            places.push((value, reader.name, error.span()));
+                        }
+                    }
+                }
+                continue;
+            }
+            for value in [boundary, boundary + 1] {
                 if let Err(error) = accepts(value) {
                     failures.push(format!(
                         "{:?} {:?}: {} refused {value}: {error}",
@@ -446,11 +555,11 @@ fn every_reader_gives_the_same_answer_at_the_same_limits() {
                     ));
                 }
             }
-            if least == 0 {
+            if boundary == 0 {
                 continue;
             }
             // Every value below one less refuses the input for the same limit, wherever.
-            for value in 0..least - 1 {
+            for value in 0..boundary - 1 {
                 match accepts(value) {
                     Err(error) if error.limit().map(|limit| limit.kind()) == Some(case.kind) => {}
                     other => failures.push(format!(
@@ -459,13 +568,13 @@ fn every_reader_gives_the_same_answer_at_the_same_limits() {
                     )),
                 }
             }
-            match accepts(least - 1) {
+            match accepts(boundary - 1) {
                 Ok(()) => failures.push(format!(
                     "{:?} {:?}: {} accepted {}",
                     case.input,
                     case.kind,
                     reader.name,
-                    least - 1
+                    boundary - 1
                 )),
                 Err(error) => {
                     let kind = error.limit().map(|limit| limit.kind());
@@ -475,10 +584,10 @@ fn every_reader_gives_the_same_answer_at_the_same_limits() {
                             case.input,
                             case.kind,
                             reader.name,
-                            least - 1
+                            boundary - 1
                         ));
                     }
-                    places.push((least, reader.name, error.span()));
+                    places.push((boundary, reader.name, error.span()));
                 }
             }
         }
@@ -497,6 +606,77 @@ fn every_reader_gives_the_same_answer_at_the_same_limits() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Every emitter that takes limits refuses one byte below the output it would write, and accepts
+/// that byte and one more. The entry point that starts from an event stream parses it again, so
+/// the output limit is the only limit under test.
+#[test]
+fn every_emitter_gives_the_same_output_limit_answer() {
+    let value = ayaml::parse_value("a\n").expect("value");
+    let events: Vec<ayaml::Event<'static>> = ayaml::parse_events("a\n")
+        .expect("events")
+        .collect::<Result<_, _>>()
+        .expect("events");
+    let emitters: Vec<(&str, Emit)> = vec![
+        ("to_string_value_with_limits", |value, _, limits| {
+            ayaml::to_string_value_with_limits(value, limits).map(|text| text.len())
+        }),
+        ("to_string_with_limits", |value, _, limits| {
+            ayaml::to_string_with_limits(value, limits).map(|text| text.len())
+        }),
+        ("to_string_documents_with_limits", |value, _, limits| {
+            ayaml::to_string_documents_with_limits(std::slice::from_ref(value), limits)
+                .map(|text| text.len())
+        }),
+        ("to_string_events_with_limits", |_, events, limits| {
+            ayaml::to_string_events_with_limits(events, limits).map(|text| text.len())
+        }),
+        ("to_writer_value_with_limits", |value, _, limits| {
+            let mut output = Vec::new();
+            ayaml::to_writer_value_with_limits(&mut output, value, limits).map(|()| output.len())
+        }),
+        ("to_writer_documents_with_limits", |value, _, limits| {
+            let mut output = Vec::new();
+            ayaml::to_writer_documents_with_limits(&mut output, std::slice::from_ref(value), limits)
+                .map(|()| output.len())
+        }),
+        ("to_writer_with_limits", |value, _, limits| {
+            let mut output = Vec::new();
+            ayaml::to_writer_with_limits(&mut output, value, limits).map(|()| output.len())
+        }),
+        ("to_writer_event_stream_with_limits", |_, _, limits| {
+            let mut output = Vec::new();
+            let stream = ayaml::parse_events("a\n").expect("events");
+            ayaml::to_writer_event_stream_with_limits(&mut output, stream, limits)
+                .map(|()| output.len())
+        }),
+    ];
+    for (name, emit) in emitters {
+        let wide = Limits::default().with_max_output_bytes(usize::MAX);
+        let least = emit(&value, &events, &wide)
+            .unwrap_or_else(|error| panic!("{name} refused usize::MAX: {error}"));
+        for allowed in [least, least + 1] {
+            emit(
+                &value,
+                &events,
+                &Limits::default().with_max_output_bytes(allowed),
+            )
+            .unwrap_or_else(|error| panic!("{name} refused {allowed} bytes: {error}"));
+        }
+        let error = emit(
+            &value,
+            &events,
+            &Limits::default().with_max_output_bytes(least - 1),
+        )
+        .expect_err("a byte below the output");
+        assert_eq!(error.kind(), ErrorKind::Limit, "{name}: {error}");
+        assert_eq!(
+            error.limit().map(|limit| limit.kind()),
+            Some(LimitKind::OutputBytes),
+            "{name}: {error}"
+        );
+    }
 }
 
 /// The lazy and eager event readers give the same events, with the same places, the stream's
