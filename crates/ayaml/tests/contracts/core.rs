@@ -517,3 +517,54 @@ fn misplaced_block_lines_say_what_is_wrong() {
         );
     }
 }
+
+/// A deeply nested Rust value returns a depth error before serialization can exhaust a 2 MiB
+/// stack. The limit is the parser's 128, and `to_string` and `to_writer` serialize through
+/// `to_value` first.
+#[test]
+fn deep_serialization_returns_a_depth_error_on_a_small_stack() {
+    fn nested(depth: usize) -> Value {
+        let mut value = Value::from(1_u64);
+        for _ in 0..depth {
+            value = Value::Sequence(vec![value]);
+        }
+        value
+    }
+
+    fn on_small_stack(body: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(body)
+            .expect("spawn")
+            .join()
+            .expect("no panic");
+    }
+
+    fn assert_depth(error: ayaml::Error) {
+        assert_eq!(error.kind(), ErrorKind::Limit, "{error}");
+        assert_eq!(
+            error.limit().map(|limit| limit.kind()),
+            Some(LimitKind::Depth),
+            "{error}"
+        );
+    }
+
+    for depth in [128, 129] {
+        let value = nested(depth);
+        on_small_stack(move || {
+            let to_value = ayaml::to_value(&value);
+            let to_string = ayaml::to_string(&value);
+            let mut output = Vec::new();
+            let to_writer = ayaml::to_writer(&mut output, &value);
+            if depth <= 128 {
+                to_value.expect("to_value at the limit");
+                to_string.expect("to_string at the limit");
+                to_writer.expect("to_writer at the limit");
+            } else {
+                assert_depth(to_value.expect_err("to_value above the limit"));
+                assert_depth(to_string.expect_err("to_string above the limit"));
+                assert_depth(to_writer.expect_err("to_writer above the limit"));
+            }
+        });
+    }
+}

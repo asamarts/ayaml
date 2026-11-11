@@ -14,6 +14,7 @@ use serde::ser::{
 use std::borrow::Cow;
 use std::fmt;
 
+use crate::limits::{LimitExceeded, LimitKind, MAX_DEPTH};
 use crate::mapping::Mapping;
 use crate::number::Number;
 use crate::tag::{Tag, TaggedValue};
@@ -976,13 +977,59 @@ impl<'de> serde::de::VariantAccess<'de> for ValueVariantAccess<'_> {
 
 /// Serialize a Rust value into the generic YAML value model.
 pub fn to_value<T: Serialize>(value: T) -> Result<Value, crate::Error> {
-    value.serialize(ValueSerializer)
+    value.serialize(ValueSerializer {
+        depth: 0,
+        wrappers: 0,
+    })
 }
 
-struct ValueSerializer;
+struct ValueSerializer {
+    /// Collections on the path to the value being serialized.
+    depth: usize,
+    /// Non-collection wrappers such as a tag, a newtype, or an `Option`.
+    wrappers: usize,
+}
+
+impl ValueSerializer {
+    fn child(self) -> Result<Self, crate::Error> {
+        let wrappers = self.wrappers + 1;
+        if wrappers > MAX_DEPTH {
+            return Err(depth_error(wrappers));
+        }
+        Ok(Self {
+            depth: self.depth,
+            wrappers,
+        })
+    }
+
+    fn collection(self) -> Result<Self, crate::Error> {
+        let depth = self.depth + 1;
+        if depth > MAX_DEPTH {
+            return Err(depth_error(depth));
+        }
+        Ok(Self {
+            depth,
+            wrappers: self.wrappers,
+        })
+    }
+}
+
+fn depth_error(depth: usize) -> crate::Error {
+    crate::Error::new(
+        crate::ErrorKind::Limit,
+        format!("serialization depth limit exceeded: limit {MAX_DEPTH}, observed {depth}"),
+    )
+    .with_limit(LimitExceeded::new(
+        LimitKind::Depth,
+        MAX_DEPTH as u64,
+        depth as u64,
+    ))
+}
 
 struct ValueSeqSerializer {
     values: Vec<Value>,
+    depth: usize,
+    wrappers: usize,
 }
 
 struct ValueMapSerializer {
@@ -992,20 +1039,31 @@ struct ValueMapSerializer {
     check_tag: bool,
     tag_key: Option<Tag>,
     tagged: Option<TaggedValue>,
+    depth: usize,
+    wrappers: usize,
+    /// Whether this map's own depth was counted. A one-entry map waits for its key, since a
+    /// tagged value is written as one and a tag is not a YAML collection.
+    counted: bool,
 }
 
 struct ValueStructSerializer {
     mapping: Mapping,
+    depth: usize,
+    wrappers: usize,
 }
 
 struct ValueTupleVariantSerializer {
     variant: &'static str,
     values: Vec<Value>,
+    depth: usize,
+    wrappers: usize,
 }
 
 struct ValueStructVariantSerializer {
     variant: &'static str,
     mapping: Mapping,
+    depth: usize,
+    wrappers: usize,
 }
 
 impl Serializer for ValueSerializer {
@@ -1086,7 +1144,7 @@ impl Serializer for ValueSerializer {
         Ok(Value::Null)
     }
     fn serialize_some<T: ?Sized + Serialize>(self, value: &T) -> Result<Self::Ok, Self::Error> {
-        value.serialize(self)
+        value.serialize(self.child()?)
     }
     fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
         Ok(Value::Null)
@@ -1109,7 +1167,7 @@ impl Serializer for ValueSerializer {
         _name: &'static str,
         value: &T,
     ) -> Result<Self::Ok, Self::Error> {
-        value.serialize(self)
+        value.serialize(self.child()?)
     }
     fn serialize_newtype_variant<T: ?Sized + Serialize>(
         self,
@@ -1118,19 +1176,26 @@ impl Serializer for ValueSerializer {
         variant: &'static str,
         value: &T,
     ) -> Result<Self::Ok, Self::Error> {
+        let child = self.child()?;
         Ok(Value::from(TaggedValue::new(
             Tag::local(variant),
-            value.serialize(ValueSerializer)?,
+            value.serialize(child)?,
         )))
     }
     fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
+        let child = self.collection()?;
         Ok(ValueSeqSerializer {
             values: Vec::with_capacity(len.unwrap_or(0)),
+            depth: child.depth,
+            wrappers: child.wrappers,
         })
     }
     fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
+        let child = self.collection()?;
         Ok(ValueSeqSerializer {
             values: Vec::with_capacity(len),
+            depth: child.depth,
+            wrappers: child.wrappers,
         })
     }
     fn serialize_tuple_struct(
@@ -1138,8 +1203,11 @@ impl Serializer for ValueSerializer {
         _name: &'static str,
         len: usize,
     ) -> Result<Self::SerializeTupleStruct, Self::Error> {
+        let child = self.collection()?;
         Ok(ValueSeqSerializer {
             values: Vec::with_capacity(len),
+            depth: child.depth,
+            wrappers: child.wrappers,
         })
     }
     fn serialize_tuple_variant(
@@ -1149,18 +1217,31 @@ impl Serializer for ValueSerializer {
         variant: &'static str,
         len: usize,
     ) -> Result<Self::SerializeTupleVariant, Self::Error> {
+        let child = self.collection()?;
         Ok(ValueTupleVariantSerializer {
             variant,
             values: Vec::with_capacity(len),
+            depth: child.depth,
+            wrappers: child.wrappers,
         })
     }
     fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
+        let one = len == Some(1);
+        let (depth, wrappers, counted) = if one {
+            (self.depth, self.wrappers, false)
+        } else {
+            let child = self.collection()?;
+            (child.depth, child.wrappers, true)
+        };
         Ok(ValueMapSerializer {
             mapping: Mapping::with_capacity(len.unwrap_or(0)),
             key: None,
-            check_tag: len == Some(1),
+            check_tag: one,
             tag_key: None,
             tagged: None,
+            depth,
+            wrappers,
+            counted,
         })
     }
     fn serialize_struct(
@@ -1168,8 +1249,11 @@ impl Serializer for ValueSerializer {
         _name: &'static str,
         len: usize,
     ) -> Result<Self::SerializeStruct, Self::Error> {
+        let child = self.collection()?;
         Ok(ValueStructSerializer {
             mapping: Mapping::with_capacity(len),
+            depth: child.depth,
+            wrappers: child.wrappers,
         })
     }
     fn serialize_struct_variant(
@@ -1179,9 +1263,12 @@ impl Serializer for ValueSerializer {
         variant: &'static str,
         len: usize,
     ) -> Result<Self::SerializeStructVariant, Self::Error> {
+        let child = self.collection()?;
         Ok(ValueStructVariantSerializer {
             variant,
             mapping: Mapping::with_capacity(len),
+            depth: child.depth,
+            wrappers: child.wrappers,
         })
     }
 }
@@ -1192,7 +1279,10 @@ macro_rules! finish_sequence {
             type Ok = Value;
             type Error = crate::Error;
             fn $method<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
-                self.values.push(value.serialize(ValueSerializer)?);
+                self.values.push(value.serialize(ValueSerializer {
+                    depth: self.depth,
+                    wrappers: self.wrappers,
+                })?);
                 Ok(())
             }
             fn $finish(self) -> Result<Self::Ok, Self::Error> {
@@ -1215,7 +1305,10 @@ impl SerializeTupleVariant for ValueTupleVariantSerializer {
     type Ok = Value;
     type Error = crate::Error;
     fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
-        self.values.push(value.serialize(ValueSerializer)?);
+        self.values.push(value.serialize(ValueSerializer {
+            depth: self.depth,
+            wrappers: self.wrappers,
+        })?);
         Ok(())
     }
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -1240,26 +1333,61 @@ impl SerializeMap for ValueMapSerializer {
         }
         if self.check_tag && self.mapping.is_empty() {
             self.check_tag = false;
-            match key.serialize(KeySerializer)? {
+            let child_depth = self.depth + 1;
+            match key.serialize(KeySerializer {
+                depth: child_depth,
+                wrappers: self.wrappers,
+            })? {
                 Value::Tagged(tagged) if tagged.tag.handle() == TAG_KEY_HANDLE => {
                     self.tag_key = Some(Tag::from_serde_name(tagged.tag.suffix()));
+                    return Ok(());
                 }
-                key => self.key = Some(key),
+                key => {
+                    self.depth = child_depth;
+                    if self.depth > MAX_DEPTH {
+                        return Err(depth_error(self.depth));
+                    }
+                    self.counted = true;
+                    self.key = Some(key);
+                    return Ok(());
+                }
             }
-            return Ok(());
         }
-        self.key = Some(key.serialize(ValueSerializer)?);
+        if !self.counted {
+            self.depth += 1;
+            if self.depth > MAX_DEPTH {
+                return Err(depth_error(self.depth));
+            }
+            self.counted = true;
+        }
+        self.key = Some(key.serialize(ValueSerializer {
+            depth: self.depth,
+            wrappers: self.wrappers,
+        })?);
         Ok(())
     }
     fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
         if let Some(tag) = self.tag_key.take() {
-            self.tagged = Some(TaggedValue::new(tag, value.serialize(ValueSerializer)?));
+            self.tagged = Some(TaggedValue::new(
+                tag,
+                value.serialize(ValueSerializer {
+                    depth: self.depth,
+                    wrappers: self.wrappers,
+                })?,
+            ));
             return Ok(());
         }
         let key = self.key.take().ok_or_else(|| {
             crate::Error::new(crate::ErrorKind::Serde, "map value serialized before key")
         })?;
-        insert_entry(&mut self.mapping, key, value.serialize(ValueSerializer)?)
+        insert_entry(
+            &mut self.mapping,
+            key,
+            value.serialize(ValueSerializer {
+                depth: self.depth,
+                wrappers: self.wrappers,
+            })?,
+        )
     }
     fn end(self) -> Result<Self::Ok, Self::Error> {
         match self.tagged {
@@ -1276,13 +1404,16 @@ const TAG_KEY_HANDLE: &str = "\u{0}ayaml:tag-key:";
 
 /// Serializes the first key of a one-entry map like [`ValueSerializer`], but
 /// recognizes a [`TagKey`].
-struct KeySerializer;
+struct KeySerializer {
+    depth: usize,
+    wrappers: usize,
+}
 
 macro_rules! delegate_to_value_serializer {
     ($($method:ident($($arg:ident: $type:ty),*) -> $output:ty;)*) => {
         $(
             fn $method(self, $($arg: $type),*) -> Result<$output, Self::Error> {
-                ValueSerializer.$method($($arg),*)
+                ValueSerializer { depth: self.depth, wrappers: self.wrappers }.$method($($arg),*)
             }
         )*
     };
@@ -1340,14 +1471,22 @@ impl Serializer for KeySerializer {
     }
 
     fn serialize_some<T: ?Sized + Serialize>(self, value: &T) -> Result<Value, Self::Error> {
-        ValueSerializer.serialize_some(value)
+        ValueSerializer {
+            depth: self.depth,
+            wrappers: self.wrappers,
+        }
+        .serialize_some(value)
     }
     fn serialize_newtype_struct<T: ?Sized + Serialize>(
         self,
         name: &'static str,
         value: &T,
     ) -> Result<Value, Self::Error> {
-        ValueSerializer.serialize_newtype_struct(name, value)
+        ValueSerializer {
+            depth: self.depth,
+            wrappers: self.wrappers,
+        }
+        .serialize_newtype_struct(name, value)
     }
     fn serialize_newtype_variant<T: ?Sized + Serialize>(
         self,
@@ -1356,7 +1495,11 @@ impl Serializer for KeySerializer {
         variant: &'static str,
         value: &T,
     ) -> Result<Value, Self::Error> {
-        ValueSerializer.serialize_newtype_variant(name, index, variant, value)
+        ValueSerializer {
+            depth: self.depth,
+            wrappers: self.wrappers,
+        }
+        .serialize_newtype_variant(name, index, variant, value)
     }
     fn collect_str<T: ?Sized + fmt::Display>(self, value: &T) -> Result<Value, Self::Error> {
         Ok(match check_for_tag(value)? {
@@ -1380,7 +1523,10 @@ impl SerializeStruct for ValueStructSerializer {
         insert_entry(
             &mut self.mapping,
             Value::String(key.to_owned()),
-            value.serialize(ValueSerializer)?,
+            value.serialize(ValueSerializer {
+                depth: self.depth,
+                wrappers: self.wrappers,
+            })?,
         )
     }
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -1399,7 +1545,10 @@ impl SerializeStructVariant for ValueStructVariantSerializer {
         insert_entry(
             &mut self.mapping,
             Value::String(key.to_owned()),
-            value.serialize(ValueSerializer)?,
+            value.serialize(ValueSerializer {
+                depth: self.depth,
+                wrappers: self.wrappers,
+            })?,
         )
     }
     fn end(self) -> Result<Self::Ok, Self::Error> {
