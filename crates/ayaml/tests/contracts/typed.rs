@@ -150,10 +150,66 @@ fn core_collection_tags_are_resolved_and_null_sequences_are_empty() {
 }
 
 #[test]
-fn duplicate_key_diagnostic_points_at_the_first_key() {
+fn duplicate_key_diagnostic_points_at_the_duplicate_key() {
     let error = ayaml::from_str_borrowed::<Value>("a: 1\na: 2\n").expect_err("duplicate");
     let location = error.location().expect("location");
-    assert_eq!((location.line(), location.column()), (1, 1));
+    assert_eq!((location.line(), location.column()), (2, 1));
+}
+
+#[test]
+fn a_typed_map_reports_keys_that_differ_only_in_type() {
+    use std::collections::BTreeMap;
+
+    let input = "1: 1\n\"1\": 2\n";
+    let error = ayaml::from_str::<BTreeMap<String, u64>>(input).expect_err("duplicate");
+    assert_eq!(error.kind(), ErrorKind::DuplicateKey);
+    assert_eq!(
+        error
+            .location()
+            .map(|location| (location.line(), location.column())),
+        Some((2, 1))
+    );
+
+    let error = ayaml::from_str::<Value>(input).expect_err("duplicate");
+    assert_eq!(error.kind(), ErrorKind::DuplicateKey);
+
+    let value = ayaml::parse_value(input).expect("the generic value keeps both keys");
+    assert_eq!(value.as_mapping().expect("mapping").len(), 2);
+}
+
+#[test]
+fn a_complex_duplicate_key_prints_readably_and_shortly() {
+    for input in [
+        "[1, 2]: a\n[1, 2]: b\n",
+        "!t 1: a\n!t 1: b\n",
+        "? {a: 1, b: 2}\n: x\n? {a: 1, b: 2}\n: y\n",
+    ] {
+        let error = ayaml::from_str::<Value>(input).expect_err("duplicate");
+        assert_eq!(error.kind(), ErrorKind::DuplicateKey, "{input:?}");
+        let message = error.message();
+        assert!(!message.contains("Node {"), "{message}");
+        assert!(!message.contains("Sequence("), "{message}");
+        assert!(!message.contains("Mapping("), "{message}");
+        assert!(message.chars().count() < 120, "{message}");
+    }
+    let long = format!("[{}]: a\n[{}]: b\n", "1, ".repeat(200), "1, ".repeat(200));
+    let error = ayaml::from_str::<Value>(&long).expect_err("duplicate");
+    assert!(error.message().chars().count() < 120, "{}", error.message());
+    assert!(error.message().contains('…'), "{}", error.message());
+}
+
+#[test]
+fn a_duplicate_key_with_location_like_text_keeps_its_location() {
+    let input = "\"at line 9\": 1\n\"at line 9\": 2\n";
+    let error = ayaml::from_str::<Value>(input).expect_err("duplicate");
+    assert_eq!(error.kind(), ErrorKind::DuplicateKey);
+    assert_eq!(
+        error
+            .location()
+            .map(|location| (location.line(), location.column())),
+        Some((2, 1))
+    );
+    assert!(error.message().contains("at line 9"), "{error}");
 }
 
 #[test]
@@ -165,7 +221,8 @@ fn empty_documents_are_null() {
 #[test]
 fn default_from_str_uses_the_typed_path() {
     // the default entry point reads an empty document into a struct with
-    // defaults, and reports duplicate keys at their first occurrence.
+    // defaults, and reports a duplicate key at the duplicate occurrence, as
+    // `parse_value` does.
     let defaults: DefaultedDocument = ayaml::from_str("").expect("empty document defaults");
     assert_eq!(defaults, DefaultedDocument::default());
 
@@ -173,7 +230,7 @@ fn default_from_str_uses_the_typed_path() {
     assert_eq!(duplicate.kind(), ErrorKind::DuplicateKey);
     assert_eq!(
         duplicate.location().map(|l| (l.line(), l.column())),
-        Some((1, 1))
+        Some((2, 1))
     );
 }
 
@@ -384,4 +441,67 @@ fn borrowed_deserializer_streams_documents() {
         .expect("seeded")
         .expect("seeded value");
     assert_eq!(first, "one");
+}
+
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_classifies_by_structured_data_not_hostile_key_names() {
+    use std::collections::BTreeMap;
+
+    for key in [
+        "collection depth limit",
+        "trailing documents",
+        "unexpected token in mapping value",
+    ] {
+        let input = format!("{key}: x\n");
+        let error = ayaml::compat::from_str::<BTreeMap<String, u8>>(&input).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Serde, "{key}: {error}");
+    }
+}
+
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_keeps_locations_on_depth_and_document_errors() {
+    let deep = format!("{}a\n", "- ".repeat(129));
+    let error = ayaml::compat::from_str::<Value>(&deep).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Serde);
+    assert_eq!(error.message(), "recursion limit exceeded");
+    assert_eq!(
+        error
+            .location()
+            .map(|location| (location.line(), location.column())),
+        Some((1, 257))
+    );
+
+    let error = ayaml::compat::from_str::<Value>("a: 1\n---\nb: 2\n").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Parser);
+    assert_eq!(error.message(), "more than one document in stream");
+    assert_eq!(
+        error
+            .location()
+            .map(|location| (location.line(), location.column())),
+        Some((2, 1))
+    );
+}
+
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_reports_an_error_inside_the_first_document_before_a_second() {
+    let error = ayaml::compat::from_str::<Value>("*x\n---\na: 1\n").unwrap_err();
+    assert!(
+        error.message().contains("unknown anchor"),
+        "the second-document error won: {error}"
+    );
+}
+
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_maps_a_bom_directive_to_the_libyaml_token_error() {
+    let error = ayaml::compat::from_str::<Value>("\u{feff}%YAML 1.2\n---\na: 1\n").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Scanner);
+    assert_eq!(
+        error.message(),
+        "found character that cannot start any token"
+    );
+    assert!(error.span().is_none(), "{error}");
 }

@@ -156,32 +156,33 @@ pub use serde_impl::{from_value, from_value_seed, to_value};
 /// default YAML 1.2.2 parser deliberately does not adopt.
 #[cfg(feature = "libyaml-compat")]
 pub mod compat {
-    use crate::error::{Error, ErrorKind};
+    use crate::error::{Code, Error, ErrorKind};
+    use crate::limits::LimitKind;
     use serde::de::Visitor;
 
     /// Translate ayaml diagnostics into the strings expected by
-    /// libyaml-compatible consumers. Each branch corresponds to a documented
-    /// compatibility deviation, not a general error-formatting rule.
-    fn map_error(input: &str, error: Error) -> Error {
-        if bom_directive_desync(input) {
+    /// libyaml-compatible consumers. Each branch is a documented compatibility
+    /// deviation keyed by the parser's structured failure, never by the text of
+    /// the input or of the message.
+    fn map_error(error: Error) -> Error {
+        if error.code() == Code::ReservedIndicatorAfterBom {
             return Error::new(
                 ErrorKind::Scanner,
                 "found character that cannot start any token",
             );
         }
-        if error.kind() == ErrorKind::Limit && error.message().contains("collection depth limit") {
-            return Error::new(ErrorKind::Serde, "recursion limit exceeded");
-        }
-        if error.kind() == ErrorKind::Scanner
-            && starts_with_bom_marker(input)
-            && input.contains('*')
-            && bom_alias_desync(input)
+        if error
+            .limit()
+            .is_some_and(|limit| limit.kind() == LimitKind::Depth)
         {
-            return Error::new(ErrorKind::Alias, "unknown anchor");
+            let mapped = Error::new(ErrorKind::Serde, "recursion limit exceeded");
+            return if let Some(span) = error.span() {
+                mapped.with_span(span)
+            } else {
+                mapped
+            };
         }
-        if error.kind() == ErrorKind::Parser
-            && error.message() == "unexpected token in mapping value"
-        {
+        if error.code() == Code::UnexpectedMappingValue {
             let mapped = Error::new(
                 ErrorKind::Parser,
                 "mapping values are not allowed in this context",
@@ -192,51 +193,19 @@ pub mod compat {
                 mapped
             };
         }
-        // By kind as well: a Serde error can quote a scalar that holds these words.
-        if (error.kind() == ErrorKind::Parser && error.message().contains("trailing documents"))
-            || (error.kind() == ErrorKind::Limit
-                && error.message().contains("documents limit exceeded"))
+        if error.code() == Code::TrailingDocuments
+            || error
+                .limit()
+                .is_some_and(|limit| limit.kind() == LimitKind::Documents)
         {
-            return Error::new(ErrorKind::Parser, "more than one document in stream");
+            let mapped = Error::new(ErrorKind::Parser, "more than one document in stream");
+            return if let Some(span) = error.span() {
+                mapped.with_span(span)
+            } else {
+                mapped
+            };
         }
         error
-    }
-
-    fn bom_directive_desync(input: &str) -> bool {
-        let mut rest = input;
-        let mut boms = 0;
-        while let Some(after) = rest.strip_prefix('\u{feff}') {
-            rest = after;
-            boms += 1;
-        }
-        boms > 0 && rest.starts_with('%')
-    }
-
-    fn starts_with_bom_marker(input: &str) -> bool {
-        let mut rest = input;
-        let mut boms = 0;
-        while let Some(after) = rest.strip_prefix('\u{feff}') {
-            rest = after;
-            boms += 1;
-        }
-        boms > 0 && rest.starts_with("---")
-    }
-
-    fn bom_alias_desync(input: &str) -> bool {
-        let mut rest = input;
-        let mut boms = 0;
-        while let Some(after) = rest.strip_prefix('\u{feff}') {
-            rest = after;
-            boms += 1;
-        }
-        if boms == 0 || !rest.starts_with("--- ") {
-            return false;
-        }
-        let first_line = rest
-            .split(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}'])
-            .next()
-            .unwrap_or_default();
-        first_line.contains(": *") && first_line.contains('\'') && !first_line.contains('"')
     }
 
     /// Deserialize one document with a caller-supplied seed under the
@@ -254,7 +223,7 @@ pub mod compat {
             },
             seed,
         )
-        .map_err(|error| map_error(input, error))
+        .map_err(map_error)
     }
 
     /// Deserialize a typed value with compatibility policies, using borrowed
@@ -268,7 +237,7 @@ pub mod compat {
                 compat_flow: true,
             },
         )
-        .map_err(|error| map_error(input, error))
+        .map_err(map_error)
     }
 
     /// Parse a whole stream into events with the libyaml-compatible scanner.
@@ -296,7 +265,7 @@ pub mod compat {
             },
             visitor,
         )
-        .map_err(|error| map_error(input, error))
+        .map_err(map_error)
     }
 }
 

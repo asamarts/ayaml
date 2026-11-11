@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use std::collections::VecDeque;
 
 use crate::composer::StreamingComposer;
-use crate::error::{Error, ErrorKind};
+use crate::error::{Code, Error, ErrorKind};
 use crate::event::{Anchor, CollectionStyle, Event, ScalarStyle};
 use crate::limits::Limits;
 use crate::position::LineIndex;
@@ -189,6 +189,9 @@ struct Parser<'a> {
     /// Stop at a second document start, as a single-document entry point
     /// needs: the rest of the stream is never parsed.
     single_document: bool,
+    /// Emit the second document start and stop, instead of reporting it here. The typed builder
+    /// then builds the first document before it reports the trailing one (AY-027).
+    stop_at_second: bool,
     /// Where the lines end: the stream end, or for one document of a lazy read, the next
     /// document's first token. An empty node after the last line is placed here.
     end: Marker,
@@ -433,6 +436,7 @@ fn parse_lines<'a>(
         documents: 0,
         emitted: counted,
         single_document: false,
+        stop_at_second: false,
         end,
     };
     parser.parse_stream()?;
@@ -468,14 +472,14 @@ fn event_capacity(lines: &[Line], tokens: &[Token<'_>]) -> usize {
 
 /// Parse a UTF-8 input into spanned events.
 pub(crate) fn parse_events<'a>(input: &'a str, limits: &Limits) -> Result<Vec<Event<'a>>, Error> {
-    parse_events_with_compat(input, limits, false, false)
+    parse_events_with_compat(input, limits, false, false, false)
 }
 
 pub(crate) fn parse_events_compat<'a>(
     input: &'a str,
     limits: &Limits,
 ) -> Result<Vec<Event<'a>>, Error> {
-    parse_events_with_compat(input, limits, true, false)
+    parse_events_with_compat(input, limits, true, false, false)
 }
 
 /// Parse the events of a single-document input. A second document is an
@@ -485,7 +489,9 @@ pub(crate) fn parse_document_events<'a>(
     limits: &Limits,
     compat_flow: bool,
 ) -> Result<Vec<Event<'a>>, Error> {
-    parse_events_with_compat(input, limits, compat_flow, true)
+    // Stop at the second document's start and let the typed builder build the first one first
+    // (AY-027). The second start is the marker the builder turns into a trailing-document error.
+    parse_events_with_compat(input, limits, compat_flow, true, true)
 }
 
 fn parse_events_with_compat<'a>(
@@ -493,6 +499,7 @@ fn parse_events_with_compat<'a>(
     limits: &Limits,
     compat_flow: bool,
     single_document: bool,
+    stop_at_second: bool,
 ) -> Result<Vec<Event<'a>>, Error> {
     let mut scanner = Scanner::with_compat(input, limits.clone(), compat_flow)?;
     let Lines {
@@ -514,6 +521,7 @@ fn parse_events_with_compat<'a>(
         documents: 0,
         emitted: 0,
         single_document,
+        stop_at_second,
         end,
     };
     parser.emit(Event::StreamStart {
@@ -551,6 +559,7 @@ pub(crate) fn parse_documents(
         documents: 0,
         emitted: 0,
         single_document,
+        stop_at_second: false,
         end: lines
             .stream_end
             .map_or_else(|| Marker::new(input.len(), 1, 1), Span::start),
@@ -666,10 +675,19 @@ impl<'a> Parser<'a> {
                     .check_documents(self.documents)
                     .map_err(|error| self.limit_at(document_start_span, error))?;
                 if self.single_document && self.documents > 1 {
-                    return Err(self.error(
-                        document_start_span,
-                        "expected a single YAML document, but found trailing documents",
-                    ));
+                    if self.stop_at_second {
+                        self.emit(Event::DocumentStart {
+                            explicit: explicit_start,
+                            span: document_start_span,
+                        })?;
+                        return Ok(());
+                    }
+                    return Err(self
+                        .error(
+                            document_start_span,
+                            "expected a single YAML document, but found trailing documents",
+                        )
+                        .with_code(Code::TrailingDocuments));
                 }
                 self.emit(Event::DocumentStart {
                     explicit: explicit_start,
@@ -732,21 +750,42 @@ impl<'a> Parser<'a> {
                 })
                 && !self.line_starts_with(index, |kind| matches!(kind, TokenKind::DocumentEnd))
             {
+                let tokens = self.line_tokens(index);
                 let span = self
                     .line_first(index)
                     .map_or_else(|| self.empty_span(index), |token| token.span);
-                let error = self.error(span, "unexpected content after document");
+                let tabbed = root_block && tab_leads_line(self.input, span.start().index());
+                let message = if tabbed {
+                    "unexpected content after document"
+                } else {
+                    match tokens.first().map(|token| &token.kind) {
+                        Some(TokenKind::Scalar {
+                            style: ScalarStyle::Literal | ScalarStyle::Folded,
+                            ..
+                        }) => "a block scalar is not indented past its parent",
+                        Some(TokenKind::BlockEntry) => {
+                            "a block entry is indented less than its parent"
+                        }
+                        Some(TokenKind::Scalar { .. })
+                            if root_block
+                                && self.lines[index].indent > 0
+                                && previous_line_is_blank(self.input, span.start().index()) =>
+                        {
+                            "a mapping line is missing a `:`"
+                        }
+                        _ => "unexpected content after document",
+                    }
+                };
+                let error = self.error(span, message);
                 // A node that only a tab seemed to indent under a key or an entry sits at its
                 // line's left edge, so it ends up here.
-                return Err(
-                    if root_block && tab_leads_line(self.input, span.start().index()) {
-                        error.with_context(
-                            ", indented by a tab, which YAML doesn't count as indentation",
-                        )
-                    } else {
-                        error
-                    },
-                );
+                return Err(if tabbed {
+                    error.with_context(
+                        ", indented by a tab, which YAML doesn't count as indentation",
+                    )
+                } else {
+                    error
+                });
             }
         }
         Ok(())
@@ -892,7 +931,8 @@ impl<'a> Parser<'a> {
                 value: tokens,
                 current_index,
             } => {
-                self.expect_consumed(tokens, value, "unexpected token in mapping value")?;
+                self.expect_consumed(tokens, value, "unexpected token in mapping value")
+                    .map_err(|error| error.with_code(Code::UnexpectedMappingValue))?;
                 Ok(Step::Return(current_index))
             }
             Cont::FlowSequenceItem { mut state, inline } => {
@@ -2531,6 +2571,21 @@ impl<'a> Parser<'a> {
 }
 
 /// Whether only blanks, a tab among them, come before `offset` on its line.
+/// Whether the line before the one that starts at `offset` holds only whitespace.
+fn previous_line_is_blank(input: &str, offset: usize) -> bool {
+    let line_start = input[..offset]
+        .rfind(['\n', '\r'])
+        .map_or(0, |break_at| break_at + 1);
+    if line_start == 0 {
+        return false;
+    }
+    let before = &input[..line_start - 1];
+    let previous_start = before
+        .rfind(['\n', '\r'])
+        .map_or(0, |break_at| break_at + 1);
+    before[previous_start..].trim().is_empty()
+}
+
 fn tab_leads_line(input: &str, offset: usize) -> bool {
     let before = &input[..offset];
     let rest = before.trim_end_matches([' ', '\t']);
