@@ -27,13 +27,16 @@ stream.
 
 Limits are inclusive at the accepted boundary. Input size, depth, alias expansion,
 tag expansion, a block scalar's size, and the least node cost have tests just below,
-at, and above their default ceilings. `tests/limit_consistency.rs` sets `max_events`,
-`max_depth`, `max_anchors`, `max_scalar_bytes`, the fixed alias allowance,
-`max_alias_dereferences`, `max_documents`, `max_collection_entries`, `max_tag_expansion_bytes`,
-and `max_input_bytes` to small values, and checks each at the least value that accepts its input,
-one above, and every value below, on every reader that takes limits. AY-034 extends that to each
-place that counts, to `node_cost_bytes` and `alias_bytes_per_input_byte`, and to the readers that
-take the default limits only.
+at, and above their default ceilings. `tests/limit_consistency.rs` covers every limit that a
+reader checks: each case names the least value that accepts its input, and every reader that
+takes limits is asked at that value, one above, and every value below. It covers
+`node_cost_bytes`, whose largest accepted value is the boundary, and
+`alias_bytes_per_input_byte`. The entry-count limit is checked at each place that counts
+entries: block and flow mappings, block and flow sequences, explicit keys, and the short-block
+fast paths. `max_output_bytes` applies to emitters rather than readers, and the same file checks
+it on every emitter that takes limits. A limit that cannot apply is stated as such: an event
+reader does not copy an alias's target, so the alias-budget limits are asked only of readers that
+build values.
 
 Every reader that takes limits counts each limit the same way, so at the same limits they agree
 on whether an input keeps within them. The readers that build values differ from the event readers
