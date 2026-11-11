@@ -65,8 +65,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - Serializing a deeply nested Rust value now returns a depth error before it can exhaust the
-  stack. `to_string`, `to_writer`, and `to_value` use the parser's 128-level limit; a tag is not
-  counted as a collection level, so values at the cap still serialize.
+  stack. `to_string`, `to_writer`, and `to_value` use the parser's 128-level limit. A tag counts
+  toward the stack bound but not the collection depth, so a value at the cap still serializes.
 - The plain-scalar fast path added in 0.1.1 is now checked against the full continuation
   analysis over generated multi-line scalars. Multi-line plain scalars after a whitespace-only
   line and after a property-led key parse as in 0.1.0, and the fast path does not end them early.

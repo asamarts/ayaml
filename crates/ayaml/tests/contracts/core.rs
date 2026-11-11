@@ -567,4 +567,39 @@ fn deep_serialization_returns_a_depth_error_on_a_small_stack() {
             }
         });
     }
+
+    // A tag writes as a one-entry map, so a chain of tags is not collection depth. It still
+    // recurses in the serializer and must stop at the same stack bound.
+    fn tagged(depth: usize) -> Value {
+        let mut value = Value::from(1_u64);
+        for _ in 0..depth {
+            value = Value::from(TaggedValue::new(Tag::new("tag:x:", "t"), value));
+        }
+        value
+    }
+    for depth in [128, 129] {
+        let value = tagged(depth);
+        on_small_stack(move || {
+            let to_value = ayaml::to_value(&value);
+            let to_string = ayaml::to_string(&value);
+            let mut output = Vec::new();
+            let to_writer = ayaml::to_writer(&mut output, &value);
+            if depth <= 128 {
+                to_value.expect("to_value at the tag limit");
+                // The emitter refuses tags on tags, but not because of the depth limit.
+                assert_eq!(
+                    to_string.expect_err("nested tags").kind(),
+                    ErrorKind::Emitter
+                );
+                assert_eq!(
+                    to_writer.expect_err("nested tags").kind(),
+                    ErrorKind::Emitter
+                );
+            } else {
+                assert_depth(to_value.expect_err("to_value above the tag limit"));
+                assert_depth(to_string.expect_err("to_string above the tag limit"));
+                assert_depth(to_writer.expect_err("to_writer above the tag limit"));
+            }
+        });
+    }
 }

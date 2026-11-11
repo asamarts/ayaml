@@ -1339,6 +1339,12 @@ impl SerializeMap for ValueMapSerializer {
                 wrappers: self.wrappers,
             })? {
                 Value::Tagged(tagged) if tagged.tag.handle() == TAG_KEY_HANDLE => {
+                    // A tagged value is written as a one-entry map, but the tag is a wrapper,
+                    // not a YAML collection. Count it against the stack bound, not the depth.
+                    self.wrappers += 1;
+                    if self.wrappers > MAX_DEPTH {
+                        return Err(depth_error(self.wrappers));
+                    }
                     self.tag_key = Some(Tag::from_serde_name(tagged.tag.suffix()));
                     return Ok(());
                 }
