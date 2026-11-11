@@ -405,8 +405,9 @@ declarative, offline check with inline annotations, and the full-tree run catche
 that a diff-scoped run would let survive. Pinning the action and the local binary keeps the
 gates on the same ruleset.
 
-**Consequences.** The five files over 2,000 lines carry per-file non-growth ratchets; AY-073
-through AY-077 split them and remove the exemptions. The pinned upstream YAML suite's
+**Consequences.** Each file over 2,000 lines carries a per-file non-growth ratchet. AY-076
+split the two test modules and removed their ratchets; AY-073 through AY-075 split the scanner,
+parser, and emitter, and AY-077 removes the remaining exemptions. The pinned upstream YAML suite's
 `README.md` / `ReadMe.md` collision is excluded from the case-conflict rule alone, not from
 the rest of the tree. `.editorconfig` states UTF-8, LF, a final newline, trailing-whitespace
 removal, four-space Rust and Python indentation, two-space YAML indentation, and tab-indented

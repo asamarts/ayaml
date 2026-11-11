@@ -62,7 +62,7 @@ rules:
     level: error
 
   # The 2,000-line ceiling over every maintained script and source file. The
-  # five files that predate it carry a non-growth ratchet below.
+  # source files that predate it carry a non-growth ratchet below.
   - id: source-file-size
     kind: file_max_lines
     paths:

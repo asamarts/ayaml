@@ -20,8 +20,9 @@ tags:
 ## Why
 
 Repository structure and Rust policy are enforced only by scattered checks and reviewer
-knowledge. Five hand-written Rust files already exceed the requested 2,000-line ceiling, and
-the workspace enables only three opt-in Clippy lints. Establish the gate before more parser,
+knowledge. Five hand-written Rust files exceeded the requested 2,000-line ceiling when the
+milestone was planned; AY-076 split the two test modules, and three source files remain. The
+workspace enables only three opt-in Clippy lints. Establish the gate before more parser,
 scanner, typed-reader, and release work adds to that debt.
 
 ## Acceptance criteria
