@@ -64,6 +64,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The plain-scalar fast path added in 0.1.1 is now checked against the full continuation
+  analysis over generated multi-line scalars. Multi-line plain scalars after a whitespace-only
+  line and after a property-led key parse as in 0.1.0, and the fast path does not end them early.
 - Block scalars now follow the grammar for whitespace-only lines. A scalar with no content lines
   is empty, and the node after it parses; a comment at or below the parent's indentation ends it;
   a tab after the content indentation is content, not an empty line or a comment; and a comment

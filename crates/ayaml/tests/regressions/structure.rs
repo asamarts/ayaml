@@ -86,6 +86,39 @@ fn continuation_indentation_follows_the_owner() {
     rejects("- a: |\n  x\n");
 }
 
+/// A plain scalar continues after a whitespace-only line, which is a line break rather than a
+/// dedented line.
+#[test]
+fn a_plain_scalar_continues_after_a_whitespace_only_line() {
+    for input in [
+        "key: first\n\n  second\n",
+        "key: first\n \n  second\n",
+        "key: first\n   \n  second\n",
+    ] {
+        assert_eq!(parse(input), json!({"key": "first\nsecond"}), "{input:?}");
+    }
+}
+
+/// A property on the key, or on the value, does not end the plain scalar's continuation.
+#[test]
+fn a_property_led_key_keeps_a_plain_scalar_continuation() {
+    for (input, expected) in [
+        ("!t key: first\n\n  second\n", "first\nsecond"),
+        ("&a key: first\n\n  second\n", "first\nsecond"),
+        ("!t key: first\n  second\n", "first second"),
+        ("key: !t first\n\n  second\n", "first\nsecond"),
+    ] {
+        let value = ayaml::parse_value(input).unwrap_or_else(|error| panic!("{input:?}: {error}"));
+        let (_, value) = value
+            .as_mapping()
+            .unwrap_or_else(|| panic!("{input:?}: {value:?}"))
+            .iter()
+            .next()
+            .expect("one entry");
+        assert_eq!(value.untag_ref().as_str(), Some(expected), "{input:?}");
+    }
+}
+
 /// Document markers end a root block scalar, also after `--- |`
 /// (suite W4TN, M7A3).
 #[test]
