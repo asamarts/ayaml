@@ -114,6 +114,20 @@ jobs:
       - name: Read the version the plan ships
         run: aplan version
 
+  alint:
+    name: repository lint
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint the repository structure
+        uses: asamarts/alint@8d7a60f6642cb1b59537202ae81df7d951a078ad # v0.22.0
+        with:
+          fail-on-warning: "true"
+      - name: Show the alint version
+        run: alint --version
+
   docs-lint:
     name: documentation lint
     runs-on: ubuntu-26.04

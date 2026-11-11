@@ -384,3 +384,34 @@ commit can rot while the hosted plan job stays green.
 **Consequences.** A documentation-only change now waits for the lint job, and the plan job fetches
 the whole history because a shallow clone cannot resolve commit evidence. A new single-line
 `run:` command in a workflow still needs its local counterpart, which the `sync` job checks.
+
+## D84 — Repository shape is gated by alint 0.22.0
+
+**Date:** 2026-11-11
+**Status:** Accepted
+
+**Decision.** `.alint.yml` requires alint 0.22.0 and extends the bundled `oss-baseline`,
+`rust`, `ci/github-actions`, `hygiene/no-tracked-artifacts`, `tooling/editorconfig`,
+`agent-hygiene`, and `agent-context` v1 rulesets. The hosted `repository lint` job runs the
+official action pinned to the v0.22.0 commit `8d7a60f6642cb1b59537202ae81df7d951a078ad` with
+`--fail-on-warning`; local CI runs `alint check --fail-on-warning`, and a release run fails
+when the binary is missing or a different version. Every deterministic error and warning is
+blocking; the advisory infos, such as CODEOWNERS, a code of conduct, and one pinned Rust
+toolchain, are not.
+
+**Why.** Repository structure, portable names, text hygiene, workflow pins, and source-file
+growth were enforced only by scattered checks and reviewer knowledge. alint makes them one
+declarative, offline check with inline annotations, and the full-tree run catches a violation
+that a diff-scoped run would let survive. Pinning the action and the local binary keeps the
+gates on the same ruleset.
+
+**Consequences.** The five files over 2,000 lines carry per-file non-growth ratchets; AY-073
+through AY-077 split them and remove the exemptions. The pinned upstream YAML suite's
+`README.md` / `ReadMe.md` collision is excluded from the case-conflict rule alone, not from
+the rest of the tree. `.editorconfig` states UTF-8, LF, a final newline, trailing-whitespace
+removal, four-space Rust and Python indentation, two-space YAML indentation, and tab-indented
+make recipes; `editorconfig_conforms` covers `.aplan.yml` and `.github/**`, while rustfmt owns
+Rust indentation and the byte-exact parser fixtures and fuzz corpora stay outside content
+conformance. A version update moves `.alint.yml`'s `requires`, the action pin, and the local
+binary together, and repeats the 2,000/2,001-line boundary probes for every covered extension,
+`tools/hooks/*`, and a Rust source outside today's `crates/`, `fuzz/`, and `tools/` layouts.

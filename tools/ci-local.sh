@@ -38,7 +38,7 @@ MSRV="1.88.0"
 STABLE="stable"
 TEST_ADDRESS_SPACE_KIB=8388608
 TEST_TIMEOUT_SECONDS=1800
-ALL_JOBS=(sync bounds release-mode quality-msrv quality-stable features policy harness instructions plan suite docs-lint package cross fuzz-smoke leak-gate scheduled)
+ALL_JOBS=(sync bounds release-mode quality-msrv quality-stable features policy harness instructions plan alint suite docs-lint package cross fuzz-smoke leak-gate scheduled)
 
 release=0
 jobs=()
@@ -320,6 +320,33 @@ job_plan() {
   step "plan check" aplan check
   step "plan verify" aplan verify
   step "plan version" aplan version
+}
+
+job_alint() {
+  local required="alint 0.22.0"
+  if ! command -v alint >/dev/null; then
+    if [ "$release" -eq 1 ]; then
+      step "alint version" sh -c 'echo "alint 0.22.0 is required for a release run" >&2; exit 1'
+    else
+      skip "alint 0.22.0 not installed"
+    fi
+    return
+  fi
+  local shown
+  shown="$(alint --version 2>/dev/null | head -n1)"
+  step "alint version" alint --version
+  case "$shown" in
+    "alint 0.22.0"*) ;;
+    *)
+      if [ "$release" -eq 1 ]; then
+        step "alint version check" sh -c 'echo "alint 0.22.0 is required, found $1" >&2; exit 1' _ "$shown"
+      else
+        skip "alint 0.22.0 required, found ${shown:-nothing}"
+      fi
+      return
+      ;;
+  esac
+  step "alint check" alint check --fail-on-warning
 }
 
 # Strict suite in both parser modes.
