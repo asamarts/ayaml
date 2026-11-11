@@ -432,7 +432,7 @@ fn single_document_entry_points_stop_at_the_second_document() {
         ayaml::compat::from_str::<ayaml::Value>(stream)
             .expect_err("compat")
             .to_string(),
-        "more than one document in stream"
+        "more than one document in stream at line 2 column 1"
     );
 }
 

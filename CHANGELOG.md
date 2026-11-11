@@ -64,6 +64,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Error diagnostics now agree across readers. A typed reader points at the duplicate key rather
+  than its first occurrence, and a default-mode typed map reports scalar keys that differ only in
+  type, as `1` and `"1"`, instead of keeping one silently. A complex or tagged duplicate key
+  prints in flow form and stays short. The parser names a missing `:` line, an entry indented
+  less than its sequence, and a block scalar not indented past its parent. Compat maps an error
+  by a private failure code rather than by message text, keeps the location of depth and
+  document-count failures, and reports an error inside the first document before a later
+  document. A scanner depth limit hit while reading ahead no longer hides an earlier token
+  error.
 - A block scalar is now built as it is read. Its lines were listed first, so a read of a 4 MiB
   block scalar of short or blank lines took 25 to 42 times its size in resident memory at its
   peak, where it now takes about 5 to 10 times. Counting the capacity it reserves without

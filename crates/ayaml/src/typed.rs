@@ -6,7 +6,8 @@
 //! value. `from_value` continues to use the owned value deserializer.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -14,7 +15,7 @@ use serde::de::{DeserializeSeed, EnumAccess, MapAccess, SeqAccess, VariantAccess
 use serde::{Deserialize, Deserializer};
 
 use crate::composer::Anchors;
-use crate::error::{Error, ErrorKind};
+use crate::error::{Code, Error, ErrorKind};
 use crate::event::{Anchor, Event, ScalarStyle};
 use crate::limits::{AliasBudget, Limits};
 use crate::number::Number;
@@ -22,7 +23,7 @@ use crate::parser;
 use crate::resolver::{float_from_text, resolve_scalar};
 use crate::span::{Marker, Span};
 use crate::tag::Tag;
-use crate::value::Value;
+use crate::value::{Value, key_text_full, push_quoted_key};
 
 #[derive(Clone, Debug)]
 struct Node<'de> {
@@ -267,8 +268,49 @@ struct Built<'de> {
     height: usize,
 }
 
+/// A key already seen in an open mapping. A scalar key is compared by its text alone, so `1` and
+/// `"1"` are one key to a target whose key type would keep only one of them; any other key keeps
+/// its node equality.
+#[derive(Clone, Debug)]
+enum SeenKey<'de> {
+    Scalar(Cow<'de, str>),
+    Node(Node<'de>),
+}
+
+impl PartialEq for SeenKey<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Scalar(left), Self::Scalar(right)) => left == right,
+            (Self::Node(left), Self::Node(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for SeenKey<'_> {}
+
+impl std::hash::Hash for SeenKey<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Scalar(text) => text.hash(state),
+            Self::Node(node) => node.hash(state),
+        }
+    }
+}
+
+impl<'de> SeenKey<'de> {
+    fn new(node: &Node<'de>) -> Self {
+        match scalar_key_text(node) {
+            Some(text) => Self::Scalar(text),
+            None => Self::Node(node.clone()),
+        }
+    }
+}
+
 /// An open collection. The builder keeps these on an explicit stack, so
-/// nesting depth costs heap, not native stack.
+/// nesting depth costs heap, not native stack. The mapping frame is the larger variant because it
+/// keeps the duplicate-key sets; one frame is live per open collection, never on the native stack.
+#[allow(clippy::large_enum_variant)]
 enum Frame<'de> {
     Sequence {
         tag: Option<Tag>,
@@ -283,7 +325,7 @@ enum Frame<'de> {
         anchor: Option<Anchor<'de>>,
         span: Span,
         entries: Vec<(Node<'de>, Node<'de>)>,
-        seen: HashMap<Node<'de>, Span>,
+        seen: HashSet<SeenKey<'de>>,
         key: Option<Node<'de>>,
         size: usize,
         height: usize,
@@ -302,12 +344,14 @@ impl<'de> Builder<'de, '_> {
                     self.index += 1;
                     break;
                 }
-                Event::DocumentStart { .. } => {
+                Event::DocumentStart { span, .. } => {
                     if document.is_some() {
                         return Err(Error::new(
                             ErrorKind::Parser,
                             "expected a single YAML document, but found trailing documents",
-                        ));
+                        )
+                        .with_span(*span)
+                        .with_code(Code::TrailingDocuments));
                     }
                     self.index += 1;
                     self.anchors.clear();
@@ -411,7 +455,7 @@ impl<'de> Builder<'de, '_> {
                         anchor,
                         span,
                         entries: Vec::new(),
-                        seen: HashMap::new(),
+                        seen: HashSet::new(),
                         key: None,
                         size: self.limits.node_cost_bytes,
                         height: 0,
@@ -480,7 +524,8 @@ impl<'de> Builder<'de, '_> {
                         None => *key = Some(built.node),
                         Some(entry_key) => {
                             if !self.options.allow_duplicates {
-                                if let Some(first_span) = seen.get(&entry_key) {
+                                let seen_key = SeenKey::new(&entry_key);
+                                if seen.contains(&seen_key) {
                                     return Err(Error::new(
                                         ErrorKind::DuplicateKey,
                                         format!(
@@ -488,9 +533,9 @@ impl<'de> Builder<'de, '_> {
                                             node_key_text(&entry_key)
                                         ),
                                     )
-                                    .with_span(*first_span));
+                                    .with_span(entry_key.span));
                                 }
-                                seen.insert(entry_key.clone(), entry_key.span);
+                                seen.insert(seen_key);
                             }
                             entries.push((entry_key, built.node));
                         }
@@ -542,13 +587,78 @@ impl<'de> Builder<'de, '_> {
 }
 
 /// A human-readable mapping key for typed diagnostics.
+/// The text of a scalar key, whatever its scalar type. Two keys with the same text but different
+/// types, as `1` and `"1"`, are one key to a target whose key type is narrower.
+fn scalar_key_text<'de>(node: &Node<'de>) -> Option<Cow<'de, str>> {
+    let node = resolve(node);
+    match &node.kind {
+        NodeKind::Null | NodeKind::Bool(_) | NodeKind::Number(_) | NodeKind::String(_) => {
+            node.text.clone()
+        }
+        _ => None,
+    }
+}
+
 fn node_key_text(node: &Node<'_>) -> String {
-    match &resolve(node).kind {
-        NodeKind::Null => "null".to_owned(),
-        NodeKind::Bool(value) => value.to_string(),
-        NodeKind::Number(value) => value.to_string(),
-        NodeKind::String(value) => format!("{value:?}"),
-        other => format!("{other:?}"),
+    let mut text = String::new();
+    push_node_key_text(resolve(node), &mut text);
+    text
+}
+
+fn push_node_key_text(node: &Node<'_>, output: &mut String) {
+    if key_text_full(output) {
+        return;
+    }
+    match &node.kind {
+        NodeKind::Null => output.push_str("null"),
+        NodeKind::Bool(value) => {
+            let _ = write!(output, "{value}");
+        }
+        NodeKind::Number(value) => {
+            let _ = write!(output, "{value}");
+        }
+        NodeKind::String(value) => push_quoted_key(value, output),
+        NodeKind::Sequence(items) => {
+            output.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if key_text_full(output) {
+                    output.push('…');
+                    return;
+                }
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                push_node_key_text(item, output);
+            }
+            if !key_text_full(output) {
+                output.push(']');
+            }
+        }
+        NodeKind::Mapping(entries) => {
+            output.push('{');
+            for (index, (key, value)) in entries.iter().enumerate() {
+                if key_text_full(output) {
+                    output.push('…');
+                    return;
+                }
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                push_node_key_text(key, output);
+                if !key_text_full(output) {
+                    output.push_str(": ");
+                }
+                push_node_key_text(value, output);
+            }
+            if !key_text_full(output) {
+                output.push('}');
+            }
+        }
+        NodeKind::Tagged(tag, inner) => {
+            let _ = write!(output, "{tag} ");
+            push_node_key_text(inner, output);
+        }
+        NodeKind::Alias(target) => push_node_key_text(target, output),
     }
 }
 

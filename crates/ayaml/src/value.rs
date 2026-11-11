@@ -1,5 +1,6 @@
 //! The generic YAML value model.
 
+use std::fmt::Write as _;
 use std::ops::{Index as OpsIndex, IndexMut};
 
 use crate::mapping::Mapping;
@@ -9,17 +10,100 @@ use crate::tag::TaggedValue;
 /// The null value used when indexing a missing key/sequence item.
 pub(crate) static NULL_VALUE: Value = Value::Null;
 
-/// A human-readable mapping key for diagnostics. Scalar keys are printed as
-/// values, not as their Rust `Debug` representation; complex keys fall back to
-/// `Debug`.
+/// The most characters a key's diagnostic text holds. A larger key is cut with `…`, so a
+/// message about a hostile or very large key stays short.
+const MAX_KEY_TEXT_CHARS: usize = 64;
+
+/// A human-readable mapping key for diagnostics. Scalars are printed as values, not as their
+/// Rust `Debug` representation, and a sequence or mapping is printed in flow form. The text is
+/// bounded by [`MAX_KEY_TEXT_CHARS`].
 pub(crate) fn key_text(value: &Value) -> String {
+    let mut text = String::new();
+    push_key_text(value, &mut text);
+    text
+}
+
+/// Whether `text` has reached the key-text budget.
+pub(crate) fn key_text_full(text: &str) -> bool {
+    text.chars().count() >= MAX_KEY_TEXT_CHARS
+}
+
+/// Push `text` as a double-quoted scalar, escaped as YAML writes it, within the budget.
+pub(crate) fn push_quoted_key(text: &str, output: &mut String) {
+    output.push('"');
+    for ch in text.chars() {
+        if key_text_full(output) {
+            output.push('…');
+            break;
+        }
+        match ch {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            ch if ch.is_control() => {
+                let _ = write!(output, "\\u{{{:x}}}", ch as u32);
+            }
+            ch => output.push(ch),
+        }
+    }
+    output.push('"');
+}
+
+fn push_key_text(value: &Value, output: &mut String) {
+    if key_text_full(output) {
+        return;
+    }
     match value {
-        Value::Null => "null".to_owned(),
-        Value::Bool(value) => value.to_string(),
-        Value::Number(value) => value.to_string(),
-        Value::String(value) => format!("{value:?}"),
-        Value::Tagged(tagged) => format!("{} {}", tagged.tag, key_text(&tagged.value)),
-        Value::Sequence(_) | Value::Mapping(_) => format!("{value:?}"),
+        Value::Null => output.push_str("null"),
+        Value::Bool(value) => {
+            let _ = write!(output, "{value}");
+        }
+        Value::Number(value) => {
+            let _ = write!(output, "{value}");
+        }
+        Value::String(value) => push_quoted_key(value, output),
+        Value::Sequence(items) => {
+            output.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if key_text_full(output) {
+                    output.push('…');
+                    return;
+                }
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                push_key_text(item, output);
+            }
+            if !key_text_full(output) {
+                output.push(']');
+            }
+        }
+        Value::Mapping(entries) => {
+            output.push('{');
+            for (index, (key, value)) in entries.iter().enumerate() {
+                if key_text_full(output) {
+                    output.push('…');
+                    return;
+                }
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                push_key_text(key, output);
+                if !key_text_full(output) {
+                    output.push_str(": ");
+                }
+                push_key_text(value, output);
+            }
+            if !key_text_full(output) {
+                output.push('}');
+            }
+        }
+        Value::Tagged(tagged) => {
+            let _ = write!(output, "{} ", tagged.tag);
+            push_key_text(&tagged.value, output);
+        }
     }
 }
 

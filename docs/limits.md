@@ -175,10 +175,10 @@ There are three exceptions. A configured `max_depth` above `MAX_DEPTH_CAP`, or a
 `node_cost_bytes` of 0, is `ErrorKind::Limit` with no structured value or span,
 because no input went over a limit. In compat mode, the readers that build values report the way a libyaml-based
 reader does. A depth failure is `ErrorKind::Serde`, with the message `recursion limit
-exceeded` and no structured value or span. Going over `max_documents` is
-`ErrorKind::Parser`, with the message `more than one document in stream` and no
-structured value or span. `compat::parse_events_with_limits` doesn't map these: it
-reports `ErrorKind::Limit` with the value and the span.
+exceeded` and the span of the collection that went over. Going over `max_documents`
+is `ErrorKind::Parser`, with the message `more than one document in stream` and the
+span of the second document's start. `compat::parse_events_with_limits` doesn't map
+these: it reports `ErrorKind::Limit` with the value and the span.
 
 Parser, scanner, composer, typed-builder, document-count, and alias-budget
 failures carry a source span when input provides one. Output-emitter limits do

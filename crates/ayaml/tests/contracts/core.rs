@@ -352,3 +352,168 @@ fn event_stream_defers_syntax_errors_to_items_and_enforces_global_document_limit
         .expect("document limit");
     assert_eq!(error.kind(), ErrorKind::Limit);
 }
+
+#[test]
+fn every_default_reader_reports_the_same_first_error() {
+    fn signature(error: ayaml::Error) -> (ErrorKind, Option<(usize, usize)>, String) {
+        (
+            error.kind(),
+            error
+                .location()
+                .map(|location| (location.line(), location.column())),
+            error.message().to_owned(),
+        )
+    }
+
+    for input in [
+        "a: 1\na: 2\n",
+        "[1, 2]: a\n[1, 2]: b\n",
+        "!t 1: a\n!t 1: b\n",
+        "a: [1,\n2\n",
+        "- key: first\n\n  second\n",
+    ] {
+        let wanted = signature(ayaml::parse_value(input).unwrap_err());
+        assert_eq!(
+            signature(ayaml::parse_documents(input).unwrap_err()),
+            wanted,
+            "parse_documents differs for {input:?}"
+        );
+        assert_eq!(
+            signature(ayaml::from_str::<Value>(input).unwrap_err()),
+            wanted,
+            "from_str differs for {input:?}"
+        );
+        assert_eq!(
+            signature(ayaml::from_str_borrowed::<Value>(input).unwrap_err()),
+            wanted,
+            "from_str_borrowed differs for {input:?}"
+        );
+        let streamed = ayaml::Deserializer::from_str(input)
+            .and_then(|mut documents| documents.next::<Value>())
+            .unwrap_err();
+        assert_eq!(
+            signature(streamed),
+            wanted,
+            "Deserializer::next differs for {input:?}"
+        );
+    }
+}
+
+#[test]
+fn an_unterminated_flow_collection_reports_a_later_line() {
+    for input in ["[\na\n", "a: [1,\n2\n"] {
+        let error = ayaml::parse_value(input).unwrap_err();
+        let location = error.location().expect("location");
+        assert!(
+            location.line() > 1,
+            "{input:?} reported line {}: {error}",
+            location.line()
+        );
+    }
+}
+
+#[test]
+fn a_depth_error_carries_the_same_span_on_every_reader() {
+    let deep = format!("{}a\n", "- ".repeat(129));
+    let wanted = Some((1, 257));
+    let error = ayaml::parse_value(&deep).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Limit);
+    assert_eq!(
+        error
+            .location()
+            .map(|location| (location.line(), location.column())),
+        wanted
+    );
+    let error = ayaml::parse_events(&deep)
+        .and_then(|events| events.collect::<Result<Vec<_>, _>>())
+        .unwrap_err();
+    assert!(
+        error.location().is_some(),
+        "parse_events lost the depth span: {error}"
+    );
+    let error = ayaml::Deserializer::from_str(&deep)
+        .and_then(|mut documents| documents.next::<Value>())
+        .unwrap_err();
+    assert_eq!(
+        error
+            .location()
+            .map(|location| (location.line(), location.column())),
+        wanted,
+        "{error}"
+    );
+}
+
+#[test]
+fn a_read_ahead_limit_does_not_hide_an_earlier_error() {
+    let input = format!("}}-x\n{}\n", "[".repeat(300));
+    let error = ayaml::parse_value(&input).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Parser);
+    assert_eq!(
+        error
+            .location()
+            .map(|location| (location.line(), location.column())),
+        Some((1, 1)),
+        "{error}"
+    );
+    assert!(error.message().contains('}'), "{error}");
+    let typed = ayaml::from_str::<Value>(&input).unwrap_err();
+    assert_eq!(typed.kind(), ErrorKind::Parser);
+    assert_eq!(
+        typed
+            .location()
+            .map(|location| (location.line(), location.column())),
+        Some((1, 1)),
+        "{typed}"
+    );
+    #[cfg(feature = "libyaml-compat")]
+    {
+        let compat = ayaml::compat::from_str::<Value>(&input).unwrap_err();
+        assert_eq!(
+            compat
+                .location()
+                .map(|location| (location.line(), location.column())),
+            Some((1, 1)),
+            "{compat}"
+        );
+    }
+}
+
+#[test]
+fn misplaced_block_lines_say_what_is_wrong() {
+    for (input, message, line, column) in [
+        (
+            "- key: first\n\n  second\n",
+            "a mapping line is missing a `:`",
+            3,
+            3,
+        ),
+        (
+            "a:\n  - b\n - c\n",
+            "a block entry is indented less than its parent",
+            3,
+            2,
+        ),
+        (
+            "-\n|2 ",
+            "a block scalar is not indented past its parent",
+            2,
+            1,
+        ),
+        (
+            "? \n|",
+            "a block scalar is not indented past its parent",
+            2,
+            1,
+        ),
+    ] {
+        let error = ayaml::parse_value(input).unwrap_err();
+        assert_eq!(error.message(), message, "{input:?}: {error}");
+        assert_eq!(
+            error
+                .location()
+                .map(|location| (location.line(), location.column())),
+            Some((line, column)),
+            "{input:?}: {error}"
+        );
+    }
+}

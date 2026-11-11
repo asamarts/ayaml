@@ -62,11 +62,29 @@ impl fmt::Display for ErrorKind {
     }
 }
 
+/// A private failure code, for mappings that must not depend on an error's message text.
+///
+/// The codes are not public yet. A later release can expose them without reclassifying the
+/// failures they name.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Code {
+    /// No specific code; the message and kind are all the error carries.
+    #[default]
+    Unspecified,
+    /// A reserved indicator follows a byte order mark at the start of a line.
+    ReservedIndicatorAfterBom,
+    /// A token appears where a mapping value belongs.
+    UnexpectedMappingValue,
+    /// A single-document reader found another document.
+    TrailingDocuments,
+}
+
 /// An ayaml error with a stable category, optional source span, and, for
 /// resource-limit failures, the structured limit that was exceeded.
 #[derive(Debug)]
 pub struct Error {
     kind: ErrorKind,
+    code: Code,
     /// How much of `message` is the path to what a typed reader rejected, with the `: ` after it.
     /// A path is at most `MAX_PATH_BYTES` and one step long. Two `u16`s keep `Error` at 112 bytes.
     path_len: u16,
@@ -84,6 +102,7 @@ impl Error {
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
+            code: Code::Unspecified,
             path_len: 0,
             context_len: 0,
             span: None,
@@ -91,6 +110,20 @@ impl Error {
             limit: None,
             source: None,
         }
+    }
+
+    /// Give this error its private failure code.
+    #[must_use]
+    pub(crate) fn with_code(mut self, code: Code) -> Self {
+        self.code = code;
+        self
+    }
+
+    /// The private failure code, for mappings that must not read the message.
+    #[cfg(feature = "libyaml-compat")]
+    #[must_use]
+    pub(crate) fn code(&self) -> Code {
+        self.code
     }
 
     /// Attach a source span.

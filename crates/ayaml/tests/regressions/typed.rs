@@ -87,11 +87,11 @@ fn compat_reports_limits_as_the_docs_say() {
     assert!(error.limit().is_some() && error.span().is_some(), "{error}");
     let error = ayaml::compat::from_str::<ayaml::Value>(&deep).unwrap_err();
     assert_eq!(error.kind(), ayaml::ErrorKind::Serde, "{error}");
-    assert!(error.limit().is_none() && error.span().is_none(), "{error}");
+    assert!(error.limit().is_none() && error.span().is_some(), "{error}");
     let many = "---\na\n".repeat(10_001);
     let error = ayaml::compat::from_str::<ayaml::Value>(&many).unwrap_err();
     assert_eq!(error.kind(), ayaml::ErrorKind::Parser, "{error}");
-    assert!(error.limit().is_none() && error.span().is_none(), "{error}");
+    assert!(error.limit().is_none() && error.span().is_some(), "{error}");
 }
 
 /// In a flow collection, compat mode keeps a `:` in an anchor or alias name, as default mode

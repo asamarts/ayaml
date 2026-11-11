@@ -8,7 +8,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::error::{Error, ErrorKind};
+use crate::error::{Code, Error, ErrorKind};
 use crate::event::ScalarStyle;
 use crate::limits::Limits;
 use crate::position::{LineIndex, starts_with_document_marker};
@@ -122,6 +122,9 @@ pub(crate) struct Scanner<'a> {
     pending_tag_handles: Vec<(String, String)>,
     started: bool,
     finished: bool,
+    /// The next call returns end of stream: a flow start went over the depth limit, and the
+    /// parser reports that limit from the token it just received (AY-027).
+    stop_after: bool,
     initial_bom: bool,
     /// Where the text after a line's byte order mark starts, outside compat. A BOM takes up
     /// no column there, so document markers and directives may start at this position.
@@ -224,6 +227,7 @@ impl<'a> Scanner<'a> {
             pending_tag_handles: Vec::new(),
             started: false,
             finished: false,
+            stop_after: false,
             initial_bom,
             after_line_bom: if initial_bom && !compat_flow { pos } else { 0 },
             compat_flow,
@@ -262,7 +266,7 @@ impl<'a> Scanner<'a> {
             self.started = true;
             return self.make(TokenKind::StreamStart, self.pos, self.pos);
         }
-        if self.finished {
+        if self.finished || self.stop_after {
             return Ok(None);
         }
 
@@ -370,9 +374,9 @@ impl<'a> Scanner<'a> {
                 self.flow_stack.push(('[', start, false));
                 self.flow_allow_zero_indent
                     .push(self.may_continue_at_column_zero());
-                self.limits
-                    .check_depth(self.flow_level)
-                    .map_err(|error| self.limit_at(start, error))?;
+                // The parser checks depth from this token. Stop reading ahead here, so a limit
+                // hit cannot hide an earlier token error (AY-027).
+                self.stop_after = self.limits.check_depth(self.flow_level).is_err();
                 self.pos += 1;
                 self.make(TokenKind::FlowSequenceStart, start, self.pos)
             }
@@ -391,9 +395,7 @@ impl<'a> Scanner<'a> {
                 self.flow_stack.push(('{', start, false));
                 self.flow_allow_zero_indent
                     .push(self.may_continue_at_column_zero());
-                self.limits
-                    .check_depth(self.flow_level)
-                    .map_err(|error| self.limit_at(start, error))?;
+                self.stop_after = self.limits.check_depth(self.flow_level).is_err();
                 self.pos += 1;
                 self.make(TokenKind::FlowMappingStart, start, self.pos)
             }
@@ -466,10 +468,17 @@ impl<'a> Scanner<'a> {
             '>' => self.scan_block_scalar(start, false),
             // Indicators that cannot start a plain scalar (`ns-plain-first`);
             // libyaml rejects them too.
-            '%' | '@' | '`' => Err(self.error_at(
-                start,
-                format!("{ch:?} is a reserved indicator and cannot start a plain scalar"),
-            )),
+            '%' | '@' | '`' => {
+                let error = self.error_at(
+                    start,
+                    format!("{ch:?} is a reserved indicator and cannot start a plain scalar"),
+                );
+                Err(if self.reserved_after_bom(start) {
+                    error.with_code(Code::ReservedIndicatorAfterBom)
+                } else {
+                    error
+                })
+            }
             _ => self.scan_plain(),
         }
     }
@@ -651,6 +660,18 @@ impl<'a> Scanner<'a> {
             error = error.with_span(Span::empty(marker));
         }
         error
+    }
+
+    /// Whether the byte at `index` follows a byte order mark at the start of a line.
+    fn reserved_after_bom(&self, index: usize) -> bool {
+        let Some(before) = self
+            .input
+            .get(..index)
+            .and_then(|text| text.strip_suffix('\u{feff}'))
+        else {
+            return false;
+        };
+        before.is_empty() || before.ends_with(['\n', '\r'])
     }
 
     fn error_at(&self, index: usize, message: impl Into<String>) -> Error {

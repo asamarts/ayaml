@@ -43,7 +43,9 @@ An invalid explicit core scalar is a resolution error.
 - Generic value composition rejects duplicate semantic keys deterministically,
   including non-string keys that compare equal after resolution.
 - Typed decoding follows the target Serde visitor: generated structs reject
-  duplicate fields, while map-like visitors may keep the last value.
+  duplicate fields, and a map-like visitor keeps the last value of an exact
+  duplicate. In default mode, scalar keys that differ only in type, as `1` and
+  `"1"`, are one key to a typed map and are reported as a duplicate.
 - In typed decoding, a custom tag, one outside YAML's own `tag:yaml.org,2002:`
   names, names an enum's variant, and a `Value` keeps it. So does any of those
   names on a collection but a collection tag such as `!!map`, which is dropped, as
