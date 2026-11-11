@@ -94,6 +94,6 @@ rules:
   - id: emitter-size-ratchet
     kind: file_max_lines
     paths: "crates/ayaml/src/emitter.rs"
-    max_lines: 2338
+    max_lines: 2353
     expect_matches: true
     level: error

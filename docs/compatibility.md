@@ -36,6 +36,25 @@ Explicit core tags override implicit resolution:
 
 An invalid explicit core scalar is a resolution error.
 
+### YAML 1.1 readers
+
+The writers quote a string that looks like a decimal numeral with a leading zero, such as
+`0644`, `-0644`, or `0_644`, because YAML 1.2 keeps it a string but a YAML 1.1 reader may
+read it as an octal integer. The writers leave the following plain strings as they are, so a
+YAML 1.1 reader can still misread them:
+
+| Text | YAML 1.1 reading |
+| --- | --- |
+| `yes`, `no`, `on`, `off` | boolean |
+| underscored numbers such as `1_000` | integer |
+| sexagesimal values such as `1:20` or `1:20:30.5` | integer or float |
+| dates such as `2001-12-15` | timestamp |
+| `=` | the special value key |
+| `<<` | merge key |
+
+A quoted or block scalar stays a string in both profiles. An explicit tag also settles the
+reading, so the event writer may leave a tagged scalar plain.
+
 ### Collections and keys
 
 - Mapping order is insertion order.

@@ -1736,13 +1736,28 @@ fn resolves_to_string(value: &str) -> bool {
     crate::resolver::plain_resolves_to_string(value)
 }
 
+/// Whether the text looks like a decimal numeral with a leading zero, as in `0644` or `-0644`.
+/// YAML 1.2 keeps it a string, but YAML 1.1 readers may take it as an octal integer, so a writer
+/// quotes it. A sign, digits, and `_` are the whole shape; `0` alone is already a number.
+pub(crate) fn looks_like_leading_zero_numeral(value: &str) -> bool {
+    let digits = value.strip_prefix(['-', '+']).unwrap_or(value);
+    let mut chars = digits.chars();
+    chars.next() == Some('0')
+        && chars.clone().next().is_some()
+        && chars.all(|ch| ch.is_ascii_digit() || ch == '_')
+}
+
 /// Whether a string can be written as a plain scalar inside a flow collection.
 pub(crate) fn plain_is_safe(value: &str) -> bool {
-    plain_text_ok(value, true) && resolves_to_string(value)
+    plain_text_ok(value, true)
+        && resolves_to_string(value)
+        && !looks_like_leading_zero_numeral(value)
 }
 
 fn plain_is_block_safe(value: &str) -> bool {
-    plain_text_ok(value, false) && resolves_to_string(value)
+    plain_text_ok(value, false)
+        && resolves_to_string(value)
+        && !looks_like_leading_zero_numeral(value)
 }
 
 /// Whether a string can be written single-quoted on one line.

@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Writers now quote a string that looks like a decimal numeral with a leading zero, such as
+  `0644`, `-0644`, or `0_644`, because YAML 1.2 keeps it a string but YAML 1.1 readers may read it
+  as an octal integer. `docs/compatibility.md` lists the other YAML 1.1 hazards that can remain
+  plain, including booleans, underscored and sexagesimal numbers, dates, `=`, and `<<`.
 - From this release on, releases are published by a GitHub Actions workflow through crates.io
   Trusted Publishing. Each release's crate gets a SLSA build provenance attestation, and its
   GitHub release holds the crate and a SHA256SUMS file. `RELEASING.md` says how to verify a
@@ -64,6 +68,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Typed readers now compare scalar mapping keys by their resolved value, so a null key and an
+  empty-string key are distinct, while two spellings of the same scalar remain duplicates.
 - Serializing a deeply nested Rust value now returns a depth error before it can exhaust the
   stack. `to_string`, `to_writer`, and `to_value` use the parser's 128-level limit. A tag counts
   toward the stack bound but not the collection depth, so a value at the cap still serializes.
