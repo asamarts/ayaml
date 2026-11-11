@@ -20,6 +20,15 @@ nightly and `cargo-fuzz`, the instruction check needs `valgrind`, the unsafe cen
 `cargo-geiger` 0.14.0, and plan changes need `aplan`
 (`cargo install aplan --version 0.6.0 --locked`).
 
+The repository lint needs alint 0.22.0. Install the pinned release from its own script:
+
+```sh
+work="$(mktemp -d)"
+curl -fsSL https://raw.githubusercontent.com/asamarts/alint/v0.22.0/install.sh -o "$work/install.sh"
+ALINT_VERSION=v0.22.0 bash "$work/install.sh"
+rm -rf "$work"
+```
+
 Maintainers also set up the leak gate, which needs a private pattern list. See
 [`tools/leak-scan/README.md`](tools/leak-scan/README.md). Pull requests from forks
 don't get that list, so a maintainer runs the check by bringing the change onto a
@@ -60,6 +69,31 @@ Two bounds also apply on their own:
   instruction counts, and the consumer smoke get only the timeout. The script needs Linux and GNU
   `timeout`, and those steps fail where it can't set these bounds. The `bounds` job checks that
   they work.
+
+## Repository lint
+
+`.alint.yml` requires alint 0.22.0 and extends the bundled `oss-baseline`, `rust`,
+`ci/github-actions`, `hygiene/no-tracked-artifacts`, `tooling/editorconfig`,
+`agent-hygiene`, and `agent-context` v1 rulesets. The hosted `repository lint` job runs
+the official action pinned to the v0.22.0 commit with `--fail-on-warning`; local CI runs
+the same check, and a release run fails if the local binary is missing or a different
+version.
+
+```sh
+alint check --fail-on-warning
+tools/ci-local.sh alint
+```
+
+Five files predate the 2,000-line ceiling and carry a non-growth ratchet in `.alint.yml`:
+the scanner, parser, emitter, and two integration-test modules. Fix the tree or remove a
+ratchet in the change that shrinks the file; there is no baseline. `--changed` is not the
+gate: it depends on a base revision and lets a shape violation that is already on the base
+survive.
+
+To move to another alint version, change the `requires:` value, the action pin in
+`.github/workflows/ci.yml`, and the local binary together, then repeat the 2,000/2,001-line
+boundary probes for every covered extension, `tools/hooks/*`, and a Rust source outside
+today's `crates/`, `fuzz/`, and `tools/` directories.
 
 ## Scheduled checks
 

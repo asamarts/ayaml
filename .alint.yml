@@ -1,0 +1,113 @@
+# Repository-shape, text, and Rust lint policy. See docs/decisions.md D84.
+version: 1
+requires:
+  alint: "0.22.0"
+
+extends:
+  - alint://bundled/oss-baseline@v1
+  - alint://bundled/rust@v1
+  - alint://bundled/ci/github-actions@v1
+  - alint://bundled/hygiene/no-tracked-artifacts@v1
+  - alint://bundled/tooling/editorconfig@v1
+  - alint://bundled/agent-hygiene@v1
+  - alint://bundled/agent-context@v1
+
+rules:
+  # The bundled sets leave these advisory; the repository gate blocks them.
+  - id: oss-final-newline
+    level: error
+  - id: oss-no-trailing-whitespace
+    level: error
+  - id: rust-sources-final-newline
+    level: error
+  - id: rust-sources-no-trailing-whitespace
+    level: error
+  - id: gha-workflow-has-name
+    level: error
+
+  # Portable names, links, and line endings, over the whole tree.
+  - id: portable-names
+    kind: no_illegal_windows_names
+    paths: "**"
+    level: error
+  - id: case-conflicts
+    kind: no_case_conflicts
+    paths:
+      include:
+        - "**"
+      exclude:
+        # The pinned upstream suite ships this collision on purpose.
+        - "tests/data/yaml-test-suite/**"
+    level: error
+  - id: no-symlinks
+    kind: no_symlinks
+    paths: "**"
+    level: error
+  - id: no-submodules
+    kind: no_submodules
+    level: error
+  - id: line-endings
+    kind: line_endings
+    paths: "**"
+    target: lf
+    level: error
+
+  # EditorConfig owns the files it can describe; rustfmt owns Rust, and the
+  # parser fixtures and fuzz corpora stay byte-exact.
+  - id: editorconfig-conforms
+    kind: editorconfig_conforms
+    paths:
+      - ".aplan.yml"
+      - ".github/**"
+    level: error
+
+  # The 2,000-line ceiling over every maintained script and source file. The
+  # five files that predate it carry a non-growth ratchet below.
+  - id: source-file-size
+    kind: file_max_lines
+    paths:
+      include:
+        - "**/*.rs"
+        - "**/*.py"
+        - "**/*.sh"
+        - "**/*.bash"
+        - "tools/hooks/*"
+      exclude:
+        - "crates/ayaml/src/scanner.rs"
+        - "crates/ayaml/src/parser.rs"
+        - "crates/ayaml/src/emitter.rs"
+        - "crates/ayaml/tests/regressions.rs"
+        - "crates/ayaml/tests/contracts.rs"
+    max_lines: 2000
+    expect_matches: true
+    level: error
+  - id: scanner-size-ratchet
+    kind: file_max_lines
+    paths: "crates/ayaml/src/scanner.rs"
+    max_lines: 3621
+    expect_matches: true
+    level: error
+  - id: parser-size-ratchet
+    kind: file_max_lines
+    paths: "crates/ayaml/src/parser.rs"
+    max_lines: 3729
+    expect_matches: true
+    level: error
+  - id: emitter-size-ratchet
+    kind: file_max_lines
+    paths: "crates/ayaml/src/emitter.rs"
+    max_lines: 2325
+    expect_matches: true
+    level: error
+  - id: regressions-size-ratchet
+    kind: file_max_lines
+    paths: "crates/ayaml/tests/regressions.rs"
+    max_lines: 3644
+    expect_matches: true
+    level: error
+  - id: contracts-size-ratchet
+    kind: file_max_lines
+    paths: "crates/ayaml/tests/contracts.rs"
+    max_lines: 2182
+    expect_matches: true
+    level: error
