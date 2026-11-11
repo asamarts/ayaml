@@ -505,3 +505,42 @@ fn compat_maps_a_bom_directive_to_the_libyaml_token_error() {
     );
     assert!(error.span().is_none(), "{error}");
 }
+
+/// Every typed reader keeps a mapping's keys in source order. The source is deliberately not
+/// sorted, so a reader that sorts or reverses keys fails.
+#[test]
+fn typed_mapping_keeps_source_key_order() {
+    let input = "z: 1\na: 2\nm: 3\nb: 4\n";
+    let expected = vec![
+        Value::from("z"),
+        Value::from("a"),
+        Value::from("m"),
+        Value::from("b"),
+    ];
+    let assert_order = |mapping: &Mapping| {
+        assert_eq!(
+            mapping.keys().cloned().collect::<Vec<_>>(),
+            expected,
+            "typed mapping key order"
+        );
+    };
+
+    let mapping: Mapping = ayaml::from_str(input).expect("from_str");
+    assert_order(&mapping);
+    let mapping: Mapping = ayaml::from_str_borrowed(input).expect("from_str_borrowed");
+    assert_order(&mapping);
+    let mapping: Mapping = ayaml::from_slice(input.as_bytes()).expect("from_slice");
+    assert_order(&mapping);
+    let mapping: Mapping =
+        ayaml::from_value(ayaml::parse_value(input).expect("value")).expect("from_value");
+    assert_order(&mapping);
+    let mut documents = ayaml::Deserializer::from_str(input).expect("deserializer");
+    let mapping: Mapping = documents.next().expect("a document").expect("a mapping");
+    assert_order(&mapping);
+
+    #[cfg(feature = "libyaml-compat")]
+    {
+        let mapping: Mapping = ayaml::compat::from_str(input).expect("compat");
+        assert_order(&mapping);
+    }
+}
