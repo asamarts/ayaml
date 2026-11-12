@@ -36,6 +36,11 @@ Explicit core tags override implicit resolution:
 
 An invalid explicit core scalar is a resolution error.
 
+A core-schema tag on a node of another kind is dropped in both modes: `!!seq a` reads the
+string `a`, while `!!str {}`, `a: !!int [1]`, and `!!null []` read the collection without the
+tag. In the value model, a core collection tag on a collection is dropped too, since it only
+restates the kind. A custom tag is kept.
+
 ### YAML 1.1 readers
 
 The writers quote a string that looks like a decimal numeral with a leading zero, such as
@@ -178,6 +183,8 @@ these places, on purpose:
 
 - NEL, LS, and PS are content; libyaml reads them as line breaks. A NEL in a comment
   after a flow `?` still ends that comment, as libyaml's line break does.
+- A core-schema tag on a node of another kind is dropped, as libyaml drops it. Default mode
+  drops it too, so `!!str {}` and `!!seq a` read as `{}` and `a` in both modes.
 - A byte-order mark past the start of the stream behaves as described above.
 - Anchor and alias names may hold any `ns-anchor-char`, where libyaml takes only
   alphanumerics, `_`, and `-`, so `&a: b` differs. As in libyaml, a `?` ends a name

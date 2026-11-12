@@ -416,3 +416,29 @@ Rust indentation and the byte-exact parser fixtures and fuzz corpora stay outsid
 conformance. A version update moves `.alint.yml`'s `requires`, the action pin, and the local
 binary together, and repeats the 2,000/2,001-line boundary probes for every covered extension,
 `tools/hooks/*`, and a Rust source outside today's `crates/`, `fuzz/`, and `tools/` layouts.
+
+## D85 — A core tag on a node of another kind is dropped
+
+**Date:** 2026-11-11
+**Status:** Accepted
+
+**Decision.** Default mode and compatibility mode both drop a core-schema tag when the node it is
+on has another kind. A collection tag on a scalar, such as `!!seq a`, is dropped and the scalar is
+read normally. A scalar tag on a collection, such as `!!str {}` or `a: !!int [1]`, is dropped and
+the collection is read normally. A core collection tag on a matching collection is still dropped
+from the value model, as it only restates the kind; an event stream keeps that tag as input
+presentation. Custom tags are kept. `parse_value`, the typed readers, and the event streams drop a
+mismatched tag alike.
+
+**Alternatives.** Refuse such a node as invalid, as YAML 1.2.2 section 3.3.3 could be read to
+require. That would make `!!str {}` and `!!seq a` errors in both modes, where today they read
+successfully, and libyaml drops the tag instead. Dropping keeps the reading lenient and makes
+compat match libyaml.
+
+**Why.** The old split was accidental: collection tags were dropped, while scalar tags stayed on
+collections. That made `!!map [a]` a sequence and `!!str {}` a tagged mapping, and compat differed
+from libyaml without saying so. One rule makes every reader agree.
+
+**Consequences.** `!!str {}` reads `{}`, `a: !!int [1]` reads `{a: [1]}`, `!!null []` reads `[]`,
+and `!!seq a` reads `a`. A custom tag on a collection still wraps it. The event streams no longer
+carry the dropped tag, so the composed value and the events agree.

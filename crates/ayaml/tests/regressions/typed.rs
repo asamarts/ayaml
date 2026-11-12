@@ -625,3 +625,68 @@ fn compat_reads_what_default_mode_and_libyaml_read() {
         assert_eq!(compat(input), default(input), "{input:?}");
     }
 }
+
+/// A core tag names a node kind. On a node of another kind both modes drop it, so values, typed
+/// readers, and event streams read the node without the tag.
+#[test]
+fn core_tags_on_other_node_kinds_are_dropped() {
+    let cases = [
+        ("!!map [a]", "[a]"),
+        ("!!seq a", "a"),
+        ("!!str {}", "{}"),
+        ("a: !!int [1]", "a: [1]"),
+        ("a: !!str\n  b: 1", "a:\n  b: 1"),
+        ("!!null []", "[]"),
+        ("%TAG !e! tag:yaml.org,2002:\n--- !e!str {}\n", "{}\n"),
+    ];
+    for (input, expected_input) in cases {
+        let expected = ayaml::parse_value(expected_input).expect("expected value");
+        assert_eq!(
+            ayaml::parse_value(input).expect("parse_value"),
+            expected,
+            "{input:?}"
+        );
+        for result in every_path::<ayaml::Value>(input) {
+            assert_eq!(result.expect("typed path"), expected, "{input:?}");
+        }
+        let events: Vec<ayaml::Event<'_>> = ayaml::parse_events(input)
+            .expect("events")
+            .collect::<Result<_, _>>()
+            .expect("events");
+        for event in events {
+            match event {
+                ayaml::Event::SequenceStart { tag, .. }
+                | ayaml::Event::MappingStart { tag, .. } => {
+                    assert!(tag.is_none(), "{input:?}");
+                }
+                ayaml::Event::Scalar { tag, .. } => {
+                    assert!(tag.is_none(), "{input:?}");
+                }
+                _ => {}
+            }
+        }
+
+        #[cfg(feature = "libyaml-compat")]
+        {
+            assert_eq!(
+                ayaml::compat::from_str::<ayaml::Value>(input).expect("compat"),
+                expected,
+                "{input:?}"
+            );
+            let events = ayaml::compat::parse_events_with_limits(input, &ayaml::Limits::default())
+                .expect("compat events");
+            for event in events {
+                match event {
+                    ayaml::Event::SequenceStart { tag, .. }
+                    | ayaml::Event::MappingStart { tag, .. } => {
+                        assert!(tag.is_none(), "compat {input:?}");
+                    }
+                    ayaml::Event::Scalar { tag, .. } => {
+                        assert!(tag.is_none(), "compat {input:?}");
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}

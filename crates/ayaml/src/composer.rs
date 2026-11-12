@@ -52,11 +52,13 @@ pub(crate) fn compose_documents_with_budget<'a>(
     Ok(documents)
 }
 
-/// Tag a collection. A core collection tag restates the node kind and is
-/// dropped.
+/// Tag a collection. A core tag on a collection names a node of another kind, or restates its
+/// kind, and is dropped; a custom tag is kept.
 fn apply_tag(tag: Option<&Tag>, value: Value) -> Value {
     match tag {
-        Some(tag) if !tag.is_core_collection() => Value::from(TaggedValue::new(tag.clone(), value)),
+        Some(tag) if !tag.is_core_collection() && !tag.is_core_scalar() => {
+            Value::from(TaggedValue::new(tag.clone(), value))
+        }
         _ => value,
     }
 }

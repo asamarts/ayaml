@@ -69,6 +69,12 @@ impl Tag {
         self.is_core() && matches!(self.suffix(), "seq" | "map" | "set" | "omap" | "pairs")
     }
 
+    /// Whether this is a scalar tag the YAML 1.2 core schema defines. On a collection it names a
+    /// node of another kind; an unknown core name is left for the application.
+    pub(crate) fn is_core_scalar(&self) -> bool {
+        self.is_core() && matches!(self.suffix(), "str" | "int" | "float" | "bool" | "null")
+    }
+
     /// The tag's name in the Serde data model: a local tag's name after its
     /// `!` (`Foo` for `!Foo`, and for `!e!Foo` under `%TAG !e! !`) or, for
     /// any other tag, its full name in angle brackets

@@ -2549,7 +2549,33 @@ impl<'a> Parser<'a> {
     }
 
     /// Count one event against `max_events`, and pass it on.
-    fn emit(&mut self, event: Event<'a>) -> Result<(), Error> {
+    fn emit(&mut self, mut event: Event<'a>) -> Result<(), Error> {
+        match &mut event {
+            Event::Scalar { tag, .. } => {
+                if tag.as_ref().is_some_and(Tag::is_core_collection) {
+                    *tag = None;
+                }
+            }
+            Event::SequenceStart { tag, .. } => {
+                if tag.as_ref().is_some_and(|tag| {
+                    tag.is_core_scalar()
+                        || (tag.is_core_collection()
+                            && !matches!(tag.suffix(), "seq" | "omap" | "pairs"))
+                }) {
+                    *tag = None;
+                }
+            }
+            Event::MappingStart { tag, .. } => {
+                let drop = tag.as_ref().is_some_and(|tag| {
+                    tag.is_core_scalar()
+                        || (tag.is_core_collection() && !matches!(tag.suffix(), "map" | "set"))
+                });
+                if drop {
+                    *tag = None;
+                }
+            }
+            _ => {}
+        }
         self.emitted = self.emitted.saturating_add(1);
         let span = event.span();
         self.limits
@@ -3365,10 +3391,10 @@ mod tests {
 
     #[test]
     fn standalone_properties_attach_to_the_next_node() {
-        let tagged = events("--- !!map\n? a\n: b\n");
+        let tagged = events("--- !Custom\n? a\n: b\n");
         assert!(tagged.iter().any(|event| matches!(
             event,
-            Event::MappingStart { tag: Some(tag), .. } if tag.to_string() == "!!map"
+            Event::MappingStart { tag: Some(tag), .. } if tag.to_string() == "!Custom"
         )));
 
         let anchored = events("&a\n- x\n");
