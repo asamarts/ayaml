@@ -68,6 +68,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A core-schema tag on a node of another kind is now dropped in both default and compatibility
+  modes, on every reader. `!!str {}` and `a: !!int [1]` read the collection without the tag, and
+  `!!seq a` reads the string `a`. Custom tags are still kept.
 - In compat mode, inputs that default mode and libyaml both read no longer fail where the two
   rules meet. This covers a flow `?` before `-` or a `!` tag, anchors ending at `?` or `:`, a
   block scalar under an anchored `:` key, NEL comments and anchors, a `...` marker after a

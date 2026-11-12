@@ -697,9 +697,9 @@ fn tag_cost(node: &Node<'_>, node_cost: usize) -> usize {
 
 fn apply_tag(tag: Option<Tag>, node: Node<'_>) -> Node<'_> {
     match tag {
-        // Core collection tags restate the node kind, so they're dropped
-        // rather than kept as a tagged wrapper.
-        Some(tag) if tag.is_core_collection() => node,
+        // A core tag on a collection names a node of another kind, or restates its kind, and is
+        // dropped; a custom tag is kept.
+        Some(tag) if tag.is_core_collection() || tag.is_core_scalar() => node,
         Some(tag) => {
             let span = node.span;
             Node::new(NodeKind::Tagged(tag, Box::new(node)), span)
