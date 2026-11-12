@@ -419,45 +419,6 @@ pub(super) fn strip_comment<'t>(line: &'t str, names: NameRules<'_, '_>) -> &'t 
     }
 }
 
-/// Check the stream's characters. A character outside `nb-json`
-/// (a C0 control other than tab, line feed, or carriage return) is an error
-/// anywhere: its offset is the `Err`. A character in `nb-json` but outside
-/// `c-printable` (DEL, a C1 control other than NEL, U+FFFE, or U+FFFF) may
-/// appear only inside a quoted scalar (YAML 1.2.2 section 5.1); the `Ok`
-/// lists their offsets for the scanner to check in context. Escapes in
-/// double-quoted scalars can still produce any character.
-pub(super) fn non_printable_characters(input: &str) -> Result<Vec<usize>, usize> {
-    let bytes = input.as_bytes();
-    let mut quoted_only = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte < 0x80 {
-            if byte < 0x20 && !matches!(byte, b'\t' | b'\n' | b'\r') {
-                return Err(index);
-            }
-            if byte == 0x7f {
-                quoted_only.push(index);
-            }
-            index += 1;
-            continue;
-        }
-        let Some(ch) = input[index..].chars().next() else {
-            break;
-        };
-        let code = u32::from(ch);
-        if !(code == 0x85
-            || (0xa0..=0xd7ff).contains(&code)
-            || (0xe000..=0xfffd).contains(&code)
-            || code >= 0x1_0000)
-        {
-            quoted_only.push(index);
-        }
-        index += ch.len_utf8();
-    }
-    Ok(quoted_only)
-}
-
 pub(super) fn non_printable_error(input: &str, index: usize) -> Error {
     let Some(ch) = input[index..].chars().next() else {
         return Error::new(ErrorKind::Scanner, "invalid character boundary");

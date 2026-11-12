@@ -830,7 +830,7 @@ fn typed_shapes_and_nulls_are_checked_on_every_reader() {
     for prefix in ["tag:x:", "foo", "tag:x", "foo/"] {
         let source = format!("%TAG !e! {prefix}\n--- !e!a 1\n");
         let composed = ayaml::parse_value(&source).unwrap();
-        let mut values = vec![
+        let values = vec![
             composed.clone(),
             ayaml::from_str::<Value>(&source).unwrap(),
             ayaml::from_str_borrowed::<Value>(&source).unwrap(),
@@ -847,7 +847,11 @@ fn typed_shapes_and_nulls_are_checked_on_every_reader() {
                 .unwrap(),
         ];
         #[cfg(feature = "libyaml-compat")]
-        values.push(ayaml::compat::from_str::<Value>(&source).unwrap());
+        let values = {
+            let mut values = values;
+            values.push(ayaml::compat::from_str::<Value>(&source).unwrap());
+            values
+        };
         let mut parts = Vec::new();
         for value in values {
             let Value::Tagged(tagged) = value else {
@@ -883,4 +887,51 @@ fn typed_shapes_and_nulls_are_checked_on_every_reader() {
             .next::<Shape>()
             .is_err()
     );
+}
+
+/// The typed reader builds scalar nodes without materializing a `Value` for strings; every scalar
+/// form, tag, and style still reads as the composer reads it.
+#[test]
+fn typed_scalars_read_like_composed_values() {
+    for input in [
+        "text\n",
+        "'text'\n",
+        "\"a\\tb\"\n",
+        "~",
+        "true\n",
+        "1\n",
+        "1.5\n",
+        "! 1\n",
+        "!text\n",
+        "!x text\n",
+        "!x ~\n",
+        "!x true\n",
+        "!x 1\n",
+        "!x 1.5\n",
+        "!!str 1\n",
+        "!!int 1\n",
+        "!!seq 1\n",
+    ] {
+        let expected =
+            ayaml::parse_value(input).unwrap_or_else(|error| panic!("{input:?}: {error}"));
+        assert_eq!(
+            ayaml::from_str::<ayaml::Value>(input)
+                .unwrap_or_else(|error| panic!("{input:?}: {error}")),
+            expected,
+            "{input:?}"
+        );
+        assert_eq!(
+            ayaml::from_str_borrowed::<ayaml::Value>(input)
+                .unwrap_or_else(|error| panic!("{input:?}: {error}")),
+            expected,
+            "{input:?}"
+        );
+        #[cfg(feature = "libyaml-compat")]
+        assert_eq!(
+            ayaml::compat::from_str::<ayaml::Value>(input)
+                .unwrap_or_else(|error| panic!("{input:?}: {error}")),
+            expected,
+            "{input:?}"
+        );
+    }
 }

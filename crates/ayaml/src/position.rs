@@ -51,69 +51,119 @@ fn lines_at_most(bytes: &[u8]) -> usize {
         .sum::<usize>()
 }
 
+/// Whether a non-ASCII code point may appear outside a quoted scalar.
+fn is_printable_non_ascii(code: u32) -> bool {
+    code == 0x85
+        || (0xa0..=0xd7ff).contains(&code)
+        || (0xe000..=0xfffd).contains(&code)
+        || code >= 0x1_0000
+}
+
+/// Build the line starts and, when `CHECK`, the offsets of non-printable characters that only a
+/// quoted scalar may hold. The validation shares the line-start scan so a valid input is read once.
+fn scan_line_starts<const CHECK: bool>(
+    input: &str,
+    quoted_only: &mut Vec<usize>,
+) -> Result<(Vec<usize>, bool), usize> {
+    let bytes = input.as_bytes();
+    // Allocated once, at 8 bytes for each CR or LF: growing by doubling would hold up to twice the
+    // index, and three times it while a copying `realloc` moves it.
+    let mut starts = Vec::with_capacity(lines_at_most(bytes));
+    starts.push(0);
+    let mut ascii = true;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte < 0x80 {
+            if CHECK {
+                if byte < 0x20 && !matches!(byte, b'\t' | b'\n' | b'\r') {
+                    return Err(index);
+                }
+                if byte == 0x7f {
+                    quoted_only.push(index);
+                }
+            }
+            match byte {
+                b'\n' => {
+                    index += 1;
+                    starts.push(index);
+                }
+                b'\r' => {
+                    index += 1;
+                    if bytes.get(index) == Some(&b'\n') {
+                        index += 1;
+                    }
+                    starts.push(index);
+                }
+                _ => index += 1,
+            }
+            continue;
+        }
+        ascii = false;
+        let Some(ch) = input[index..].chars().next() else {
+            break;
+        };
+        if CHECK && !is_printable_non_ascii(u32::from(ch)) {
+            quoted_only.push(index);
+        }
+        index += ch.len_utf8();
+    }
+    Ok((starts, ascii))
+}
+
 impl LineIndex {
     /// Build an index for `input`.
     #[must_use]
     pub(crate) fn new(input: &str) -> Self {
-        // Allocated once, at 8 bytes for each CR or LF: growing by doubling would hold up to twice
-        // the index, and three times it while a copying `realloc` moves it.
-        let mut starts = Vec::with_capacity(lines_at_most(input.as_bytes()));
-        starts.push(0);
-        if input.is_ascii() {
-            let bytes = input.as_bytes();
-            let mut index = 0;
-            while index < bytes.len() {
-                match bytes[index] {
-                    b'\n' => {
-                        index += 1;
-                        starts.push(index);
-                    }
-                    b'\r' => {
-                        index += 1;
-                        if bytes.get(index) == Some(&b'\n') {
-                            index += 1;
-                        }
-                        starts.push(index);
-                    }
-                    _ => index += 1,
-                }
-            }
-            return Self {
-                starts,
-                content_start: 0,
-                skip_line_boms: false,
-                len: input.len(),
-                ascii: true,
-                last_line: Cell::new(0),
-                counted_column: Cell::new((usize::MAX, 0, 0)),
-            };
-        }
-        let mut chars = input.char_indices().peekable();
-        while let Some((index, ch)) = chars.next() {
-            match ch {
-                '\r' => {
-                    if let Some((_, '\n')) = chars.peek() {
-                        chars.next();
-                    }
-                    starts.push(chars.peek().map_or(input.len(), |(next, _)| *next));
-                }
-                '\n' => {
-                    starts.push(index + ch.len_utf8());
-                }
-                _ => {}
-            }
-        }
-
+        let mut quoted_only = Vec::new();
+        let Ok((starts, ascii)) = scan_line_starts::<false>(input, &mut quoted_only) else {
+            unreachable!("an unchecked scan cannot fail");
+        };
         let content_start = if input.starts_with('\u{feff}') { 3 } else { 0 };
         Self {
             starts,
             content_start,
-            skip_line_boms: true,
+            skip_line_boms: !ascii,
             len: input.len(),
-            ascii: input.is_ascii(),
+            ascii,
             last_line: Cell::new(0),
             counted_column: Cell::new((usize::MAX, 0, 0)),
         }
+    }
+
+    /// Build an index and check the characters that YAML forbids outside a quoted scalar.
+    ///
+    /// The scan that builds the line starts also collects the quoted-only offsets. `count_line_boms`
+    /// applies the compat rule of [`Self::counting_line_boms`].
+    pub(crate) fn new_checked(
+        input: &str,
+        count_line_boms: bool,
+    ) -> Result<(Self, Vec<usize>), usize> {
+        let mut quoted_only = Vec::new();
+        let (starts, ascii) = scan_line_starts::<true>(input, &mut quoted_only)?;
+        let content_start = if count_line_boms
+            && input
+                .strip_prefix('\u{feff}')
+                .is_some_and(starts_with_document_marker)
+        {
+            0
+        } else if input.starts_with('\u{feff}') {
+            3
+        } else {
+            0
+        };
+        Ok((
+            Self {
+                starts,
+                content_start,
+                skip_line_boms: !count_line_boms && !ascii,
+                len: input.len(),
+                ascii,
+                last_line: Cell::new(0),
+                counted_column: Cell::new((usize::MAX, 0, 0)),
+            },
+            quoted_only,
+        ))
     }
 
     /// Build an index for compat, where a later line's BOM takes up a column, as libyaml reads it.
@@ -459,5 +509,47 @@ mod tests {
         let input = "é";
         let index = LineIndex::new(input);
         assert_eq!(index.marker(input, 1), None);
+    }
+
+    #[test]
+    fn checked_scan_agrees_with_the_index_and_collects_quoted_only_characters() {
+        for input in ["", "a\nb\r\nc", "é\n\u{feff}x\n", "a\u{85}b\u{2028}c"] {
+            let index = LineIndex::new(input);
+            let (checked, quoted) = LineIndex::new_checked(input, false).unwrap();
+            assert_eq!(index.line_count(), checked.line_count(), "{input:?}");
+            assert!(quoted.is_empty(), "{input:?}: {quoted:?}");
+            for at in (0..=input.len()).filter(|&at| input.is_char_boundary(at)) {
+                assert_eq!(
+                    index.marker(input, at),
+                    checked.marker(input, at),
+                    "{input:?}"
+                );
+            }
+        }
+        for (input, expected) in [
+            ("a\u{7f}b", vec![1]),
+            ("a\u{fffe}b", vec![1]),
+            ("a\u{1}b", Vec::new()),
+        ] {
+            let result = LineIndex::new_checked(input, false);
+            if expected.is_empty() {
+                assert_eq!(result.unwrap_err(), 1, "{input:?}");
+            } else {
+                assert_eq!(result.unwrap().1, expected, "{input:?}");
+            }
+        }
+        let input = "\u{feff}---\nx\n";
+        let normal = LineIndex::new(input);
+        let compat = LineIndex::counting_line_boms(input);
+        let checked_compat = LineIndex::new_checked(input, true).unwrap().0;
+        assert_eq!(normal.marker(input, 3).unwrap().column(), 1);
+        assert_eq!(compat.marker(input, 3).unwrap().column(), 2);
+        for at in (0..=input.len()).filter(|&at| input.is_char_boundary(at)) {
+            assert_eq!(
+                compat.marker(input, at),
+                checked_compat.marker(input, at),
+                "{at}"
+            );
+        }
     }
 }
