@@ -22,8 +22,8 @@ Rust 1.88, and is dual-licensed under MIT or Apache-2.0.
   exact wide integers, and deterministic equality.
 - **Serde support** through borrowed and owned typed decoding, a
   multi-document `Deserializer`, `DeserializeSeed`, `from_value`, and
-  `to_value`. `from_value` applies the same shape and string-target checks as the
-  source-based readers; a composed null is an explicit null.
+  `to_value`. `from_value` applies the typed path's shape checks, and its string
+  target requires a string; a composed null is an explicit null.
 - **Deterministic emitter** for values, Serde types, event streams, and
   document streams, with per-node styles and output limits.
 - **Native resource limits** for input size, depth, documents, scalars,

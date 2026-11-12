@@ -128,10 +128,31 @@ fn insert_entry(mapping: &mut Mapping, key: Value, value: Value) -> Result<(), c
 
 impl<'de> Deserialize<'de> for Mapping {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        match Value::deserialize(deserializer)? {
-            Value::Mapping(mapping) => Ok(mapping),
-            _ => Err(serde::de::Error::custom("expected a YAML mapping")),
+        deserializer.deserialize_map(MappingVisitor)
+    }
+}
+
+struct MappingVisitor;
+
+impl<'de> Visitor<'de> for MappingVisitor {
+    type Value = Mapping;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a YAML mapping")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
+        let mut mapping = Mapping::new();
+        while let Some((key, value)) = access.next_entry()? {
+            if mapping.contains_key(&key) {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate entry with key {}",
+                    crate::value::key_text(&key)
+                )));
+            }
+            mapping.insert(key, value);
         }
+        Ok(mapping)
     }
 }
 
