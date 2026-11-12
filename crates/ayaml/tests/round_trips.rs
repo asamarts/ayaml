@@ -656,7 +656,7 @@ fn a_flow_key_takes_the_explicit_form_past_128_characters() {
     for (short, long) in cases {
         for (key, explicit) in [(short, false), (long, true)] {
             let mut mapping = ayaml::Mapping::new();
-            mapping.insert(key.clone(), Value::from(1_u64));
+            mapping.insert(key, Value::from(1_u64));
             let value = Value::Mapping(mapping);
             let text = Emitter::new(&limits, &flow)
                 .value_to_string(&value)
@@ -695,7 +695,7 @@ fn a_flow_key_takes_the_explicit_form_past_128_characters() {
         let (open, close) = if flow { ("{", ": 1}") } else { ("", ": 1") };
         for (key, explicit) in [(short, false), (long, true)] {
             let mut mapping = ayaml::Mapping::new();
-            mapping.insert(key.clone(), Value::from(1_u64));
+            mapping.insert(key, Value::from(1_u64));
             let value = Value::Mapping(mapping);
             let text = Emitter::new(&limits, &options)
                 .value_to_string(&value)
