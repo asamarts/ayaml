@@ -61,8 +61,8 @@ rules:
       - ".github/**"
     level: error
 
-  # The 2,000-line ceiling over every maintained script and source file. The
-  # source files that predate it carry a non-growth ratchet below.
+  # The 2,000-line ceiling over every maintained script and source file. There
+  # is no path exclusion or non-growth ratchet.
   - id: source-file-size
     kind: file_max_lines
     paths:

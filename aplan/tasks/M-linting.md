@@ -21,7 +21,8 @@ tags:
 
 Repository structure and Rust policy are enforced only by scattered checks and reviewer
 knowledge. Five hand-written Rust files exceeded the requested 2,000-line ceiling when the
-milestone was planned; AY-076 split the two test modules, and three source files remain. The
+milestone was planned. AY-076 split the two test modules, and AY-073 through AY-075 split
+the scanner, parser, and emitter; no maintained source file now exceeds the ceiling. The
 workspace enables only three opt-in Clippy lints. Establish the gate before more parser,
 scanner, typed-reader, and release work adds to that debt.
 
