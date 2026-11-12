@@ -260,7 +260,13 @@ fn chars_variants_and_mappings_follow_the_text() {
     assert!(ayaml::from_str_borrowed::<Renamed>("TRUE\n").is_err());
     for input in ["", "~\n"] {
         let results = every_path::<ayaml::Mapping>(input);
-        assert!(results.iter().all(Result::is_err), "{results:?}");
+        if input.is_empty() {
+            assert_eq!(results[0], Ok(ayaml::Mapping::new()));
+            assert_eq!(results[1], Ok(ayaml::Mapping::new()));
+            assert!(results[2].is_err(), "{results:?}");
+        } else {
+            assert!(results.iter().all(Result::is_err), "{results:?}");
+        }
     }
     for result in every_path::<ayaml::Mapping>("a\n") {
         assert!(result.is_err(), "{result:?}");
@@ -824,12 +830,24 @@ fn typed_shapes_and_nulls_are_checked_on_every_reader() {
     for prefix in ["tag:x:", "foo", "tag:x", "foo/"] {
         let source = format!("%TAG !e! {prefix}\n--- !e!a 1\n");
         let composed = ayaml::parse_value(&source).unwrap();
-        let values = [
+        let mut values = vec![
             composed.clone(),
             ayaml::from_str::<Value>(&source).unwrap(),
             ayaml::from_str_borrowed::<Value>(&source).unwrap(),
             ayaml::from_value::<Value>(composed).unwrap(),
+            ayaml::Deserializer::from_str(&source)
+                .unwrap()
+                .next::<Value>()
+                .unwrap()
+                .unwrap(),
+            ayaml::Deserializer::from_str(&source)
+                .unwrap()
+                .next_borrowed::<Value>()
+                .unwrap()
+                .unwrap(),
         ];
+        #[cfg(feature = "libyaml-compat")]
+        values.push(ayaml::compat::from_str::<Value>(&source).unwrap());
         let mut parts = Vec::new();
         for value in values {
             let Value::Tagged(tagged) = value else {
