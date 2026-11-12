@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Typed `from_str` now scans each input once for line starts and non-printable characters, skips a
+  temporary `Value` for string scalars, and reserves collection capacity from Serde size hints.
+  Its default and compatibility readers still return the same values and report the same errors.
 - Typed decoding now rejects a sequence for a struct, an explicit null for a sequence, mapping,
   struct, or struct variant, and a non-string value for a string target under `from_value`. A null,
   boolean, or number scalar no longer names an enum variant, even when a variant is renamed to its

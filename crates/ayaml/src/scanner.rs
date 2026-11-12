@@ -22,8 +22,7 @@ mod tests;
 
 use self::line::{
     NameRules, Owner, PercentError, decode_percent_escapes, is_blank, is_line_break, is_tag_char,
-    is_uri_char, leading_spaces, non_printable_characters, non_printable_error,
-    starts_block_collection, uri_text_ok,
+    is_uri_char, leading_spaces, non_printable_error, starts_block_collection, uri_text_ok,
 };
 
 /// A lexical token.
@@ -210,8 +209,8 @@ impl<'a> Scanner<'a> {
         limits.check_input(input.len()).map_err(|error| {
             Error::from(error).with_span(Span::empty(crate::span::Marker::new(0, 1, 1)))
         })?;
-        let quoted_only = match non_printable_characters(input) {
-            Ok(quoted_only) => quoted_only,
+        let (line_index, quoted_only) = match LineIndex::new_checked(input, compat_flow) {
+            Ok(checked) => checked,
             Err(index) => {
                 let marker = if compat_flow {
                     LineIndex::counting_line_boms(input).marker(input, index)
@@ -230,11 +229,7 @@ impl<'a> Scanner<'a> {
         Ok(Self {
             input,
             pos,
-            line_index: if compat_flow {
-                LineIndex::counting_line_boms(input)
-            } else {
-                LineIndex::new(input)
-            },
+            line_index,
             limits,
             tokens: 0,
             anchors: 0,

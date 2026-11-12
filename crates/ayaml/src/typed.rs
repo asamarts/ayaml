@@ -20,7 +20,7 @@ use crate::event::{Anchor, Event, ScalarStyle};
 use crate::limits::{AliasBudget, Limits};
 use crate::number::Number;
 use crate::parser;
-use crate::resolver::{float_from_text, resolve_scalar};
+use crate::resolver::{float_from_text, plain_resolves_to_string, resolve_scalar};
 use crate::span::{Marker, Span};
 use crate::tag::Tag;
 use crate::value::{Value, key_text_full, push_quoted_key};
@@ -391,9 +391,9 @@ impl<'de> Builder<'de, '_> {
                     anchor,
                     span,
                 } => {
-                    let resolved = resolve_scalar(value.as_ref(), style, tag.as_ref())
-                        .map_err(|error| error.with_span(span))?;
-                    let mut node = node_from_value(resolved, &value, &raw, style, span);
+                    let mut node =
+                        scalar_node(value.as_ref(), &value, &raw, style, tag.as_ref(), span)
+                            .map_err(|error| error.with_span(span))?;
                     if tag
                         .as_ref()
                         .is_some_and(|tag| tag.is_core() || tag.is_non_specific())
@@ -713,6 +713,63 @@ fn apply_tag(tag: Option<Tag>, node: Node<'_>) -> Node<'_> {
         }
         None => node,
     }
+}
+
+/// Build a scalar node without materializing a `Value` when the scalar stays a string.
+fn scalar_node<'de>(
+    text: &str,
+    value: &Cow<'de, str>,
+    raw: &Cow<'de, str>,
+    style: ScalarStyle,
+    tag: Option<&Tag>,
+    span: Span,
+) -> Result<Node<'de>, Error> {
+    let scalar_text = borrowed_or_owned(value, raw, style);
+    let string = match tag {
+        Some(tag) if tag.is_non_specific() => {
+            let inner = Node::scalar(
+                NodeKind::String(scalar_text.clone()),
+                scalar_text.clone(),
+                style,
+                span,
+            );
+            return Ok(Node::scalar(
+                NodeKind::Tagged(tag.clone(), Box::new(inner)),
+                scalar_text,
+                style,
+                span,
+            ));
+        }
+        Some(tag) if tag.is_core() => !matches!(tag.suffix(), "int" | "float" | "bool" | "null"),
+        Some(tag) => {
+            if style != ScalarStyle::Plain || plain_resolves_to_string(text) {
+                let inner = Node::scalar(
+                    NodeKind::String(scalar_text.clone()),
+                    scalar_text.clone(),
+                    style,
+                    span,
+                );
+                return Ok(Node::scalar(
+                    NodeKind::Tagged(tag.clone(), Box::new(inner)),
+                    scalar_text,
+                    style,
+                    span,
+                ));
+            }
+            false
+        }
+        None => style != ScalarStyle::Plain || plain_resolves_to_string(text),
+    };
+    if string {
+        return Ok(Node::scalar(
+            NodeKind::String(scalar_text.clone()),
+            scalar_text,
+            style,
+            span,
+        ));
+    }
+    let resolved = resolve_scalar(text, style, tag).map_err(|error| error.with_span(span))?;
+    Ok(node_from_value(resolved, value, raw, style, span))
 }
 
 fn node_from_value<'de>(

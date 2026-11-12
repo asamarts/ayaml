@@ -144,13 +144,9 @@ impl<'de> Visitor<'de> for MappingVisitor {
     fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
         let mut mapping = Mapping::new();
         while let Some((key, value)) = access.next_entry()? {
-            if mapping.contains_key(&key) {
-                return Err(serde::de::Error::custom(format!(
-                    "duplicate entry with key {}",
-                    crate::value::key_text(&key)
-                )));
-            }
-            mapping.insert(key, value);
+            mapping.insert_new(key, value).map_err(|key| {
+                serde::de::Error::custom(format!("duplicate entry with key {key}"))
+            })?;
         }
         Ok(mapping)
     }
@@ -240,7 +236,12 @@ impl<'de> Visitor<'de> for ValueVisitor {
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
-        let mut sequence = Vec::new();
+        let hint = access.size_hint().unwrap_or(0);
+        let mut sequence = if (8..=1024).contains(&hint) {
+            Vec::with_capacity(hint)
+        } else {
+            Vec::new()
+        };
         while let Some(value) = access.next_element()? {
             sequence.push(value);
         }
@@ -248,15 +249,12 @@ impl<'de> Visitor<'de> for ValueVisitor {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
-        let mut mapping = Mapping::new();
+        let capacity = access.size_hint().unwrap_or(0).min(4096);
+        let mut mapping = Mapping::with_capacity(capacity);
         while let Some((key, value)) = access.next_entry()? {
-            if mapping.contains_key(&key) {
-                return Err(serde::de::Error::custom(format!(
-                    "duplicate entry with key {}",
-                    crate::value::key_text(&key)
-                )));
-            }
-            mapping.insert(key, value);
+            mapping.insert_new(key, value).map_err(|key| {
+                serde::de::Error::custom(format!("duplicate entry with key {key}"))
+            })?;
         }
         Ok(Value::Mapping(mapping))
     }
