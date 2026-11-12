@@ -2,7 +2,7 @@
 id: M-linting
 title: Enforce repository and Rust lint policy before 0.1.2
 phase: 1
-status: todo
+status: done
 blocked_by:
 - AY-072
 - AY-073
@@ -15,6 +15,9 @@ tags:
 - milestone
 - linting
 - maintainability
+evidence:
+  - kind: test
+    ref: the_repository_lint_policy_is_the_one_the_plan_requires
 ---
 
 ## Why
@@ -28,7 +31,7 @@ scanner, typed-reader, and release work adds to that debt.
 
 ## Acceptance criteria
 
-- [ ] every member is closed with its required evidence
-- [ ] full-tree alint, MSRV and stable Clippy, rustdoc, rustfmt, and the production panic-prone-operation profile are blocking local and hosted checks
-- [ ] every maintained `.rs`, `.py`, `.sh`, and `.bash` file plus `tools/hooks/*` is at most 2,000 lines, with no baseline, exclusion, or temporary ratchet left for the size rule
-- [ ] the policy, intentional exceptions, update procedure, and local commands are documented
+- [x] every member is closed with its required evidence
+- [x] full-tree alint, MSRV and stable Clippy, rustdoc, rustfmt, and the production panic-prone-operation profile are blocking local and hosted checks
+- [x] every maintained `.rs`, `.py`, `.sh`, and `.bash` file plus `tools/hooks/*` is at most 2,000 lines, with no baseline, exclusion, or temporary ratchet left for the size rule
+- [x] the policy, intentional exceptions, update procedure, and local commands are documented

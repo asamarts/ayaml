@@ -75,6 +75,10 @@ pub(crate) enum TokenKind<'a> {
 }
 
 impl fmt::Display for TokenKind<'_> {
+    #[allow(
+        clippy::struct_excessive_bools,
+        reason = "the flags are independent scanner or emitter options, not a state enum"
+    )]
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::StreamStart => formatter.write_str("stream start"),
@@ -103,6 +107,10 @@ impl fmt::Display for TokenKind<'_> {
 
 /// An iterative scanner over a UTF-8 YAML input.
 #[derive(Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "the flags are independent scanner options, not a state enum"
+)]
 pub(crate) struct Scanner<'a> {
     input: &'a str,
     pos: usize,
@@ -278,6 +286,10 @@ impl<'a> Scanner<'a> {
     }
 
     /// Return the next token, or `None` after the stream end has been emitted.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the routine is one linear state machine; splitting it would obscure its state"
+    )]
     pub(crate) fn next_token(&mut self) -> Result<Option<Token<'a>>, Error> {
         if !self.started {
             self.started = true;
@@ -390,7 +402,10 @@ impl<'a> Scanner<'a> {
         }
 
         let start = self.pos;
-        let ch = self.peek().expect("checked EOF");
+        let Some(ch) = self.peek() else {
+            self.finished = true;
+            return self.make(TokenKind::StreamEnd, self.pos, self.pos);
+        };
         match ch {
             '[' => {
                 if self.flow_level == 0 {
@@ -522,6 +537,10 @@ impl<'a> Scanner<'a> {
 
     /// Every non-printable character the scanner has passed must sit inside
     /// `quoted`, the quoted scalar being made, if any.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "the small owned value keeps the shared call site simple"
+    )]
     fn check_quoted_only(&mut self, quoted: Option<std::ops::Range<usize>>) -> Result<(), Error> {
         while let Some(&index) = self.quoted_only.get(self.quoted_only_next) {
             if index >= self.pos {
@@ -773,7 +792,9 @@ impl<'a> Scanner<'a> {
             if self.pos >= self.input.len() {
                 return Ok(());
             }
-            let ch = self.peek().expect("checked EOF");
+            let Some(ch) = self.peek() else {
+                return Ok(());
+            };
             match ch {
                 ' ' => self.pos += 1,
                 '\t' => {
@@ -882,7 +903,9 @@ impl<'a> Scanner<'a> {
     }
 
     fn consume_line_break(&mut self) {
-        let ch = self.peek().expect("line break");
+        let Some(ch) = self.peek() else {
+            return;
+        };
         self.pos += ch.len_utf8();
         if ch == '\r' && self.peek() == Some('\n') {
             self.pos += 1;

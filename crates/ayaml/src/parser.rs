@@ -91,6 +91,10 @@ const fn arena_growth(len: usize, chunk: usize) -> usize {
 }
 
 /// Logical lines read from the scanner, plus the stream boundary spans.
+#[allow(
+    clippy::struct_field_names,
+    reason = "the field name matches the domain term for this line collection"
+)]
 struct Lines<'a> {
     lines: Vec<Line>,
     tokens: Vec<Token<'a>>,
@@ -221,6 +225,10 @@ pub(crate) struct EventCursor<'a> {
 }
 
 impl<'a> EventCursor<'a> {
+    #[allow(
+        clippy::unused_self,
+        reason = "the method is part of a uniform grammar or diagnostic surface"
+    )]
     fn limit_at(&self, span: Span, limit: crate::limits::LimitExceeded) -> Error {
         Error::from(limit).with_span(span)
     }
@@ -274,19 +282,18 @@ impl<'a> EventCursor<'a> {
             if self.stream_ended {
                 return Ok(None);
             }
-            match self.load_chunk()? {
-                Some(events) => self.queue.extend(events),
-                None => {
-                    self.stream_ended = true;
-                    let span = self
-                        .stream_end
-                        .unwrap_or_else(|| Span::empty(Marker::new(self.input.len(), 1, 1)));
-                    self.events += 1;
-                    self.limits
-                        .check_events(self.events)
-                        .map_err(|error| self.limit_at(span, error))?;
-                    return Ok(Some(Event::StreamEnd { span }));
-                }
+            if let Some(events) = self.load_chunk()? {
+                self.queue.extend(events);
+            } else {
+                self.stream_ended = true;
+                let span = self
+                    .stream_end
+                    .unwrap_or_else(|| Span::empty(Marker::new(self.input.len(), 1, 1)));
+                self.events += 1;
+                self.limits
+                    .check_events(self.events)
+                    .map_err(|error| self.limit_at(span, error))?;
+                return Ok(Some(Event::StreamEnd { span }));
             }
         }
     }
@@ -595,7 +602,9 @@ impl<'a> Parser<'a> {
             while let Some(TokenKind::Directive { name, value }) =
                 self.line_first(index).map(|token| &token.kind)
             {
-                let span = self.line_first(index).expect("directive").span;
+                let Some(span) = self.line_first(index).map(|token| token.span) else {
+                    break;
+                };
                 let event = Event::Directive {
                     name: name.clone(),
                     value: value.clone(),
@@ -617,7 +626,8 @@ impl<'a> Parser<'a> {
                 })
             {
                 return Err(self.error(
-                    self.line_first(index).expect("checked").span,
+                    self.line_first(index)
+                        .map_or_else(|| self.empty_span(index), |token| token.span),
                     "directive must be followed by a document start",
                 ));
             }
@@ -893,6 +903,10 @@ impl<'a> Parser<'a> {
         }
     }
 
+    #[allow(
+        clippy::match_same_arms,
+        reason = "the arms stay separate to document each representation or state"
+    )]
     fn resume(
         &mut self,
         cont: Cont,

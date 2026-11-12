@@ -1,7 +1,13 @@
 use std::borrow::Cow;
 
-use super::line::*;
-use super::*;
+use super::line::{
+    Continuation, LineShape, LineStop, Owner, block_prefix, is_blank, is_line_break,
+    leading_spaces, line_shape, strip_comment, walk_line,
+};
+use super::{
+    BOM_FIRST_BYTE, EMPTY_LINE_TAB, Error, ScalarStyle, Scanner, Token, TokenKind,
+    starts_with_document_marker,
+};
 
 impl<'a> Scanner<'a> {
     pub(super) fn scan_single_quoted(&mut self) -> Result<Option<Token<'a>>, Error> {
@@ -386,6 +392,10 @@ impl<'a> Scanner<'a> {
             .ok_or_else(|| self.error_at(escape_start, "escape is not a Unicode scalar value"))
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the routine is one linear state machine; splitting it would obscure its state"
+    )]
     pub(super) fn scan_block_scalar(
         &mut self,
         start: usize,
@@ -407,7 +417,7 @@ impl<'a> Scanner<'a> {
                     self.pos += 1;
                 }
                 Some(ch @ '1'..='9') if explicit_indent.is_none() => {
-                    explicit_indent = Some(ch.to_digit(10).expect("digit") as usize);
+                    explicit_indent = Some(ch.to_digit(10).unwrap_or(0) as usize);
                     self.pos += 1;
                 }
                 _ => break,
@@ -548,8 +558,9 @@ impl<'a> Scanner<'a> {
                     .find(['\n', '\r'])
                     .map_or(self.input.len(), |offset| leading + offset);
                 leading = line_end;
-                if leading < self.input.len() {
-                    let ch = self.input[leading..].chars().next().expect("line break");
+                if leading < self.input.len()
+                    && let Some(ch) = self.input[leading..].chars().next()
+                {
                     leading += ch.len_utf8();
                     if ch == '\r' && self.input[leading..].starts_with('\n') {
                         leading += 1;
@@ -833,6 +844,10 @@ impl<'a> Scanner<'a> {
             .count()
     }
 
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "the caller uses the shared fallible scanner API"
+    )]
     pub(super) fn detect_block_indent(
         &self,
         content_start: usize,
@@ -847,8 +862,8 @@ impl<'a> Scanner<'a> {
             if next.is_none() {
                 return Ok(base_indent + 1);
             }
-            if next.is_some_and(is_line_break) {
-                position = after + next.expect("checked").len_utf8();
+            if let Some(ch) = next.filter(|ch| is_line_break(*ch)) {
+                position = after + ch.len_utf8();
                 continue;
             }
             if spaces < base_indent || (!allow_base && spaces == base_indent) {
@@ -926,13 +941,12 @@ impl<'a> Scanner<'a> {
             {
                 break;
             }
-            let continuation = match continuation {
-                Some(continuation) => continuation,
-                None => {
-                    let computed = self.plain_continuation(start);
-                    continuation = Some(computed);
-                    computed
-                }
+            let continuation = if let Some(continuation) = continuation {
+                continuation
+            } else {
+                let computed = self.plain_continuation(start);
+                continuation = Some(computed);
+                computed
             };
             let first_end = self.pos;
             let Some(breaks) = self.try_plain_continuation(continuation)? else {
@@ -946,7 +960,9 @@ impl<'a> Scanner<'a> {
                 }
                 value = Some(first);
             }
-            let value = value.as_mut().expect("initialized");
+            let Some(value) = value.as_mut() else {
+                break;
+            };
             if breaks == 1 {
                 value.push(' ');
             } else {
@@ -1209,7 +1225,9 @@ impl<'a> Scanner<'a> {
     pub(super) fn trim_trailing_whitespace(&self, start: usize, end: usize) -> usize {
         let mut trimmed = end;
         while trimmed > start {
-            let ch = self.input[..trimmed].chars().next_back().expect("nonempty");
+            let Some(ch) = self.input[..trimmed].chars().next_back() else {
+                break;
+            };
             if ch == ' ' || ch == '\t' {
                 trimmed -= ch.len_utf8();
             } else {
@@ -1219,7 +1237,7 @@ impl<'a> Scanner<'a> {
         trimmed
     }
 }
-fn scalar_cow<'a>(value: String, candidate: &'a str) -> Cow<'a, str> {
+fn scalar_cow(value: String, candidate: &str) -> Cow<'_, str> {
     if value == candidate {
         Cow::Borrowed(candidate)
     } else {

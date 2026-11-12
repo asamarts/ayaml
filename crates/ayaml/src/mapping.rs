@@ -162,12 +162,14 @@ impl Mapping {
 }
 
 /// A view into one mapping slot, mirroring the `indexmap` entry API.
+#[derive(Debug)]
 pub struct Entry<'a> {
     inner: indexmap::map::Entry<'a, Value, Value>,
 }
 
 impl<'a> Entry<'a> {
     /// Insert `default` if the key is absent, and return the slot.
+    #[must_use]
     pub fn or_insert(self, default: Value) -> &'a mut Value {
         self.inner.or_insert(default)
     }
@@ -178,6 +180,7 @@ impl<'a> Entry<'a> {
     }
 
     /// Mutate the value if the key is present, and return the entry.
+    #[must_use]
     pub fn and_modify<F: FnOnce(&mut Value)>(mut self, f: F) -> Self {
         if let indexmap::map::Entry::Occupied(entry) = &mut self.inner {
             f(entry.get_mut());
@@ -474,10 +477,11 @@ mod tests {
     #[test]
     fn entry_inserts_lazily_and_mutates_existing() {
         let mut map = Mapping::new();
-        map.entry(key("a")).or_insert(Value::from(1_u64));
-        map.entry(key("a"))
+        let _slot = map.entry(key("a")).or_insert(Value::from(1_u64));
+        let _slot = map
+            .entry(key("a"))
             .and_modify(|value| *value = Value::from(2_u64));
-        map.entry(key("b")).or_insert_with(|| Value::from(3_u64));
+        let _slot = map.entry(key("b")).or_insert_with(|| Value::from(3_u64));
         assert_eq!(map.get("a"), Some(&Value::from(2_u64)));
         assert_eq!(map.get("b"), Some(&Value::from(3_u64)));
     }

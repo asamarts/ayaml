@@ -1,3 +1,9 @@
+#![allow(
+    clippy::needless_pass_by_value,
+    clippy::items_after_statements,
+    reason = "test fixtures favor compact setup, generated inputs, and literal YAML braces"
+)]
+
 use super::*;
 
 #[test]
@@ -172,26 +178,23 @@ fn parse_value_rejects_duplicate_keys_and_trailing_documents() {
 
 #[test]
 fn limit_errors_carry_a_source_span() {
-    let cases: &[(&str, ayaml::Limits)] = &[
-        ("a: 1\n", ayaml::Limits::default().with_max_input_bytes(1)),
-        ("a:\n  b: 1\n", ayaml::Limits::default().with_max_depth(1)),
-        (
-            "abcdef\n",
-            ayaml::Limits::default().with_max_scalar_bytes(2),
-        ),
-        ("a: 1\n", ayaml::Limits::default().with_max_events(1)),
-        ("a: &x 1\n", ayaml::Limits::default().with_max_anchors(0)),
+    let cases: &[(&str, Limits)] = &[
+        ("a: 1\n", Limits::default().with_max_input_bytes(1)),
+        ("a:\n  b: 1\n", Limits::default().with_max_depth(1)),
+        ("abcdef\n", Limits::default().with_max_scalar_bytes(2)),
+        ("a: 1\n", Limits::default().with_max_events(1)),
+        ("a: &x 1\n", Limits::default().with_max_anchors(0)),
         (
             "!!str a\n",
-            ayaml::Limits::default().with_max_tag_expansion_bytes(1),
+            Limits::default().with_max_tag_expansion_bytes(1),
         ),
         (
             "- a\n- b\n",
-            ayaml::Limits::default().with_max_collection_entries(1),
+            Limits::default().with_max_collection_entries(1),
         ),
         (
             "a: &x [1, 2]\nb: *x\n",
-            ayaml::Limits::default()
+            Limits::default()
                 .with_max_alias_expansion_bytes(0)
                 .with_alias_bytes_per_input_byte(0),
         ),
@@ -203,7 +206,7 @@ fn limit_errors_carry_a_source_span() {
         assert!(error.limit().is_some(), "{input:?}: {error}");
     }
 
-    let limits = ayaml::Limits::default().with_max_documents(1);
+    let limits = Limits::default().with_max_documents(1);
     let error = ayaml::parse_documents_with_limits("a\n---\nb\n", &limits).expect_err("docs");
     assert_eq!(error.kind(), ErrorKind::Limit);
     assert!(error.span().is_some(), "{error}");
@@ -346,16 +349,13 @@ fn event_stream_defers_syntax_errors_to_items_and_enforces_global_document_limit
 
     let mut docs =
         ayaml::parse_events_with_limits("--- a\n--- b\n", &Limits::compat()).expect("stream");
-    let error = docs
-        .by_ref()
-        .find_map(|event| event.err())
-        .expect("document limit");
+    let error = docs.by_ref().find_map(Result::err).expect("document limit");
     assert_eq!(error.kind(), ErrorKind::Limit);
 }
 
 #[test]
 fn every_default_reader_reports_the_same_first_error() {
-    fn signature(error: ayaml::Error) -> (ErrorKind, Option<(usize, usize)>, String) {
+    fn signature(error: Error) -> (ErrorKind, Option<(usize, usize)>, String) {
         (
             error.kind(),
             error
@@ -425,7 +425,7 @@ fn a_depth_error_carries_the_same_span_on_every_reader() {
         wanted
     );
     let error = ayaml::parse_events(&deep)
-        .and_then(|events| events.collect::<Result<Vec<_>, _>>())
+        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
         .unwrap_err();
     assert!(
         error.location().is_some(),
@@ -540,10 +540,10 @@ fn deep_serialization_returns_a_depth_error_on_a_small_stack() {
             .expect("no panic");
     }
 
-    fn assert_depth(error: ayaml::Error) {
+    fn assert_depth(error: Error) {
         assert_eq!(error.kind(), ErrorKind::Limit, "{error}");
         assert_eq!(
-            error.limit().map(|limit| limit.kind()),
+            error.limit().map(ayaml::LimitExceeded::kind),
             Some(LimitKind::Depth),
             "{error}"
         );

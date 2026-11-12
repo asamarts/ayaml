@@ -442,10 +442,9 @@ pub(super) fn non_printable_characters(input: &str) -> Result<Vec<usize>, usize>
             index += 1;
             continue;
         }
-        let ch = input[index..]
-            .chars()
-            .next()
-            .expect("index is a char boundary");
+        let Some(ch) = input[index..].chars().next() else {
+            break;
+        };
         let code = u32::from(ch);
         if !(code == 0x85
             || (0xa0..=0xd7ff).contains(&code)
@@ -460,10 +459,9 @@ pub(super) fn non_printable_characters(input: &str) -> Result<Vec<usize>, usize>
 }
 
 pub(super) fn non_printable_error(input: &str, index: usize) -> Error {
-    let ch = input[index..]
-        .chars()
-        .next()
-        .expect("index is a char boundary");
+    let Some(ch) = input[index..].chars().next() else {
+        return Error::new(ErrorKind::Scanner, "invalid character boundary");
+    };
     Error::new(
         ErrorKind::Scanner,
         format!(

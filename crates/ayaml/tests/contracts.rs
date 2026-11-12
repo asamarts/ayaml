@@ -1,3 +1,5 @@
+//! Contract tests for the public value, typed, and writer surfaces.
+
 #[path = "contracts/core.rs"]
 mod core;
 #[path = "contracts/typed.rs"]
@@ -114,13 +116,19 @@ struct BorrowedConfig<'a> {
 }
 
 #[derive(Debug, serde::Deserialize)]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "the shared test harness uses different subsets from each contract module"
+)]
 struct SpannedCount {
     count: u32,
 }
 
 #[derive(Debug, serde::Deserialize)]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "the shared test harness uses different subsets from each contract module"
+)]
 struct NestedCounts {
     items: Vec<u32>,
 }
@@ -174,7 +182,7 @@ impl<'de> serde::Deserialize<'de> for Bytes {
     }
 }
 
-type ValueReader = fn(&str) -> Result<Value, ayaml::Error>;
+type ValueReader = fn(&str) -> Result<Value, Error>;
 
 /// Each way to read a document into a value, with its name.
 fn value_readers() -> Vec<(&'static str, ValueReader)> {

@@ -442,3 +442,40 @@ from libyaml without saying so. One rule makes every reader agree.
 **Consequences.** `!!str {}` reads `{}`, `a: !!int [1]` reads `{a: [1]}`, `!!null []` reads `[]`,
 and `!!seq a` reads `a`. A custom tag on a collection still wraps it. The event streams no longer
 carry the dropped tag, so the composed value and the events agree.
+
+## D86 — Rust linting is strict on the MSRV and stable, with a separate panic profile
+
+**Date:** 2026-11-12
+**Status:** Accepted
+
+**Decision.** The workspace enables `all`, `cargo`, and `pedantic` Clippy at group priority -1,
+plus the selected `allow_attributes_without_reason`, `literal_string_with_formatting_args`,
+`mem_forget`, `needless_pass_by_ref_mut`, `or_fun_call`, and `redundant_clone` lints. It allows
+only `multiple_crate_versions`, `module_name_repetitions`, and `similar_names` policy-wide, and
+denies `dbg_macro`, `todo`, and `unimplemented`. Rust lints include `missing_docs`, the 2018
+idioms, and the other checks listed in `Cargo.toml`. The nursery and restriction groups stay off.
+The `fuzz` workspace mirrors the applicable policy and declares Rust 1.88; its three fuzz targets
+forbid unsafe code, and its counting allocator is the documented exception. A production-library
+Clippy command denies `unwrap_used`, `expect_used`, and `panic`. Rustdoc enables `rustdoc::all`
+and retains `-D warnings`. `clippy.toml` sets the function-size threshold to 200 lines without
+duplicating MSRV metadata.
+
+**Alternatives.** Enable every nursery and restriction lint, or allow the noisy pedantic lints
+policy-wide. The first produces unstable or contradictory findings, and the second hides the
+findings this policy exists to catch. Keep the panic profile on tests too: tests legitimately use
+`expect` and `panic` to report a failed assertion, so the profile belongs to the production
+library only.
+
+**Why.** The MSRV and stable toolchains must agree on what a clean tree is. The selected groups
+catch stale public documentation, lossy conversions, panic-prone shortcuts, and stale
+suppressions while leaving the scanner's deliberate indexing and numeric operations readable.
+A separate fuzz workspace is necessary for the allocator, and the fuzz targets still get the
+same compile-time policy. Documenting errors and running rustdoc with all lints keeps the public
+API usable from docs.rs.
+
+**Consequences.** Clippy is blocking on both toolchains and all targets and features, including
+both fuzz workspaces. A new finding is fixed or gets a narrow reasoned suppression, never a
+silent baseline. A stable release that adds a lint may require a policy change; it is made in a
+pull request with this record updated. The production panic profile is checked in both toolchain
+jobs, and any new `unwrap`, `expect`, or `panic` in the library must be a checked invariant or a
+required panicking trait behavior.

@@ -367,6 +367,10 @@ impl Index for usize {
 
     /// A sequence entry must exist; a sequence never grows. A mapping
     /// gains the integer key.
+    #[expect(
+        clippy::panic,
+        reason = "Index::index_or_insert must panic for a missing sequence offset or a wrong node kind, per the trait contract"
+    )]
     fn index_or_insert<'a>(&self, value: &'a mut Value) -> &'a mut Value {
         match value.untag_mut() {
             Value::Sequence(sequence) => {
@@ -556,7 +560,19 @@ impl PartialEq<bool> for Value {
     }
 }
 
-macro_rules! partial_eq_numeric {
+macro_rules! partial_eq_numeric_from {
+    ($method:ident, $base:ty, $($type:ty),+ $(,)?) => {
+        $(
+            impl PartialEq<$type> for Value {
+                fn eq(&self, other: &$type) -> bool {
+                    self.$method().is_some_and(|value| value == <$base>::from(*other))
+                }
+            }
+        )+
+    };
+}
+
+macro_rules! partial_eq_numeric_as {
     ($method:ident, $base:ty, $($type:ty),+ $(,)?) => {
         $(
             impl PartialEq<$type> for Value {
@@ -568,9 +584,29 @@ macro_rules! partial_eq_numeric {
     };
 }
 
-partial_eq_numeric!(as_i64, i64, i8, i16, i32, i64, isize);
-partial_eq_numeric!(as_u64, u64, u8, u16, u32, u64, usize);
-partial_eq_numeric!(as_f64, f64, f32, f64);
+partial_eq_numeric_from!(as_i64, i64, i8, i16, i32);
+partial_eq_numeric_as!(as_i64, i64, isize);
+partial_eq_numeric_from!(as_u64, u64, u8, u16, u32);
+partial_eq_numeric_as!(as_u64, u64, usize);
+partial_eq_numeric_from!(as_f64, f64, f32);
+
+impl PartialEq<i64> for Value {
+    fn eq(&self, other: &i64) -> bool {
+        self.as_i64() == Some(*other)
+    }
+}
+
+impl PartialEq<u64> for Value {
+    fn eq(&self, other: &u64) -> bool {
+        self.as_u64() == Some(*other)
+    }
+}
+
+impl PartialEq<f64> for Value {
+    fn eq(&self, other: &f64) -> bool {
+        self.as_f64() == Some(*other)
+    }
+}
 
 /// `value[index]` is the entry, or null when there is none: a missing key, an
 /// offset past the end, or a value of another kind. It looks through tags, so `value[0]` on `{0: zero}` is `zero`.

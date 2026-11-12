@@ -1,3 +1,9 @@
+#![allow(
+    clippy::items_after_statements,
+    clippy::match_same_arms,
+    reason = "test fixtures favor compact setup, generated inputs, and literal YAML braces"
+)]
+
 use super::*;
 
 /// Two keys that differ only in the order of their entries are one key, whatever the target.

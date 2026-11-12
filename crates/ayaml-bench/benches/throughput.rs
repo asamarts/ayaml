@@ -2,6 +2,10 @@
 //!
 //! Results depend on the host, so compare only runs from the same host, compiler,
 //! and build mode. `docs/benchmarks.md` has the method.
+#![allow(
+    missing_docs,
+    reason = "criterion generates the benchmark entry points"
+)]
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::fmt::Write as _;

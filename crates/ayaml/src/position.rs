@@ -265,7 +265,7 @@ impl LineIndex {
         let line = self.last_line.get();
         let next_start = self.starts.get(line + 1).copied().unwrap_or(self.len);
         if end < next_start || (end == next_start && line + 1 == self.starts.len()) {
-            let end_marker = crate::span::Marker::new(end, line + 1, self.column(input, line, end));
+            let end_marker = Marker::new(end, line + 1, self.column(input, line, end));
             return Some(crate::span::Span::new(start_marker, end_marker));
         }
         self.marker(input, end)

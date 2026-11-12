@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    Anchor, Call, CollectionStyle, Cont, Cow, DUPLICATE_PROPERTIES, Error, ErrorKind, Event,
+    FlowLack, FlowState, LineIndex, Parser, Properties, Run, ScalarStyle, Span, Step, Tag, Token,
+    TokenKind, implicit_key_fits,
+};
 
 impl<'a> Parser<'a> {
     pub(super) fn flow_sequence(
@@ -368,12 +372,12 @@ impl<'a> Parser<'a> {
         self.limits
             .check_collection_entries(state.entries)
             .map_err(|error| self.limit_at(span, error))?;
-        if !matches!(self.token(tokens, index).kind, TokenKind::Value) {
+        if matches!(self.token(tokens, index).kind, TokenKind::Value) {
+            index += 1;
+        } else {
             // Flow mappings permit omitted values: `{key, other: value}`.
             let span = self.empty_before(tokens, index, state.start_span);
             self.emit(self.null_scalar(span))?;
-        } else {
-            index += 1;
         }
         if index >= tokens.len()
             || matches!(
@@ -431,6 +435,10 @@ impl<'a> Parser<'a> {
         self.flow_mapping_loop(state, stack)
     }
 
+    #[allow(
+        clippy::unused_self,
+        reason = "the method is part of a uniform grammar or diagnostic surface"
+    )]
     pub(super) fn implicit_flow_colon(&self, tokens: &[Token<'a>], start: usize) -> Option<usize> {
         let mut depth = 0usize;
         for (index, token) in tokens.iter().enumerate().skip(start) {
@@ -460,6 +468,14 @@ impl<'a> Parser<'a> {
 
     /// Where the flow key from `start` ends. With no end in sight the parse goes on to the end of
     /// `tokens`, and finds what is wrong in order.
+    #[allow(
+        clippy::match_same_arms,
+        reason = "the arms stay separate to document each representation or state"
+    )]
+    #[allow(
+        clippy::unused_self,
+        reason = "the method is part of a uniform grammar or diagnostic surface"
+    )]
     pub(super) fn find_flow_value(&self, tokens: &[Token<'a>], start: usize) -> usize {
         let mut depth = 0usize;
         for (index, token) in tokens.iter().enumerate().skip(start) {
@@ -480,6 +496,10 @@ impl<'a> Parser<'a> {
     }
 
     /// Where the flow item from `start` ends, on the same terms as [`Self::find_flow_value`].
+    #[allow(
+        clippy::unused_self,
+        reason = "the method is part of a uniform grammar or diagnostic surface"
+    )]
     pub(super) fn find_flow_item_end(&self, tokens: &[Token<'a>], start: usize) -> usize {
         let mut depth = 0usize;
         for (index, token) in tokens.iter().enumerate().skip(start) {
@@ -733,6 +753,10 @@ impl<'a> Parser<'a> {
         self.null_scalar_with(span, None, None)
     }
 
+    #[allow(
+        clippy::unused_self,
+        reason = "the method is part of a uniform grammar or diagnostic surface"
+    )]
     pub(super) fn null_scalar_with(
         &self,
         span: Span,
@@ -814,10 +838,18 @@ impl<'a> Parser<'a> {
         self.empty_span(index)
     }
 
+    #[allow(
+        clippy::unused_self,
+        reason = "the method is part of a uniform grammar or diagnostic surface"
+    )]
     pub(super) fn error(&self, span: Span, message: impl Into<String>) -> Error {
         Error::new(ErrorKind::Parser, message).with_span(span)
     }
 
+    #[allow(
+        clippy::unused_self,
+        reason = "the method is part of a uniform grammar or diagnostic surface"
+    )]
     pub(super) fn limit_at(&self, span: Span, limit: crate::limits::LimitExceeded) -> Error {
         Error::from(limit).with_span(span)
     }

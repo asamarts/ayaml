@@ -5,8 +5,12 @@
 //! budget given on the command line. It lives here, outside the parser crate's
 //! `forbid(unsafe_code)` graph, because a counting allocator needs `unsafe`.
 //!
-//! usage: memcount PATH|@NAME [PARSE_PEAK EMIT_PEAK PARSE_ALLOCS EMIT_ALLOCS
-//! SERIALIZE_PEAK SERIALIZE_ALLOCS]
+//! Usage: `memcount PATH|@NAME [PARSE_PEAK EMIT_PEAK PARSE_ALLOCS EMIT_ALLOCS
+//! SERIALIZE_PEAK SERIALIZE_ALLOCS]`.
+#![allow(
+    unsafe_code,
+    reason = "the counting global allocator is the crate-local unsafe exception"
+)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::fmt::Write as _;
@@ -119,14 +123,14 @@ fn generated_input(name: &str) -> Option<String> {
         "@mapping-1000" => {
             let mut value = String::new();
             for index in 0..1_000 {
-                value.push_str(&format!("key{index}: {index}\n"));
+                let _ = writeln!(value, "key{index}: {index}");
             }
             Some(value)
         }
         "@mapping-10000" => {
             let mut value = String::new();
             for index in 0..10_000 {
-                value.push_str(&format!("key{index}: {index}\n"));
+                let _ = writeln!(value, "key{index}: {index}");
             }
             Some(value)
         }

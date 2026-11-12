@@ -77,15 +77,15 @@ fn failure_is(input: &str, failure: At, opening: At, sequence: bool, kind: Failu
     };
     let (line, column) = failure;
     let (opened_line, opened_column) = opening;
-    let default = if kind != Failure::Token {
-        format!(
-            "unterminated flow {name} at line {line} column {column}, \
-             opened at line {opened_line} column {opened_column}"
-        )
-    } else {
+    let default = if kind == Failure::Token {
         format!(
             "expected ',' or '{closing}' at line {line} column {column}, \
              in the flow {name} opened at line {opened_line} column {opened_column}"
+        )
+    } else {
+        format!(
+            "unterminated flow {name} at line {line} column {column}, \
+             opened at line {opened_line} column {opened_column}"
         )
     };
     for (reader, error) in default_errors(input) {

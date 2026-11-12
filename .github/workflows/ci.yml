@@ -32,6 +32,12 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked --all-features -- -D warnings
+      - name: Fuzz workspace format
+        run: cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
+      - name: Fuzz workspace Clippy
+        run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
+      - name: Production library panic profile
+        run: cargo clippy -p ayaml --lib --locked --all-features -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
       - name: Test
         run: cargo test --workspace --locked --all-features
       - name: Test with default features

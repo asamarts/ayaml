@@ -9,6 +9,15 @@
 //! keeps too, so it ends even if the test binary dies first. A stack overflow also fails one
 //! test, not the whole binary.
 
+#![allow(
+    clippy::format_push_string,
+    clippy::format_collect,
+    clippy::items_after_statements,
+    clippy::cast_precision_loss,
+    let_underscore_drop,
+    reason = "test fixtures favor compact setup, generated inputs, and literal YAML braces"
+)]
+
 use std::hash::Hash;
 use std::io::{Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -722,7 +731,7 @@ fn scanning_takes_time_linear_in_the_input() {
             }),
             #[cfg(feature = "libyaml-compat")]
             ("compat", |input| {
-                let _ = ayaml::compat::from_str::<ayaml::Value>(input);
+                let _ = ayaml::compat::from_str::<Value>(input);
             }),
         ];
         let shorter = repeated_inputs(LENGTH / 8);
@@ -749,11 +758,11 @@ fn many_keys_take_time_linear_in_their_number() {
                 ayaml::parse_value(input).expect("distinct keys parse");
             }),
             ("from_str", |input| {
-                ayaml::from_str::<ayaml::Value>(input).expect("distinct keys parse");
+                ayaml::from_str::<Value>(input).expect("distinct keys parse");
             }),
             #[cfg(feature = "libyaml-compat")]
             ("compat", |input| {
-                ayaml::compat::from_str::<ayaml::Value>(input).expect("distinct keys parse");
+                ayaml::compat::from_str::<Value>(input).expect("distinct keys parse");
             }),
         ];
         type Key = fn(usize) -> String;
@@ -843,10 +852,10 @@ fn a_long_tag_prefix_cannot_multiply_memory() {
         for input in &inputs {
             for (entry_point, result) in entry_points(input) {
                 let error = result.expect_err(entry_point);
-                let limit = error.limit().map(ayaml::LimitExceeded::kind);
+                let limit = error.limit().map(LimitExceeded::kind);
                 assert_eq!(
                     limit,
-                    Some(ayaml::LimitKind::TagExpansion),
+                    Some(LimitKind::TagExpansion),
                     "{entry_point}: {error}"
                 );
             }
@@ -895,10 +904,10 @@ fn an_alias_cannot_multiply_a_long_tag() {
                 ("Deserializer::next", cursor),
             ] {
                 let error = result.expect_err(entry_point);
-                let limit = error.limit().map(ayaml::LimitExceeded::kind);
+                let limit = error.limit().map(LimitExceeded::kind);
                 assert_eq!(
                     limit,
-                    Some(ayaml::LimitKind::AliasExpansion),
+                    Some(LimitKind::AliasExpansion),
                     "{entry_point}: {error}"
                 );
             }
@@ -984,7 +993,7 @@ fn limited_entry_points(
         (
             "parse_events_with_limits",
             ayaml::parse_events_with_limits(input, limits)
-                .and_then(|stream| stream.collect::<Result<Vec<_>, _>>())
+                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
                 .map(drop),
         ),
         (
@@ -1043,7 +1052,7 @@ fn limited_entry_points(
 fn value_paths(input: &str, limits: &Limits) -> Vec<(&'static str, Result<(), ayaml::Error>)> {
     let value = ayaml::parse_value_with_limits(input, limits).expect("parse");
     let events = ayaml::parse_events_with_limits(input, limits)
-        .and_then(|stream| stream.collect::<Result<Vec<_>, _>>())
+        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
         .expect("events");
     let mut merged = value.clone();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1084,7 +1093,7 @@ fn value_paths(input: &str, limits: &Limits) -> Vec<(&'static str, Result<(), ay
         ("apply_merge_keys", merged.apply_merge_keys()),
         ("clone, eq, hash, debug", {
             assert_eq!(merged, value);
-            assert!(!debug.is_empty());
+            assert_ne!(debug, "");
             Ok(())
         }),
     ]
@@ -1096,7 +1105,7 @@ fn limited_emitters(input: &str, limits: &Limits) -> Vec<(&'static str, Result<(
     let value = ayaml::parse_value(input).expect("parse");
     let documents = std::slice::from_ref(&value);
     let events = ayaml::parse_events(input)
-        .and_then(|stream| stream.collect::<Result<Vec<_>, _>>())
+        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
         .expect("events");
     let options = ayaml::EmitterOptions::default();
     let styles = ayaml::EmitterStyles::default();
@@ -1160,7 +1169,13 @@ fn limited_emitters(input: &str, limits: &Limits) -> Vec<(&'static str, Result<(
 
 /// Every public path that takes explicit limits and reads YAML, compat's included.
 fn limited_readers(input: &str, limits: &Limits) -> Vec<(&'static str, Result<(), ayaml::Error>)> {
-    #[cfg_attr(not(feature = "libyaml-compat"), allow(unused_mut))]
+    #[cfg_attr(
+        not(feature = "libyaml-compat"),
+        allow(
+            unused_mut,
+            reason = "the compat reader is pushed only with that feature"
+        )
+    )]
     let mut readers = limited_entry_points(input, limits);
     #[cfg(feature = "libyaml-compat")]
     readers.push((
@@ -1194,8 +1209,8 @@ fn assert_depth_error_kind(name: &str, error: &ayaml::Error) {
         assert_eq!(error.kind(), ErrorKind::Limit, "{name}: {error}");
         assert!(error.to_string().contains("depth"), "{name}: {error}");
         assert_eq!(
-            error.limit().map(|limit| limit.kind()),
-            Some(ayaml::LimitKind::Depth),
+            error.limit().map(LimitExceeded::kind),
+            Some(LimitKind::Depth),
             "{name}"
         );
     }
@@ -1396,7 +1411,7 @@ fn wide_collections_fit_a_small_stack() {
                 };
                 let input = wide(shape, entries);
                 let events = ayaml::parse_events_with_limits(&input, &limits)
-                    .and_then(|stream| stream.collect::<Result<Vec<_>, _>>())
+                    .and_then(Iterator::collect::<Result<Vec<_>, _>>)
                     .unwrap_or_else(|error| panic!("{shape}: {error}"));
                 ayaml::to_string_events_with_limits(&events, &limits)
                     .unwrap_or_else(|error| panic!("{shape}, to_string_events: {error}"));
@@ -1508,7 +1523,7 @@ fn tag_expansion_is_accepted_up_to_its_limit() {
                 (
                     "parse_events_with_limits",
                     ayaml::parse_events_with_limits(input, limits)
-                        .and_then(|stream| stream.collect::<Result<Vec<_>, _>>())
+                        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
                         .map(drop),
                 ),
                 (

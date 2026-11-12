@@ -32,11 +32,19 @@ use crate::tag::Tag;
 const STEP: usize = 2;
 
 /// Emit a collected event stream as YAML text.
+///
+/// # Errors
+///
+/// Returns an error when the events cannot be written, a configured limit is exceeded, or the writer fails.
 pub fn to_string_events(events: &[Event<'_>]) -> Result<String, Error> {
     to_string_events_with_limits(events, &Limits::default())
 }
 
 /// Emit a collected event stream with an explicit output-size limit.
+///
+/// # Errors
+///
+/// Returns an error when the events cannot be written, a configured limit is exceeded, or the writer fails.
 pub fn to_string_events_with_limits(
     events: &[Event<'_>],
     limits: &Limits,
@@ -53,6 +61,10 @@ pub fn to_string_events_with_limits(
 }
 
 /// Write a collected event stream to a writer.
+///
+/// # Errors
+///
+/// Returns an error when the events cannot be written, a configured limit is exceeded, or the writer fails.
 pub fn to_writer_events<W: Write>(writer: &mut W, events: &[Event<'_>]) -> Result<(), Error> {
     let limits = Limits::default();
     write_events(
@@ -68,6 +80,10 @@ pub fn to_writer_events<W: Write>(writer: &mut W, events: &[Event<'_>]) -> Resul
 /// collected events. It holds one document's text at a time, since the
 /// document's `%TAG` directives come first, and otherwise needs memory for the
 /// nesting depth.
+///
+/// # Errors
+///
+/// Returns an error when the events cannot be written, a configured limit is exceeded, or the writer fails.
 pub fn to_writer_event_stream<W: Write>(
     writer: &mut W,
     stream: EventStream<'_>,
@@ -76,6 +92,10 @@ pub fn to_writer_event_stream<W: Write>(
 }
 
 /// Write a lazy event stream with a cumulative output limit.
+///
+/// # Errors
+///
+/// Returns an error when the events cannot be written, a configured limit is exceeded, or the writer fails.
 pub fn to_writer_event_stream_with_limits<W: Write>(
     writer: &mut W,
     stream: EventStream<'_>,
@@ -503,6 +523,10 @@ where
         self.push(&text)
     }
 
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the indentation indicator is a single digit in 1..=9"
+    )]
     fn block_scalar(
         &mut self,
         value: &str,
@@ -523,7 +547,7 @@ where
             // Content sits one step below the parent node; a root node's indentation is -1, so
             // a root scalar's indicator is one more than its content indentation.
             let indicator = if root { content_indent + 1 } else { STEP };
-            header.push(char::from_digit(indicator as u32, 10).expect("single digit"));
+            header.push(char::from_digit(indicator as u32, 10).unwrap_or('0'));
         }
         if trailing == 0 {
             header.push('-');

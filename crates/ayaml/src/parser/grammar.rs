@@ -1,7 +1,15 @@
-use super::*;
+use super::{
+    Anchor, BlockState, Call, CollectionStyle, Cont, Cow, DUPLICATE_PROPERTIES, Error, Event,
+    FlowLack, NodeBounds, Parser, Run, ScalarStyle, Span, Step, Tag, TokenKind,
+    flow_brackets_match, has_value_indicator, implicit_key_fits, is_mapping_line,
+    value_indicator_index,
+};
 
 impl<'a> Parser<'a> {
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the grammar routine takes its full parsed state explicitly so recursion stays heap-based"
+    )]
     pub(super) fn node(
         &mut self,
         mut index: usize,
@@ -126,7 +134,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the grammar routine takes its full parsed state explicitly so recursion stays heap-based"
+    )]
     pub(super) fn sequence_first(
         &mut self,
         index: usize,
@@ -325,7 +336,10 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the grammar routine takes its full parsed state explicitly so recursion stays heap-based"
+    )]
     pub(super) fn mapping_first(
         &mut self,
         first: Run,
@@ -559,6 +573,10 @@ impl<'a> Parser<'a> {
         Ok(Step::Return(current_index))
     }
 
+    #[allow(
+        clippy::needless_pass_by_ref_mut,
+        reason = "the signature mirrors the surrounding grammar dispatch even where this path does not mutate"
+    )]
     pub(super) fn mapping_after_implicit_key(
         &mut self,
         mut state: BlockState,
