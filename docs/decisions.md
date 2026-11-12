@@ -405,9 +405,9 @@ declarative, offline check with inline annotations, and the full-tree run catche
 that a diff-scoped run would let survive. Pinning the action and the local binary keeps the
 gates on the same ruleset.
 
-**Consequences.** Each file over 2,000 lines carries a per-file non-growth ratchet. AY-076
-split the two test modules and removed their ratchets; AY-073 through AY-075 split the scanner,
-parser, and emitter, and AY-077 removes the remaining exemptions. The pinned upstream YAML suite's
+**Consequences.** AY-076 split the two test modules and removed their ratchets; AY-073 through
+AY-075 split the scanner, parser, and emitter, and AY-077 removed the remaining exemptions. The
+source-size rule now has no path exclusion, baseline entry, or non-growth ratchet. The pinned upstream YAML suite's
 `README.md` / `ReadMe.md` collision is excluded from the case-conflict rule alone, not from
 the rest of the tree. `.editorconfig` states UTF-8, LF, a final newline, trailing-whitespace
 removal, four-space Rust and Python indentation, two-space YAML indentation, and tab-indented
