@@ -116,27 +116,20 @@ fn the_repository_lint_policy_is_the_one_the_plan_requires() {
     );
     let mut exclude = strings(&size["paths"]["exclude"]);
     exclude.sort_unstable();
-    assert_eq!(
-        exclude,
-        ["crates/ayaml/src/emitter.rs", "crates/ayaml/src/parser.rs",]
-    );
+    assert_eq!(exclude, ["crates/ayaml/src/emitter.rs"]);
 
-    for (id, path) in [
-        ("parser-size-ratchet", "crates/ayaml/src/parser.rs"),
-        ("emitter-size-ratchet", "crates/ayaml/src/emitter.rs"),
-    ] {
-        let ratchet = rule(&config, id);
-        assert_eq!(ratchet["kind"].as_str(), Some("file_max_lines"), "{id}");
-        assert_eq!(ratchet["level"].as_str(), Some("error"), "{id}");
-        assert_eq!(ratchet["expect_matches"].as_bool(), Some(true), "{id}");
-        assert_eq!(ratchet["paths"].as_str(), Some(path), "{id}");
-        let lines = read(&root, path).lines().count() as u64;
-        assert_eq!(
-            ratchet["max_lines"].as_u64(),
-            Some(lines),
-            "{id} is not the file's current line count"
-        );
-    }
+    let (id, path) = ("emitter-size-ratchet", "crates/ayaml/src/emitter.rs");
+    let ratchet = rule(&config, id);
+    assert_eq!(ratchet["kind"].as_str(), Some("file_max_lines"), "{id}");
+    assert_eq!(ratchet["level"].as_str(), Some("error"), "{id}");
+    assert_eq!(ratchet["expect_matches"].as_bool(), Some(true), "{id}");
+    assert_eq!(ratchet["paths"].as_str(), Some(path), "{id}");
+    let lines = read(&root, path).lines().count() as u64;
+    assert_eq!(
+        ratchet["max_lines"].as_u64(),
+        Some(lines),
+        "{id} is not the file's current line count"
+    );
 
     let editorconfig = read(&root, ".editorconfig");
     for line in [

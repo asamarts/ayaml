@@ -73,15 +73,8 @@ rules:
         - "**/*.bash"
         - "tools/hooks/*"
       exclude:
-        - "crates/ayaml/src/parser.rs"
         - "crates/ayaml/src/emitter.rs"
     max_lines: 2000
-    expect_matches: true
-    level: error
-  - id: parser-size-ratchet
-    kind: file_max_lines
-    paths: "crates/ayaml/src/parser.rs"
-    max_lines: 3832
     expect_matches: true
     level: error
   - id: emitter-size-ratchet
