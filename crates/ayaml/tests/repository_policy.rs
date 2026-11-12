@@ -95,8 +95,8 @@ fn the_repository_lint_policy_is_the_one_the_plan_requires() {
         [".aplan.yml", ".github/**"]
     );
 
-    // The size rule covers every maintained source and script file, with one
-    // non-growth ratchet for each file that predates the ceiling.
+    // The size rule covers every maintained source and script file, with a
+    // non-growth ratchet for each remaining file that predates the ceiling.
     let size = rule(&config, "source-file-size");
     assert_eq!(size["kind"].as_str(), Some("file_max_lines"));
     assert_eq!(size["level"].as_str(), Some("error"));
@@ -118,15 +118,10 @@ fn the_repository_lint_policy_is_the_one_the_plan_requires() {
     exclude.sort_unstable();
     assert_eq!(
         exclude,
-        [
-            "crates/ayaml/src/emitter.rs",
-            "crates/ayaml/src/parser.rs",
-            "crates/ayaml/src/scanner.rs",
-        ]
+        ["crates/ayaml/src/emitter.rs", "crates/ayaml/src/parser.rs",]
     );
 
     for (id, path) in [
-        ("scanner-size-ratchet", "crates/ayaml/src/scanner.rs"),
         ("parser-size-ratchet", "crates/ayaml/src/parser.rs"),
         ("emitter-size-ratchet", "crates/ayaml/src/emitter.rs"),
     ] {
