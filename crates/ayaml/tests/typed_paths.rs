@@ -114,6 +114,33 @@ fn assert_reads<T: DeserializeOwned + Debug + PartialEq>(input: &str, expected: 
     }
 }
 
+/// Source-based readers read `expected`. A composed `Value` cannot tell a bare tag or an empty
+/// value from `~`, so the value readers are checked separately where that matters.
+#[track_caller]
+fn assert_source_reads<T: DeserializeOwned + Debug + PartialEq>(input: &str, expected: &T) {
+    for (name, result, spans) in every_reading::<T>(input) {
+        if !spans {
+            continue;
+        }
+        match result {
+            Ok(value) => assert_eq!(&value, expected, "{name}: {input:?}"),
+            Err(error) => panic!("{name}: {input:?}: {error}"),
+        }
+    }
+}
+
+/// The value-based readers reject `input`, whose composed value is indistinguishable from an
+/// explicit null.
+#[track_caller]
+fn assert_composed_rejects<T: DeserializeOwned + Debug>(input: &str) {
+    for (name, result, spans) in every_reading::<T>(input) {
+        if spans {
+            continue;
+        }
+        assert!(result.is_err(), "{name}: {input:?} read {result:?}");
+    }
+}
+
 /// Every reader gives `path` before its message, keeps the Serde kind, and the readers that report
 /// spans point at the line and column.
 #[track_caller]
@@ -731,7 +758,8 @@ fn an_application_tag_leaves_a_plain_target_s_reading() {
     }
     assert_reads::<Vec<u32>>("!list [1, 2]", &vec![1, 2]);
     assert_reads::<Vec<u32>>("!list\n- 1\n- 2", &vec![1, 2]);
-    assert_reads::<Vec<u32>>("!list", &vec![]);
+    assert_source_reads::<Vec<u32>>("!list", &vec![]);
+    assert_composed_rejects::<Vec<u32>>("!list");
     assert_reads::<(u8, u8)>("!pair [1, 2]", &(1, 2));
     assert_reads::<Pair>("!pair [1, 2]", &Pair(1, 2));
     assert_reads::<()>("!none ~", &());
@@ -800,7 +828,8 @@ fn an_option_or_an_untagged_enum_still_sees_an_application_tag() {
     enum Untagged {
         Number(u32),
     }
-    assert_reads::<Option<Vec<u32>>>("!list", &Some(vec![]));
+    assert_source_reads::<Option<Vec<u32>>>("!list", &Some(vec![]));
+    assert_composed_rejects::<Option<Vec<u32>>>("!list");
     assert_reads::<Option<u32>>("!port 5", &Some(5));
     for (name, error, _) in every_reader::<Option<u32>>("!port ~") {
         assert!(
@@ -894,7 +923,7 @@ fn a_bare_tag_fills_a_struct_variant_s_defaults() {
             x: u32,
         },
     }
-    assert_reads(
+    assert_source_reads(
         "- !Point\n- !Point {x: 2}\n- Point:\n- !Line 1",
         &vec![
             Shape::Point { x: 0 },
@@ -903,11 +932,22 @@ fn a_bare_tag_fills_a_struct_variant_s_defaults() {
             Shape::Line(1),
         ],
     );
-    // So does a scalar that names a variant renamed to it, or a key that names one.
-    for input in ["Point", "true", "1"] {
+    assert_composed_rejects::<Shape>("!Point");
+    assert_composed_rejects::<Shape>("Point:");
+    // A bare variant name does not fill a data-carrying variant, and a boolean or number scalar
+    // does not name one, even when a variant is renamed to its spelling.
+    for (name, error, _) in every_reader::<Shape>("Point") {
+        assert!(
+            error.message().contains("expected struct variant"),
+            "{name}: {error}"
+        );
+    }
+    for input in ["true", "1"] {
         for (name, error, _) in every_reader::<Shape>(input) {
             assert!(
-                error.message().contains("expected struct variant"),
+                error
+                    .message()
+                    .contains("enum value must be tagged or a single-entry mapping"),
                 "{name}: {input:?}: {error}"
             );
         }
@@ -962,7 +1002,8 @@ fn a_bare_tag_reached_through_any_fills_a_struct_variant() {
             deserializer.deserialize_any(Variant)
         }
     }
-    assert_reads("!Point", &Fields(0));
+    assert_source_reads("!Point", &Fields(0));
+    assert_composed_rejects::<Fields>("!Point");
     assert_reads("!Point {x: 1}", &Fields(1));
 }
 

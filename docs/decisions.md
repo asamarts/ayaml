@@ -479,3 +479,40 @@ silent baseline. A stable release that adds a lint may require a policy change; 
 pull request with this record updated. The production panic profile is checked in both toolchain
 jobs, and any new `unwrap`, `expect`, or `panic` in the library must be a checked invariant or a
 required panicking trait behavior.
+
+## D87 — Typed decoding checks the node shape, scalar kind, and exact variant names
+
+**Date:** 2026-11-12
+**Status:** Accepted
+
+**Decision.** A typed sequence target reads only a sequence or tuple, and a struct reads only a
+mapping. A sequence no longer fills a struct by position. An explicit null is an error for a
+sequence, mapping, struct, or struct-variant target, whether the null is bare or under a tag; an
+empty source value still supplies an empty collection or a struct's defaults to the source-based
+readers. A string target under `from_value` reads only a string or tagged string, not a number,
+boolean, null, or collection. A bare enum variant is named only by a string scalar or a tag; a
+null, boolean, or number scalar names no variant, even when a variant is renamed to its spelling,
+and a bare variant name does not fill a data-carrying variant. A mapping names a variant only
+through its one string key. Readers store a tag in a canonical full-name split, so `handle()` and
+`suffix()` do not depend on which reader produced the tag.
+
+**Alternatives.** Keep the old coercions and document them. That leaves `from_value::<String>`
+inventing `"5"` from `5`, lets `[1, 2]` fill `{a, b}` by position, and makes a null mean an empty
+collection or a default value, which is not what the caller wrote. Keep plain `true` and `1` as
+variant names for source readers. That would make `from_str` and `from_value` disagree after the
+value path stopped stringifying non-strings. Preserve each reader's original tag split. That
+cannot be reproduced from a tag's full name alone after typed decoding, so the same tag would
+have a different `handle()` or `suffix()` depending on the reader.
+
+**Why.** A Serde target describes the shape and scalar kind it accepts. Coercing a different shape
+produces a value the caller did not write and hides a bad document. Exact string names make
+`from_str`, `from_str_borrowed`, `from_value`, seeded readers, and compat agree, and they match
+D80's rule for a variant's mapping key. The full tag name is what the tag means; the split is
+presentation, so a canonical split is safe.
+
+**Consequences.** Source-based readers still accept an empty source value as an empty collection
+or a struct's defaults, and still accept a bare tag with no value there. A composed `Value` cannot
+distinguish that empty value or bare tag from `~`, so `from_value` and the owned stream readers
+treat it as an explicit null and reject it for those targets. That difference is documented in
+`docs/compatibility.md` and the `from_value` API docs. A tag built by hand keeps the explicit
+split its constructor was given; tags read from a source use the canonical split.

@@ -35,7 +35,11 @@ impl Tag {
     /// `Tag::new("", "tag:yaml.org,2002:str")` and
     /// `Tag::new("tag:yaml.org,2002:s", "tr")` are both the core tag `!!str`.
     /// A verbatim tag (empty `handle`) that starts with `!` is split there,
-    /// so `Tag::new("", "!x")` is the local tag `!x`.
+    /// so `Tag::new("", "!x")` is the local tag `!x`. Any other empty-handle
+    /// full name is split after its last `:`, `/`, or `#` when it has one, or
+    /// before its last character otherwise, so a reader can reproduce its
+    /// `handle` and `suffix` from the full name. `Tag::new("foo", "bar")`
+    /// keeps the explicit split it was given.
     #[must_use]
     pub fn new(handle: impl Into<String>, suffix: impl Into<String>) -> Self {
         let handle = handle.into();
@@ -58,6 +62,23 @@ impl Tag {
                 handle: "!".to_owned(),
                 suffix: rest.to_owned(),
             };
+        }
+        // A full name with a URI scheme and no explicit handle is split like a writer would:
+        // after its last `:`, `/`, or `#`. That keeps the handle/suffix pair independent of
+        // whether a reader got the tag verbatim or through an expanded `%TAG` handle.
+        if handle.is_empty()
+            && let Some((last, _)) = suffix.char_indices().next_back()
+            && last > 0
+        {
+            let cut = suffix[..last]
+                .rfind([':', '/', '#'])
+                .map_or(last, |index| index + 1);
+            if cut < suffix.len() {
+                return Self {
+                    handle: suffix[..cut].to_owned(),
+                    suffix: suffix[cut..].to_owned(),
+                };
+            }
         }
         Self { handle, suffix }
     }
