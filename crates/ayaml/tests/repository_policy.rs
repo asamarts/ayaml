@@ -95,8 +95,8 @@ fn the_repository_lint_policy_is_the_one_the_plan_requires() {
         [".aplan.yml", ".github/**"]
     );
 
-    // The size rule covers every maintained source and script file, with a
-    // non-growth ratchet for each remaining file that predates the ceiling.
+    // The size rule covers every maintained source and script file, with no
+    // path exclusion or non-growth ratchet.
     let size = rule(&config, "source-file-size");
     assert_eq!(size["kind"].as_str(), Some("file_max_lines"));
     assert_eq!(size["level"].as_str(), Some("error"));
@@ -114,21 +114,14 @@ fn the_repository_lint_policy_is_the_one_the_plan_requires() {
             "tools/hooks/*"
         ]
     );
-    let mut exclude = strings(&size["paths"]["exclude"]);
-    exclude.sort_unstable();
-    assert_eq!(exclude, ["crates/ayaml/src/emitter.rs"]);
-
-    let (id, path) = ("emitter-size-ratchet", "crates/ayaml/src/emitter.rs");
-    let ratchet = rule(&config, id);
-    assert_eq!(ratchet["kind"].as_str(), Some("file_max_lines"), "{id}");
-    assert_eq!(ratchet["level"].as_str(), Some("error"), "{id}");
-    assert_eq!(ratchet["expect_matches"].as_bool(), Some(true), "{id}");
-    assert_eq!(ratchet["paths"].as_str(), Some(path), "{id}");
-    let lines = read(&root, path).lines().count() as u64;
-    assert_eq!(
-        ratchet["max_lines"].as_u64(),
-        Some(lines),
-        "{id} is not the file's current line count"
+    assert_eq!(size["paths"]["exclude"], Value::Null);
+    assert!(
+        config["rules"]
+            .as_sequence()
+            .expect("rules is a sequence")
+            .iter()
+            .all(|rule| !rule["id"].as_str().unwrap_or("").ends_with("-size-ratchet")),
+        "source-size ratchets remain"
     );
 
     let editorconfig = read(&root, ".editorconfig");
