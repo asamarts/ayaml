@@ -130,8 +130,6 @@ impl<'de> Deserialize<'de> for Mapping {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         match Value::deserialize(deserializer)? {
             Value::Mapping(mapping) => Ok(mapping),
-            // An empty value or `~` is an empty mapping.
-            Value::Null => Ok(Mapping::new()),
             _ => Err(serde::de::Error::custom("expected a YAML mapping")),
         }
     }
@@ -262,6 +260,12 @@ impl<'de> Deserialize<'de> for Value {
 
 /// Deserialize a value from an already-composed generic value.
 ///
+/// A string target accepts only a YAML string or a tagged string; a number, boolean, null, or
+/// collection is an error. A sequence does not fill a struct by position, and a null is not an
+/// empty sequence, map, or struct. Since a composed `Value::Null` no longer distinguishes an
+/// empty source value from `~`, this function treats it as an explicit null; the source-based
+/// readers accept an empty source value for a collection or struct.
+///
 /// # Errors
 ///
 /// Returns an error when the value cannot be converted to or from the requested form.
@@ -317,6 +321,24 @@ macro_rules! to_value_deserializer {
             }
         )*
     };
+}
+
+impl<'de> ValueDeserializer {
+    /// A key name or a character reads a scalar's text, including a non-string scalar. Only a
+    /// string target rejects those values.
+    fn scalar_text<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, crate::Error> {
+        match self.value {
+            Value::Null => visitor.visit_string("null".to_owned()),
+            Value::Bool(value) => visitor.visit_string(value.to_string()),
+            Value::Number(value) => visitor.visit_string(value.to_string()),
+            Value::String(value) => visitor.visit_string(value),
+            Value::Tagged(tagged) => ValueDeserializer {
+                value: tagged.value,
+            }
+            .scalar_text(visitor),
+            value => ValueDeserializer { value }.deserialize_any(visitor),
+        }
+    }
 }
 
 impl<'de> Deserializer<'de> for ValueDeserializer {
@@ -383,15 +405,18 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
 
     fn deserialize_string<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         match self.value {
-            Value::Null => visitor.visit_string("null".to_owned()),
-            Value::Bool(value) => visitor.visit_string(value.to_string()),
-            Value::Number(value) => visitor.visit_string(value.to_string()),
             Value::String(value) => visitor.visit_string(value),
-            Value::Tagged(tagged) => ValueDeserializer {
-                value: tagged.value,
-            }
-            .deserialize_string(visitor),
-            value => ValueDeserializer { value }.deserialize_any(visitor),
+            Value::Tagged(tagged) => match tagged.value {
+                Value::String(value) => visitor.visit_string(value),
+                _ => Err(serde::de::Error::invalid_type(
+                    serde::de::Unexpected::Other("tagged non-string YAML value"),
+                    &visitor,
+                )),
+            },
+            _ => Err(serde::de::Error::invalid_type(
+                serde::de::Unexpected::Other("non-string YAML value"),
+                &visitor,
+            )),
         }
     }
 
@@ -410,50 +435,65 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
         self.deserialize_bytes(visitor)
     }
 
-    /// A null reads as an empty sequence. A `Value` cannot tell an empty
-    /// scalar from `~`, so both are accepted.
+    /// A null is not an empty sequence on the value path, where it carries no
+    /// distinguishing text.
     fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         match untagged(self.value) {
-            Value::Null => visitor.visit_seq(ValueSeqAccess {
-                iter: Vec::new().into_iter(),
-                len: 0,
-            }),
+            Value::Null => Err(serde::de::Error::invalid_type(
+                serde::de::Unexpected::Unit,
+                &visitor,
+            )),
             value => ValueDeserializer { value }.deserialize_any(visitor),
         }
     }
 
-    /// A null reads as an empty map.
+    /// A null is not an empty map on the value path.
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         match untagged(self.value) {
-            Value::Null => visitor.visit_map(ValueMapAccess {
-                iter: Mapping::new().into_iter(),
-                key: None,
-                plain_key: None,
-                value: None,
-            }),
+            Value::Null => Err(serde::de::Error::invalid_type(
+                serde::de::Unexpected::Unit,
+                &visitor,
+            )),
             value => ValueDeserializer { value }.deserialize_any(visitor),
         }
     }
 
-    /// A null reads as a struct with no fields, so defaults apply.
+    /// A struct reads only a mapping. A sequence does not fill its fields by position.
     fn deserialize_struct<V: Visitor<'de>>(
         self,
         _name: &'static str,
         _fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        self.deserialize_map(visitor)
+        match untagged(self.value) {
+            Value::Mapping(value) => ValueDeserializer {
+                value: Value::Mapping(value),
+            }
+            .deserialize_any(visitor),
+            Value::Null => Err(serde::de::Error::invalid_type(
+                serde::de::Unexpected::Unit,
+                &visitor,
+            )),
+            Value::Sequence(_) => Err(serde::de::Error::invalid_type(
+                serde::de::Unexpected::Seq,
+                &visitor,
+            )),
+            _ => Err(serde::de::Error::invalid_type(
+                serde::de::Unexpected::Other("non-mapping YAML value"),
+                &visitor,
+            )),
+        }
     }
 
     /// A field name is the key's text: `1: x` names the field `"1"`, not
-    /// the second field.
+    /// the second field. Unlike a string target, a non-string key has text.
     fn deserialize_identifier<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.deserialize_string(visitor)
+        self.scalar_text(visitor)
     }
 
     /// A character is read from the scalar's text, so `5` is `'5'`.
     fn deserialize_char<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.deserialize_string(visitor)
+        self.scalar_text(visitor)
     }
 
     fn deserialize_enum<V: Visitor<'de>>(
@@ -832,9 +872,6 @@ fn enum_parts(value: Value) -> Result<(String, Value), crate::Error> {
             (tag.into_variant_name(), value)
         }
         Value::String(variant) => (variant, Value::Null),
-        // `true` and `1` name variants renamed to them.
-        Value::Bool(value) => (value.to_string(), Value::Null),
-        Value::Number(value) => (value.to_string(), Value::Null),
         Value::Mapping(mapping) => {
             let mut iter = mapping.into_iter();
             let Some((key, value)) = iter.next() else {
@@ -1604,12 +1641,12 @@ mod tests {
     }
 
     #[test]
-    fn scalar_values_deserialize_as_strings_with_their_text() {
+    fn a_string_target_accepts_only_string_values() {
         use serde::Deserialize as _;
-        assert_eq!(String::deserialize(Value::from(false)).unwrap(), "false");
-        assert_eq!(String::deserialize(Value::from(42_u64)).unwrap(), "42");
-        assert_eq!(String::deserialize(Value::Null).unwrap(), "null");
         assert_eq!(String::deserialize(Value::from("text")).unwrap(), "text");
+        for value in [Value::from(false), Value::from(42_u64), Value::Null] {
+            assert!(String::deserialize(value).is_err());
+        }
     }
 
     #[test]

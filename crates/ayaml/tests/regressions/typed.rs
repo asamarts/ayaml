@@ -197,30 +197,42 @@ fn overlong_sequences_are_an_error() {
     }
 }
 
-/// An empty value reads as an empty sequence, an empty map, or a struct
-/// with its defaults. On the typed path an explicit `~` does not; a `Value`
-/// cannot tell the two apart (fixed for `from_str` by the typed path).
+/// An empty source value reads as an empty sequence, map, or struct with its
+/// defaults on the source-based readers. `from_value` has only a `Null`, which
+/// it treats as an explicit null, so it rejects it. An explicit `~` is rejected
+/// by every reader.
 #[test]
 fn empty_values_are_empty_collections() {
-    for result in every_path::<Vec<u32>>("") {
-        assert_eq!(result, Ok(Vec::new()));
-    }
-    for result in every_path::<std::collections::BTreeMap<String, u32>>("") {
-        assert_eq!(result, Ok(std::collections::BTreeMap::new()));
-    }
-    for result in every_path::<Defaults>("") {
-        assert_eq!(result, Ok(Defaults::default()));
-    }
-    for result in every_path::<Defaults>("a: 1\nv:\nm:\n") {
-        assert_eq!(
-            result,
-            Ok(Defaults {
-                a: 1,
-                ..Defaults::default()
-            })
-        );
-    }
-    assert!(ayaml::from_str_borrowed::<Vec<u32>>("~\n").is_err());
+    let results = every_path::<Vec<u32>>("");
+    assert_eq!(results[0], Ok(Vec::new()));
+    assert_eq!(results[1], Ok(Vec::new()));
+    assert!(results[2].is_err(), "{results:?}");
+    let results = every_path::<std::collections::BTreeMap<String, u32>>("");
+    assert_eq!(results[0], Ok(std::collections::BTreeMap::new()));
+    assert_eq!(results[1], Ok(std::collections::BTreeMap::new()));
+    assert!(results[2].is_err(), "{results:?}");
+    let results = every_path::<Defaults>("");
+    assert_eq!(results[0], Ok(Defaults::default()));
+    assert_eq!(results[1], Ok(Defaults::default()));
+    assert!(results[2].is_err(), "{results:?}");
+    let results = every_path::<Defaults>("a: 1\nv:\nm:\n");
+    assert_eq!(
+        results[0],
+        Ok(Defaults {
+            a: 1,
+            ..Defaults::default()
+        })
+    );
+    assert_eq!(
+        results[1],
+        Ok(Defaults {
+            a: 1,
+            ..Defaults::default()
+        })
+    );
+    assert!(results[2].is_err(), "{results:?}");
+    let results = every_path::<Vec<u32>>("~\n");
+    assert!(results.iter().all(Result::is_err), "{results:?}");
     assert!(ayaml::from_str_borrowed::<Defaults>("v: ~\n").is_err());
     assert!(ayaml::from_str_borrowed::<Vec<u32>>("''\n").is_err());
 }
@@ -235,21 +247,20 @@ fn chars_variants_and_mappings_follow_the_text() {
     for result in every_path::<char>("55\n") {
         assert!(result.is_err(), "{result:?}");
     }
-    for (input, variant) in [
-        ("true\n", Renamed::Yes),
-        ("1\n", Renamed::One),
-        ("'true'\n", Renamed::Yes),
-        ("Plain\n", Renamed::Plain),
-    ] {
+    for input in ["true\n", "1\n"] {
+        for result in every_path::<Renamed>(input) {
+            assert!(result.is_err(), "{input:?}: {result:?}");
+        }
+    }
+    for (input, variant) in [("'true'\n", Renamed::Yes), ("Plain\n", Renamed::Plain)] {
         for result in every_path::<Renamed>(input) {
             assert_eq!(result.as_ref(), Ok(&variant), "{input:?}");
         }
     }
     assert!(ayaml::from_str_borrowed::<Renamed>("TRUE\n").is_err());
     for input in ["", "~\n"] {
-        for result in every_path::<ayaml::Mapping>(input) {
-            assert_eq!(result, Ok(ayaml::Mapping::new()), "{input:?}");
-        }
+        let results = every_path::<ayaml::Mapping>(input);
+        assert!(results.iter().all(Result::is_err), "{results:?}");
     }
     for result in every_path::<ayaml::Mapping>("a\n") {
         assert!(result.is_err(), "{result:?}");
@@ -695,4 +706,163 @@ fn core_tags_on_other_node_kinds_are_dropped() {
             }
         }
     }
+}
+
+/// Typed decoding checks the shape of the node, not only whether the target's visitor can consume
+/// it: sequences do not fill structs, a bare name does not fill a data-carrying variant, null is
+/// not an empty collection, and `from_value` does not stringify a non-string value.
+#[test]
+fn typed_shapes_and_nulls_are_checked_on_every_reader() {
+    use ayaml::Value;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Pair {
+        a: u32,
+        b: u32,
+    }
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Point {
+        x: u32,
+    }
+    #[derive(Debug, Deserialize, PartialEq)]
+    enum Data {
+        Data(u32),
+        Unit,
+    }
+    #[derive(Debug, Deserialize, PartialEq)]
+    enum Shape {
+        Point(Point),
+        Unit,
+    }
+    #[derive(Debug, Deserialize, PartialEq)]
+    enum Named {
+        #[serde(rename = "true")]
+        True,
+        #[serde(rename = "1")]
+        One,
+    }
+
+    for input in ["- 1\n- 2\n", "[1, 2]\n"] {
+        assert!(
+            every_path::<Pair>(input).iter().all(Result::is_err),
+            "{input:?}"
+        );
+    }
+    for input in ["Data\n", "Data: ~\n", "Point: ~\n"] {
+        assert!(
+            every_path::<Data>(input).iter().all(Result::is_err),
+            "{input:?}"
+        );
+    }
+    for input in ["~", "!list ~"] {
+        assert!(
+            every_path::<Vec<u32>>(input).iter().all(Result::is_err),
+            "{input:?}"
+        );
+        assert!(
+            every_path::<Point>(input).iter().all(Result::is_err),
+            "{input:?}"
+        );
+    }
+    assert!(every_path::<Shape>("Point: ~\n").iter().all(Result::is_err));
+    for input in ["~", "!list ~"] {
+        assert!(
+            every_path::<std::collections::BTreeMap<String, u32>>(input)
+                .iter()
+                .all(Result::is_err),
+            "{input:?}"
+        );
+    }
+
+    assert_eq!(
+        ayaml::from_value::<String>(Value::from("text")).unwrap(),
+        "text"
+    );
+    assert_eq!(
+        ayaml::from_value::<String>(ayaml::parse_value("!x text\n").unwrap()).unwrap(),
+        "text"
+    );
+    for value in [
+        Value::from(5_u64),
+        Value::from(true),
+        Value::Null,
+        ayaml::parse_value("!x true\n").unwrap(),
+    ] {
+        assert!(
+            ayaml::from_value::<String>(value.clone()).is_err(),
+            "{value:?}"
+        );
+    }
+
+    for input in ["true\n", "1\n"] {
+        assert!(
+            every_path::<Named>(input).iter().all(Result::is_err),
+            "{input:?}"
+        );
+    }
+    for (input, expected) in [("'true'\n", Named::True), ("'1'\n", Named::One)] {
+        for result in every_path::<Named>(input) {
+            assert_eq!(result.as_ref(), Ok(&expected), "{input:?}");
+        }
+    }
+
+    #[cfg(feature = "libyaml-compat")]
+    {
+        assert!(ayaml::compat::from_str::<Pair>("- 1\n- 2\n").is_err());
+        assert!(ayaml::compat::from_str::<Data>("Data\n").is_err());
+        assert!(ayaml::compat::from_str::<Vec<u32>>("~").is_err());
+        assert!(ayaml::compat::from_str::<Point>("!list ~").is_err());
+        assert!(ayaml::compat::from_str::<Shape>("Point: ~\n").is_err());
+        assert!(ayaml::compat::from_str::<Named>("true\n").is_err());
+        assert_eq!(
+            ayaml::compat::from_str::<Named>("'true'\n").unwrap(),
+            Named::True
+        );
+    }
+
+    for prefix in ["tag:x:", "foo", "tag:x", "foo/"] {
+        let source = format!("%TAG !e! {prefix}\n--- !e!a 1\n");
+        let composed = ayaml::parse_value(&source).unwrap();
+        let values = [
+            composed.clone(),
+            ayaml::from_str::<Value>(&source).unwrap(),
+            ayaml::from_str_borrowed::<Value>(&source).unwrap(),
+            ayaml::from_value::<Value>(composed).unwrap(),
+        ];
+        let mut parts = Vec::new();
+        for value in values {
+            let Value::Tagged(tagged) = value else {
+                panic!("expected a tagged value");
+            };
+            assert_eq!(
+                format!("{}{}", tagged.tag.handle(), tagged.tag.suffix()),
+                format!("{prefix}a")
+            );
+            parts.push((
+                tagged.tag.handle().to_owned(),
+                tagged.tag.suffix().to_owned(),
+            ));
+        }
+        assert!(
+            parts.windows(2).all(|pair| pair[0] == pair[1]),
+            "{prefix:?}: {parts:?}"
+        );
+    }
+
+    for input in ["~", "!list ~"] {
+        assert!(
+            ayaml::Deserializer::from_str(input)
+                .unwrap()
+                .next::<Vec<u32>>()
+                .is_err(),
+            "{input:?}"
+        );
+    }
+    assert!(
+        ayaml::Deserializer::from_str("Point: ~\n")
+            .unwrap()
+            .next::<Shape>()
+            .is_err()
+    );
 }

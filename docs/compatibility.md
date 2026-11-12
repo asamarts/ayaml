@@ -79,17 +79,22 @@ reading, so the event writer may leave a tagged scalar plain.
   a local tag by all of it after its first `!`, as `B` for `!B`, and any other tag
   by its full name in angle brackets, as `<tag:x:B>` for `!<tag:x:B>`, which `!e!B`
   under `%TAG !e! tag:x:` is too, or `<tag:yaml.org,2002:C>` for `!!C`.
+  A reader stores the tag in a canonical full-name split, so `handle()` and
+  `suffix()` agree across readers; the full name is what the tag means.
   Serialization writes a variant that holds a value under the local tag of its
   name, as `!%3Ctag:x:B%3E` for one named `<tag:x:B>`, which selects it too, and
   a unit variant as its name. An enum also reads from a scalar that names a
   variant, and from a mapping of one entry whose key is a string naming it, as
   in `B: 5` or `! B: 5`, in both modes. Any other mapping is an error, such as
   one of two entries, or one whose key is `1`, `true`, or under a custom tag, as
-  in `!x B: 5` (D80). Readers differ on a null, boolean, or number scalar today:
-  `from_str`, `Deserializer::next_borrowed`, and compat name the variant by the
-  scalar's text, so `~` names one renamed `~`, while `from_value` and
-  `Deserializer::next` name it by the value, so `True` names one renamed `true`
-  and a null names none. A target that Serde
+  in `!x B: 5` (D80). A null, boolean, or number scalar does not name a variant,
+  even when a variant is renamed to its spelling; use a quoted scalar or a
+  one-entry mapping for such a name. A sequence does not fill a struct by position.
+  A string target under `from_value` accepts only a string or a tagged string;
+  the source-based readers still read a scalar's text into a string.
+  A null is not an empty sequence, map, or struct; an empty source value still
+  supplies an empty collection or a struct's defaults, but a composed
+  `Value::Null` is treated as an explicit null by `from_value`. A target that Serde
   reads by its type, such as a number, a sequence, a struct, or what an enum
   variant holds, reads the node under a custom tag, so `!port 80` reads into a
   `u16`, while a collection under a YAML tag that it keeps, as in `!!C {x: 1}`,

@@ -1184,6 +1184,16 @@ impl<'a> Scanner<'a> {
         Ok(Some(prefix))
     }
 
+    /// The tag a scanner produced from a resolved handle prefix and suffix, in the canonical form a
+    /// composed value and the typed readers can reproduce from its full name. The handle/suffix
+    /// split is presentation; the full name is what the tag means.
+    fn resolved_tag(prefix: &str, suffix: &str) -> Tag {
+        let mut full = String::with_capacity(prefix.len() + suffix.len());
+        full.push_str(prefix);
+        full.push_str(suffix);
+        Tag::new("", full)
+    }
+
     fn scan_tag(&mut self) -> Result<Option<Token<'a>>, Error> {
         let start = self.pos;
         self.pos += 1;
@@ -1211,7 +1221,7 @@ impl<'a> Scanner<'a> {
                 .expand_tag_handle(start, "!!")?
                 .ok_or_else(|| self.error_at(start, "undefined secondary tag handle"))?;
             no_suffix = self.pos == suffix_start;
-            Tag::new(prefix, self.decode_tag_suffix(suffix_start)?)
+            Self::resolved_tag(&prefix, &self.decode_tag_suffix(suffix_start)?)
         } else if self.peek() == Some('<') {
             self.pos += 1;
             let suffix_start = self.pos;
@@ -1251,7 +1261,7 @@ impl<'a> Scanner<'a> {
                 ));
             }
             self.pos += 1;
-            Tag::new("", suffix)
+            Self::resolved_tag("", suffix)
         } else {
             let handle_start = self.pos;
             while let Some(ch) = self.peek() {
@@ -1269,7 +1279,7 @@ impl<'a> Scanner<'a> {
                     self.error_at(start, format!("undefined tag handle {handle:?}"))
                 })?;
                 no_suffix = self.pos == suffix_start;
-                Tag::new(prefix, self.decode_tag_suffix(suffix_start)?)
+                Self::resolved_tag(&prefix, &self.decode_tag_suffix(suffix_start)?)
             } else {
                 // `!` alone is the non-specific tag, which no `%TAG !` changes.
                 let prefix = if self.pos == handle_start {
@@ -1278,7 +1288,7 @@ impl<'a> Scanner<'a> {
                     self.expand_tag_handle(start, "!")?
                         .ok_or_else(|| self.error_at(start, "undefined primary tag handle"))?
                 };
-                Tag::new(prefix, self.decode_tag_suffix(handle_start)?)
+                Self::resolved_tag(&prefix, &self.decode_tag_suffix(handle_start)?)
             }
         };
         if self.peek().is_some_and(|ch| {

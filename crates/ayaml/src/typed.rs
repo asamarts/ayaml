@@ -1019,9 +1019,19 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
                 .map_err(|error| with_span(error, span));
         }
         null_is_not_a_collection(node, &visitor)?;
-        NodeDeserializer::new(node)
-            .deserialize_any(visitor)
-            .map_err(|error| with_span(error, span))
+        if matches!(node.kind, NodeKind::Mapping(_)) {
+            return NodeDeserializer::new(node)
+                .deserialize_any(visitor)
+                .map_err(|error| with_span(error, span));
+        }
+        let unexpected = match &node.kind {
+            NodeKind::Sequence(_) => serde::de::Unexpected::Seq,
+            _ => serde::de::Unexpected::Other("non-mapping YAML value"),
+        };
+        Err(with_span(
+            serde::de::Error::invalid_type(unexpected, &visitor),
+            span,
+        ))
     }
 
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
@@ -1063,12 +1073,6 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
             NodeKind::Tagged(tag, value) => (tag.variant_name(), span, NodeValue::Ref(value)),
             NodeKind::String(variant) => (
                 variant.as_ref().to_owned(),
-                span,
-                NodeValue::Null(Node::new(NodeKind::Null, span)),
-            ),
-            // `true` and `1` name variants renamed to them.
-            NodeKind::Null | NodeKind::Bool(_) | NodeKind::Number(_) if node.text.is_some() => (
-                node.text.as_deref().unwrap_or_default().to_owned(),
                 span,
                 NodeValue::Null(Node::new(NodeKind::Null, span)),
             ),

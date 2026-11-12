@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Typed decoding now rejects a sequence for a struct, an explicit null for a sequence, mapping,
+  struct, or struct variant, and a non-string value for a string target under `from_value`. A null,
+  boolean, or number scalar no longer names an enum variant, even when a variant is renamed to its
+  spelling; a quoted scalar or a one-entry mapping names it instead. Tags read from a source keep a
+  canonical handle and suffix across readers. Source readers still accept an empty source value as
+  an empty collection or a struct's defaults; `from_value` and the owned stream readers treat a
+  composed null as an explicit null, because a `Value` cannot distinguish the two.
 - Writers now quote a string that looks like a decimal numeral with a leading zero, such as
   `0644`, `-0644`, or `0_644`, because YAML 1.2 keeps it a string but YAML 1.1 readers may read it
   as an octal integer. `docs/compatibility.md` lists the other YAML 1.1 hazards that can remain
