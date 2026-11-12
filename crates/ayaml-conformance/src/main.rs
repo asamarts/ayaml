@@ -72,7 +72,7 @@ struct Seen<'a> {
 }
 
 #[cfg(not(feature = "compat"))]
-const EXPECTED: Seen = Seen {
+const EXPECTED: Seen<'_> = Seen {
     fixtures: 5,
     cases: 405,
     expected_errors: 94,
@@ -88,7 +88,7 @@ const EXPECTED: Seen = Seen {
 };
 
 #[cfg(feature = "compat")]
-const EXPECTED: Seen = Seen {
+const EXPECTED: Seen<'_> = Seen {
     fixtures: 5,
     cases: 405,
     expected_errors: 94,
@@ -96,7 +96,7 @@ const EXPECTED: Seen = Seen {
 };
 
 /// How `seen` differs from `want`, one line for each difference.
-fn count_differences(seen: &Seen, want: &Seen) -> Vec<String> {
+fn count_differences(seen: &Seen<'_>, want: &Seen<'_>) -> Vec<String> {
     let mut out = Vec::new();
     for (name, got, wanted) in [
         ("fixtures", seen.fixtures, want.fixtures),
@@ -140,6 +140,10 @@ fn parse_flag(name: &str, value: Option<&OsStr>) -> Result<bool, String> {
     }
 }
 
+#[allow(
+    clippy::unnecessary_debug_formatting,
+    reason = "OsStr has no Display implementation"
+)]
 fn parse_show(value: Option<&OsStr>) -> Result<usize, String> {
     let Some(value) = value else { return Ok(40) };
     value
@@ -290,6 +294,10 @@ fn plain_is_string(value: &str) -> bool {
     )
 }
 
+#[allow(
+    clippy::match_same_arms,
+    reason = "each scalar style is named in its own arm for the conformance notation"
+)]
 fn tree(events: &[Event<'_>], detail: Detail) -> Vec<String> {
     let full = detail == Detail::Suite;
     let mut out = Vec::with_capacity(events.len());
@@ -376,7 +384,7 @@ fn first_difference(actual: &[String], expected: &[String]) -> String {
         .iter()
         .zip(expected)
         .position(|(a, e)| a != e)
-        .unwrap_or(actual.len().min(expected.len()));
+        .unwrap_or_else(|| actual.len().min(expected.len()));
     format!(
         "line {index}: got `{}`, want `{}`",
         actual.get(index).map_or("<end>", String::as_str),
@@ -676,6 +684,10 @@ fn field<'a>(case: &'a ayaml::Value, name: &str) -> Option<&'a str> {
     case.get(name).and_then(ayaml::Value::as_str)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the conformance driver keeps argument handling, reporting, and exit status together"
+)]
 fn main() {
     let mut args = std::env::args().skip(1);
     let fixture_root = args
@@ -902,14 +914,14 @@ mod tests {
 
     use super::{Seen, count_differences, parse_flag, parse_show};
 
-    const WANT: Seen = Seen {
+    const WANT: Seen<'_> = Seen {
         fixtures: 2,
         cases: 3,
         expected_errors: 1,
         runs: &[("class", 3), ("tree", 2)],
     };
 
-    fn differences(seen: &Seen) -> Vec<String> {
+    fn differences(seen: &Seen<'_>) -> Vec<String> {
         count_differences(seen, &WANT)
     }
 

@@ -1,3 +1,9 @@
+#![allow(
+    clippy::float_cmp,
+    clippy::literal_string_with_formatting_args,
+    reason = "test fixtures favor compact setup, generated inputs, and literal YAML braces"
+)]
+
 use super::*;
 
 /// Integer-like text outside the value model is quoted.

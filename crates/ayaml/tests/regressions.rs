@@ -258,7 +258,10 @@ where
         ayaml::Deserializer::from_str(input)
             .and_then(|mut documents| documents.next_borrowed::<T>()),
     );
-    #[allow(unused_mut)]
+    #[allow(
+        unused_mut,
+        reason = "the mutation is used only by some regression configurations"
+    )]
     let mut readers = vec![
         ("from_str", owned),
         ("from_str_borrowed", borrowed),

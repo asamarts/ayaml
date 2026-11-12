@@ -1,3 +1,8 @@
+#![allow(
+    clippy::format_collect,
+    reason = "test fixtures favor compact setup, generated inputs, and literal YAML braces"
+)]
+
 use std::collections::HashMap;
 
 use super::line::*;
@@ -601,7 +606,7 @@ fn input_limit_is_enforced_before_scanning() {
     assert_eq!(error.kind(), crate::error::ErrorKind::Limit);
 }
 
-fn scan_all<'a>(input: &'a str, fast: bool) -> Result<Vec<Token<'a>>, String> {
+fn scan_all(input: &str, fast: bool) -> Result<Vec<Token<'_>>, String> {
     let mut scanner = Scanner::new(input, Limits::default()).map_err(|error| error.to_string())?;
     scanner.fast_continuation = fast;
     let mut tokens = Vec::new();

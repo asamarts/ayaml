@@ -143,22 +143,21 @@ impl TagDirectives {
     /// The handle that stands for `prefix`, added if there is none yet.
     pub(crate) fn handle_for(&mut self, prefix: &str) -> &str {
         let added = self.added.get_or_insert_with(Box::default);
-        let index = match added.by_prefix.get(prefix) {
-            Some(&index) => index,
-            None => {
-                let handle = loop {
-                    let handle = format!("!t{}!", added.next);
-                    added.next += 1;
-                    if !self.declared.contains(&handle) {
-                        break handle;
-                    }
-                };
-                added.handles.push((handle, prefix.to_owned()));
-                added
-                    .by_prefix
-                    .insert(prefix.to_owned(), added.handles.len() - 1);
-                added.handles.len() - 1
-            }
+        let index = if let Some(&index) = added.by_prefix.get(prefix) {
+            index
+        } else {
+            let handle = loop {
+                let handle = format!("!t{}!", added.next);
+                added.next += 1;
+                if !self.declared.contains(&handle) {
+                    break handle;
+                }
+            };
+            added.handles.push((handle, prefix.to_owned()));
+            added
+                .by_prefix
+                .insert(prefix.to_owned(), added.handles.len() - 1);
+            added.handles.len() - 1
         };
         &added.handles[index].0
     }

@@ -33,7 +33,7 @@ impl Serialize for Tag {
 }
 
 /// A tagged value is a one-entry map from the tag to the value: `{"!Foo": 1}`
-/// to a generic serializer such as serde_json. ayaml's serializers turn it
+/// to a generic serializer such as `serde_json`. ayaml's serializers turn it
 /// back into a tag.
 impl Serialize for TaggedValue {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -261,11 +261,19 @@ impl<'de> Deserialize<'de> for Value {
 }
 
 /// Deserialize a value from an already-composed generic value.
+///
+/// # Errors
+///
+/// Returns an error when the value cannot be converted to or from the requested form.
 pub fn from_value<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, crate::Error> {
     T::deserialize(ValueDeserializer { value })
 }
 
 /// Deserialize using a caller-supplied Serde seed.
+///
+/// # Errors
+///
+/// Returns an error when the value cannot be converted to or from the requested form.
 pub fn from_value_seed<'de, T: serde::de::DeserializeSeed<'de>>(
     value: Value,
     seed: T,
@@ -418,7 +426,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         match untagged(self.value) {
             Value::Null => visitor.visit_map(ValueMapAccess {
-                iter: crate::mapping::Mapping::new().into_iter(),
+                iter: Mapping::new().into_iter(),
                 key: None,
                 plain_key: None,
                 value: None,
@@ -472,7 +480,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
     fn deserialize_f64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         match untagged(self.value) {
             Value::Number(number) if number.is_wide() => {
-                visitor.visit_f64(number.as_f64().expect("an integer converts to f64"))
+                visitor.visit_f64(number.as_f64().unwrap_or(f64::NAN))
             }
             value => ValueDeserializer { value }.deserialize_any(visitor),
         }
@@ -878,7 +886,7 @@ struct ValueEnumAccess<'a> {
     bare: bool,
 }
 
-impl<'de, 'a> serde::de::EnumAccess<'de> for ValueEnumAccess<'a> {
+impl<'de, 'a> EnumAccess<'de> for ValueEnumAccess<'a> {
     type Error = crate::Error;
     type Variant = ValueVariantAccess<'a>;
 
@@ -925,7 +933,7 @@ impl ValueVariantAccess<'_> {
     }
 }
 
-impl<'de> serde::de::VariantAccess<'de> for ValueVariantAccess<'_> {
+impl<'de> VariantAccess<'de> for ValueVariantAccess<'_> {
     type Error = crate::Error;
 
     /// A variant's value reads past an application tag, as a target that isn't an enum does.
@@ -976,6 +984,10 @@ impl<'de> serde::de::VariantAccess<'de> for ValueVariantAccess<'_> {
 }
 
 /// Serialize a Rust value into the generic YAML value model.
+///
+/// # Errors
+///
+/// Returns an error when the value cannot be converted to or from the requested form.
 pub fn to_value<T: Serialize>(value: T) -> Result<Value, crate::Error> {
     value.serialize(ValueSerializer {
         depth: 0,
@@ -1120,7 +1132,10 @@ impl Serializer for ValueSerializer {
     fn serialize_f32(self, value: f32) -> Result<Self::Ok, Self::Error> {
         // Widen through the shortest `f32` text, so `0.1_f32` is written
         // `0.1` and not `0.10000000149011612`.
-        let widened = value.to_string().parse::<f64>().unwrap_or(f64::from(value));
+        let widened = value
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or_else(|_| f64::from(value));
         self.serialize_f64(widened)
     }
     fn serialize_f64(self, value: f64) -> Result<Self::Ok, Self::Error> {

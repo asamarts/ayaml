@@ -1,3 +1,9 @@
+#![allow(
+    clippy::float_cmp,
+    clippy::items_after_statements,
+    reason = "test fixtures favor compact setup, generated inputs, and literal YAML braces"
+)]
+
 use super::*;
 
 #[test]
@@ -146,7 +152,7 @@ fn core_collection_tags_are_resolved_and_null_sequences_are_empty() {
         items: Vec<String>,
     }
     let defaults: Defaults = ayaml::from_str_borrowed("items:\n").expect("null sequence");
-    assert!(defaults.items.is_empty());
+    assert_eq!(defaults.items.len(), 0);
 }
 
 #[test]

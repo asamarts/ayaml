@@ -1,6 +1,10 @@
 //! An alias directly followed by `:` is a key in compat, as libyaml reads it, unless an anchor in
 //! the same document has that exact name. Default mode keeps the colon in the name, as YAML 1.2.2
 //! says.
+#![allow(
+    clippy::format_push_string,
+    reason = "test fixtures favor compact setup, generated inputs, and literal YAML braces"
+)]
 #![cfg(feature = "libyaml-compat")]
 
 use std::collections::BTreeMap;
@@ -294,9 +298,15 @@ fn a_block_scalar_after_a_key_keeps_its_header_check() {
 fn a_duplicate_is_found_at_its_mapping_as_libyaml_finds_it() {
     #[derive(Debug, Deserialize)]
     struct Record {
-        #[allow(dead_code)]
+        #[allow(
+            dead_code,
+            reason = "the compatibility test target compiles independently"
+        )]
         name: String,
-        #[allow(dead_code)]
+        #[allow(
+            dead_code,
+            reason = "the compatibility test target compiles independently"
+        )]
         items: Vec<u8>,
     }
     let error = compat::from_str::<Record>("items: []\nname: &key items\n*key: []\n")

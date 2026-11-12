@@ -159,6 +159,10 @@ const ROUND: [u32; 64] = [
 ];
 
 /// SHA-256, from FIPS 180-4, so that a check of test data adds no dependency.
+#[allow(
+    clippy::many_single_char_names,
+    reason = "the SHA-256 round uses the standard a..h and k/w/t names"
+)]
 fn sha256(input: &[u8]) -> [u8; 32] {
     let mut state: [u32; 8] = [
         0x6a09_e667,

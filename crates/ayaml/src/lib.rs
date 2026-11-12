@@ -70,7 +70,7 @@
 //!
 //! - `libyaml-compat`: adds `ayaml::compat` and its decoding entry points.
 //! - `bench-internals`: unstable hooks for ayaml's benchmark and conformance
-//!   harnesses. This module is hidden and outside SemVer.
+//!   harnesses. This module is hidden and outside `SemVer`.
 //!
 //! # Resource limits
 //!
@@ -92,19 +92,35 @@
 //! Rust 1.88. The crate is dual-licensed under MIT or Apache-2.0.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+#![warn(rustdoc::all)]
 
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "the conformance and benchmark layers use these hooks only under their features"
+)]
 mod composer;
 mod emitter;
 mod event_emitter;
 mod merge;
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "the conformance and benchmark layers use these hooks only under their features"
+)]
 mod parser;
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "the conformance and benchmark layers use these hooks only under their features"
+)]
 mod position;
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "the conformance and benchmark layers use these hooks only under their features"
+)]
 mod resolver;
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "the conformance and benchmark layers use these hooks only under their features"
+)]
 mod scanner;
 mod serde_impl;
 mod typed;
@@ -210,6 +226,10 @@ pub mod compat {
 
     /// Deserialize one document with a caller-supplied seed under the
     /// compatibility policies.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
     pub fn from_str_seed<'de, T: serde::de::DeserializeSeed<'de>>(
         input: &'de str,
         seed: T,
@@ -228,6 +248,10 @@ pub mod compat {
 
     /// Deserialize a typed value with compatibility policies, using borrowed
     /// scalar text where possible.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
     pub fn from_str<'de, T: serde::Deserialize<'de>>(input: &'de str) -> Result<T, Error> {
         crate::typed::from_str_with_options(
             input,
@@ -244,6 +268,10 @@ pub mod compat {
     ///
     /// This is the event stream behind the compatibility deserializers; the
     /// conformance runner uses it to check compat-mode deviations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
     pub fn parse_events_with_limits<'a>(
         input: &'a str,
         limits: &crate::Limits,
@@ -252,6 +280,10 @@ pub mod compat {
     }
 
     /// Deserialize one document with a visitor and compatibility policies.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
     pub fn deserialize_any<'de, V: Visitor<'de>>(
         input: &'de str,
         visitor: V,
@@ -283,6 +315,10 @@ pub mod internals {
     use crate::value::Value;
 
     /// Scan all tokens and return their count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
     pub fn scan_tokens(input: &str, limits: &Limits) -> Result<usize, Error> {
         let mut scanner = crate::scanner::Scanner::new(input, limits.clone())?;
         let mut count = 0;
@@ -293,12 +329,20 @@ pub mod internals {
     }
 
     /// Parse all events into an owned vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
     pub fn parse_events<'a>(input: &'a str, limits: &Limits) -> Result<Vec<Event<'a>>, Error> {
         crate::parser::parse_events(input, limits)
     }
 
     /// Compose an already-collected event vector. Like every entry point that takes limits, it
     /// refuses limits that would turn a budget off.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
     pub fn compose_events(
         events: &[Event<'_>],
         input_len: usize,
@@ -348,12 +392,23 @@ pub struct Deserializer<'a> {
 
 impl<'a> Deserializer<'a> {
     /// Create a typed document cursor over one UTF-8 YAML input.
-    #[allow(clippy::should_implement_trait)]
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "the cursor deliberately mirrors Iterator::next with a different return type"
+    )]
     pub fn from_str(input: &'a str) -> Result<Self, Error> {
         Self::from_str_with_limits(input, &Limits::default())
     }
 
     /// Create a typed document cursor with explicit limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
     pub fn from_str_with_limits(input: &'a str, limits: &Limits) -> Result<Self, Error> {
         let limits = limits.clone();
         let events = parse_events_with_limits(input, &limits)?;
@@ -367,7 +422,14 @@ impl<'a> Deserializer<'a> {
     }
 
     /// Deserialize the next document, or return `None` at end of stream.
-    #[allow(clippy::should_implement_trait)]
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "the cursor deliberately mirrors Iterator::next with a different return type"
+    )]
     pub fn next<T: serde::de::DeserializeOwned>(&mut self) -> Result<Option<T>, Error> {
         let Some(value) = self.next_value()? else {
             return Ok(None);
@@ -376,6 +438,10 @@ impl<'a> Deserializer<'a> {
     }
 
     /// Deserialize the next document, borrowing simple strings from the input.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
     pub fn next_borrowed<T: serde::Deserialize<'a>>(&mut self) -> Result<Option<T>, Error> {
         let Some(events) = self.next_events()? else {
             return Ok(None);
@@ -384,6 +450,10 @@ impl<'a> Deserializer<'a> {
     }
 
     /// Deserialize the next document with a seed, borrowing simple strings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
     pub fn next_seed_borrowed<T: serde::de::DeserializeSeed<'a>>(
         &mut self,
         seed: T,
@@ -396,6 +466,10 @@ impl<'a> Deserializer<'a> {
     }
 
     /// Deserialize the next document using a caller-supplied seed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
     pub fn next_seed<'de, T: serde::de::DeserializeSeed<'de>>(
         &mut self,
         seed: T,
@@ -422,6 +496,10 @@ impl<'a> Deserializer<'a> {
         Ok(Some(value))
     }
 
+    #[allow(
+        clippy::match_same_arms,
+        reason = "the arms stay separate to document each representation or state"
+    )]
     fn next_events(&mut self) -> Result<Option<Vec<Event<'a>>>, Error> {
         if self.finished {
             return Ok(None);
@@ -467,11 +545,19 @@ impl<'a> Deserializer<'a> {
 /// This exposes the shared scanner/parser pipeline without composing values.
 /// Duplicate mapping entries remain visible to the caller. Syntax and limit
 /// errors are returned by the iterator.
+///
+/// # Errors
+///
+/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
 pub fn parse_events(input: &str) -> Result<EventStream<'_>, Error> {
     parse_events_with_limits(input, &Limits::default())
 }
 
 /// Parse a YAML input into a pull traversal with explicit limits.
+///
+/// # Errors
+///
+/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
 pub fn parse_events_with_limits<'a>(
     input: &'a str,
     limits: &Limits,
@@ -489,6 +575,10 @@ pub fn parse_events_with_limits<'a>(
 ///
 /// This is a single-document convenience API. Trailing documents are rejected;
 /// use [`parse_documents`] for a document stream.
+///
+/// # Errors
+///
+/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
 pub fn parse_value(input: &str) -> Result<Value, Error> {
     parse_value_with_limits(input, &Limits::default())
 }
@@ -499,6 +589,10 @@ pub fn parse_value(input: &str) -> Result<Value, Error> {
 /// is never allowed to exceed `limits.max_input_bytes`, and alias materialization
 /// is charged before allocation. Trailing documents are rejected even when the
 /// limits would otherwise permit them.
+///
+/// # Errors
+///
+/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
 pub fn parse_value_with_limits(input: &str, limits: &Limits) -> Result<Value, Error> {
     limits
         .check_input(input.len())
@@ -517,11 +611,19 @@ pub fn parse_value_with_limits(input: &str, limits: &Limits) -> Result<Value, Er
 ///
 /// The same compatibility resolver and composition budgets as [`parse_value`]
 /// apply. The configured `max_documents` limit is enforced by the event parser.
+///
+/// # Errors
+///
+/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
 pub fn parse_documents(input: &str) -> Result<Vec<Value>, Error> {
     parse_documents_with_limits(input, &Limits::default())
 }
 
 /// Parse every YAML document in the stream with explicit limits.
+///
+/// # Errors
+///
+/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
 pub fn parse_documents_with_limits(input: &str, limits: &Limits) -> Result<Vec<Value>, Error> {
     limits
         .check_input(input.len())
@@ -535,6 +637,10 @@ pub fn parse_documents_with_limits(input: &str, limits: &Limits) -> Result<Vec<V
 /// into defaulted structs, duplicate keys are reported at their first
 /// occurrence, and alias limits are enforced. Trailing documents are
 /// rejected. Use `ayaml::compat` for libyaml-compatible decoding.
+///
+/// # Errors
+///
+/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
 pub fn from_str<T: serde::de::DeserializeOwned>(input: &str) -> Result<T, Error> {
     typed::from_str(input, &Limits::default())
 }
@@ -557,11 +663,19 @@ pub fn from_str<T: serde::de::DeserializeOwned>(input: &str) -> Result<T, Error>
 /// ```
 ///
 /// Trailing documents are rejected.
+///
+/// # Errors
+///
+/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
 pub fn from_str_borrowed<'de, T: serde::Deserialize<'de>>(input: &'de str) -> Result<T, Error> {
     from_str_borrowed_with_limits(input, &Limits::default())
 }
 
 /// Deserialize one YAML document with explicit limits, borrowing simple strings.
+///
+/// # Errors
+///
+/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
 pub fn from_str_borrowed_with_limits<'de, T: serde::Deserialize<'de>>(
     input: &'de str,
     limits: &Limits,
@@ -570,6 +684,10 @@ pub fn from_str_borrowed_with_limits<'de, T: serde::Deserialize<'de>>(
 }
 
 /// Deserialize one UTF-8 YAML document from bytes, borrowing simple strings.
+///
+/// # Errors
+///
+/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
 pub fn from_slice_borrowed<'de, T: serde::Deserialize<'de>>(input: &'de [u8]) -> Result<T, Error> {
     let input = std::str::from_utf8(input).map_err(|error| {
         Error::new(ErrorKind::InvalidEncoding, "input is not valid UTF-8").with_source(error)
@@ -578,6 +696,10 @@ pub fn from_slice_borrowed<'de, T: serde::Deserialize<'de>>(input: &'de [u8]) ->
 }
 
 /// Deserialize one UTF-8 YAML document from bytes.
+///
+/// # Errors
+///
+/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
 pub fn from_slice<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, Error> {
     let input = std::str::from_utf8(input).map_err(|error| {
         Error::new(ErrorKind::InvalidEncoding, "input is not valid UTF-8").with_source(error)

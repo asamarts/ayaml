@@ -248,6 +248,9 @@ quality() {
   if ! have_toolchain "$tc"; then skip "toolchain $tc missing"; return; fi
   step "fmt ($tc)" cargo "+$tc" fmt --all -- --check
   step "clippy ($tc)" cargo "+$tc" clippy --workspace --all-targets --locked --all-features -- -D warnings
+  step "fuzz workspace format ($tc)" cargo "+$tc" fmt --manifest-path fuzz/Cargo.toml --all -- --check
+  step "fuzz workspace clippy ($tc)" cargo "+$tc" clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
+  step "production library panic profile ($tc)" cargo "+$tc" clippy -p ayaml --lib --locked --all-features -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
   test_step "test ($tc)" cargo "+$tc" test --workspace --locked --all-features
   test_step "test default features ($tc)" cargo "+$tc" test -p ayaml --locked
   # The depth cap is measured in both profiles.
@@ -255,6 +258,9 @@ quality() {
   step "doc ($tc)" env RUSTDOCFLAGS="-D warnings" cargo "+$tc" doc --workspace --locked --no-deps --all-features
   # Mirrors: cargo fmt --all -- --check
   # Mirrors: cargo clippy --workspace --all-targets --locked --all-features -- -D warnings
+  # Mirrors: cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
+  # Mirrors: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
+  # Mirrors: cargo clippy -p ayaml --lib --locked --all-features -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
   # Mirrors: cargo test --workspace --locked --all-features
   # Mirrors: cargo test -p ayaml --locked
   # Mirrors: cargo test -p ayaml --locked --release --all-features --test adversarial

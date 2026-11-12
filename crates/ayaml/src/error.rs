@@ -266,6 +266,10 @@ fn is_short_name(key: &str) -> bool {
 }
 
 /// A key in brackets and quotes, with anything that could change how a terminal shows it escaped.
+#[allow(
+    clippy::format_push_string,
+    reason = "one small escaped code point appended to an already-owned string"
+)]
 fn quoted_key(key: &str) -> String {
     let mut quoted = String::from("[\"");
     let mut chars = key.chars();
@@ -323,6 +327,10 @@ impl fmt::Display for Error {
 }
 
 impl StdError for Error {
+    #[allow(
+        trivial_casts,
+        reason = "Box<dyn Error + Send + Sync> is widened to the plain error trait object"
+    )]
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         self.source
             .as_deref()
@@ -435,7 +443,7 @@ mod tests {
 
         let mut error = Error::new(ErrorKind::Serde, "bad").inside_index(7);
         for _ in 0..200 {
-            error = error.inside_index(1234567);
+            error = error.inside_index(1_234_567);
         }
         assert!(error.message().starts_with("…["), "{}", error.message());
     }
@@ -460,8 +468,8 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn an_error_stays_small() {
-        assert_eq!(std::mem::size_of::<Error>(), 112);
-        assert_eq!(std::mem::size_of::<Result<crate::Value, Error>>(), 112);
+        assert_eq!(size_of::<Error>(), 112);
+        assert_eq!(size_of::<Result<crate::Value, Error>>(), 112);
     }
 
     /// A path's steps are as long as `inside` lets them be, and a context too long to keep its

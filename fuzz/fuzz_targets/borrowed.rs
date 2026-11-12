@@ -1,4 +1,5 @@
 #![no_main]
+#![forbid(unsafe_code)]
 
 //! The borrowed (typed) path must compose the same `Value` as the composed
 //! path, tags included, one document at a time and as a stream.

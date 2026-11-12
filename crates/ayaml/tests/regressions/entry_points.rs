@@ -1,3 +1,8 @@
+#![allow(
+    clippy::items_after_statements,
+    reason = "test fixtures favor compact setup, generated inputs, and literal YAML braces"
+)]
+
 use super::*;
 
 /// A block collection starts after a line break (`s-l+block-collection`), so none starts on a
@@ -422,7 +427,7 @@ fn an_empty_line_inside_a_scalar_holds_no_tab_before_its_indentation() {
             "{input:?} in compat"
         );
         #[cfg(not(feature = "libyaml-compat"))]
-        let _ = value;
+        drop(value);
     }
     for (input, value) in [
         ("k:\n  a\n \t\n  b", json!({ "k": "a\nb" })),

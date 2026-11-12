@@ -1,3 +1,11 @@
+//! Property tests for emitter, parser, and Serde round trips.
+
+#![allow(
+    let_underscore_drop,
+    clippy::redundant_clone,
+    reason = "test fixtures favor compact setup, generated inputs, and literal YAML braces"
+)]
+
 use ayaml::Value;
 use proptest::prelude::*;
 

@@ -318,6 +318,10 @@ impl Limits {
     /// The input contribution is capped at `max_input_bytes`, so padding a
     /// document cannot raise the budget above roughly 768 MiB with the
     /// compatibility constants.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `observed` exceeds this limit or the limit setting is invalid.
     #[must_use]
     pub fn expansion_budget(&self, input_len: usize) -> usize {
         let input = input_len.min(self.max_input_bytes);
@@ -349,21 +353,37 @@ impl Limits {
     }
 
     /// Check the input size before scanning.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `observed` exceeds this limit or the limit setting is invalid.
     pub fn check_input(&self, observed: usize) -> Result<(), LimitExceeded> {
         check(LimitKind::InputBytes, self.max_input_bytes, observed)
     }
 
     /// Check collection depth before descending.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `observed` exceeds this limit or the limit setting is invalid.
     pub fn check_depth(&self, observed: usize) -> Result<(), LimitExceeded> {
         check(LimitKind::Depth, self.max_depth, observed)
     }
 
     /// Check the number of documents.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `observed` exceeds this limit or the limit setting is invalid.
     pub fn check_documents(&self, observed: usize) -> Result<(), LimitExceeded> {
         check(LimitKind::Documents, self.max_documents, observed)
     }
 
     /// Check the bytes that tag handles have expanded to so far.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `observed` exceeds this limit or the limit setting is invalid.
     pub fn check_tag_expansion(&self, observed: usize) -> Result<(), LimitExceeded> {
         check(
             LimitKind::TagExpansion,
@@ -373,11 +393,19 @@ impl Limits {
     }
 
     /// Check a scalar's byte length.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `observed` exceeds this limit or the limit setting is invalid.
     pub fn check_scalar_bytes(&self, observed: usize) -> Result<(), LimitExceeded> {
         check(LimitKind::ScalarBytes, self.max_scalar_bytes, observed)
     }
 
     /// Check one collection's entry count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `observed` exceeds this limit or the limit setting is invalid.
     pub fn check_collection_entries(&self, observed: usize) -> Result<(), LimitExceeded> {
         check(
             LimitKind::CollectionEntries,
@@ -387,16 +415,28 @@ impl Limits {
     }
 
     /// Check the event count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `observed` exceeds this limit or the limit setting is invalid.
     pub fn check_events(&self, observed: usize) -> Result<(), LimitExceeded> {
         check(LimitKind::Events, self.max_events, observed)
     }
 
     /// Check the anchor count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `observed` exceeds this limit or the limit setting is invalid.
     pub fn check_anchors(&self, observed: usize) -> Result<(), LimitExceeded> {
         check(LimitKind::Anchors, self.max_anchors, observed)
     }
 
     /// Check the alias-dereference count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `observed` exceeds this limit or the limit setting is invalid.
     pub fn check_alias_dereferences(&self, observed: usize) -> Result<(), LimitExceeded> {
         check(
             LimitKind::AliasDereferences,
@@ -406,11 +446,19 @@ impl Limits {
     }
 
     /// Check output bytes before a write.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `observed` exceeds this limit or the limit setting is invalid.
     pub fn check_output_bytes(&self, observed: usize) -> Result<(), LimitExceeded> {
         check(LimitKind::OutputBytes, self.max_output_bytes, observed)
     }
 
     /// Check a charged node/alias expansion against an explicit budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `observed` exceeds this limit or the limit setting is invalid.
     pub fn check_alias_expansion(
         &self,
         input_len: usize,

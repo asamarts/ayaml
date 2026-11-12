@@ -28,6 +28,10 @@ impl Value {
     /// generic `Value` model does not retain scalar style, a quoted `"<<"` key
     /// is treated the same as a plain one here. Use the event stream when a
     /// caller needs to distinguish those forms.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a merge key is invalid or its value cannot be merged.
     pub fn apply_merge_keys(&mut self) -> Result<(), Error> {
         apply_value(self)
     }

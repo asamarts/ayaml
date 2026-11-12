@@ -70,6 +70,47 @@ Two bounds also apply on their own:
   `timeout`, and those steps fail where it can't set these bounds. The `bounds` job checks that
   they work.
 
+## Rust lint policy
+
+The workspace lint policy lives in `Cargo.toml`, with `clippy.toml` for the 200-line
+function threshold and `rustfmt.toml` for the 2024 style edition, Unix newlines, field-init
+shorthand, and try shorthand. The policy is checked on Rust 1.88 and stable with `-D warnings`.
+
+The Clippy policy enables `all`, `cargo`, and `pedantic`. The only policy-wide allows are
+`multiple_crate_versions`, `module_name_repetitions`, and `similar_names`. It also enables
+`allow_attributes_without_reason`, `literal_string_with_formatting_args`, `mem_forget`,
+`needless_pass_by_ref_mut`, `or_fun_call`, and `redundant_clone`; `dbg_macro`, `todo`, and
+`unimplemented` are denied. The nursery and restriction groups stay off: the scanner has many
+proven-boundary indexing, slicing, and numeric casts where blanket suppressions would hide the
+reasoning instead of improving safety.
+
+Fix a new finding rather than adding a baseline. When a finding is genuinely intentional, use the
+narrowest `#[expect(lint, reason = "...")]` or `#[allow(lint, reason = "...")]` that covers it. A
+stable release that adds a finding is an ordinary pull request: fix it or record the decision in
+the pull request and the lint decision record. Keep the policy on both toolchains; a new lint that
+Rust 1.88 does not know is not added until both accept it.
+
+The production library has a stricter panic profile. It denies `unwrap_used`, `expect_used`, and
+`panic`, so fallible parsing and writing return errors and a panic is only allowed for a required
+trait contract with a narrow reason. Tests and development targets are not part of that profile.
+
+The separate `fuzz` workspace declares Rust 1.88 and mirrors the applicable policy. Its three
+fuzz targets forbid unsafe code; `memcount` is the one documented exception because a counting
+global allocator needs `unsafe`. Run the fuzz workspace's format and Clippy checks in both
+toolchain jobs.
+
+Rustdoc uses `#![warn(rustdoc::all)]` and `RUSTDOCFLAGS=-D warnings`; public `Result` APIs
+document their error cases under `# Errors`. The practical local commands are:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy -p ayaml --lib --all-features -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
+cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
+cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --all-features
+```
+
 ## Repository lint
 
 `.alint.yml` requires alint 0.22.0 and extends the bundled `oss-baseline`, `rust`,

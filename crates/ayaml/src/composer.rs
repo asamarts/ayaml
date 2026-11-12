@@ -22,8 +22,8 @@ use crate::tag::{Tag, TaggedValue};
 use crate::value::Value;
 
 /// Compose every document in an event stream.
-pub(crate) fn compose_documents<'a>(
-    events: &[Event<'a>],
+pub(crate) fn compose_documents(
+    events: &[Event<'_>],
     input_len: usize,
     limits: &Limits,
 ) -> Result<Vec<Value>, Error> {
@@ -535,6 +535,10 @@ impl<'a> StreamingComposer<'a> {
         None
     }
 
+    #[allow(
+        clippy::unused_self,
+        reason = "the method is part of a uniform grammar or diagnostic surface"
+    )]
     fn error_at(&self, span: Span, message: impl Into<String>) -> Error {
         Error::new(ErrorKind::Composition, message).with_span(span)
     }

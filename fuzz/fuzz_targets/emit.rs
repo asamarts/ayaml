@@ -1,4 +1,5 @@
 #![no_main]
+#![forbid(unsafe_code)]
 
 //! Emitter oracle: whatever ayaml parses, both emitters must write as text
 //! that parses back to the same documents, and the lazy event writer must

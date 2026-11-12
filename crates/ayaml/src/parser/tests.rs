@@ -1,3 +1,8 @@
+#![allow(
+    clippy::literal_string_with_formatting_args,
+    reason = "test fixtures favor compact setup, generated inputs, and literal YAML braces"
+)]
+
 use super::{
     TOKEN_ARENA_CHUNK, TOKEN_ARENA_MID_CHUNK, TOKEN_ARENA_SMALL_CHUNK, arena_growth, parse_events,
     push_token,

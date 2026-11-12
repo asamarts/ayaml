@@ -1,7 +1,16 @@
 //! A typed reader's error names the path to what it rejected, on every entry point.
 
+#![allow(
+    clippy::items_after_statements,
+    clippy::unreadable_literal,
+    clippy::zero_sized_map_values,
+    reason = "test fixtures favor compact setup, generated inputs, and literal YAML braces"
+)]
 // These targets exist to be read and to fail, so no test looks at their fields.
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "the test target compiles independently of the library feature set"
+)]
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -411,7 +420,10 @@ fn a_location_in_a_key_leaves_the_error_s_own_location() {
 fn a_value_or_a_field_that_quotes_a_location_keeps_the_error_s_own() {
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "the test target compiles independently of the library feature set"
+    )]
     struct Only {
         a: Option<u8>,
     }
@@ -483,9 +495,9 @@ fn a_string_key_reads_the_same_whatever_the_target() {
     impl<'de> Deserialize<'de> for IgnoredKey {
         fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
             struct Bytes;
-            impl serde::de::Visitor<'_> for Bytes {
+            impl Visitor<'_> for Bytes {
                 type Value = IgnoredKey;
-                fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                     formatter.write_str("bytes")
                 }
                 fn visit_bytes<E>(self, value: &[u8]) -> Result<IgnoredKey, E> {
@@ -508,7 +520,10 @@ fn a_string_key_reads_for_a_target_that_takes_only_the_owned_form() {
         fn deserialize<D: Deserializer2<'de>>(deserializer: D) -> Result<Self, D::Error> {
             struct Text<const HOW: u8>;
             // Implementing the owned form alone is the case under test.
-            #[allow(clippy::serde_api_misuse)]
+            #[allow(
+                clippy::serde_api_misuse,
+                reason = "the test deliberately exercises a visitor that implements only one Serde method"
+            )]
             impl<const HOW: u8> Visitor<'_> for Text<HOW> {
                 type Value = OwnedText<HOW>;
                 fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -1,5 +1,13 @@
 //! A YAML number with compatibility semantics.
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::match_same_arms,
+    reason = "Number keeps range-checked limbs and separate signed/unsigned representation arms."
+)]
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -536,8 +544,8 @@ mod tests {
     fn wide_integer_storage_keeps_value_compact() {
         // The two-limb representation keeps Number at 24 bytes and
         // Value at 72.
-        assert_eq!(std::mem::size_of::<Number>(), 24);
-        assert_eq!(std::mem::size_of::<crate::Value>(), 72);
+        assert_eq!(size_of::<Number>(), 24);
+        assert_eq!(size_of::<crate::Value>(), 72);
     }
 
     #[test]

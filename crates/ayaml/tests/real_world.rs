@@ -4,7 +4,7 @@
 //! shape. `tests/real-world/README.md` names the source of each one. For every
 //! fixture this test checks:
 //!
-//! - the composed documents, serialized with serde_json, against the
+//! - the composed documents, serialized with `serde_json`, against the
 //!   fixture's `.json` file (set `AYAML_BLESS=1` to rewrite them, then review
 //!   the diff by hand; `0` or leaving it unset doesn't, and any other value fails);
 //! - the typed path and the document cursor against the composed documents;

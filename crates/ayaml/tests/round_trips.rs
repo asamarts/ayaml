@@ -2,6 +2,11 @@
 //! streams with explicit markers, tags that a verbatim tag can't hold, long keys, and Serde input
 //! that a mapping can't hold.
 
+#![allow(
+    clippy::format_collect,
+    reason = "test fixtures favor compact setup, generated inputs, and literal YAML braces"
+)]
+
 use std::fmt;
 
 use ayaml::{Emitter, EmitterOptions, Event, Limits, Tag, TaggedValue, Value};
@@ -897,7 +902,7 @@ fn every_writer_writes_the_whole_output_above_the_chunk_size() {
         styled.value_to_writer(writer, &value)
     });
 
-    let documents = [value.clone(), Value::from("tail")];
+    let documents = [value, Value::from("tail")];
     let expected_documents = ayaml::to_string_documents(&documents).expect("document text");
     assert!(
         expected_documents.len() > 8 * 1024,

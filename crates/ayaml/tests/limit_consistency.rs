@@ -8,6 +8,11 @@
 //! out by hand in each case's comment, from what `docs/limits.md` says each limit counts, not
 //! read off the parser.
 
+#![allow(
+    clippy::needless_pass_by_value,
+    reason = "test fixtures favor compact setup, generated inputs, and literal YAML braces"
+)]
+
 use std::marker::PhantomData;
 
 use ayaml::{Deserializer, Error, ErrorKind, LimitKind, Limits, Span, Value};
@@ -39,7 +44,7 @@ fn cursor(
 fn readers() -> Vec<Reader> {
     #[cfg_attr(
         not(any(feature = "libyaml-compat", feature = "bench-internals")),
-        allow(unused_mut)
+        allow(unused_mut, reason = "the list is extended only by optional readers")
     )]
     let mut readers = vec![
         Reader {
@@ -534,7 +539,7 @@ fn every_reader_gives_the_same_answer_at_the_same_limits() {
                             case.input, case.kind, reader.name
                         )),
                         Err(error) => {
-                            let kind = error.limit().map(|limit| limit.kind());
+                            let kind = error.limit().map(ayaml::LimitExceeded::kind);
                             if error.kind() != ErrorKind::Limit || kind != Some(case.kind) {
                                 failures.push(format!(
                                     "{:?} {:?}: {} refused {value} with {error}",
@@ -561,7 +566,8 @@ fn every_reader_gives_the_same_answer_at_the_same_limits() {
             // Every value below one less refuses the input for the same limit, wherever.
             for value in 0..boundary - 1 {
                 match accepts(value) {
-                    Err(error) if error.limit().map(|limit| limit.kind()) == Some(case.kind) => {}
+                    Err(error)
+                        if error.limit().map(ayaml::LimitExceeded::kind) == Some(case.kind) => {}
                     other => failures.push(format!(
                         "{:?} {:?}: {} at {value}: {other:?}",
                         case.input, case.kind, reader.name
@@ -577,7 +583,7 @@ fn every_reader_gives_the_same_answer_at_the_same_limits() {
                     boundary - 1
                 )),
                 Err(error) => {
-                    let kind = error.limit().map(|limit| limit.kind());
+                    let kind = error.limit().map(ayaml::LimitExceeded::kind);
                     if error.kind() != ErrorKind::Limit || kind != Some(case.kind) {
                         failures.push(format!(
                             "{:?} {:?}: {} refused {} with {error}",
@@ -672,7 +678,7 @@ fn every_emitter_gives_the_same_output_limit_answer() {
         .expect_err("a byte below the output");
         assert_eq!(error.kind(), ErrorKind::Limit, "{name}: {error}");
         assert_eq!(
-            error.limit().map(|limit| limit.kind()),
+            error.limit().map(ayaml::LimitExceeded::kind),
             Some(LimitKind::OutputBytes),
             "{name}: {error}"
         );
@@ -711,7 +717,7 @@ fn lazy_and_eager_events_match() {
         let limits = Limits::default();
         let eager = ayaml::internals::parse_events(input, &limits);
         let lazy = ayaml::parse_events_with_limits(input, &limits)
-            .and_then(|stream| stream.collect::<Result<Vec<_>, _>>());
+            .and_then(Iterator::collect::<Result<Vec<_>, _>>);
         match (lazy, eager) {
             (Ok(lazy), Ok(eager)) => assert_eq!(lazy, eager, "{input:?}"),
             (Err(lazy), Err(eager)) => assert_eq!(

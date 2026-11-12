@@ -289,7 +289,7 @@ impl PartialEq for SeenKey<'_> {
 
 impl Eq for SeenKey<'_> {}
 
-impl std::hash::Hash for SeenKey<'_> {
+impl Hash for SeenKey<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
             Self::Scalar(text) => text.hash(state),
@@ -310,7 +310,10 @@ impl<'de> SeenKey<'de> {
 /// An open collection. The builder keeps these on an explicit stack, so
 /// nesting depth costs heap, not native stack. The mapping frame is the larger variant because it
 /// keeps the duplicate-key sets; one frame is live per open collection, never on the native stack.
-#[allow(clippy::large_enum_variant)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the mapping frame owns its duplicate-key set and is kept inline to avoid an allocation per open collection"
+)]
 enum Frame<'de> {
     Sequence {
         tag: Option<Tag>,
@@ -581,6 +584,10 @@ impl<'de> Builder<'de, '_> {
         )
     }
 
+    #[allow(
+        clippy::unused_self,
+        reason = "the method is part of a uniform grammar or diagnostic surface"
+    )]
     fn error_at(&self, span: Span, message: impl Into<String>) -> Error {
         Error::new(ErrorKind::Composition, message).with_span(span)
     }
@@ -858,7 +865,7 @@ impl<'de, 'a> NodeDeserializer<'de, 'a> {
     }
 }
 
-impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
+impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
     type Error = Error;
 
     fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
@@ -1068,15 +1075,15 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
             NodeKind::Mapping(entries) => {
                 let mut iter = entries.iter();
                 let Some((key, value)) = iter.next() else {
-                    return Err(crate::Error::new(
-                        crate::ErrorKind::Serde,
+                    return Err(Error::new(
+                        ErrorKind::Serde,
                         "enum mapping must contain one variant",
                     )
                     .with_span(span));
                 };
                 if iter.next().is_some() {
-                    return Err(crate::Error::new(
-                        crate::ErrorKind::Serde,
+                    return Err(Error::new(
+                        ErrorKind::Serde,
                         "enum mapping must contain one variant",
                     )
                     .with_span(span));
@@ -1088,11 +1095,10 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
                     _ => resolve(key),
                 };
                 let NodeKind::String(variant) = &key.kind else {
-                    return Err(crate::Error::new(
-                        crate::ErrorKind::Serde,
-                        "enum variant key must be a string",
-                    )
-                    .with_span(variant_span));
+                    return Err(
+                        Error::new(ErrorKind::Serde, "enum variant key must be a string")
+                            .with_span(variant_span),
+                    );
                 };
                 (
                     variant.as_ref().to_owned(),
@@ -1101,8 +1107,8 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
                 )
             }
             _ => {
-                return Err(crate::Error::new(
-                    crate::ErrorKind::Serde,
+                return Err(Error::new(
+                    ErrorKind::Serde,
                     "enum value must be tagged or a single-entry mapping",
                 )
                 .with_span(span));
@@ -1127,7 +1133,7 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
             && number.is_f64()
         {
             return visitor
-                .visit_f64(number.as_f64().expect("a float converts to f64"))
+                .visit_f64(number.as_f64().unwrap_or(f64::NAN))
                 .map_err(|error| with_span(error, node.span));
         }
         // A plain scalar reads from its text, so an integer wider than 64 bits reads, and so does
@@ -1146,8 +1152,8 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'de, 'a> {
                     }
                     // A radix integer is a number to the resolver, but not text that parses
                     // into a float.
-                    return Err(crate::Error::new(
-                        crate::ErrorKind::Serde,
+                    return Err(Error::new(
+                        ErrorKind::Serde,
                         format!("invalid type: integer `{text}`, expected f64"),
                     )
                     .with_span(node.span));
@@ -1273,7 +1279,7 @@ impl<'de> MapAccess<'de> for EmptyMapAccess {
         _seed: V,
     ) -> Result<V::Value, Self::Error> {
         Err(Error::new(
-            crate::ErrorKind::Serde,
+            ErrorKind::Serde,
             "map value requested before key",
         ))
     }
@@ -1284,7 +1290,7 @@ enum NodeValue<'de, 'a> {
     Null(Node<'de>),
 }
 
-impl<'de, 'a> NodeValue<'de, 'a> {
+impl<'de> NodeValue<'de, '_> {
     fn node(&self) -> &Node<'de> {
         match self {
             Self::Ref(node) => node,
@@ -1298,7 +1304,7 @@ struct NodeSeqAccess<'de, 'a> {
     len: usize,
 }
 
-impl<'de, 'a> SeqAccess<'de> for NodeSeqAccess<'de, 'a> {
+impl<'de> SeqAccess<'de> for NodeSeqAccess<'de, '_> {
     type Error = Error;
 
     fn next_element_seed<T: DeserializeSeed<'de>>(
@@ -1325,7 +1331,7 @@ struct NodeMapAccess<'de, 'a> {
     entry: Option<&'a (Node<'de>, Node<'de>)>,
 }
 
-impl<'de, 'a> MapAccess<'de> for NodeMapAccess<'de, 'a> {
+impl<'de> MapAccess<'de> for NodeMapAccess<'de, '_> {
     type Error = Error;
 
     fn next_key_seed<K: DeserializeSeed<'de>>(
@@ -1347,9 +1353,10 @@ impl<'de, 'a> MapAccess<'de> for NodeMapAccess<'de, 'a> {
         &mut self,
         seed: V,
     ) -> Result<V::Value, Self::Error> {
-        let (key, value) = self.entry.take().ok_or_else(|| {
-            crate::Error::new(crate::ErrorKind::Serde, "map value requested before key")
-        })?;
+        let (key, value) = self
+            .entry
+            .take()
+            .ok_or_else(|| Error::new(ErrorKind::Serde, "map value requested before key"))?;
         let span = value.span;
         seed.deserialize(NodeDeserializer::new(value))
             .map_err(|error| inside_key(with_span(error, span), key))
@@ -1410,7 +1417,7 @@ impl NodeVariantAccess<'_, '_> {
     }
 }
 
-impl<'de, 'a> VariantAccess<'de> for NodeVariantAccess<'de, 'a> {
+impl<'de> VariantAccess<'de> for NodeVariantAccess<'de, '_> {
     type Error = Error;
 
     /// A variant's value reads past an application tag, as a target that isn't an enum does, so
@@ -1421,8 +1428,7 @@ impl<'de, 'a> VariantAccess<'de> for NodeVariantAccess<'de, 'a> {
             Ok(())
         } else {
             Err(self.inside_variant(
-                crate::Error::new(crate::ErrorKind::Serde, "expected a unit enum variant")
-                    .with_span(node.span),
+                Error::new(ErrorKind::Serde, "expected a unit enum variant").with_span(node.span),
             ))
         }
     }

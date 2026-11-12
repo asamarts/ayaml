@@ -1,3 +1,8 @@
+#![allow(
+    clippy::literal_string_with_formatting_args,
+    reason = "test fixtures favor compact setup, generated inputs, and literal YAML braces"
+)]
+
 use super::*;
 
 #[test]
@@ -305,7 +310,7 @@ fn non_printable_characters_are_rejected() {
         "\u{fffe}\n",
     ] {
         let error = ayaml::parse_value(input).expect_err(input);
-        assert_eq!(error.kind(), ayaml::ErrorKind::Scanner, "{input:?}");
+        assert_eq!(error.kind(), ErrorKind::Scanner, "{input:?}");
     }
     assert_eq!(
         ayaml::parse_value("\"\\x01\\x7f\"").unwrap(),
@@ -338,7 +343,7 @@ fn boms_may_only_start_a_document() {
     assert_eq!(
         ayaml::parse_documents_with_limits(
             "a\n\u{feff}# next\n---\nb\n\u{feff}\n",
-            &ayaml::Limits::default().with_max_documents(4)
+            &Limits::default().with_max_documents(4)
         )
         .unwrap(),
         vec![Value::from("a"), Value::from("b")]
@@ -774,10 +779,7 @@ fn an_explicit_key_with_properties_may_hold_an_indentless_sequence() {
         (key.clone(), value.clone())
     };
     let items = ayaml::parse_value("[a]\n").unwrap();
-    let tagged = Value::from(ayaml::TaggedValue::new(
-        ayaml::Tag::local("t"),
-        items.clone(),
-    ));
+    let tagged = Value::from(TaggedValue::new(Tag::local("t"), items.clone()));
     for (input, key, value) in [
         ("? &x\n- a\n", &items, Value::Null),
         ("? &x\n- a\n: b\n", &items, Value::from("b")),
@@ -808,7 +810,7 @@ fn an_explicit_key_with_properties_may_hold_an_indentless_sequence() {
 /// starts a document. libyaml counts a column for it, so compat reads `---` as text there.
 #[test]
 fn a_bom_before_a_marker_or_directive_starts_a_document() {
-    let limits = ayaml::Limits::default().with_max_documents(8);
+    let limits = Limits::default().with_max_documents(8);
     let documents = |input| ayaml::parse_documents_with_limits(input, &limits);
     let a = Value::from("a");
     let b = Value::from("b");
@@ -869,7 +871,7 @@ fn a_bom_before_a_marker_or_directive_starts_a_document() {
         ),
         (
             "-\n\u{feff}---\nb\n",
-            vec![Value::Sequence(vec![Value::Null]), b.clone()],
+            vec![Value::Sequence(vec![Value::Null]), b],
         ),
         (
             "a\n...\n\u{feff}b: 1\nc: 2\n",
@@ -881,7 +883,7 @@ fn a_bom_before_a_marker_or_directive_starts_a_document() {
         ),
         (
             "a\n...\n\u{feff}- b\n- c\n",
-            vec![a.clone(), ayaml::parse_value("[b, c]\n").unwrap()],
+            vec![a, ayaml::parse_value("[b, c]\n").unwrap()],
         ),
         (
             "\u{feff}\u{feff}b: 1\nc: 2\n",
@@ -1008,15 +1010,13 @@ fn compat_counts_that_column_for_block_structure() {
 #[cfg(feature = "libyaml-compat")]
 #[test]
 fn compat_reads_a_marker_after_a_bom_as_text() {
-    let events = ayaml::compat::parse_events_with_limits(
-        "a\n...\n\u{feff}---\nb\n",
-        &ayaml::Limits::default(),
-    )
-    .unwrap();
+    let events =
+        ayaml::compat::parse_events_with_limits("a\n...\n\u{feff}---\nb\n", &Limits::default())
+            .unwrap();
     let scalars: Vec<&str> = events
         .iter()
         .filter_map(|event| match event {
-            ayaml::Event::Scalar { value, .. } => Some(value.as_ref()),
+            Event::Scalar { value, .. } => Some(value.as_ref()),
             _ => None,
         })
         .collect();
@@ -1026,12 +1026,8 @@ fn compat_reads_a_marker_after_a_bom_as_text() {
 /// The non-specific tag `!` isn't a shorthand, so `%TAG !` leaves it alone.
 #[test]
 fn the_non_specific_tag_ignores_a_primary_handle_directive() {
-    let non_specific = |text: &str| {
-        Value::from(ayaml::TaggedValue::new(
-            ayaml::Tag::local(""),
-            Value::from(text),
-        ))
-    };
+    let non_specific =
+        |text: &str| Value::from(TaggedValue::new(Tag::local(""), Value::from(text)));
     for (reader, read) in value_readers() {
         for input in ["%TAG ! tag:example.com,2000:\n---\n! 1\n", "! 1\n"] {
             assert_eq!(
@@ -1045,7 +1041,7 @@ fn the_non_specific_tag_ignores_a_primary_handle_directive() {
         let Value::Tagged(tagged) = value else {
             panic!("{reader}: not tagged");
         };
-        assert_eq!(tagged.tag, ayaml::Tag::new("tag:example.com,2000:", "x"));
+        assert_eq!(tagged.tag, Tag::new("tag:example.com,2000:", "x"));
     }
 }
 
@@ -1094,14 +1090,14 @@ fn a_handle_expanding_to_a_core_name_is_that_core_tag() {
             );
         }
     }
-    let tag = ayaml::Tag::new("tag:yaml.org,2002:s", "tr");
+    let tag = Tag::new("tag:yaml.org,2002:s", "tr");
     assert!(tag.is_core());
     assert_eq!((tag.handle(), tag.suffix()), ("tag:yaml.org,2002:", "str"));
-    assert_eq!(tag, ayaml::Tag::core("str"));
+    assert_eq!(tag, Tag::core("str"));
     // Near the core prefix isn't the core prefix.
-    assert!(!ayaml::Tag::new("tag:yaml.org,", "2003:str").is_core());
-    assert!(!ayaml::Tag::new("tag:", "example.com:x").is_core());
-    assert_eq!(ayaml::Tag::new("", "!x"), ayaml::Tag::local("x"));
+    assert!(!Tag::new("tag:yaml.org,", "2003:str").is_core());
+    assert!(!Tag::new("tag:", "example.com:x").is_core());
+    assert_eq!(Tag::new("", "!x"), Tag::local("x"));
 }
 
 #[test]
@@ -1109,11 +1105,11 @@ fn tag_handles_count_against_their_limit_at_each_use() {
     let prefix = "tag:e.com,2000:";
     let tags = |count: usize| format!("%TAG !e! {prefix}\n---\n{}", "- !e!x a\n".repeat(count));
     let at_most = |bytes: usize| Limits::default().with_max_tag_expansion_bytes(bytes);
-    let limit_of = |error: ayaml::Error| {
+    let limit_of = |error: Error| {
         assert_eq!(error.kind(), ErrorKind::Limit, "{error}");
         assert!(error.span().is_some(), "{error}");
         let limit = error.limit().expect("a limit");
-        assert_eq!(limit.kind(), ayaml::LimitKind::TagExpansion);
+        assert_eq!(limit.kind(), LimitKind::TagExpansion);
         (limit.limit(), limit.observed())
     };
     let over = |input: &str, limits: &Limits| {
@@ -1162,7 +1158,7 @@ fn compat_reports_a_scanner_error_as_itself() {
         ("!~!&-*-", "undefined tag handle"),
     ] {
         let error = ayaml::compat::from_str::<Value>(input).expect_err(input);
-        assert_eq!(error.kind(), ayaml::ErrorKind::Scanner, "{input:?}");
+        assert_eq!(error.kind(), ErrorKind::Scanner, "{input:?}");
         assert!(error.message().contains(message), "{input:?}: {error}");
     }
 }
@@ -1194,7 +1190,7 @@ fn an_alias_is_charged_for_the_tags_it_copies() {
         .map(|result| result.expect_err(&input))
         {
             let limit = error.limit().expect("a limit");
-            assert_eq!(limit.kind(), ayaml::LimitKind::AliasExpansion, "{error}");
+            assert_eq!(limit.kind(), LimitKind::AliasExpansion, "{error}");
             assert!(limit.observed() > 1_000, "{error}");
         }
         ayaml::parse_value(&input).expect("the default leaves room for this");

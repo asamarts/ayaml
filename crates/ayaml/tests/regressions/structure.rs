@@ -1,3 +1,8 @@
+#![allow(
+    clippy::literal_string_with_formatting_args,
+    reason = "test fixtures favor compact setup, generated inputs, and literal YAML braces"
+)]
+
 use super::*;
 
 /// A plain scalar must not continue into the next entry of a compact
@@ -551,10 +556,7 @@ fn implicit_keys_are_at_most_1024_characters() {
     rejects(&format!("{long}: v\n"));
     rejects(&format!("{} : v\n", "k".repeat(1024)));
     rejects(&format!("- {long}: v\n"));
-    assert_eq!(
-        parse(&format!("[{fits}: v]\n")),
-        json!([{ fits.clone(): "v" }])
-    );
+    assert_eq!(parse(&format!("[{fits}: v]\n")), json!([{ fits: "v" }]));
     rejects(&format!("[{long}: v]\n"));
     assert_eq!(parse(&format!("{{{long}: v}}\n")), json!({ long: "v" }));
 }
