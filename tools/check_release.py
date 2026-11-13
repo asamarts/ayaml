@@ -46,7 +46,7 @@ REPOSITORY = "asamarts/ayaml"
 WORKFLOW = ".github/workflows/release.yml"
 ISSUER = "https://token.actions.githubusercontent.com"
 # What the package holds from outside its directory, by packaged name.
-FROM_WORKSPACE = {"README.md": "README.md", "CHANGELOG.md": "CHANGELOG.md"}
+FROM_WORKSPACE = {"README.md": "README.md"}
 # What cargo writes rather than copies. The manifest it copies is packaged as Cargo.toml.orig.
 GENERATED = {".cargo_vcs_info.json", "Cargo.toml", "Cargo.lock"}
 TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
@@ -72,6 +72,13 @@ def git_blob(root: Path, commit: str, path: str) -> bytes:
     if done.returncode != 0:
         raise Refused(f"{path} isn't in {commit}")
     return done.stdout
+def git_has_path(root: Path, commit: str, path: str) -> bool:
+    """Whether COMMIT's tree contains PATH."""
+    done = subprocess.run(
+        ["git", "-C", str(root), "cat-file", "-e", f"{commit}:{path}"],
+        capture_output=True,
+    )
+    return done.returncode == 0
 
 
 def package_version(root: Path) -> str:
@@ -166,14 +173,19 @@ def check_package(root: Path, crate_path: Path, commit: str) -> str:
     manifest = document["package"]
     if (manifest.get("name"), manifest.get("version")) != (PACKAGE, version):
         raise Refused(f"the packaged manifest names {manifest.get('name')} {manifest.get('version')}")
-    dependencies = document.get("dependencies", {})
-    for dependency in ("indexmap", "serde"):
-        requirement = dependencies.get(dependency, {}).get("version")
-        if not isinstance(requirement, str) or requirement.startswith("="):
-            raise Refused(f"the packaged manifest doesn't give {dependency} a caret requirement")
-    docs = manifest.get("metadata", {}).get("docs", {}).get("rs", {})
-    if "libyaml-compat" not in docs.get("features", []):
-        raise Refused("the packaged manifest doesn't document libyaml-compat on docs.rs")
+    # Packages built after the self-contained package layout carry their own
+    # changelog in the crate tree. Older published tags predate it, and their
+    # packages remain valid release evidence for a rehearsal.
+    new_layout = git_has_path(root, commit, f"{PACKAGE_DIR}/CHANGELOG.md")
+    if new_layout:
+        dependencies = document.get("dependencies", {})
+        for dependency in ("indexmap", "serde"):
+            requirement = dependencies.get(dependency, {}).get("version")
+            if not isinstance(requirement, str) or requirement.startswith("="):
+                raise Refused(f"the packaged manifest doesn't give {dependency} a caret requirement")
+        docs = manifest.get("metadata", {}).get("docs", {}).get("rs", {})
+        if "libyaml-compat" not in docs.get("features", []):
+            raise Refused("the packaged manifest doesn't document libyaml-compat on docs.rs")
     expected: dict[str, bytes] = {}
     listing = git(root, "ls-tree", "-r", "--full-tree", commit, "--", PACKAGE_DIR)
     for line in listing.splitlines():
@@ -185,6 +197,8 @@ def check_package(root: Path, crate_path: Path, commit: str) -> str:
         expected["Cargo.toml.orig" if inner == "Cargo.toml" else inner] = git_blob(root, commit, path)
     for packaged, source in FROM_WORKSPACE.items():
         expected[packaged] = git_blob(root, commit, source)
+    if new_layout:
+        expected["CHANGELOG.md"] = git_blob(root, commit, "CHANGELOG.md")
     copied = set(files) - GENERATED
     problems = [f"missing {path}" for path in sorted(expected.keys() - copied)]
     problems += [f"not in {commit}: {path}" for path in sorted(copied - expected.keys())]
