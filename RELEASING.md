@@ -14,8 +14,8 @@ could publish them still exist until step 3 of the one-time setup revokes them.
    section headed `## [VERSION] — YYYY-MM-DD`.
 3. **Package.** `cargo package`, with the toolchain that `RELEASE_TOOLCHAIN` pins, and then
    `tools/check_release.py package`. The package must hold exactly the commit's files under
-   `crates/ayaml`, the workspace `README.md`, and what cargo generates, and its
-   `.cargo_vcs_info.json` must name the commit and no dirty state.
+   `crates/ayaml`, the workspace `README.md` and `CHANGELOG.md`, and what cargo generates,
+   and its `.cargo_vcs_info.json` must name the commit and no dirty state.
 4. **Publish.** Only for a tag pushed to `asamarts/ayaml`, in the `release` environment.
    The job packages the tag again and checks that the package's digest is step 3's.
    crates.io Trusted Publishing then mints a token that lasts minutes and is revoked when the
