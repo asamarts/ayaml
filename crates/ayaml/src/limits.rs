@@ -25,7 +25,7 @@ pub const MAX_DEPTH: usize = 128;
 /// they fit a 2 MiB thread, the default for spawned and test threads, in
 /// debug and release builds. The tightest paths measured, `from_value`,
 /// `to_value`, and `to_string` over nested flow mappings with tags in a debug
-/// build, need about 1.6 MiB at this depth, so 1.5 MiB overflows.
+/// build, need about 1.8 MiB at this depth, so 1.5 MiB overflows.
 pub const MAX_DEPTH_CAP: usize = MAX_DEPTH;
 /// Fixed alias-expansion allowance.
 pub const MAX_ALIAS_EXPANSION_BYTES: usize = 256 * 1024 * 1024;

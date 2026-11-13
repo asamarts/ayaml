@@ -28,8 +28,8 @@ normal dependency graph.
 - CI runs an unsafe census with `cargo-geiger`, and `tools/check_unsafe_census.py` holds the
   allowlist. It fails if ayaml has any unsafe code or stops forbidding it, or if any other crate
   in the census has unsafe code.
-- Dev-only differential, property-test, fuzzing, and benchmark dependencies are
-  not part of the shipped graph.
+- Dev-only property-test, fuzzing, allocation, and benchmark dependencies are not
+  part of the shipped graph.
 
 `cargo tree -p ayaml -e normal,build --all-features` is the shipped graph.
 `tools/check_deps.py` reads it, and any crate not on its allowlists fails, including
@@ -37,9 +37,9 @@ a YAML parser.
 
 ## Build and test dependencies
 
-The workspace uses dev-only crates for conformance, differential testing,
-allocation measurement, and benchmarks. These are not reachable from the
-normal runtime graph.
+The workspace uses dev-only crates for conformance, property testing,
+fuzzing, allocation measurement, and benchmarks. These are not reachable
+from the normal runtime graph.
 
 ## Minimum supported Rust version
 

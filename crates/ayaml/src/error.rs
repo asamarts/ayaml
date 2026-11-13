@@ -1,4 +1,4 @@
-//! Structured, span-carrying errors.
+//! Structured errors with a stable kind and, when the source provides one, a span.
 
 use std::error::Error as StdError;
 use std::fmt;

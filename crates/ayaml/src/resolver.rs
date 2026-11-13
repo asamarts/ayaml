@@ -1,7 +1,8 @@
-//! Scalar resolution for the compatibility profile.
+//! Scalar resolution for YAML 1.2.2 and the compatibility profile.
 //!
 //! Parser events retain raw scalar text, style, tag, anchor, and span; this
-//! module turns one scalar into a `Value` without losing that metadata.
+//! module resolves one scalar to a `Value`, and the event keeps the rest of
+//! its metadata.
 
 use crate::error::{Error, ErrorKind};
 use crate::event::ScalarStyle;
@@ -9,7 +10,7 @@ use crate::number::Number;
 use crate::tag::{Tag, TaggedValue};
 use crate::value::Value;
 
-/// Resolve a scalar under the compatibility profile.
+/// Resolve a scalar under the active parsing profile.
 pub(crate) fn resolve_scalar(
     text: &str,
     style: ScalarStyle,

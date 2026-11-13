@@ -1,12 +1,12 @@
-# Synthetic compatibility fixtures
+# Compatibility fixtures
 
-These are anonymized synthetic compatibility fixtures. They exercise the YAML
-constructs, scalar styles, tags, anchors, aliases, merge keys, duplicate keys,
-multi-document streams, and malformed flow syntax that the compatibility
-profile must handle.
+These fixtures are derived from a real-world toolchain-pinning ruleset and
+anonymized. They exercise the YAML constructs, scalar styles, tags, anchors,
+aliases, merge keys, duplicate keys, multi-document streams, and malformed flow
+syntax that the compatibility profile must handle.
 
-`toolchain-pins.yml` is a synthetic ruleset with cross-file checks for Node.js,
-Rust, Python, Ruby, JVM, and .NET toolchain pins. It covers block and flow
+`toolchain-pins.yml` is a reduced, anonymized ruleset with cross-file checks for
+Node.js, Rust, Python, Ruby, JVM, and .NET toolchain pins. It covers block and flow
 collections, tagged scalars, regexes, JSON/YAML extraction selectors, nested
 conditions, and cross-file rules. It carries no external attribution.
 

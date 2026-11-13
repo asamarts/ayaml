@@ -36,6 +36,11 @@ revisions.
 
 ## Running them
 
+The timing harness is `crates/ayaml-bench/benches/throughput.rs`. Allocation budgets
+come from `tools/check_alloc_corpus.sh` and its counting allocator,
+`fuzz/src/bin/memcount.rs`; instruction counts use `tools/check_instructions.py`
+with `tools/instruction-probe.rs`.
+
 ```sh
 cargo bench -p ayaml-bench                     # timing, with criterion
 tools/check_alloc_corpus.sh                    # allocation budgets

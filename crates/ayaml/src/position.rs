@@ -1,8 +1,9 @@
 //! Byte-offset to line/column mapping for scanner positions.
 //!
-//! The mapping is built once per input. It understands LF, CR, CRLF, and a
-//! UTF-8 BOM at the start of a line, which takes up no column. NEL (U+0085),
-//! LS (U+2028), and PS (U+2029) are content in YAML 1.2, not line breaks.
+//! The scanner builds one index per input. It understands LF, CR, CRLF, and a
+//! UTF-8 BOM at the start of a line; in default mode the BOM takes up no column,
+//! while compatibility mode counts one on a later line. NEL (U+0085), LS
+//! (U+2028), and PS (U+2029) are content in YAML 1.2, not line breaks.
 
 use std::cell::Cell;
 
