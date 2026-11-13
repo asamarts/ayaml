@@ -147,11 +147,14 @@ See [docs/compatibility.md](docs/compatibility.md) for the full profile.
 
 ## Limits
 
-Every entry point accepts a `Limits` value. The defaults allow 32 MiB of input,
-depth 128, 10,000 documents per stream, and a byte-weighted alias budget; the
-single-document APIs still reject a second document. Exceeding a limit returns
-`ErrorKind::Limit`, and `Error::limit()` exposes the limit kind, ceiling, and
-observed value. Limit errors carry source spans where the input provides one.
+`Limits` can be passed to the parser and document readers, the borrowed typed
+decoder, the `Deserializer`, and the emitters that support an explicit limit, through
+their `_with_limits` forms. The convenience `from_str` and `from_slice` typed readers
+use the defaults. The defaults allow 32 MiB of input, depth 128, 10,000 documents per
+stream, and a byte-weighted alias budget; the single-document APIs still reject a
+second document. Exceeding a limit returns `ErrorKind::Limit`, and `Error::limit()`
+exposes the limit kind, ceiling, and observed value. Limit errors carry source spans
+where the input provides one.
 
 See [docs/limits.md](docs/limits.md) for defaults, boundaries, and the alias
 budget formula.

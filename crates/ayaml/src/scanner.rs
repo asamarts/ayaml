@@ -1,7 +1,9 @@
 //! Lexical scanner.
 //!
-//! This is an iterative UTF-8 scanner that produces spanned tokens. The token
-//! layer is deliberately kept below the public API.
+//! This is an iterative UTF-8 scanner that produces spanned tokens. The stable
+//! public API exposes events, values, typed decoding, and text emission; the
+//! token layer is internal, with an unstable counting hook under
+//! `bench-internals`.
 
 use std::borrow::Cow;
 use std::cell::Cell;
