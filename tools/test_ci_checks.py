@@ -905,7 +905,7 @@ class GitHubRelease(unittest.TestCase):
 class Release(unittest.TestCase):
     """tools/check_release.py, against a scratch repository laid out as this one is."""
 
-    MANIFEST = b'[package]\nname = "ayaml"\nversion.workspace = true\n'
+    MANIFEST = b'[package]\nname = "ayaml"\nversion.workspace = true\n\n[dependencies.indexmap]\nversion = "2.0.0"\n\n[dependencies.serde]\nversion = "1.0.220"\n\n[package.metadata.docs.rs]\nfeatures = ["libyaml-compat"]\n'
     CHANGELOG = "# Changelog\n\n## [0.2.0] \u2014 2026-11-07\n\n- A change.\n\n## [0.1.0] - 2026-01-01\n\n- First.\n"
 
     def setUp(self) -> None:
@@ -918,6 +918,7 @@ class Release(unittest.TestCase):
         (self.root / "crates/ayaml/src/lib.rs").write_text("//! ayaml\n")
         (self.root / "README.md").write_text("# ayaml\n")
         (self.root / "CHANGELOG.md").write_text(self.CHANGELOG, encoding="utf-8")
+        (self.root / "crates/ayaml/CHANGELOG.md").write_text(self.CHANGELOG, encoding="utf-8")
         git(self.root.parent, "init", "-q", "-b", "main", str(self.root))
         for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("tag.gpgsign", "false"), ("commit.gpgsign", "false")]:
             git(self.root, "config", key, value)
@@ -985,10 +986,11 @@ class Release(unittest.TestCase):
         """The files cargo would package for the commit, with CHANGES: a path to None removes it."""
         files = {
             ".cargo_vcs_info.json": json.dumps({"git": {"sha1": self.commit}, "path_in_vcs": "crates/ayaml"}).encode(),
-            "Cargo.toml": b'[package]\nname = "ayaml"\nversion = "0.2.0"\n',
+            "Cargo.toml": b'[package]\nname = "ayaml"\nversion = "0.2.0"\n\n[dependencies.indexmap]\nversion = "2.0.0"\n\n[dependencies.serde]\nversion = "1.0.220"\n\n[package.metadata.docs.rs]\nfeatures = ["libyaml-compat"]\n',
             "Cargo.toml.orig": self.MANIFEST,
             "Cargo.lock": b"# lock\n",
             "README.md": b"# ayaml\n",
+            "CHANGELOG.md": self.CHANGELOG.encode(),
             "src/lib.rs": b"//! ayaml\n",
         }
         for name, data in (changes or {}).items():
@@ -1015,7 +1017,13 @@ class Release(unittest.TestCase):
         self.refused(lambda: self.check_package(self.packaged({"src/lib.rs": None})), "missing src/lib.rs")
         self.refused(lambda: self.check_package(self.packaged({"src/lib.rs": b"changed"})), "differs from")
         self.refused(lambda: self.check_package(self.packaged({"README.md": b"other"})), "differs from")
+        self.refused(lambda: self.check_package(self.packaged({"CHANGELOG.md": b"other"})), "differs from")
+        self.refused(lambda: self.check_package(self.packaged({"CHANGELOG.md": None})), "missing CHANGELOG.md")
         self.refused(lambda: self.check_package(self.packaged({"Cargo.toml.orig": b"x"})), "differs from")
+        no_docs = self.packaged({"Cargo.toml": b'[package]\nname = "ayaml"\nversion = "0.2.0"\n\n[dependencies.indexmap]\nversion = "2.0.0"\n\n[dependencies.serde]\nversion = "1.0.220"\n'})
+        self.refused(lambda: self.check_package(no_docs), "doesn't document libyaml-compat")
+        exact = self.packaged({"Cargo.toml": b'[package]\nname = "ayaml"\nversion = "0.2.0"\n\n[dependencies.indexmap]\nversion = "=2.0.0"\n\n[dependencies.serde]\nversion = "1.0.220"\n\n[package.metadata.docs.rs]\nfeatures = ["libyaml-compat"]\n'})
+        self.refused(lambda: self.check_package(exact), "doesn't give indexmap a caret requirement")
 
     def test_a_package_naming_another_commit_or_path_is_refused(self) -> None:
         other = json.dumps({"git": {"sha1": "0" * 40}, "path_in_vcs": "crates/ayaml"}).encode()

@@ -40,8 +40,9 @@ fn bless_requested(value: Option<&std::ffi::OsStr>) -> bool {
     }
 }
 
-fn fixture_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/real-world")
+fn fixture_dir() -> Option<PathBuf> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/real-world");
+    dir.is_dir().then_some(dir)
 }
 
 fn limits() -> ayaml::Limits {
@@ -54,8 +55,7 @@ fn json(documents: &impl serde::Serialize) -> String {
     text
 }
 
-fn check(name: &str) {
-    let dir = fixture_dir();
+fn check(name: &str, dir: &Path) {
     let text = std::fs::read_to_string(dir.join(format!("{name}.yml"))).expect("fixture");
     let documents = ayaml::parse_documents_with_limits(&text, &limits())
         .unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -113,8 +113,11 @@ fn check(name: &str) {
 
 #[test]
 fn real_world_fixtures() {
+    let Some(dir) = fixture_dir() else {
+        return;
+    };
     for name in FIXTURES {
-        check(name);
+        check(name, &dir);
     }
 }
 
@@ -133,7 +136,10 @@ fn bless_takes_only_its_documented_values() {
 /// Every fixture file is listed, so none is skipped silently.
 #[test]
 fn every_fixture_is_listed() {
-    let mut names: Vec<String> = std::fs::read_dir(fixture_dir())
+    let Some(dir) = fixture_dir() else {
+        return;
+    };
+    let mut names: Vec<String> = std::fs::read_dir(dir)
         .expect("fixture dir")
         .filter_map(|entry| {
             let path = entry.expect("entry").path();

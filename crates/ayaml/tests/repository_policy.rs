@@ -36,6 +36,17 @@ fn strings(value: &Value) -> Vec<&str> {
 }
 
 #[test]
+fn the_packaged_changelog_matches_the_workspace_changelog() {
+    let Some(root) = repository_root() else {
+        return;
+    };
+    assert_eq!(
+        read(&root, "CHANGELOG.md"),
+        read(&root, "crates/ayaml/CHANGELOG.md")
+    );
+}
+
+#[test]
 fn the_repository_lint_policy_is_the_one_the_plan_requires() {
     let Some(root) = repository_root() else {
         return;

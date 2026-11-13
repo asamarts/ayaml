@@ -20,8 +20,8 @@ keywords = ["yaml", "parser", "serde", "serialization", "no-unsafe"]
 categories = ["parser-implementations", "encoding", "development-tools"]
 
 [workspace.dependencies]
-indexmap = "=2.14.2"
-serde = "=1.0.229"
+indexmap = "2.0.0"
+serde = "1.0.220"
 serde_json = "=1.0.154"
 proptest = "=1.10.0"
 criterion = "=0.7.0"

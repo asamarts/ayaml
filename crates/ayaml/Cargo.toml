@@ -12,6 +12,10 @@ keywords.workspace = true
 categories.workspace = true
 description = "A safe, pure-Rust YAML parser, event stream, value model, Serde layer, and emitter"
 
+[package.metadata.docs.rs]
+features = ["libyaml-compat"]
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 bench-internals = []
 libyaml-compat = []
