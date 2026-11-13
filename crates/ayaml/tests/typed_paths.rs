@@ -415,6 +415,23 @@ fn an_alias_reads_as_the_place_it_is_used() {
     assert_path::<Keys>("k: &k a\n*k : x\n", "a", (2, 6));
 }
 
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_typed_readers_accept_explicit_limits() {
+    let limits = ayaml::Limits::default();
+    assert_eq!(
+        ayaml::compat::from_str_with_limits::<Value>("a: 1\n", &limits)
+            .expect("compat from_str_with_limits"),
+        ayaml::parse_value("a: 1\n").expect("value")
+    );
+    let tight = ayaml::Limits::default().with_max_events(1);
+    assert!(ayaml::compat::from_str_with_limits::<Value>("a: 1\n", &tight).is_err());
+    assert!(
+        ayaml::compat::from_str_seed_with_limits("a: 1\n", &limits, PhantomData::<Value>,).is_ok()
+    );
+    assert!(ayaml::compat::deserialize_any_with_limits("a: 1\n", &limits, IgnoredAny).is_ok());
+}
+
 #[test]
 fn a_deep_path_keeps_its_deepest_steps() {
     #[derive(Debug, Deserialize)]

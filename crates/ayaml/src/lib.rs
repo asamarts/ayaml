@@ -237,9 +237,23 @@ pub mod compat {
         input: &'de str,
         seed: T,
     ) -> Result<T::Value, Error> {
+        from_str_seed_with_limits(input, &crate::Limits::default(), seed)
+    }
+
+    /// Deserialize one document with a caller-supplied seed and explicit limits
+    /// under the compatibility policies.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+    pub fn from_str_seed_with_limits<'de, T: serde::de::DeserializeSeed<'de>>(
+        input: &'de str,
+        limits: &crate::Limits,
+        seed: T,
+    ) -> Result<T::Value, Error> {
         crate::typed::from_str_seed_with_options(
             input,
-            &crate::Limits::default(),
+            limits,
             crate::typed::NodeOptions {
                 allow_duplicates: true,
                 compat_flow: true,
@@ -256,9 +270,22 @@ pub mod compat {
     ///
     /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
     pub fn from_str<'de, T: serde::Deserialize<'de>>(input: &'de str) -> Result<T, Error> {
+        from_str_with_limits(input, &crate::Limits::default())
+    }
+
+    /// Deserialize a typed value with compatibility policies and explicit limits,
+    /// using borrowed scalar text where possible.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+    pub fn from_str_with_limits<'de, T: serde::Deserialize<'de>>(
+        input: &'de str,
+        limits: &crate::Limits,
+    ) -> Result<T, Error> {
         crate::typed::from_str_with_options(
             input,
-            &crate::Limits::default(),
+            limits,
             crate::typed::NodeOptions {
                 allow_duplicates: true,
                 compat_flow: true,
@@ -291,9 +318,23 @@ pub mod compat {
         input: &'de str,
         visitor: V,
     ) -> Result<V::Value, Error> {
+        deserialize_any_with_limits(input, &crate::Limits::default(), visitor)
+    }
+
+    /// Deserialize one document with a visitor, explicit limits, and compatibility
+    /// policies.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+    pub fn deserialize_any_with_limits<'de, V: Visitor<'de>>(
+        input: &'de str,
+        limits: &crate::Limits,
+        visitor: V,
+    ) -> Result<V::Value, Error> {
         crate::typed::from_str_visitor(
             input,
-            &crate::Limits::default(),
+            limits,
             crate::typed::NodeOptions {
                 allow_duplicates: true,
                 compat_flow: true,

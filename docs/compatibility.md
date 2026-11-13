@@ -151,7 +151,8 @@ assert_eq!(value["key"].as_str(), Some("value"));
 The compatibility module reads YAML the way a libyaml-compatible stack does, for
 callers that need it, apart from the differences listed below. Enabling the
 feature does not change the root parsing functions; choose the compatibility
-entry points explicitly.
+entry points explicitly. Its typed and visitor readers also provide
+`_with_limits` forms for callers that need their own budgets.
 
 libyaml counts a column for a byte-order mark at the start of a line, so in
 compatibility mode a `---` right after one, or a `...` followed by more text on
