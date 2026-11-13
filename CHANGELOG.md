@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The compatibility entry points now have `_with_limits` forms for typed decoding, seeded
+  decoding, and visitor decoding, so a compatibility reader can apply its own budgets.
 - The published crate now uses caret requirements for `serde` and `indexmap`, includes its
   changelog, carries docs.rs feature metadata for `libyaml-compat`, and can run its tests from
   the unpacked `.crate`.
