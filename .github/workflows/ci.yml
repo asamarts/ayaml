@@ -173,6 +173,16 @@ jobs:
         run: cargo package -p ayaml --locked
       - name: The package holds the commit's files
         run: python3 tools/check_release.py package target/package/ayaml-*.crate "$(git rev-parse HEAD)"
+      - name: Test the unpacked package
+        run: |
+          set -e
+          tmp="${RUNNER_TEMP}/ayaml-package-test"
+          rm -rf "$tmp"
+          mkdir -p "$tmp"
+          tar -xzf target/package/ayaml-*.crate -C "$tmp"
+          crate="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d -name 'ayaml-*' | head -n1)"
+          test -n "$crate"
+          cargo test --manifest-path "$crate/Cargo.toml" --all-features --locked
       - name: Downstream smoke
         run: |
           set -e

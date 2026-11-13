@@ -37,7 +37,7 @@ a YAML parser.
 
 ## Build and test dependencies
 
-The workspace uses dev-only crates for conformance, property testing,
+The repository uses dev-only crates for conformance, property testing,
 fuzzing, allocation measurement, and benchmarks. These are not reachable
 from the normal runtime graph.
 

@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The published crate now uses caret requirements for `serde` and `indexmap`, includes its
+  changelog, carries docs.rs feature metadata for `libyaml-compat`, and can run its tests from
+  the unpacked `.crate`.
 - Typed `from_str` now scans each input once for line starts and non-printable characters, skips a
   temporary `Value` for string scalars, and reserves collection capacity from Serde size hints.
   Its default and compatibility readers still return the same values and report the same errors.

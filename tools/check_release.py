@@ -7,7 +7,7 @@ usage:
       origin/main; the package's version is TAG's; and CHANGELOG.md has a section for it.
   tools/check_release.py package CRATE COMMIT
       CRATE, as `cargo package` wrote it, holds exactly COMMIT's files of the package's
-      directory, the workspace README, and what cargo generates, and it names COMMIT.
+      directory, the workspace README and CHANGELOG, and what cargo generates, and it names COMMIT.
   tools/check_release.py published VERSION
       Exits 0 if crates.io has VERSION, 1 if it doesn't, and 2 for any other answer, an error
       in this script included.
@@ -46,7 +46,7 @@ REPOSITORY = "asamarts/ayaml"
 WORKFLOW = ".github/workflows/release.yml"
 ISSUER = "https://token.actions.githubusercontent.com"
 # What the package holds from outside its directory, by packaged name.
-FROM_WORKSPACE = {"README.md": "README.md"}
+FROM_WORKSPACE = {"README.md": "README.md", "CHANGELOG.md": "CHANGELOG.md"}
 # What cargo writes rather than copies. The manifest it copies is packaged as Cargo.toml.orig.
 GENERATED = {".cargo_vcs_info.json", "Cargo.toml", "Cargo.lock"}
 TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
@@ -162,9 +162,18 @@ def check_package(root: Path, crate_path: Path, commit: str) -> str:
     wanted = {"git": {"sha1": commit}, "path_in_vcs": PACKAGE_DIR}
     if vcs != wanted:
         raise Refused(f".cargo_vcs_info.json is {vcs}, not {wanted}")
-    manifest = tomllib.loads(files["Cargo.toml"].decode("utf-8"))["package"]
+    document = tomllib.loads(files["Cargo.toml"].decode("utf-8"))
+    manifest = document["package"]
     if (manifest.get("name"), manifest.get("version")) != (PACKAGE, version):
         raise Refused(f"the packaged manifest names {manifest.get('name')} {manifest.get('version')}")
+    dependencies = document.get("dependencies", {})
+    for dependency in ("indexmap", "serde"):
+        requirement = dependencies.get(dependency, {}).get("version")
+        if not isinstance(requirement, str) or requirement.startswith("="):
+            raise Refused(f"the packaged manifest doesn't give {dependency} a caret requirement")
+    docs = manifest.get("metadata", {}).get("docs", {}).get("rs", {})
+    if "libyaml-compat" not in docs.get("features", []):
+        raise Refused("the packaged manifest doesn't document libyaml-compat on docs.rs")
     expected: dict[str, bytes] = {}
     listing = git(root, "ls-tree", "-r", "--full-tree", commit, "--", PACKAGE_DIR)
     for line in listing.splitlines():

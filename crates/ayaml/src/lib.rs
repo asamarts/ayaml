@@ -1,3 +1,5 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 //! ayaml is a safe, pure-Rust YAML 1.2.2 parser, event stream, value model,
 //! Serde implementation, and emitter.
 //!
@@ -171,6 +173,7 @@ pub use serde_impl::{from_value, from_value_seed, to_value};
 /// behavior for callers that need it, including scanner quirks that the
 /// default YAML 1.2.2 parser deliberately does not adopt.
 #[cfg(feature = "libyaml-compat")]
+#[cfg_attr(docsrs, doc(cfg(feature = "libyaml-compat")))]
 pub mod compat {
     use crate::error::{Code, Error, ErrorKind};
     use crate::limits::LimitKind;
@@ -307,6 +310,7 @@ pub mod compat {
 /// documentation and exists only for ayaml's benchmark and
 /// conformance harnesses. It may change or disappear in any release.
 #[cfg(feature = "bench-internals")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bench-internals")))]
 #[doc(hidden)]
 pub mod internals {
     use crate::error::Error;
