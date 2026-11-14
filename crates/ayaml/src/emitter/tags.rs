@@ -113,7 +113,7 @@ pub(crate) struct TagDirectives {
     /// The handles added so far, kept apart so that a document that adds none allocates nothing.
     added: Option<Box<AddedHandles>>,
     /// Named handles that the document's own directives declare.
-    declared: Vec<String>,
+    declared: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Default)]
@@ -131,7 +131,7 @@ impl TagDirectives {
     /// No directives yet, in a document whose own directives declare `declared`.
     pub(crate) fn declaring(declared: Vec<String>) -> Self {
         Self {
-            declared,
+            declared: declared.into_iter().collect(),
             ..Self::default()
         }
     }

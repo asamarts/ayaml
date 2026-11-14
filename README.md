@@ -8,7 +8,7 @@ unsafe Rust or a native YAML dependency. One scanner and grammar back the
 spanned event stream, the generic value model, typed Serde decoding, and the
 emitter, so every surface observes the same syntax and resolution rules.
 
-The current patch release is `0.1.1`. The crate is UTF-8 only, has an MSRV of
+The current patch release is `0.1.2`. The crate is UTF-8 only, has an MSRV of
 Rust 1.88, and is dual-licensed under MIT or Apache-2.0.
 
 ## Highlights
@@ -27,7 +27,7 @@ Rust 1.88, and is dual-licensed under MIT or Apache-2.0.
 - **Deterministic emitter** for values, Serde types, event streams, and
   document streams, with per-node styles and output limits.
 - **Native resource limits** for input size, depth, documents, scalars,
-  collections, events, anchors, aliases, alias expansion, and output.
+  collections, events, anchors, aliases, alias expansion, tag expansion, and output.
 - **No `unsafe`** in the crates ayaml publishes and no third-party YAML parser in
   the runtime dependency graph.
 - **Optional libyaml-compatible mode** behind the additive `libyaml-compat`
@@ -37,14 +37,14 @@ Rust 1.88, and is dual-licensed under MIT or Apache-2.0.
 
 ```toml
 [dependencies]
-ayaml = "0.1.1"
+ayaml = "0.1.2"
 ```
 
 For typed decoding, enable Serde's derive feature in your own crate:
 
 ```toml
 [dependencies]
-ayaml = "0.1.1"
+ayaml = "0.1.2"
 serde = { version = "1", features = ["derive"] }
 ```
 
@@ -141,9 +141,9 @@ The `libyaml-compat` feature adds `ayaml::compat` for callers that need the
 observable behavior of a libyaml-compatible stack. It is additive: enabling it
 does not change the root parsing functions. The deliberate compatibility
 deviations are listed in
-[`tests/data/yaml-test-suite-deviations.txt`](tests/data/yaml-test-suite-deviations.txt).
+[`tests/data/yaml-test-suite-deviations.txt`](https://github.com/asamarts/ayaml/blob/main/tests/data/yaml-test-suite-deviations.txt).
 
-See [docs/compatibility.md](docs/compatibility.md) for the full profile.
+See [docs/compatibility.md](https://github.com/asamarts/ayaml/blob/main/docs/compatibility.md) for the full profile.
 
 ## Limits
 
@@ -156,7 +156,7 @@ second document. Exceeding a limit returns `ErrorKind::Limit`, and `Error::limit
 exposes the limit kind, ceiling, and observed value. Limit errors carry source spans
 where the input provides one.
 
-See [docs/limits.md](docs/limits.md) for defaults, boundaries, and the alias
+See [docs/limits.md](https://github.com/asamarts/ayaml/blob/main/docs/limits.md) for defaults, boundaries, and the alias
 budget formula.
 
 ## Feature flags
@@ -168,12 +168,12 @@ budget formula.
 
 ## Documentation
 
-- [Design](docs/design.md)
-- [Compatibility profile](docs/compatibility.md)
-- [Resource limits](docs/limits.md)
-- [Dependency policy](docs/dependencies.md)
-- [Benchmark methodology](docs/benchmarks.md)
-- [Changelog](CHANGELOG.md)
+- [Design](https://github.com/asamarts/ayaml/blob/main/docs/design.md)
+- [Compatibility profile](https://github.com/asamarts/ayaml/blob/main/docs/compatibility.md)
+- [Resource limits](https://github.com/asamarts/ayaml/blob/main/docs/limits.md)
+- [Dependency policy](https://github.com/asamarts/ayaml/blob/main/docs/dependencies.md)
+- [Benchmark methodology](https://github.com/asamarts/ayaml/blob/main/docs/benchmarks.md)
+- [Changelog](https://github.com/asamarts/ayaml/blob/main/CHANGELOG.md)
 
 ## Minimum supported Rust version
 

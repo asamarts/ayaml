@@ -127,8 +127,9 @@ line separator, and paragraph separator are content under YAML 1.2.2. A UTF-8
 byte-order mark is handled according to the specification: it may start any
 document prefix, and it takes up no column, so a document marker or directive
 right after one is still a marker or directive. Raw C0 control characters are
-rejected; quoted scalars accept the printable characters that YAML permits,
-including DEL, C1 controls, U+FFFE, and U+FFFF.
+rejected as content; a tab is accepted where YAML uses it as separation.
+Quoted scalars accept the printable characters that YAML permits, including
+DEL, C1 controls, U+FFFE, and U+FFFF.
 
 ## Compatibility mode
 
@@ -136,7 +137,7 @@ The additive `libyaml-compat` feature exposes `ayaml::compat`:
 
 ```toml
 [dependencies]
-ayaml = { version = "0.1.1", features = ["libyaml-compat"] }
+ayaml = { version = "0.1.2", features = ["libyaml-compat"] }
 ```
 
 ```rust

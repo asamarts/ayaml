@@ -14,6 +14,9 @@ fuzz_target!(|data: &[u8]| {
     let borrowed = ayaml::from_str_borrowed::<ayaml::Value>(input);
     match (composed, borrowed) {
         (Ok(composed), Ok(borrowed)) => assert_eq!(composed, borrowed, "input={input:?}"),
+        // A typed map rejects scalar keys whose rendered text collides before a narrower key type
+        // can silently keep only one; the composed value can keep both. This is deliberate.
+        (Ok(_), Err(error)) if error.kind() == ayaml::ErrorKind::DuplicateKey => {}
         (Err(_), Err(_)) => {}
         (composed, borrowed) => {
             panic!("composed {composed:?}, borrowed {borrowed:?}, input={input:?}");
@@ -25,6 +28,8 @@ fuzz_target!(|data: &[u8]| {
     let composed = ayaml::parse_documents_with_limits(input, &limits);
     match (streamed, composed) {
         (Ok(streamed), Ok(composed)) => assert_eq!(streamed, composed, "input={input:?}"),
+        // The same deliberate typed-map duplicate-key difference applies to a stream.
+        (Err(error), Ok(_)) if error.kind() == ayaml::ErrorKind::DuplicateKey => {}
         (Err(_), Err(_)) => {}
         (streamed, composed) => {
             panic!("streamed {streamed:?}, composed {composed:?}, input={input:?}");

@@ -60,6 +60,12 @@ jobs:
         with:
           path: trusted
           persist-credentials: false
+      - name: Check out the leak gate from main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: leak-gate
+          ref: refs/heads/main
+          persist-credentials: false
       - name: Check out the tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -80,6 +86,20 @@ jobs:
           python3 ../trusted/tools/check_release.py tag "$TAG"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Install the leak gate's scanner
+        working-directory: source
+        run: |
+          set -euo pipefail
+          echo "AYAML_GITLEAKS=$(../leak-gate/tools/leak-scan/install-gitleaks.sh "$RUNNER_TEMP/gitleaks")" >> "$GITHUB_ENV"
+      - name: Check the tag message for leaks
+        working-directory: source
+        env:
+          AYAML_LEAK_PATTERNS: ${{ secrets.AYAML_LEAK_PATTERNS }}
+        run: |
+          set -euo pipefail
+          tag_message="$(git for-each-ref --format='%(contents)' "refs/tags/$TAG")"
+          TAG_MESSAGE="$tag_message" TAG_NAME="$TAG" \
+            python3 ../leak-gate/tools/leak-scan/gate.py text TAG_MESSAGE TAG_NAME
       - name: Package
         id: package
         working-directory: source

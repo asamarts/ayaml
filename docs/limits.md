@@ -5,9 +5,9 @@ part of the parser API rather than an optional wrapper.
 
 ## Defaults
 
-`Limits::default()` uses the compatibility profile except that a document
-stream may contain 10,000 documents. `Limits::compat()` uses a one-document
-stream.
+`Limits::default()` allows a stream of up to 10,000 documents. `Limits::compat()` uses
+the same defaults with a one-document stream. It is not the optional `libyaml-compat`
+mode; that mode has its own `ayaml::compat` entry points.
 
 | Limit | Default | Notes |
 | --- | ---: | --- |
@@ -27,7 +27,7 @@ stream.
 
 Limits are inclusive at the accepted boundary. Input size, depth, alias expansion,
 tag expansion, a block scalar's size, and the least node cost have tests just below,
-at, and above their default ceilings. `tests/limit_consistency.rs` covers every limit that a
+at, and above their default ceilings. `crates/ayaml/tests/limit_consistency.rs` covers every limit that a
 reader checks: each case names the least value that accepts its input, and every reader that
 takes limits is asked at that value, one above, and every value below. It covers
 `node_cost_bytes`, whose largest accepted value is the boundary, and

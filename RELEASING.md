@@ -8,7 +8,8 @@ could publish them still exist until step 3 of the one-time setup revokes them.
 ## What the workflow binds together
 
 1. **Gate.** The whole of `ci.yml` runs on the tag's commit, as it does on a pull request.
-2. **Tag.** `tools/check_release.py tag` checks that the tag is annotated and names
+2. **Tag.** The package job scans the annotated tag message and name with the leak gate.
+   `tools/check_release.py tag` checks that the tag is annotated and names
    `vMAJOR.MINOR.PATCH`, that the checkout is that commit and is clean, that the commit is on
    `main`, that the package declares the tag's version, and that `CHANGELOG.md` has a non-empty
    section headed `## [VERSION] — YYYY-MM-DD`.

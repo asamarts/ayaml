@@ -30,6 +30,8 @@
 # are healthy, because GitHub turns their schedules off after 60 days with no activity, and then
 # nothing hosted would report that.
 set -uo pipefail
+# Python checks import helpers; keep bytecode out of the worktree that alint reads.
+export PYTHONDONTWRITEBYTECODE=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 2
@@ -54,7 +56,11 @@ done
 [ "${#jobs[@]}" -eq 0 ] && jobs=("${ALL_JOBS[@]}")
 
 dirty=0
-[ -n "$(git status --porcelain --untracked-files=no)" ] && dirty=1
+[ -n "$(git status --porcelain --untracked-files=all)" ] && dirty=1
+if [ "$release" -eq 1 ] && [ "$dirty" -eq 1 ]; then
+  echo "a release run needs a clean checkout, including untracked files" >&2
+  exit 1
+fi
 
 sha="$(git rev-parse HEAD)"
 short="$(git rev-parse --short HEAD)"
@@ -329,7 +335,6 @@ job_plan() {
 }
 
 job_alint() {
-  local required="alint 0.22.0"
   if ! command -v alint >/dev/null; then
     if [ "$release" -eq 1 ]; then
       step "alint version" sh -c 'echo "alint 0.22.0 is required for a release run" >&2; exit 1'
@@ -377,9 +382,21 @@ job_package() {
   [ "$dirty" -eq 1 ] && allow=(--allow-dirty)
   step "cargo package" cargo package -p ayaml --locked "${allow[@]}"
   # Mirrors: cargo package -p ayaml --locked
-  local crate
-  crate="$(ls -t target/package/ayaml-*.crate 2>/dev/null | head -1)"
-  if [ -z "$crate" ]; then echo "  no packaged crate"; job_failed=1; return; fi
+  if [ "$job_failed" -ne 0 ]; then return; fi
+  local version crate
+  version="$(python3 - <<'PY'
+import tomllib
+from pathlib import Path
+with Path("Cargo.toml").open("rb") as manifest:
+    print(tomllib.load(manifest)["workspace"]["package"]["version"])
+PY
+)"
+  crate="target/package/ayaml-$version.crate"
+  if [ ! -f "$crate" ]; then
+    echo "  cargo package did not write $crate"
+    job_failed=1
+    return
+  fi
   if [ "$dirty" -eq 0 ]; then
     step "the package holds the commit's files" python3 tools/check_release.py package "$crate" "$sha"
     # Mirrors: python3 tools/check_release.py package target/package/ayaml-*.crate "$(git rev-parse HEAD)"

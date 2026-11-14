@@ -1,4 +1,5 @@
 /target/
+__pycache__/
 /CLAUDE.md
 /fuzz/target
 /fuzz/artifacts

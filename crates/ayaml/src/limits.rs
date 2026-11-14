@@ -2,7 +2,8 @@
 //!
 //! The defaults use 32 MiB of input, depth 128, a byte-weighted alias budget,
 //! and a 256-byte node cost estimate. A stream may hold up to 10,000 documents;
-//! the single-document compatibility profile allows one. Limits are inclusive
+//! the single-document profile allows one. This is not the optional
+//! `libyaml-compat` mode. Limits are inclusive
 //! at the accepted boundary, and `max_depth` may not exceed
 //! [`MAX_DEPTH_CAP`].
 
@@ -38,7 +39,7 @@ pub const MAX_TAG_EXPANSION_BYTES: usize = 64 * 1024 * 1024;
 /// Default maximum documents in one stream. Single-document entry
 /// points reject a second document regardless.
 pub const DEFAULT_MAX_DOCUMENTS: usize = 10_000;
-/// Maximum documents in the single-document compatibility profile.
+/// Maximum documents in the single-document profile.
 pub const COMPAT_MAX_DOCUMENTS: usize = 1;
 
 /// The resource that was exhausted.
@@ -187,7 +188,7 @@ pub struct Limits {
 }
 
 impl Default for Limits {
-    /// The compatibility profile with a stream-sized document limit.
+    /// The single-document profile with a stream-sized document limit.
     fn default() -> Self {
         Self {
             max_documents: DEFAULT_MAX_DOCUMENTS,
@@ -197,7 +198,10 @@ impl Default for Limits {
 }
 
 impl Limits {
-    /// The single-document compatibility profile.
+    /// The single-document profile.
+    ///
+    /// This is not the optional `libyaml-compat` mode; it is the default profile with a
+    /// one-document stream limit.
     #[must_use]
     pub const fn compat() -> Self {
         Self {

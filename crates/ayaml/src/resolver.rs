@@ -1,4 +1,4 @@
-//! Scalar resolution for YAML 1.2.2 and the compatibility profile.
+//! Scalar resolution for the YAML 1.2.2 default profile.
 //!
 //! Parser events retain raw scalar text, style, tag, anchor, and span; this
 //! module resolves one scalar to a `Value`, and the event keeps the rest of
@@ -18,7 +18,7 @@ pub(crate) fn resolve_scalar(
 ) -> Result<Value, Error> {
     if let Some(tag) = tag {
         if tag.is_core() {
-            return resolve_explicit_core(text, tag.suffix());
+            return resolve_explicit_core(text, tag.suffix(), tag);
         }
         // A custom tag keeps its payload resolved as if untagged:
         // `!Flag true` holds a bool. The non-specific
@@ -63,7 +63,7 @@ fn resolve_plain(text: &str) -> Option<Value> {
     clippy::match_same_arms,
     reason = "the arms stay separate to document each representation or state"
 )]
-fn resolve_explicit_core(text: &str, suffix: &str) -> Result<Value, Error> {
+fn resolve_explicit_core(text: &str, suffix: &str, tag: &Tag) -> Result<Value, Error> {
     match suffix {
         "str" => Ok(Value::String(text.to_owned())),
         "int" => parse_int_with(text, true)
@@ -79,7 +79,11 @@ fn resolve_explicit_core(text: &str, suffix: &str) -> Result<Value, Error> {
             .ok_or_else(|| resolution_error("invalid !!bool scalar")),
         "null" if is_null(text) => Ok(Value::Null),
         "null" => Err(resolution_error("invalid !!null scalar")),
-        _ => Ok(Value::String(text.to_owned())),
+        // A core name this schema doesn't define is left for the application, like a custom tag.
+        _ => Ok(Value::from(TaggedValue::new(
+            tag.clone(),
+            Value::String(text.to_owned()),
+        ))),
     }
 }
 
@@ -124,7 +128,7 @@ fn parse_int_with(text: &str, allow_leading_zero: bool) -> Option<Number> {
         return None;
     }
     if !allow_leading_zero && radix == 10 && digits.len() > 1 && digits.starts_with('0') {
-        // Preserve the compatibility profile: 0123 is a string, not legacy octal.
+        // Preserve the default profile: 0123 is a string, not legacy octal.
         return None;
     }
     let magnitude = u128::from_str_radix(digits, radix).ok()?;

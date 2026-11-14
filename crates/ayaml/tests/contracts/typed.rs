@@ -566,3 +566,16 @@ fn a_null_key_and_an_empty_string_key_are_not_duplicates() {
     let duplicate = ayaml::from_str::<Value>("~: 1\nnull: 2\n").expect_err("two null keys");
     assert_eq!(duplicate.kind(), ErrorKind::DuplicateKey);
 }
+
+/// A core-schema name the scalar schema does not define is an application tag, so the value keeps
+/// it. The event stream already keeps it; the composed value and typed readers must agree.
+#[test]
+fn an_unknown_core_tag_on_a_scalar_is_kept() {
+    let input = "!!binary aGk=\n";
+    let composed = ayaml::parse_value(input).expect("composed");
+    assert!(composed.is_tagged(), "{composed:?}");
+    let typed: Value = ayaml::from_str(input).expect("typed");
+    assert_eq!(typed, composed);
+    let rendered = ayaml::to_string_value(&composed).expect("emit");
+    assert_eq!(ayaml::parse_value(&rendered).expect("reparse"), composed);
+}
