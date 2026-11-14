@@ -12,7 +12,7 @@ description = "Pinned YAML Test Suite and ayaml fixture conformance runner"
 compat = ["ayaml/libyaml-compat"]
 
 [dependencies]
-ayaml = { path = "../ayaml", version = "=0.1.1", features = ["bench-internals"] }
+ayaml = { path = "../ayaml", version = "=0.1.2", features = ["bench-internals"] }
 serde_json.workspace = true
 
 [lints]

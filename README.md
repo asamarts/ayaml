@@ -8,7 +8,7 @@ unsafe Rust or a native YAML dependency. One scanner and grammar back the
 spanned event stream, the generic value model, typed Serde decoding, and the
 emitter, so every surface observes the same syntax and resolution rules.
 
-The current patch release is `0.1.1`. The crate is UTF-8 only, has an MSRV of
+The current patch release is `0.1.2`. The crate is UTF-8 only, has an MSRV of
 Rust 1.88, and is dual-licensed under MIT or Apache-2.0.
 
 ## Highlights
@@ -37,14 +37,14 @@ Rust 1.88, and is dual-licensed under MIT or Apache-2.0.
 
 ```toml
 [dependencies]
-ayaml = "0.1.1"
+ayaml = "0.1.2"
 ```
 
 For typed decoding, enable Serde's derive feature in your own crate:
 
 ```toml
 [dependencies]
-ayaml = "0.1.1"
+ayaml = "0.1.2"
 serde = { version = "1", features = ["derive"] }
 ```
 

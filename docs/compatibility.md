@@ -136,7 +136,7 @@ The additive `libyaml-compat` feature exposes `ayaml::compat`:
 
 ```toml
 [dependencies]
-ayaml = { version = "0.1.1", features = ["libyaml-compat"] }
+ayaml = { version = "0.1.2", features = ["libyaml-compat"] }
 ```
 
 ```rust
