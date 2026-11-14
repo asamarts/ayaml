@@ -76,8 +76,11 @@
 //!
 //! # Resource limits
 //!
-//! Every entry point has a `_with_limits` form, and [`Limits`] is accepted by
-//! the document cursor, emitters, and typed decoders. Exceeding a limit
+//! The parser and document readers, the borrowed typed decoder, the
+//! `Deserializer`, and the emitters that take limits have `_with_limits`
+//! forms. The convenience `from_str` and `from_slice` typed readers use the
+//! defaults; `from_value`, `from_value_seed`, and `to_value` do not take
+//! limits. Exceeding a limit
 //! returns [`ErrorKind::Limit`]; [`Error::limit`] exposes the structured
 //! [`LimitExceeded`] value. See the `docs/limits.md` file for the defaults and
 //! the alias-budget formula.
@@ -612,7 +615,7 @@ pub fn parse_events_with_limits<'a>(
 
 /// Parse one YAML document into the generic value model.
 ///
-/// The compatibility profile is used: `yes` and date-like scalars stay
+/// The default YAML 1.2.2 profile is used: `yes` and date-like scalars stay
 /// strings, legacy octal-looking scalars such as `0123` stay strings, `0b11`
 /// and `0x1f` become integers, and `1e3` becomes a float. Custom tags remain
 /// represented as [`Value::Tagged`]. Anchors and aliases are materialized under
@@ -654,7 +657,7 @@ pub fn parse_value_with_limits(input: &str, limits: &Limits) -> Result<Value, Er
 
 /// Parse every YAML document in the stream into generic values.
 ///
-/// The same compatibility resolver and composition budgets as [`parse_value`]
+/// The same default resolver and composition budgets as [`parse_value`]
 /// apply. The configured `max_documents` limit is enforced by the event parser.
 ///
 /// # Errors

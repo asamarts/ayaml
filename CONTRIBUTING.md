@@ -125,11 +125,10 @@ alint check --fail-on-warning
 tools/ci-local.sh alint
 ```
 
-Three source files predate the 2,000-line ceiling and carry a non-growth ratchet in
-`.alint.yml`: the scanner, parser, and emitter. Fix the tree or remove a ratchet in the
-change that shrinks the file; there is no baseline. `--changed` is not the
-gate: it depends on a base revision and lets a shape violation that is already on the base
-survive.
+Every maintained source and script file is held to the 2,000-line ceiling by `.alint.yml`;
+there is no baseline or ratchet. Fix the tree rather than adding an exclusion. `--changed` is
+not the gate: it depends on a base revision and lets a shape violation that is already on the
+base survive.
 
 To move to another alint version, change the `requires:` value, the action pin in
 `.github/workflows/ci.yml`, and the local binary together, then repeat the 2,000/2,001-line

@@ -13,7 +13,6 @@ edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/asamarts/ayaml"
-homepage = "https://github.com/asamarts/ayaml"
 documentation = "https://docs.rs/ayaml"
 readme = "README.md"
 keywords = ["yaml", "parser", "serde", "serialization", "no-unsafe"]

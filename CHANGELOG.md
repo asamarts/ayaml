@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.2] — 2026-11-14
 
+### Added
+
+- `Limits::max_tag_expansion_bytes`, `Limits::with_max_tag_expansion_bytes`,
+  `Limits::check_tag_expansion`, and `MAX_TAG_EXPANSION_BYTES` bound the memory that `%TAG`
+  handles can expand to.
+- The compatibility module now exposes `from_str_with_limits`,
+  `from_str_seed_with_limits`, and `deserialize_any_with_limits`.
+
 ### Changed
 
 - The compatibility entry points now have `_with_limits` forms for typed decoding, seeded
@@ -80,6 +88,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   may need 2 more. `docs/limits.md` says what each limit counts.
 - `max_anchors` is now documented as counting the anchors of a stream, as every reader already
   enforced it. It said one document.
+
+### Performance
+
+- Tag handles a document doesn't use no longer allocate their built-in prefixes. The smallest
+  inputs take about 15% fewer instructions.
 
 ### Fixed
 

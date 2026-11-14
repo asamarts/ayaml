@@ -1,4 +1,4 @@
-//! Scalar resolution for YAML 1.2.2 and the compatibility profile.
+//! Scalar resolution for the YAML 1.2.2 default profile.
 //!
 //! Parser events retain raw scalar text, style, tag, anchor, and span; this
 //! module resolves one scalar to a `Value`, and the event keeps the rest of
@@ -124,7 +124,7 @@ fn parse_int_with(text: &str, allow_leading_zero: bool) -> Option<Number> {
         return None;
     }
     if !allow_leading_zero && radix == 10 && digits.len() > 1 && digits.starts_with('0') {
-        // Preserve the compatibility profile: 0123 is a string, not legacy octal.
+        // Preserve the default profile: 0123 is a string, not legacy octal.
         return None;
     }
     let magnitude = u128::from_str_radix(digits, radix).ok()?;

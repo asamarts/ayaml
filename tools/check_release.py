@@ -72,6 +72,8 @@ def git_blob(root: Path, commit: str, path: str) -> bytes:
     if done.returncode != 0:
         raise Refused(f"{path} isn't in {commit}")
     return done.stdout
+
+
 def git_has_path(root: Path, commit: str, path: str) -> bool:
     """Whether COMMIT's tree contains PATH."""
     done = subprocess.run(
@@ -198,7 +200,13 @@ def check_package(root: Path, crate_path: Path, commit: str) -> str:
     for packaged, source in FROM_WORKSPACE.items():
         expected[packaged] = git_blob(root, commit, source)
     if new_layout:
-        expected["CHANGELOG.md"] = git_blob(root, commit, "CHANGELOG.md")
+        crate_changelog = git_blob(root, commit, f"{PACKAGE_DIR}/CHANGELOG.md")
+        workspace_changelog = git_blob(root, commit, "CHANGELOG.md")
+        if crate_changelog != workspace_changelog:
+            raise Refused(
+                f"{PACKAGE_DIR}/CHANGELOG.md and CHANGELOG.md differ; "
+                "the workspace and packaged changelogs must match"
+            )
     copied = set(files) - GENERATED
     problems = [f"missing {path}" for path in sorted(expected.keys() - copied)]
     problems += [f"not in {commit}: {path}" for path in sorted(copied - expected.keys())]
@@ -333,7 +341,12 @@ def main(argv: list[str]) -> int:
                 print(f"{PACKAGE} {version} on crates.io: {'unknown' if answer is None else answer}")
                 return 2 if answer is None else 0 if answer else 1
             case ["registry", crate, version, *rest] if len(rest) <= 1:
-                check_registry(Path(crate), version, float(rest[0]) if rest else 300)
+                try:
+                    seconds = float(rest[0]) if rest else 300
+                except ValueError:
+                    print(__doc__, file=sys.stderr)
+                    return 2
+                check_registry(Path(crate), version, seconds)
             case ["notes", version]:
                 print(changelog_section((root / "CHANGELOG.md").read_text(encoding="utf-8"), version))
             case ["record", tag, commit, digest, *rest] if len(rest) <= 1:

@@ -1009,6 +1009,7 @@ class Release(unittest.TestCase):
         path = self.root.parent / "ayaml-0.2.0.crate"
         digest = self.check_package(self.packaged())
         self.assertEqual(digest, hashlib.sha256(path.read_bytes()).hexdigest())
+
     def test_a_package_from_before_the_self_contained_layout_still_passes(self) -> None:
         (self.root / "crates/ayaml/CHANGELOG.md").unlink()
         git(self.root, "add", "-A")
@@ -1020,6 +1021,14 @@ class Release(unittest.TestCase):
 
     def test_a_file_the_commit_does_not_have_is_refused(self) -> None:
         self.refused(lambda: self.check_package(self.packaged({"src/extra.rs": b"x"})), "not in")
+
+    def test_a_workspace_and_crate_changelog_difference_is_refused(self) -> None:
+        (self.root / "crates/ayaml/CHANGELOG.md").write_text(self.CHANGELOG + "\n", encoding="utf-8")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "crate changelog differs")
+        self.commit = git(self.root, "rev-parse", "HEAD")
+        files = self.packaged({"CHANGELOG.md": (self.CHANGELOG + "\n").encode()})
+        self.refused(lambda: self.check_package(files), "workspace and packaged changelogs")
 
     def test_a_missing_or_changed_file_is_refused(self) -> None:
         self.refused(lambda: self.check_package(self.packaged({"src/lib.rs": None})), "missing src/lib.rs")
