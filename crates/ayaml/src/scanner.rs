@@ -139,7 +139,7 @@ pub(crate) struct Scanner<'a> {
     tag_handles: HashMap<String, String>,
     /// The bytes that tag handles have expanded to in this stream.
     tag_expansion_bytes: usize,
-    pending_tag_handles: Vec<(String, String)>,
+    pending_tag_handles: HashMap<String, String>,
     started: bool,
     finished: bool,
     /// The next call returns end of stream: a flow start went over the depth limit, and the
@@ -244,7 +244,7 @@ impl<'a> Scanner<'a> {
             yaml_directive_seen: false,
             tag_handles: HashMap::new(),
             tag_expansion_bytes: 0,
-            pending_tag_handles: Vec::new(),
+            pending_tag_handles: HashMap::new(),
             started: false,
             finished: false,
             stop_after: false,
@@ -926,9 +926,8 @@ impl<'a> Scanner<'a> {
             self.yaml_directive_seen = false;
             self.colon_anchors = None;
             self.tag_handles.clear();
-            for (handle, prefix) in self.pending_tag_handles.drain(..) {
-                self.tag_handles.insert(handle, prefix);
-            }
+            self.tag_handles
+                .extend(std::mem::take(&mut self.pending_tag_handles));
             return self.make(TokenKind::DocumentStart { explicit: true }, start, self.pos);
         }
         if rest.starts_with("...") && self.marker_follows(start, 3) {
@@ -1045,11 +1044,7 @@ impl<'a> Scanner<'a> {
             }
             // One document may give a handle one prefix, even the same one twice (YAML 1.2.2
             // section 6.8.2.2).
-            if self
-                .pending_tag_handles
-                .iter()
-                .any(|(seen, _)| seen == handle)
-            {
+            if self.pending_tag_handles.contains_key(handle) {
                 return Err(self.error_at(start, format!("duplicate %TAG directive for {handle}")));
             }
             // A prefix is `!` and URI characters (a local prefix), or URI
@@ -1069,7 +1064,7 @@ impl<'a> Scanner<'a> {
             // does. `uri_text_ok` has checked their syntax.
             let prefix = decode_percent_escapes(prefix)
                 .map_err(|_| self.error_at(start, "tag %-escapes do not form valid UTF-8"))?;
-            self.pending_tag_handles.push((handle.to_owned(), prefix));
+            self.pending_tag_handles.insert(handle.to_owned(), prefix);
         }
         self.make(TokenKind::Directive { name, value }, start, self.pos)
     }

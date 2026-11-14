@@ -747,6 +747,43 @@ fn scanning_takes_time_linear_in_the_input() {
     });
 }
 
+/// Many `%TAG` directives must not make the scanner or the event writer quadratic. The scanner
+/// checks each handle once, and the writer's generated handles use a lookup rather than a scan.
+#[test]
+fn many_tag_directives_take_time_linear_in_their_number() {
+    in_child!(|| {
+        const DIRECTIVES: usize = 8_000;
+        let input = |count: usize| {
+            let mut text = String::new();
+            for index in 0..count {
+                text.push_str(&format!("%TAG !t{index}! tag:x{index}:\n"));
+            }
+            text.push_str("---\n[\n");
+            for index in 0..count {
+                text.push_str(&format!("  !t{index}!a%20b,\n"));
+            }
+            text.push_str("]\n");
+            text
+        };
+        let (short, long) = (input(DIRECTIVES / 8), input(DIRECTIVES));
+        let scan: fn(&str) = |text| {
+            let _ = ayaml::parse_documents(text);
+        };
+        if let Err(times) = linear_time(&scan, &short, &long) {
+            panic!("scanner: {times}");
+        }
+        let emit: fn(&str) = |text| {
+            let events = ayaml::parse_events(text)
+                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                .expect("events");
+            let _ = ayaml::to_string_events(&events);
+        };
+        if let Err(times) = linear_time(&emit, &short, &long) {
+            panic!("event writer: {times}");
+        }
+    });
+}
+
 #[test]
 fn many_keys_take_time_linear_in_their_number() {
     in_child!(|| {

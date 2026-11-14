@@ -740,7 +740,23 @@ fn scalar_node<'de>(
                 span,
             ));
         }
-        Some(tag) if tag.is_core() => !matches!(tag.suffix(), "int" | "float" | "bool" | "null"),
+        Some(tag) if tag.is_core() => {
+            if !matches!(tag.suffix(), "str" | "int" | "float" | "bool" | "null") {
+                let inner = Node::scalar(
+                    NodeKind::String(scalar_text.clone()),
+                    scalar_text.clone(),
+                    style,
+                    span,
+                );
+                return Ok(Node::scalar(
+                    NodeKind::Tagged(tag.clone(), Box::new(inner)),
+                    scalar_text,
+                    style,
+                    span,
+                ));
+            }
+            !matches!(tag.suffix(), "int" | "float" | "bool" | "null")
+        }
         Some(tag) => {
             if style != ScalarStyle::Plain || plain_resolves_to_string(text) {
                 let inner = Node::scalar(

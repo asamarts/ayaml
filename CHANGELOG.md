@@ -96,6 +96,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An unknown core-schema tag on a scalar, such as `!!binary` or `!!timestamp`, is now kept as
+  an application tag instead of being dropped. Event streams, composed values, and typed readers
+  agree on it.
 - A core-schema tag on a node of another kind is now dropped in both default and compatibility
   modes, on every reader. `!!str {}` and `a: !!int [1]` read the collection without the tag, and
   `!!seq a` reads the string `a`. Custom tags are still kept.
@@ -104,8 +107,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   block scalar under an anchored `:` key, NEL comments and anchors, a `...` marker after a
   stream-start BOM, and quoted scalars below a BOM key. The compatibility notes say where a
   reading remains a deliberate deviation.
-- Typed readers now compare scalar mapping keys by their resolved value, so a null key and an
-  empty-string key are distinct, while two spellings of the same scalar remain duplicates.
+- Typed readers now compare scalar mapping keys by their resolved kind and rendering, so a null
+  key and an empty-string key are distinct, while two spellings of the same scalar remain
+  duplicates and keys that differ only in type are rejected before a narrower target can keep
+  only one.
 - Serializing a deeply nested Rust value now returns a depth error before it can exhaust the
   stack. `to_string`, `to_writer`, and `to_value` use the parser's 128-level limit. A tag counts
   toward the stack bound but not the collection depth, so a value at the cap still serializes.
