@@ -410,6 +410,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A key or value whose `Display` fails is now an error from `to_value`, `to_string` and the other
   writers. A key's text was cut where the failure came, and `collect_str` panicked.
 
+### Security
+
+- Resource-exhaustion and wrong-value handling in 0.1.0 and 0.1.1 is covered by
+  [GHSA-f77x-cp9r-m4p3](https://github.com/asamarts/ayaml/security/advisories/GHSA-f77x-cp9r-m4p3).
+  Inputs include a long `%TAG` prefix repeated across tags, an alias to a long-tagged node, and
+  many `%TAG` directives; 0.1.2 bounds each under the documented limits. `0.1.0` and `0.1.1`
+  remain published and are not yanked; users should upgrade.
+
 ## [0.1.1] — 2026-11-04
 
 A performance patch for wide documents made of short block entries. There are
