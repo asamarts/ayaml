@@ -1,4 +1,10 @@
 //! An insertion-ordered YAML mapping backed by `indexmap`.
+//!
+//! The `IntoIterator` implementations currently expose `indexmap`'s iterator
+//! types through their associated `IntoIter` type. Replacing those with
+//! ayaml-owned newtypes would change a public associated type, which is a
+//! `SemVer` break for the 0.1.x line; it is planned for the next minor release
+//! instead.
 
 use std::hash::{BuildHasher, Hash, Hasher, RandomState};
 use std::ops::Index as OpsIndex;
@@ -484,6 +490,14 @@ mod tests {
         let _slot = map.entry(key("b")).or_insert_with(|| Value::from(3_u64));
         assert_eq!(map.get("a"), Some(&Value::from(2_u64)));
         assert_eq!(map.get("b"), Some(&Value::from(3_u64)));
+    }
+
+    #[test]
+    fn entry_implements_debug() {
+        let mut map = Mapping::new();
+        let entry = map.entry(key("a"));
+        let rendered = format!("{entry:?}");
+        assert_ne!(rendered, "");
     }
 
     #[test]
