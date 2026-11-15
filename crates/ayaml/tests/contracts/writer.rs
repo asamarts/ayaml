@@ -309,6 +309,10 @@ fn compat_reads_a_non_handle_bang_as_a_local_tag() {
         ayaml::compat::from_str::<Value>("[?!@! x]").unwrap(),
         Value::Sequence(vec![Value::Mapping(mapping)])
     );
+    assert_eq!(
+        ayaml::compat::from_str::<Value>("!@!%41 x").unwrap(),
+        Value::from(TaggedValue::new(Tag::local("@!A"), Value::from("x")))
+    );
 }
 
 #[test]
