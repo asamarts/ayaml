@@ -2,7 +2,7 @@
 id: M-v0.1.2
 title: Publish the hardened ayaml 0.1.2 release
 phase: 1
-status: todo
+status: done
 blocked_by:
 - AY-001
 - AY-002
@@ -48,6 +48,9 @@ blocked_by:
 tags:
 - milestone
 - v0.1.2
+evidence:
+  - kind: url
+    ref: https://github.com/asamarts/ayaml/releases/tag/v0.1.2
 ---
 
 ## Why
@@ -59,6 +62,6 @@ release, not two.
 
 ## Acceptance criteria
 
-- [ ] every member is closed with the evidence its tags require
-- [ ] ayaml 0.1.2 is published from the attested public tag
-- [ ] the release record names the tag, commit, crate checksum, and attestation, with commands that verify each
+- [x] every member is closed with the evidence its tags require
+- [x] ayaml 0.1.2 is published from the attested public tag
+- [x] the release record names the tag, commit, crate checksum, and attestation, with commands that verify each
