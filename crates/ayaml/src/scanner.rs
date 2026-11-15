@@ -1274,8 +1274,8 @@ impl<'a> Scanner<'a> {
                     }
                     self.pos += ch.len_utf8();
                 }
-                let suffix = &self.input[handle_start - 1..self.pos];
-                Self::resolved_tag("", suffix)
+                let suffix = self.decode_tag_suffix(handle_start - 1)?;
+                Self::resolved_tag("", &suffix)
             } else if self.peek() == Some('!') {
                 self.pos += 1;
                 let suffix_start = self.pos;
