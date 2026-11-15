@@ -59,8 +59,9 @@ These are done in the web interfaces by an owner. Each is recorded here once don
    *Done on 2026-11-08: crates.io lists that publisher for `ayaml`.*
 3. **After the first release through the workflow.** In the same settings, turn on "Trusted
    Publishing only", so that no API token can publish `ayaml`. Then revoke every crates.io API
-   token that could. *Done on 2026-11-15: Trusted Publishing only is enabled; legacy tokens can
-   no longer publish `ayaml`.*
+   token that could. *Reported enabled on 2026-11-15, but crates.io's API still reports
+   `trustpub_only: false` for `ayaml`; verify the setting and revoke the tokens before treating
+   this step as done.*
 4. **Immutable releases**, optional: under Settings → General → Releases. A published
    release's assets and tag can then no longer change. `gh release create` keeps the release
    a draft until its assets are uploaded, so the workflow works either way. *On since
