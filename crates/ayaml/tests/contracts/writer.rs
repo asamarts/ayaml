@@ -296,6 +296,29 @@ fn compat_flow_question_mark_is_always_an_explicit_key() {
     assert_eq!(ayaml::compat::from_str::<Value>("{?$}").unwrap(), expected);
 }
 
+/// A named handle holds only word characters, so `!@!` is a local tag even
+/// though compat reads the leading flow `?` as an explicit key. libyaml reads
+/// the same tag, and default mode reads the whole `?!@! x` as a plain scalar.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_reads_a_non_handle_bang_as_a_local_tag() {
+    let key = Value::from(TaggedValue::new(Tag::local("@!"), Value::from("x")));
+    let mut mapping = Mapping::new();
+    mapping.insert(key, Value::Null);
+    assert_eq!(
+        ayaml::compat::from_str::<Value>("[?!@! x]").unwrap(),
+        Value::Sequence(vec![Value::Mapping(mapping)])
+    );
+}
+
+#[test]
+fn default_reads_a_flow_question_before_a_non_handle_bang_as_a_plain_scalar() {
+    assert_eq!(
+        ayaml::parse_value("[?!@! x]").unwrap(),
+        Value::Sequence(vec![Value::from("?!@! x")])
+    );
+}
+
 #[test]
 fn non_printable_characters_are_rejected() {
     // c-printable excludes control characters other than tab, LF, CR, and

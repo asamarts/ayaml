@@ -1262,7 +1262,21 @@ impl<'a> Scanner<'a> {
                 }
                 self.pos += ch.len_utf8();
             }
-            if self.peek() == Some('!') {
+            let handle_name = &self.input[handle_start..self.pos];
+            if self.compat_flow && self.peek() == Some('!') && handle_name.contains('@') {
+                // libyaml reads `!@!` as a local tag, not as a handle whose name holds
+                // `@`. A named handle holds only word characters, so a later `!` here
+                // belongs to the local tag's suffix.
+                self.pos += 1;
+                while let Some(ch) = self.peek() {
+                    if is_blank(ch) || (self.flow_level > 0 && matches!(ch, ',' | ']' | '}')) {
+                        break;
+                    }
+                    self.pos += ch.len_utf8();
+                }
+                let suffix = &self.input[handle_start - 1..self.pos];
+                Self::resolved_tag("", suffix)
+            } else if self.peek() == Some('!') {
                 self.pos += 1;
                 let suffix_start = self.pos;
                 self.consume_tag_suffix();
