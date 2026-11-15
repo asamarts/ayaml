@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- In compat mode, a named tag handle holds only word characters. A local tag such as `!@!`
+  after a flow `?` is now read as a local tag instead of an undefined handle, matching
+  libyaml; default mode still reads the whole `?!@! x` as a plain scalar.
+
 ## [0.1.2] — 2026-11-14
 
 ### Added

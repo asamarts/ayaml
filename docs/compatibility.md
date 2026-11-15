@@ -220,7 +220,9 @@ these places, on purpose:
   `{?\n:{}}` because only a JSON-like key allows an adjacent value. A flow mapping key may
   span lines or have a line break before its `:`. `[-]` is an error, and so is a `?` right
   before a flow indicator, as in `{?}` or `[?[a]]`, where libyaml reads an empty key or the
-  key `[a]`. A flow `?` followed by `-` and a flow indicator reads as an explicit key
+  key `[a]`. A `?` followed directly by `!` is a plain scalar in default mode; compat reads
+  the `?` as an explicit key and a local tag such as `!@!`, as libyaml does. A flow `?`
+  followed by `-` and a flow indicator reads as an explicit key
   whose key is the scalar `-`, as in `[?-]` or `{?-}`; a comment may follow the `?`;
   and `!!!` after it is the core tag `!!` with suffix `!`, read as libyaml does.
 - An implicit key in a flow mapping may run past 1024 characters, as YAML 1.2.2 allows, where
