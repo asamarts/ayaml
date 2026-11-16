@@ -6,19 +6,44 @@
 //! `SemVer` break for the 0.1.x line; it is planned for the next minor release
 //! instead.
 
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{BuildHasher, Hash, Hasher, RandomState};
 use std::ops::Index as OpsIndex;
 use std::sync::OnceLock;
 
 use indexmap::IndexMap;
 
+/// A zero-sized hasher that uses one process-wide random seed, leaving room for the hash cache.
+#[derive(Clone, Default)]
+struct GlobalHasher;
+
+impl BuildHasher for GlobalHasher {
+    type Hasher = DefaultHasher;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        static STATE: OnceLock<RandomState> = OnceLock::new();
+        STATE.get_or_init(RandomState::new).build_hasher()
+    }
+}
+
 use crate::value::{NULL_VALUE, Value};
 
 /// A YAML mapping with insertion-order iteration and swap-remove semantics.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default)]
 pub struct Mapping {
-    map: IndexMap<Value, Value>,
+    map: IndexMap<Value, Value, GlobalHasher>,
+    /// The order-independent hash, cached until the mapping changes. A mapping used as a key
+    /// would otherwise hash every nested entry at each duplicate check.
+    hash: OnceLock<u64>,
 }
+
+impl PartialEq for Mapping {
+    fn eq(&self, other: &Self) -> bool {
+        self.map == other.map
+    }
+}
+
+impl Eq for Mapping {}
 
 /// A borrowed or owned key accepted by [`Mapping`] lookup operations.
 ///
@@ -50,7 +75,8 @@ impl Mapping {
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            map: IndexMap::with_capacity(capacity),
+            map: IndexMap::with_capacity_and_hasher(capacity, GlobalHasher),
+            hash: OnceLock::new(),
         }
     }
 
@@ -69,16 +95,19 @@ impl Mapping {
     /// Remove all entries.
     pub fn clear(&mut self) {
         self.map.clear();
+        self.hash.take();
     }
 
     /// Insert or replace a value, returning the previous value.
     pub fn insert(&mut self, key: Value, value: Value) -> Option<Value> {
+        self.hash.take();
         self.map.insert(key, value)
     }
 
     /// Insert a key that the mapping doesn't hold yet. For a key that it holds, return the key's
     /// text and leave the mapping as it was.
     pub(crate) fn insert_new(&mut self, key: Value, value: Value) -> Result<(), String> {
+        self.hash.take();
         match self.map.entry(key) {
             indexmap::map::Entry::Vacant(entry) => {
                 entry.insert(value);
@@ -90,8 +119,10 @@ impl Mapping {
 
     /// Get a mutable entry for `key`, inserting lazily through [`Entry`].
     pub fn entry(&mut self, key: Value) -> Entry<'_> {
+        let Self { map, hash } = self;
         Entry {
-            inner: self.map.entry(key),
+            inner: map.entry(key),
+            hash,
         }
     }
 
@@ -110,12 +141,14 @@ impl Mapping {
     /// Mutably look up a value by key.
     #[must_use]
     pub fn get_mut<I: Index>(&mut self, key: I) -> Option<&mut Value> {
+        self.hash.take();
         Index::get_mut(&key, self)
     }
 
     /// Mutably look up a value by string key.
     #[must_use]
     pub fn get_str_mut(&mut self, key: &str) -> Option<&mut Value> {
+        self.hash.take();
         self.map.get_mut(&Value::String(key.to_owned()))
     }
 
@@ -127,11 +160,13 @@ impl Mapping {
 
     /// Remove a key, swapping the last entry into its place.
     pub fn remove<I: Index>(&mut self, key: I) -> Option<Value> {
+        self.hash.take();
         Index::swap_remove(&key, self)
     }
 
     /// Remove a key, preserving the relative order of the remaining entries.
     pub fn shift_remove<I: Index>(&mut self, key: I) -> Option<Value> {
+        self.hash.take();
         Index::shift_remove(&key, self)
     }
 
@@ -142,6 +177,7 @@ impl Mapping {
 
     /// Mutably iterate over entries in insertion order.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (&Value, &mut Value)> + '_ {
+        self.hash.take();
         self.map.iter_mut()
     }
 
@@ -157,6 +193,7 @@ impl Mapping {
 
     /// Mutably iterate over values in insertion order.
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut Value> + '_ {
+        self.hash.take();
         self.map.values_mut()
     }
 
@@ -171,23 +208,27 @@ impl Mapping {
 #[derive(Debug)]
 pub struct Entry<'a> {
     inner: indexmap::map::Entry<'a, Value, Value>,
+    hash: &'a mut OnceLock<u64>,
 }
 
 impl<'a> Entry<'a> {
     /// Insert `default` if the key is absent, and return the slot.
     #[must_use]
     pub fn or_insert(self, default: Value) -> &'a mut Value {
+        self.hash.take();
         self.inner.or_insert(default)
     }
 
     /// Insert the result of `default` if the key is absent, and return the slot.
     pub fn or_insert_with<F: FnOnce() -> Value>(self, default: F) -> &'a mut Value {
+        self.hash.take();
         self.inner.or_insert_with(default)
     }
 
     /// Mutate the value if the key is present, and return the entry.
     #[must_use]
     pub fn and_modify<F: FnOnce(&mut Value)>(mut self, f: F) -> Self {
+        self.hash.take();
         if let indexmap::map::Entry::Occupied(entry) = &mut self.inner {
             f(entry.get_mut());
         }
@@ -204,7 +245,13 @@ impl std::fmt::Debug for Mapping {
 
 impl Hash for Mapping {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        hash_of_entries(self.map.iter()).hash(state);
+        if let Some(hash) = self.hash.get() {
+            hash.hash(state);
+            return;
+        }
+        let hash = hash_of_entries(self.map.iter());
+        let _ = self.hash.set(hash);
+        hash.hash(state);
     }
 }
 
@@ -277,14 +324,17 @@ impl Index for Value {
     }
 
     fn get_mut<'a>(&self, mapping: &'a mut Mapping) -> Option<&'a mut Value> {
+        mapping.hash.take();
         mapping.map.get_mut(self)
     }
 
     fn swap_remove(&self, mapping: &mut Mapping) -> Option<Value> {
+        mapping.hash.take();
         mapping.map.swap_remove(self)
     }
 
     fn shift_remove(&self, mapping: &mut Mapping) -> Option<Value> {
+        mapping.hash.take();
         mapping.map.shift_remove(self)
     }
 }
@@ -301,14 +351,17 @@ impl Index for str {
     }
 
     fn get_mut<'a>(&self, mapping: &'a mut Mapping) -> Option<&'a mut Value> {
+        mapping.hash.take();
         mapping.map.get_mut(&Value::String(self.to_owned()))
     }
 
     fn swap_remove(&self, mapping: &mut Mapping) -> Option<Value> {
+        mapping.hash.take();
         mapping.map.swap_remove(&Value::String(self.to_owned()))
     }
 
     fn shift_remove(&self, mapping: &mut Mapping) -> Option<Value> {
+        mapping.hash.take();
         mapping.map.shift_remove(&Value::String(self.to_owned()))
     }
 }
@@ -368,12 +421,14 @@ impl FromIterator<(Value, Value)> for Mapping {
     fn from_iter<T: IntoIterator<Item = (Value, Value)>>(iter: T) -> Self {
         Self {
             map: iter.into_iter().collect(),
+            hash: OnceLock::new(),
         }
     }
 }
 
 impl Extend<(Value, Value)> for Mapping {
     fn extend<T: IntoIterator<Item = (Value, Value)>>(&mut self, iter: T) {
+        self.hash.take();
         self.map.extend(iter);
     }
 }
@@ -509,6 +564,43 @@ mod tests {
             format!("{map:?}"),
             "Mapping {String(\"a\"): Number(Number(PosInt(1)))}"
         );
+    }
+
+    #[test]
+    fn cached_hash_tracks_every_mutation() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn digest(map: &Mapping) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            map.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        let mut map = Mapping::new();
+        let mut fresh = Mapping::new();
+        map.insert(key("a"), Value::from(1_u64));
+        fresh.insert(key("a"), Value::from(1_u64));
+        assert_eq!(digest(&map), digest(&fresh));
+        let _ = map.get_mut("a").map(|value| *value = Value::from(2_u64));
+        fresh.insert(key("a"), Value::from(2_u64));
+        assert_eq!(digest(&map), digest(&fresh));
+        let _ = map.entry(key("b")).or_insert(Value::from(3_u64));
+        fresh.insert(key("b"), Value::from(3_u64));
+        assert_eq!(digest(&map), digest(&fresh));
+        for value in map.values_mut() {
+            *value = Value::Null;
+        }
+        for value in fresh.values_mut() {
+            *value = Value::Null;
+        }
+        assert_eq!(digest(&map), digest(&fresh));
+        map.remove("a");
+        fresh.remove("a");
+        assert_eq!(digest(&map), digest(&fresh));
+        map.clear();
+        fresh.clear();
+        assert_eq!(digest(&map), digest(&fresh));
     }
 
     /// Without a mark for each kind of number, these write the same bytes, and a mapping of them
