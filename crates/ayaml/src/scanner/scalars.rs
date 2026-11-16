@@ -479,6 +479,28 @@ impl<'a> Scanner<'a> {
         // line's indentation. Root scalars count from column 0, as libyaml
         // does.
         let owner = self.owner_of(start);
+        let header_indent = self.line_indent(start);
+        // A header on the same line as its key or a root marker is already owned by that
+        // line's structure; only a header on a line of its own needs the parent check.
+        if line_start > 0
+            && prefix.is_empty()
+            && !self.input[line_start..start].contains('\t')
+            && let Owner::Block(parent) = owner
+        {
+            let previous = self.input[..line_start]
+                .trim_end_matches(is_line_break)
+                .rsplit(['\n', '\r'])
+                .next()
+                .unwrap_or_default();
+            let anchored_colon_key = self.compat_flow
+                && parent == 0
+                && header_indent == 0
+                && previous.trim().starts_with('&')
+                && previous.trim_end().ends_with("::");
+            if header_indent <= parent && !anchored_colon_key {
+                return Err(self.error_at(start, "a block scalar is not indented past its parent"));
+            }
+        }
         let root_like = matches!(&owner, Owner::Root)
             || (matches!(&owner, Owner::Unknown) && prefix.is_empty());
         let (detect_base, allow_base, explicit_base) = match owner {
@@ -521,6 +543,11 @@ impl<'a> Scanner<'a> {
                     }
                 }
                 Some(_) => {
+                    // A document marker at column 0 ends a root scalar, so it is outside it,
+                    // not the first content line that sets the leading-blank check.
+                    if spaces == 0 && self.document_marker_starts_line(probe) {
+                        break;
+                    }
                     // A dedented line is outside the scalar, so it is neither content nor a
                     // leading empty line. A tab after the indentation is content, not space.
                     if spaces < indent {

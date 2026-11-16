@@ -1275,3 +1275,44 @@ fn a_root_block_scalar_reads_back_after_an_indicator_from_minus_one() {
         }
     }
 }
+
+/// A block scalar header after properties must still be indented past its parent.
+#[test]
+fn a_block_scalar_header_after_properties_needs_the_parent_indent() {
+    for input in [
+        "a: &x\n|\nb: 1\n",
+        "a:\n  b: &x\n>\n",
+        "m:\n  -\n    !t\n>\n",
+        "m:\n  -\n    &a\n>\n",
+        "m:\n  k:\n    !t\n>\n",
+    ] {
+        rejects(input);
+        #[cfg(feature = "libyaml-compat")]
+        assert!(
+            ayaml::compat::from_str::<ayaml::Value>(input).is_err(),
+            "{input:?} should be rejected in compat mode"
+        );
+    }
+}
+
+/// A top-level block scalar ends at a document marker even after indented empty lines.
+#[test]
+fn a_marker_after_indented_empty_scalar_lines_ends_the_scalar() {
+    for input in ["|\n  \n...\n", ">\n  \n...\n"] {
+        for (mode, read) in readings(input) {
+            assert_eq!(
+                read.unwrap_or_else(|error| panic!("{input:?} in {mode}: {error}")),
+                ayaml::Value::from(""),
+                "{input:?} in {mode}"
+            );
+        }
+    }
+    assert_eq!(
+        parse_documents("|\n  \n---\nb\n"),
+        vec![json!(""), json!("b")]
+    );
+    assert_eq!(
+        parse_documents("--- |\n  \n--- x\n"),
+        vec![json!(""), json!("x")]
+    );
+}
