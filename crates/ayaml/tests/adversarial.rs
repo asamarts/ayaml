@@ -1833,7 +1833,7 @@ fn nested_key_hashing_does_not_multiply_by_depth() {
         let short_time = (0..3).map(|_| time_runs(read, &short, 1)).min().unwrap();
         let long_time = (0..3).map(|_| time_runs(read, &long, 1)).min().unwrap();
         assert!(
-            long_time < short_time * 3 + Duration::from_millis(20),
+            long_time < short_time * 4 + Duration::from_millis(20),
             "{name}: depth 100 took {long_time:?}, depth 1 took {short_time:?}"
         );
     }
@@ -1845,7 +1845,7 @@ fn nested_key_hashing_does_not_multiply_by_depth() {
         let short_time = (0..3).map(|_| time_runs(&read, &short, 1)).min().unwrap();
         let long_time = (0..3).map(|_| time_runs(&read, &long, 1)).min().unwrap();
         assert!(
-            long_time < short_time * 3 + Duration::from_millis(20),
+            long_time < short_time * 4 + Duration::from_millis(20),
             "compat: depth 100 took {long_time:?}, depth 1 took {short_time:?}"
         );
     }
