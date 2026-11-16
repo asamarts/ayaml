@@ -1,3 +1,8 @@
+#![allow(
+    clippy::mutable_key_type,
+    reason = "Node is immutable after construction; its hash cache is internal and never changes equality"
+)]
+
 //! Event-backed typed decoding with borrowed strings and source spans.
 //!
 //! This is a private bridge between the parser's spanned events and Serde. It
@@ -9,7 +14,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde::de::{DeserializeSeed, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor};
 use serde::{Deserialize, Deserializer};
@@ -31,6 +36,8 @@ struct Node<'de> {
     text: Option<Cow<'de, str>>,
     style: ScalarStyle,
     span: Span,
+    /// The hash of the resolved kind, cached so nested mapping keys aren't traversed again.
+    hash: OnceLock<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -104,9 +111,22 @@ impl PartialEq for Node<'_> {
 
 impl Eq for Node<'_> {}
 
+impl Node<'_> {
+    fn cached_hash(&self) -> u64 {
+        if let Some(hash) = self.hash.get() {
+            return *hash;
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        resolve(self).kind.hash(&mut hasher);
+        let hash = hasher.finish();
+        let _ = self.hash.set(hash);
+        hash
+    }
+}
+
 impl Hash for Node<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        resolve(self).kind.hash(state);
+        self.cached_hash().hash(state);
     }
 }
 
@@ -117,6 +137,7 @@ impl<'de> Node<'de> {
             text: None,
             style: ScalarStyle::Plain,
             span,
+            hash: OnceLock::new(),
         }
     }
 
@@ -126,6 +147,7 @@ impl<'de> Node<'de> {
             text: Some(text),
             style,
             span,
+            hash: OnceLock::new(),
         }
     }
 
@@ -300,9 +322,11 @@ impl Hash for SeenKey<'_> {
 
 impl<'de> SeenKey<'de> {
     fn new(node: &Node<'de>) -> Self {
-        match scalar_key_text(node) {
-            Some(text) => Self::Scalar(text),
-            None => Self::Node(node.clone()),
+        if let Some(text) = scalar_key_text(node) {
+            Self::Scalar(text)
+        } else {
+            node.cached_hash();
+            Self::Node(node.clone())
         }
     }
 }

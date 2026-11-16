@@ -4,7 +4,8 @@
     clippy::items_after_statements,
     clippy::unreadable_literal,
     clippy::zero_sized_map_values,
-    reason = "test fixtures favor compact setup, generated inputs, and literal YAML braces"
+    clippy::mutable_key_type,
+    reason = "test fixtures favor compact setup, generated inputs, and literal YAML braces; Value's hash cache does not change equality"
 )]
 // These targets exist to be read and to fail, so no test looks at their fields.
 #![allow(

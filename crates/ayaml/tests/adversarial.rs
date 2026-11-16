@@ -1798,3 +1798,78 @@ fn tokens_hold_memory_in_proportion_to_their_number() {
 fn an_error_at_the_end_holds_one_index_of_lines() {
     measure_in_children("unclosed flow sequence");
 }
+
+/// A mapping key nested `depth` levels deep, with a wide mapping at the bottom.
+fn nested_mapping_key(depth: usize, width: usize) -> String {
+    let mut inner = String::from("{");
+    for index in 0..width {
+        if index != 0 {
+            inner.push_str(", ");
+        }
+        inner.push_str(&format!("k{index}: {index}"));
+    }
+    inner.push('}');
+    for _ in 0..depth {
+        inner = format!("{{? {inner}: null}}");
+    }
+    inner
+}
+
+/// A key nested in keys is hashed once at each level, not once for every level and entry.
+#[test]
+fn nested_key_hashing_does_not_multiply_by_depth() {
+    let short = nested_mapping_key(1, 1_000);
+    let long = nested_mapping_key(100, 1_000);
+    type Reader<'a> = (&'static str, &'a dyn Fn(&str));
+    let readers: [Reader<'_>; 2] = [
+        ("parse_value", &|input| {
+            let _ = ayaml::parse_value(input);
+        }),
+        ("from_str", &|input| {
+            let _ = ayaml::from_str::<Value>(input);
+        }),
+    ];
+    for (name, read) in readers {
+        let short_time = (0..3).map(|_| time_runs(read, &short, 1)).min().unwrap();
+        let long_time = (0..3).map(|_| time_runs(read, &long, 1)).min().unwrap();
+        assert!(
+            long_time < short_time * 3 + Duration::from_millis(20),
+            "{name}: depth 100 took {long_time:?}, depth 1 took {short_time:?}"
+        );
+    }
+    #[cfg(feature = "libyaml-compat")]
+    {
+        let read = |input: &str| {
+            let _ = ayaml::compat::from_str::<Value>(input);
+        };
+        let short_time = (0..3).map(|_| time_runs(&read, &short, 1)).min().unwrap();
+        let long_time = (0..3).map(|_| time_runs(&read, &long, 1)).min().unwrap();
+        assert!(
+            long_time < short_time * 3 + Duration::from_millis(20),
+            "compat: depth 100 took {long_time:?}, depth 1 took {short_time:?}"
+        );
+    }
+}
+
+/// A duplicate at any nesting level is found, including a reordered mapping key.
+#[test]
+fn nested_mapping_duplicate_keys_are_found_in_every_reader() {
+    let inputs = [
+        "? {a: 1, b: 2}\n: 1\n? {b: 2, a: 1}\n: 2\n",
+        "? {outer: {a: 1, b: 2}}\n: 1\n? {outer: {b: 2, a: 1}}\n: 2\n",
+    ];
+    for input in inputs {
+        for (name, result) in entry_points(input) {
+            // Compat's seeded and visitor decoders deliberately keep the last duplicate, as
+            // libyaml does.
+            if name.contains("seed") || name.contains("deserialize_any") {
+                continue;
+            }
+            let error = result.expect_err(name);
+            assert!(
+                error.kind() == ErrorKind::DuplicateKey || error.to_string().contains("duplicate"),
+                "{name}: {error}"
+            );
+        }
+    }
+}
