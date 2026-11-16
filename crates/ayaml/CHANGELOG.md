@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- In compatibility mode, the line reader now ends an anchor or alias name before a `:` followed
+  by a flow indicator, matching the scanner and the continuation indentation check.
 - After a leading byte order mark, a compatibility error keeps its line and column, a quoted
   scalar's continuation check still applies, and a second stream-start mark is skipped instead
   of read as content.

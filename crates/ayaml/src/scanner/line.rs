@@ -150,26 +150,28 @@ pub(super) fn only_properties(text: &str, compat: bool) -> bool {
         })
 }
 
+/// Whether compat ends an anchor or alias name at a `?` before `after`.
+pub(super) fn compat_question_stops_name(after: Option<char>) -> bool {
+    after.is_some_and(|next| !matches!(next, '[' | ']' | '{' | '}' | ','))
+}
+
+/// Whether compat ends an anchor or alias name at a `:` before `after`.
+pub(super) fn compat_colon_stops_name(after: Option<char>) -> bool {
+    after.is_some_and(|next| !is_blank(next) && !matches!(next, '\u{85}' | '\u{2028}' | '\u{2029}'))
+}
+
 /// Whether the compat scanner, outside a flow collection, ends the anchor or alias name that
 /// starts at `name_start` before `bytes[index]`: libyaml stops at a `?`, and at a `:` followed by
-/// more name text (see `scan_anchor`).
+/// any non-blank character, including a flow indicator (see `scan_anchor`).
 fn compat_name_stop(bytes: &[u8], index: usize, name_start: usize) -> bool {
+    let after = || {
+        std::str::from_utf8(&bytes[index + 1..])
+            .ok()
+            .and_then(|rest| rest.chars().next())
+    };
     match bytes[index] {
-        b'?' => bytes
-            .get(index + 1)
-            .is_some_and(|next| !matches!(next, b'[' | b']' | b'{' | b'}' | b',')),
-        b':' => {
-            if index <= name_start {
-                return false;
-            }
-            let rest = std::str::from_utf8(&bytes[index + 1..]).unwrap_or("");
-            rest.chars().next().is_some_and(|next| {
-                !matches!(
-                    next,
-                    ' ' | '\t' | '[' | ']' | '{' | '}' | ',' | '\u{85}' | '\u{2028}' | '\u{2029}'
-                )
-            })
-        }
+        b'?' => compat_question_stops_name(after()),
+        b':' => index > name_start && compat_colon_stops_name(after()),
         _ => false,
     }
 }

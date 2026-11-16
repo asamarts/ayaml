@@ -1403,3 +1403,39 @@ fn a_stream_start_run_of_marks_is_not_content() {
         }
     }
 }
+
+/// The compatibility scanner and the line reader end an anchor name at the same `:` before a
+/// flow indicator. Issue #139.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_ends_anchor_names_before_flow_indicators() {
+    for input in ["&a:[: x\n\"\n", "&a:,: x\n\"\n", "&a:k: x\n\"\n"] {
+        let error = ayaml::compat::from_str::<ayaml::Value>(input).unwrap_err();
+        assert_eq!(
+            error
+                .location()
+                .map(|location| (location.line(), location.column())),
+            Some((2, 1)),
+            "{input:?}: {error}"
+        );
+        assert!(
+            error
+                .message()
+                .contains("unterminated double-quoted scalar"),
+            "{input:?}: {error}"
+        );
+    }
+    for input in ["&a:[: x\n\"\n", "&a:,: x\n\"\n"] {
+        rejects(input);
+    }
+    for (input, expected) in [
+        ("&a:[: x\n y\n", json!({":[" : "x y"})),
+        ("&a:,: x\n y\n", json!({":," : "x y"})),
+    ] {
+        assert_eq!(
+            serde_json::to_value(ayaml::compat::from_str::<ayaml::Value>(input).unwrap()).unwrap(),
+            expected,
+            "{input:?}"
+        );
+    }
+}
