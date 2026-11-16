@@ -1439,3 +1439,31 @@ fn compat_ends_anchor_names_before_flow_indicators() {
         );
     }
 }
+
+/// A tab before any space does not indent a quoted scalar's continuation, even when spaces follow
+/// it. Issue #138.
+#[test]
+fn a_quoted_continuation_line_may_not_start_with_a_tab() {
+    for input in [
+        "foo: \"bar\n\tbaz\"\n",
+        "foo: \"bar\n\t  baz\"\n",
+        "foo: 'bar\n\t baz'\n",
+    ] {
+        for (mode, read) in readings(input) {
+            let error = read.unwrap_err();
+            assert!(
+                error.starts_with("tabs cannot be the only quoted-scalar indentation at line 2"),
+                "{input:?} in {mode}: {error}"
+            );
+        }
+    }
+    for (input, equal) in [
+        ("foo: \"bar\n  \tbaz\"", "foo: 'bar baz'"),
+        ("foo: 'bar\n  \tbaz'", "foo: 'bar baz'"),
+    ] {
+        for ((mode, read), (_, expected)) in readings(input).into_iter().zip(readings(equal)) {
+            let expected = expected.unwrap_or_else(|error| panic!("{equal:?}: {error}"));
+            assert_eq!(read, Ok(expected), "{input:?} in {mode}");
+        }
+    }
+}
