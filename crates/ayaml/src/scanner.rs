@@ -23,8 +23,9 @@ mod scalars;
 mod tests;
 
 use self::line::{
-    NameRules, Owner, PercentError, decode_percent_escapes, is_blank, is_line_break, is_tag_char,
-    is_uri_char, leading_spaces, non_printable_error, starts_block_collection, uri_text_ok,
+    NameRules, Owner, PercentError, compat_colon_stops_name, compat_question_stops_name,
+    decode_percent_escapes, is_blank, is_line_break, is_tag_char, is_uri_char, leading_spaces,
+    non_printable_error, starts_block_collection, uri_text_ok,
 };
 
 /// A lexical token.
@@ -1106,15 +1107,13 @@ impl<'a> Scanner<'a> {
             // this scanner wouldn't, so stopping would match neither reading.
             if self.compat_flow && ch == '?' {
                 let after = self.input[self.pos + 1..].chars().next();
-                if after.is_some_and(|next| !matches!(next, '[' | ']' | '{' | '}' | ',')) {
+                if compat_question_stops_name(after) {
                     break;
                 }
             }
             if self.compat_flow && self.flow_level == 0 && ch == ':' && self.pos > name_start {
                 let after = self.input[self.pos + 1..].chars().next();
-                if after.is_some_and(|next| {
-                    !is_blank(next) && !matches!(next, '\u{85}' | '\u{2028}' | '\u{2029}')
-                }) {
+                if compat_colon_stops_name(after) {
                     break;
                 }
             }
