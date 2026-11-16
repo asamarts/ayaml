@@ -1286,15 +1286,27 @@ fn a_block_scalar_header_after_properties_needs_the_parent_indent() {
         "m:\n  -\n    &a\n>\n",
         "m:\n  k:\n    !t\n>\n",
     ] {
-        rejected_in_both_modes(input);
+        rejects(input);
+        #[cfg(feature = "libyaml-compat")]
+        assert!(
+            ayaml::compat::from_str::<ayaml::Value>(input).is_err(),
+            "{input:?} should be rejected in compat mode"
+        );
     }
 }
 
 /// A top-level block scalar ends at a document marker even after indented empty lines.
 #[test]
 fn a_marker_after_indented_empty_scalar_lines_ends_the_scalar() {
-    assert_eq!(parse("|\n  \n...\n"), json!(""));
-    assert_eq!(parse(">\n  \n...\n"), json!(""));
+    for input in ["|\n  \n...\n", ">\n  \n...\n"] {
+        for (mode, read) in readings(input) {
+            assert_eq!(
+                read.unwrap_or_else(|error| panic!("{input:?} in {mode}: {error}")),
+                ayaml::Value::from(""),
+                "{input:?} in {mode}"
+            );
+        }
+    }
     assert_eq!(
         parse_documents("|\n  \n---\nb\n"),
         vec![json!(""), json!("b")]
