@@ -23,6 +23,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import check_instructions
+import check_deps
 import check_release
 import check_scheduled_runs
 import check_unsafe_census
@@ -1334,3 +1335,37 @@ class InstructionsBase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ScannerDependencyPolicy(unittest.TestCase):
+    def scanner(self, source: str) -> str | None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scanner").mkdir()
+            (root / "scanner" / "line.rs").write_text("use std::fmt;\n", encoding="utf-8")
+            (root / "scanner" / "scalars.rs").write_text("use std::borrow::Cow;\n", encoding="utf-8")
+            (root / "scanner.rs").write_text(source, encoding="utf-8")
+            return check_deps.scanner_problem(root)
+
+    def test_approved_imports_pass(self) -> None:
+        source = "use std::fmt;\nuse crate::error::Error;\nuse self::line::is_blank;\n"
+        self.assertIsNone(self.scanner(source))
+
+    def test_a_third_party_import_fails(self) -> None:
+        problem = self.scanner("use serde::Serialize;\n")
+        self.assertIsNotNone(problem)
+        self.assertIn("serde", problem)
+
+    def test_an_unapproved_crate_module_fails(self) -> None:
+        problem = self.scanner("use crate::value::Value;\n")
+        self.assertIsNotNone(problem)
+        self.assertIn("crate::value", problem)
+
+    def test_an_extern_crate_fails(self) -> None:
+        self.assertIsNotNone(self.scanner("extern crate serde;\n"))
+
+    def test_a_missing_scanner_file_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            problem = check_deps.scanner_problem(Path(directory))
+        self.assertIsNotNone(problem)
+        self.assertIn("missing", problem)
+
