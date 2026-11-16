@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `Limits::for_max_input()` lifts the four count limits for a valid document within
+  `MAX_INPUT_BYTES`, while the default profile stays memory-bounded.
+
 ### Fixed
 
 - A comment after a flow `?` in compatibility mode now ends at the same physical line ending as

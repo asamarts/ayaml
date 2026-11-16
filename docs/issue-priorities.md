@@ -5,13 +5,12 @@ cause so one change is tested once, rather than fixing symptoms separately.
 
 ## Correctness and data safety
 
-1. **AY-083 — #124.** Default count limits currently refuse valid documents far
-   below the 32 MiB input limit. Define and test the intended default profile.
-2. **AY-082 — #123.** Plain-scalar spans and raw text include trailing
+1. **AY-082 — #123.** Plain-scalar spans and raw text include trailing
    separation, which makes span-based edits unsafe.
 
 Completed: AY-086 — #132, #146, #147 in `608a0b4` (#152);
-AY-087 — #133, #137, #140; AY-088 — #138; AY-089 — #139; AY-090 — #141.
+AY-087 — #133, #137, #140; AY-088 — #138; AY-089 — #139; AY-090 — #141;
+AY-083 — #124.
 
 ## API and performance
 
@@ -31,11 +30,9 @@ AY-087 — #133, #137, #140; AY-088 — #138; AY-089 — #139; AY-090 — #141.
 AY-082 (plain scalar extent) ─┐
 AY-045 (byte spans) ──────────┴─> AY-049 (spanned tree, #128)
 
-AY-083 (#124)
 AY-070 / AY-057 (#127)
 AY-084 (#125)
 AY-085 (#126)
 ```
 
-The remaining correctness fixes are independent. AY-083 covers limits and AY-082
-covers spans; they can run in parallel.
+The remaining correctness fix, AY-082, covers spans.

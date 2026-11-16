@@ -221,6 +221,27 @@ impl Limits {
         }
     }
 
+    /// The default profile with the four count limits lifted, for a valid document within
+    /// [`MAX_INPUT_BYTES`] that exceeds the memory-bounded defaults.
+    ///
+    /// The default count limits deliberately bound the tokens an eager read keeps to about
+    /// 100 MB, so a dense document can reach one of them before the input limit. This profile
+    /// sets `max_events`, `max_collection_entries`, `max_anchors`, and
+    /// `max_alias_dereferences` to `usize::MAX`; the input, depth, scalar, tag-expansion,
+    /// document, and alias budgets still apply. A read at this profile can hold several
+    /// gigabytes of tokens, so use it only for input whose size and trustworthiness you know.
+    #[must_use]
+    pub const fn for_max_input() -> Self {
+        Self {
+            max_documents: DEFAULT_MAX_DOCUMENTS,
+            max_events: usize::MAX,
+            max_collection_entries: usize::MAX,
+            max_anchors: usize::MAX,
+            max_alias_dereferences: usize::MAX,
+            ..Self::compat()
+        }
+    }
+
     /// Set the maximum input size.
     #[must_use]
     pub const fn with_max_input_bytes(mut self, value: usize) -> Self {
@@ -541,6 +562,19 @@ mod tests {
                 ..Limits::compat()
             }
         );
+    }
+
+    #[test]
+    fn max_input_profile_lifts_only_the_count_limits() {
+        let limits = Limits::for_max_input();
+        assert_eq!(limits.max_input_bytes, MAX_INPUT_BYTES);
+        assert_eq!(limits.max_depth, MAX_DEPTH);
+        assert_eq!(limits.max_documents, 10_000);
+        assert_eq!(limits.max_events, usize::MAX);
+        assert_eq!(limits.max_collection_entries, usize::MAX);
+        assert_eq!(limits.max_anchors, usize::MAX);
+        assert_eq!(limits.max_alias_dereferences, usize::MAX);
+        assert!(limits.with_max_events(1).check_events(2).is_err());
     }
 
     #[test]
