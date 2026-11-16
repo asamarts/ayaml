@@ -829,11 +829,8 @@ impl<'a> Scanner<'a> {
                     self.pos += 1;
                 }
                 '#' if self.comment_is_legal() => {
-                    let flow_key = self.compat_flow
-                        && self.flow_level > 0
-                        && self.input[..self.pos].ends_with('?');
                     while let Some(ch) = self.peek() {
-                        if is_line_break(ch) || (flow_key && ch == '\u{85}') {
+                        if is_line_break(ch) {
                             break;
                         }
                         if ch == '\u{feff}' && !self.compat_flow {
@@ -843,9 +840,6 @@ impl<'a> Scanner<'a> {
                             ));
                         }
                         self.pos += ch.len_utf8();
-                    }
-                    if flow_key && self.peek() == Some('\u{85}') {
-                        self.pos += '\u{85}'.len_utf8();
                     }
                 }
                 _ if is_line_break(ch) => return Ok(()),

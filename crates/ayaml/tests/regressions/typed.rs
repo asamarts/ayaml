@@ -583,7 +583,7 @@ fn explicit_core_tags_follow_the_core_schema() {
 
 /// A drop-in compat reader shouldn't refuse forms that default mode and libyaml each read. These
 /// are the small scanner/parser meetings AY-067 lists: flow `?` before `-` or a `!` tag, anchors
-/// that end at `?` or `:`, a block scalar under an anchored `:` key, a NEL comment, a BOM marker,
+/// that end at `?` or `:`, a block scalar under an anchored `:` key, a NEL in a comment, a BOM marker,
 /// and a quoted scalar below a BOM key.
 #[cfg(feature = "libyaml-compat")]
 #[test]
@@ -625,8 +625,9 @@ fn compat_reads_what_default_mode_and_libyaml_read() {
         assert_eq!(compat(input), default(input), "{input:?}");
     }
 
-    // A NEL in a comment after a flow `?` ends the comment, as libyaml's line break does.
-    assert_eq!(compat("{?# \u{85}}"), default("{null: null}"));
+    // A NEL in a comment after a flow `?` is content, as it is in every other comment.
+    assert!(ayaml::compat::from_str::<ayaml::Value>("{?# \u{85}}").is_err());
+    assert_eq!(compat("[?#\n [1]]"), default("[{[1]: null}]"));
 
     // Outside a flow collection, a `:` before a flow indicator ends a name and becomes text.
     assert_eq!(compat("&r:}"), ayaml::Value::from(":}"));
