@@ -35,6 +35,15 @@ normal dependency graph.
 `tools/check_deps.py` reads it, and any crate not on its allowlists fails, including
 a YAML parser.
 
+## Scanner boundary
+
+The scanner stays independent of third-party crates as well as of the value
+layer. It may use `core`, `alloc`, `std`, `self`, `super`, and only the
+crate-local `error`, `event`, `limits`, `position`, `span`, and `tag` modules
+(plus the scanner's own `line` and `scalars` submodules). `tools/check_deps.py`
+reads the scanner sources and fails on any other import, including a new
+third-party crate or an unapproved crate module.
+
 ## Build and test dependencies
 
 The repository uses dev-only crates for conformance, property testing,
