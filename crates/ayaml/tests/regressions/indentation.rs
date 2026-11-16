@@ -392,6 +392,8 @@ fn a_quoted_scalar_on_its_own_line_is_measured_against_its_parent() {
         ("k: [\n    'a\nb']", &format!("{below} at line 3 column 1")),
         ("k:\n  'a\n\tb'", &format!("{tabs} at line 3 column 1")),
         ("k:\n  'a\n\t\tb'", &format!("{tabs} at line 3 column 1")),
+        ("k:\n  'a\n\t  b'", &format!("{tabs} at line 3 column 1")),
+        ("k:\n  \"a\n\t  b\"", &format!("{tabs} at line 3 column 1")),
         // Each outermost flow collection has its own owner, so a later one isn't held to an
         // earlier one's.
         (

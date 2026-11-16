@@ -227,24 +227,22 @@ impl<'a> Scanner<'a> {
             .rfind(['\n', '\r'])
             .map_or(0, |index| index + 1);
         let indentation = &self.input[line_start..self.pos];
-        let indent = indentation
-            .chars()
-            .take_while(|ch| *ch == ' ' || *ch == '\t')
-            .count();
+        // Only spaces indent a quoted scalar's continuation. A tab after them is separation, but
+        // a tab before any space is not indentation, whatever follows it.
+        let indent = indentation.chars().take_while(|ch| *ch == ' ').count();
         // A closing quote may sit at any indentation, as a closing `]` or `}` may, so tabs alone
         // can come before it. Only this scalar's quote closes it, and in a single-quoted scalar
         // `''` is a quote in the text.
         let closes =
             self.peek() == Some(quote) && (quote == '"' || self.peek_second() != Some('\''));
-        if !allow_same_indent && !closes && indentation.contains('\t') && !indentation.contains(' ')
-        {
+        if !allow_same_indent && !closes && indentation.starts_with('\t') {
             return Err(self.error_at(
                 line_start,
                 "tabs cannot be the only quoted-scalar indentation",
             ));
         }
         let rest = &self.input[self.pos..];
-        if indent == 0
+        if indentation.is_empty()
             && (rest.starts_with("---") || rest.starts_with("..."))
             && rest
                 .get(3..)

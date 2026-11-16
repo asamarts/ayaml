@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A quoted scalar's continuation line that starts with a tab is now rejected even when spaces
+  follow the tab; only spaces indent the continuation, as YAML requires.
 - In compatibility mode, the line reader now ends an anchor or alias name before a `:` followed
   by a flow indicator, matching the scanner and the continuation indentation check.
 - After a leading byte order mark, a compatibility error keeps its line and column, a quoted
