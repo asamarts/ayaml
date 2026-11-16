@@ -1513,3 +1513,76 @@ fn a_flow_question_comment_runs_to_the_line_end() {
         ayaml::parse_value("[{[1]: null}]\n").expect("value")
     );
 }
+
+/// A plain scalar's span and raw text end at its last non-whitespace character, before a comment,
+/// line break, or flow separator. Issue #123.
+#[test]
+fn plain_scalar_spans_and_raw_end_at_their_content() {
+    let input = "a: value   # note\nb: [x , y ]\nc: tail   \nd: \"q\"\n";
+    let default: Vec<ayaml::Event<'_>> = ayaml::parse_events(input)
+        .expect("default events")
+        .collect::<Result<_, _>>()
+        .expect("default events");
+    #[cfg(feature = "libyaml-compat")]
+    let compat: Vec<ayaml::Event<'_>> =
+        ayaml::compat::parse_events_with_limits(input, &ayaml::Limits::default())
+            .expect("compat events");
+    #[cfg(feature = "libyaml-compat")]
+    let readers = [("default", default), ("compat", compat)];
+    #[cfg(not(feature = "libyaml-compat"))]
+    let readers = [("default", default)];
+
+    for (mode, events) in readers {
+        let scalars: Vec<_> = events
+            .into_iter()
+            .filter_map(|event| match event {
+                ayaml::Event::Scalar {
+                    value, raw, span, ..
+                } => Some((value.into_owned(), raw.into_owned(), span)),
+                _ => None,
+            })
+            .collect();
+        let pairs: Vec<_> = scalars
+            .iter()
+            .map(|(value, raw, span)| {
+                let text = &input[span.start().index()..span.end().index()];
+                (value.as_str(), raw.as_str(), text)
+            })
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("a", "a", "a"),
+                ("value", "value", "value"),
+                ("b", "b", "b"),
+                ("x", "x", "x"),
+                ("y", "y", "y"),
+                ("c", "c", "c"),
+                ("tail", "tail", "tail"),
+                ("d", "d", "d"),
+                ("q", "\"q\"", "\"q\""),
+            ],
+            "{mode}"
+        );
+        assert!(
+            input[scalars[1].2.end().index()..].starts_with("   # note"),
+            "{mode}"
+        );
+        assert!(
+            input[scalars[3].2.end().index()..].starts_with(" ,"),
+            "{mode}"
+        );
+        assert!(
+            input[scalars[4].2.end().index()..].starts_with(" ]"),
+            "{mode}"
+        );
+        assert!(
+            input[scalars[6].2.end().index()..].starts_with("   \n"),
+            "{mode}"
+        );
+    }
+    assert_eq!(
+        parse(input),
+        json!({"a": "value", "b": ["x", "y"], "c": "tail", "d": "q"})
+    );
+}

@@ -13,6 +13,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A plain scalar's event span and raw text now end at its last non-whitespace character, leaving
+  comments, line breaks, and flow separators outside the scalar.
 - A comment after a flow `?` in compatibility mode now ends at the same physical line ending as
   every other comment; NEL, LS, and PS remain content.
 - A quoted scalar's continuation line that starts with a tab is now rejected even when spaces

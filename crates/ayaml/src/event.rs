@@ -87,7 +87,8 @@ pub enum Event<'a> {
     Scalar {
         /// Decoded scalar text.
         value: Cow<'a, str>,
-        /// Scalar text as written, including quotes or block indicators.
+        /// Scalar text as written, including quotes or block indicators. A plain scalar ends at
+        /// its last non-whitespace character, so its separation is not part of the text.
         raw: Cow<'a, str>,
         /// Presentation style.
         style: ScalarStyle,
@@ -95,7 +96,7 @@ pub enum Event<'a> {
         tag: Option<Tag>,
         /// Anchor, if any.
         anchor: Option<Anchor<'a>>,
-        /// Source span.
+        /// Source span. A plain scalar's span ends at its last non-whitespace character.
         span: Span,
     },
     /// Start of a sequence.

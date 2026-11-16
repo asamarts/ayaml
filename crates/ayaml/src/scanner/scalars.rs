@@ -1016,7 +1016,10 @@ impl<'a> Scanner<'a> {
                 }
             }
         }
-        let end = self.pos;
+        // A plain scalar ends at its last non-blank character. The scanner still stops at the
+        // separation, comment, line break, or flow indicator that ended it, so trimming here
+        // changes only what the token and event report, not what comes next.
+        let end = self.trim_trailing_whitespace(start, self.pos);
         if end == start {
             return Err(self.error_at(start, "expected a token"));
         }
