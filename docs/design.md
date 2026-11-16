@@ -64,7 +64,9 @@ resource model is described in [limits.md](limits.md).
 Spans are half-open UTF-8 byte ranges over the original input. `Marker` carries
 a byte index plus one-based line and column values. Block and flow collections,
 scalars, tags, anchors, aliases, and directives expose source spans in the
-event stream.
+event stream. A plain scalar's span and raw text end at its last non-whitespace
+character, so the separation before a comment, line break, or flow indicator
+stays outside it.
 
 Errors have a stable `ErrorKind`, an optional span and location, a message, and
 an optional source. Resource-limit errors additionally expose a structured
