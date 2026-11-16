@@ -400,7 +400,7 @@ fn compat_line_start_boms_are_ignored_but_same_line_bom_content_is_kept() {
     let compat = |input: &str| ayaml::compat::from_str::<Value>(input).unwrap();
     assert_eq!(compat("\n\u{feff}\n\u{feff}"), Value::Null);
     assert_eq!(compat("\n\u{feff} x"), Value::from("x"));
-    assert_eq!(compat("\u{feff}\u{feff}"), Value::from("\u{feff}"));
+    assert_eq!(compat("\u{feff}\u{feff}"), Value::Null);
     assert_eq!(compat("a: b\u{feff}c\n")["a"], Value::from("b\u{feff}c"));
 }
 

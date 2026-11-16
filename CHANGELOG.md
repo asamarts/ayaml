@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- After a leading byte order mark, a compatibility error keeps its line and column, a quoted
+  scalar's continuation check still applies, and a second stream-start mark is skipped instead
+  of read as content.
 - A block scalar header after node properties on their own line is now rejected when it is not
   indented past its parent, in both modes and after an anchor or a tag.
 - A top-level block scalar with indented empty lines now ends before a document marker, leaving

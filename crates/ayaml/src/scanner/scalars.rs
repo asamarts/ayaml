@@ -101,7 +101,7 @@ impl<'a> Scanner<'a> {
             (self.owner_of(start), self.compact_column(start))
         };
         if self.compat_flow
-            && self.previous_line_starts_with_bom(line_start)
+            && self.previous_line_bom_takes_column(line_start)
             && let Owner::Block(parent) = owner
         {
             // A mark at the start of the key's line is a column in libyaml, but libyaml has no
@@ -739,6 +739,21 @@ impl<'a> Scanner<'a> {
     /// What `text`, which starts the line at `line_start`, says about ownership. An owner after
     /// a mark that takes up a column is one deeper.
     pub(super) fn shape_of_line(&self, line_start: usize, text: &str) -> LineShape {
+        // The stream-start run of marks is skipped, so it cannot make a later mark look like
+        // content. Keep the first mark in the slice: compat's block-prefix rule reads a marker
+        // after it as text, and a mark on a later line still counts as a column here.
+        let text = if self.compat_flow && line_start == 0 && self.initial_bom {
+            let marks = self.initial_bom_end();
+            let last = marks - '\u{feff}'.len_utf8();
+            let end = line_start + text.len();
+            if marks > '\u{feff}'.len_utf8() && end >= last {
+                &self.input[last..end]
+            } else {
+                text
+            }
+        } else {
+            text
+        };
         let shape = line_shape(text, self.names());
         match shape {
             LineShape::Owner(Owner::Block(indent))
@@ -765,7 +780,7 @@ impl<'a> Scanner<'a> {
     pub(super) fn owner_from_previous_lines(&self, line_start: usize) -> Owner {
         let mut end = line_start;
         loop {
-            if end == 0 || (end == 3 && self.initial_bom) {
+            if end == 0 || (self.initial_bom && end == self.initial_bom_end()) {
                 return Owner::Root;
             }
             let mut previous_end = end;
@@ -824,17 +839,22 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// Whether the nearest non-empty line before `line_start` starts with a byte order mark.
-    pub(super) fn previous_line_starts_with_bom(&self, line_start: usize) -> bool {
+    /// Whether the nearest non-empty line before `line_start` starts with a byte order mark that
+    /// takes up a column.
+    pub(super) fn previous_line_bom_takes_column(&self, line_start: usize) -> bool {
         let mut end = line_start;
         while end > 0 {
             let previous_start = self.line_index.line_start(end.saturating_sub(1));
             let line = &self.input[previous_start..end];
-            if line.trim_matches(is_blank).is_empty() {
+            let trimmed = line.trim_start_matches(is_blank);
+            if trimmed.is_empty() {
                 end = previous_start;
                 continue;
             }
-            return line.trim_start_matches(is_blank).starts_with('\u{feff}');
+            let bom_start = previous_start + (line.len() - trimmed.len());
+            return trimmed
+                .strip_prefix('\u{feff}')
+                .is_some_and(|rest| self.mark_takes_column(bom_start, rest));
         }
         false
     }

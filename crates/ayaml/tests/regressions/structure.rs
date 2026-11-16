@@ -1316,3 +1316,90 @@ fn a_marker_after_indented_empty_scalar_lines_ends_the_scalar() {
         vec![json!(""), json!("x")]
     );
 }
+
+/// A leading byte order mark takes no column, so it changes neither an error's location nor a
+/// quoted scalar's continuation check. Issues #133 and #137.
+#[test]
+fn a_leading_mark_keeps_locations_and_quoted_indentation() {
+    for input in ["\u{feff}@\n", "\u{feff}`\n"] {
+        for (mode, read) in readings(input) {
+            let error = read.unwrap_err();
+            assert!(
+                error.ends_with("at line 1 column 1"),
+                "{input:?} in {mode}: {error}"
+            );
+        }
+    }
+    for input in [
+        "\u{feff}a:\n  b: \"x\n  y\"\n",
+        "\u{feff}a:\n  b: 'x\n  y'\n",
+    ] {
+        for (mode, read) in readings(input) {
+            let error = read.unwrap_err();
+            assert!(
+                error.starts_with(
+                    "quoted scalar continuation must be indented more than its parent"
+                ),
+                "{input:?} in {mode}: {error}"
+            );
+            assert!(
+                error.ends_with("at line 3 column 3"),
+                "{input:?} in {mode}: {error}"
+            );
+        }
+    }
+    for (mode, read) in readings("\u{feff}a: \"x\ny\"\n") {
+        let error = read.unwrap_err();
+        assert!(
+            error.ends_with("at line 2 column 1"),
+            "top-level scalar in {mode}: {error}"
+        );
+    }
+}
+
+/// A second stream-start mark is skipped rather than read as content, and does not move the
+/// indentation. Issue #140.
+#[test]
+fn a_stream_start_run_of_marks_is_not_content() {
+    let expected = ayaml::parse_value("a: 1\n").expect("mapping");
+    for input in ["\u{feff}\u{feff}a: 1\n", "\u{feff}\u{feff}\u{feff}a: 1\n"] {
+        for (mode, read) in readings(input) {
+            assert_eq!(
+                read.unwrap_or_else(|error| panic!("{input:?} in {mode}: {error}")),
+                expected,
+                "{input:?} in {mode}"
+            );
+        }
+    }
+    for (mode, read) in readings("\u{feff}\u{feff}") {
+        assert_eq!(
+            read.unwrap_or_else(|error| panic!("empty stream in {mode}: {error}")),
+            ayaml::Value::Null,
+            "empty stream in {mode}"
+        );
+    }
+    for input in ["\u{feff}...\n", "\u{feff}\u{feff}...\n"] {
+        for (mode, read) in readings(input) {
+            assert_eq!(
+                read.unwrap_or_else(|error| panic!("{input:?} in {mode}: {error}")),
+                ayaml::Value::Null,
+                "{input:?} in {mode}"
+            );
+        }
+    }
+    for input in [
+        "\u{feff}  : |2\n  \"\n",
+        "\u{feff}\u{feff}  : |2\n  \"\n",
+        "\u{feff}\u{feff}\u{feff}  : |2\n  \"\n",
+    ] {
+        for (mode, read) in readings(input) {
+            let error = read.unwrap_err();
+            assert!(
+                error.starts_with(
+                    "quoted scalar continuation must be indented more than its parent"
+                ),
+                "{input:?} in {mode}: {error}"
+            );
+        }
+    }
+}

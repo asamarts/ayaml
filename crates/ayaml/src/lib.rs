@@ -188,10 +188,15 @@ pub mod compat {
     /// the input or of the message.
     fn map_error(error: Error) -> Error {
         if error.code() == Code::ReservedIndicatorAfterBom {
-            return Error::new(
+            let mapped = Error::new(
                 ErrorKind::Scanner,
                 "found character that cannot start any token",
             );
+            return if let Some(span) = error.span() {
+                mapped.with_span(span)
+            } else {
+                mapped
+            };
         }
         if error
             .limit()

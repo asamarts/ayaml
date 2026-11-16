@@ -503,13 +503,27 @@ fn compat_reports_an_error_inside_the_first_document_before_a_second() {
 #[cfg(feature = "libyaml-compat")]
 #[test]
 fn compat_maps_a_bom_directive_to_the_libyaml_token_error() {
-    let error = ayaml::compat::from_str::<Value>("\u{feff}%YAML 1.2\n---\na: 1\n").unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Scanner);
-    assert_eq!(
-        error.message(),
-        "found character that cannot start any token"
-    );
-    assert!(error.span().is_none(), "{error}");
+    for input in [
+        "\u{feff}%YAML 1.2\n---\na: 1\n",
+        "\u{feff}\u{feff}%YAML 1.2\n---\na: 1\n",
+        "\u{feff}@\n",
+        "\u{feff}`\n",
+    ] {
+        let error = ayaml::compat::from_str::<Value>(input).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Scanner, "{input:?}");
+        assert_eq!(
+            error.message(),
+            "found character that cannot start any token",
+            "{input:?}"
+        );
+        assert_eq!(
+            error
+                .location()
+                .map(|location| (location.line(), location.column())),
+            Some((1, 1)),
+            "{input:?}: {error}"
+        );
+    }
 }
 
 /// Every typed reader keeps a mapping's keys in source order. The source is deliberately not
