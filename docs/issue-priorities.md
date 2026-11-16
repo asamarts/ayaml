@@ -16,8 +16,8 @@ cause so one change is tested once, rather than fixing symptoms separately.
 5. **AY-082 — #123.** Plain-scalar spans and raw text include trailing
    separation, which makes span-based edits unsafe.
 
-Completed: AY-086 — #132, #146, #147 in `608a0b4` (#152); AY-087 — #133, #137,
-#140.
+Completed: AY-086 — #132, #146, #147 in `608a0b4` (#152);
+AY-087 — #133, #137, #140.
 
 ## API and performance
 
