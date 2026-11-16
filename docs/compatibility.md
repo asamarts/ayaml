@@ -191,8 +191,8 @@ lines, as libyaml does, except where an implicit flow key's `:` sits on one, as 
 Compatibility mode isn't an exact copy of libyaml. It follows YAML 1.2.2 instead in
 these places, on purpose:
 
-- NEL, LS, and PS are content; libyaml reads them as line breaks. A NEL in a comment
-  after a flow `?` still ends that comment, as libyaml's line break does.
+- NEL, LS, and PS are content; libyaml reads them as line breaks. Comments run to a
+  physical line ending in both modes, including a comment after a flow `?`.
 - A core-schema tag on a node of another kind is dropped, as libyaml drops it. Default mode
   drops it too, so `!!str {}` and `!!seq a` read as `{}` and `a` in both modes.
 - A byte-order mark past the start of the stream behaves as described above.

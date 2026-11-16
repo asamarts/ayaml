@@ -1467,3 +1467,49 @@ fn a_quoted_continuation_line_may_not_start_with_a_tab() {
         }
     }
 }
+
+/// A comment after a flow `?` ends at a physical line ending like every other comment; NEL and
+/// the other YAML 1.1 separators are content. Issue #141.
+#[test]
+fn a_flow_question_comment_runs_to_the_line_end() {
+    for input in [
+        "[?#\u{85} [1]]\n",
+        "[?#\u{2028} [1]]\n",
+        "[?#\u{2029} [1]]\n",
+    ] {
+        for (mode, read) in readings(input) {
+            assert!(read.is_err(), "{input:?} in {mode} should fail");
+        }
+    }
+    assert_eq!(parse("[?#x\u{85}y]\n"), json!(["?#x\u{85}y"]));
+    assert_eq!(parse("{?# \u{85}}\n"), json!({"?# \u{85}": null}));
+    assert!(ayaml::parse_events("[?#x\u{85}y]\n").is_ok());
+    #[cfg(feature = "libyaml-compat")]
+    for input in [
+        "[?#\u{85} [1]]\n",
+        "[?#x\u{85}y]\n",
+        "{?# \u{85}}\n",
+        "[?#\u{2028} [1]]\n",
+        "[?#\u{2029} [1]]\n",
+    ] {
+        let error = ayaml::compat::from_str::<ayaml::Value>(input).unwrap_err();
+        assert_eq!(
+            error
+                .location()
+                .map(|location| (location.line(), location.column())),
+            Some((2, 1)),
+            "{input:?}: {error}"
+        );
+        assert!(
+            error
+                .message()
+                .starts_with("did not find expected node content"),
+            "{input:?}: {error}"
+        );
+    }
+    #[cfg(feature = "libyaml-compat")]
+    assert_eq!(
+        ayaml::compat::from_str::<ayaml::Value>("[?#\n [1]]\n").expect("compat"),
+        ayaml::parse_value("[{[1]: null}]\n").expect("value")
+    );
+}
