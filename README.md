@@ -152,9 +152,12 @@ decoder, the `Deserializer`, and the emitters that support an explicit limit, th
 their `_with_limits` forms. The convenience `from_str` and `from_slice` typed readers
 use the defaults. The defaults allow 32 MiB of input, depth 128, 10,000 documents per
 stream, and a byte-weighted alias budget; the single-document APIs still reject a
-second document. Exceeding a limit returns `ErrorKind::Limit`, and `Error::limit()`
-exposes the limit kind, ceiling, and observed value. Limit errors carry source spans
-where the input provides one.
+second document. The default count limits are intentionally lower than the input
+limit, to bound memory for untrusted input; use `Limits::for_max_input()` when a
+dense document within the input limit is refused by a count limit, at the cost of
+much larger memory use. Exceeding a limit returns `ErrorKind::Limit`, and
+`Error::limit()` exposes the limit kind, ceiling, and observed value. Limit errors
+carry source spans where the input provides one.
 
 See [docs/limits.md](https://github.com/asamarts/ayaml/blob/main/docs/limits.md) for defaults, boundaries, and the alias
 budget formula.

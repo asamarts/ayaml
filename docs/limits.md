@@ -25,6 +25,34 @@ mode; that mode has its own `ayaml::compat` entry points.
 | `max_output_bytes` | 64 MiB | Maximum bytes written by one emitter call. |
 | `max_tag_expansion_bytes` | 64 MiB | Maximum bytes that tag handles expand to in one stream. |
 
+### Count profile for the input limit
+
+The default count limits are a lower profile than `max_input_bytes`: they bound the tokens
+an eager read keeps to about 100 MB. A dense but valid document can therefore reach
+`max_events`, `max_collection_entries`, `max_anchors`, or `max_alias_dereferences` before it
+reaches the 32 MiB input limit. This is intentional for hostile input.
+
+When a caller needs the four count limits not to refuse a valid document within
+`MAX_INPUT_BYTES`, start from `Limits::for_max_input()`:
+
+```rust
+use ayaml::{parse_value_with_limits, Limits};
+
+# fn main() -> Result<(), ayaml::Error> {
+let limits = Limits::for_max_input();
+let value = parse_value_with_limits("[1, 2, 3]\n", &limits)?;
+# let _ = value;
+# Ok(())
+# }
+```
+
+That profile sets the four count limits to `usize::MAX`; the input, depth, scalar,
+tag-expansion, document, and alias budgets still bound the read. Counts and the token arena
+can then reach gigabytes for a 32 MiB input, so use `Limits::default()` for untrusted input.
+The four reproduced dense shapes are covered by
+`crates/ayaml/tests/limit_profiles.rs`: the default profile refuses each one, and
+`Limits::for_max_input()` reads it.
+
 Limits are inclusive at the accepted boundary. Input size, depth, alias expansion,
 tag expansion, a block scalar's size, and the least node cost have tests just below,
 at, and above their default ceilings. `crates/ayaml/tests/limit_consistency.rs` covers every limit that a

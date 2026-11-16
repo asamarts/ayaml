@@ -516,3 +516,30 @@ distinguish that empty value or bare tag from `~`, so `from_value` and the owned
 treat it as an explicit null and reject it for those targets. That difference is documented in
 `docs/compatibility.md` and the `from_value` API docs. A tag built by hand keeps the explicit
 split its constructor was given; tags read from a source use the canonical split.
+
+## D88 — Default count limits stay memory-bounded; `Limits::for_max_input` lifts them
+
+**Date:** 2026-11-16
+**Status:** Accepted
+
+**Decision.** `Limits::default()` keeps `max_events`, `max_collection_entries`,
+`max_anchors`, and `max_alias_dereferences` at their memory-bounded values. Add
+`Limits::for_max_input()`, which sets those four to `usize::MAX` and keeps the input, depth,
+scalar, tag-expansion, document, and alias budgets. `docs/limits.md` states that the defaults
+are a lower profile than `max_input_bytes`, and that the new profile is the way to read a
+dense document the input limit admits when the other budgets allow it.
+
+**Alternatives.** Raise the defaults themselves until they cover the worst case within 32 MiB:
+the token arena could then reach several gigabytes, undoing D78's memory bound. Scale the count
+limits with input length: every reader would need a new input-sized count rule, it would still
+permit the same memory, and explicitly lower limits would become ambiguous. Document the lower
+profile without a preset: callers would still have to discover and lift four fields by hand.
+
+**Why.** The input limit was being read as a promise about every dense document, but the count
+limits exist to bound memory, not to restate the input size. Naming the permissive profile makes
+that trade explicit and leaves the default fail-closed for hostile input.
+
+**Consequences.** Callers that need the input bound opt in and accept the memory cost; callers
+that lower any of the four counts keep their stricter behavior. The other budgets, including
+depth and alias expansion, still apply even with `for_max_input()`, so a syntactically valid
+document can still be refused for those reasons.
