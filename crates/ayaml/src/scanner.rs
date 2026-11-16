@@ -146,6 +146,8 @@ pub(crate) struct Scanner<'a> {
     /// parser reports that limit from the token it just received (AY-027).
     stop_after: bool,
     initial_bom: bool,
+    /// The byte after the stream-start run of byte order marks.
+    initial_bom_end: usize,
     /// Where the text after a line's byte order mark starts, outside compat. A BOM takes up
     /// no column there, so document markers and directives may start at this position.
     after_line_bom: usize,
@@ -226,8 +228,9 @@ impl<'a> Scanner<'a> {
                 });
             }
         };
-        let initial_bom = input.starts_with('\u{feff}');
-        let pos = if initial_bom { 3 } else { 0 };
+        let initial_bom_end = input.len() - input.trim_start_matches('\u{feff}').len();
+        let initial_bom = initial_bom_end > 0;
+        let pos = initial_bom_end;
         Ok(Self {
             input,
             pos,
@@ -249,6 +252,7 @@ impl<'a> Scanner<'a> {
             finished: false,
             stop_after: false,
             initial_bom,
+            initial_bom_end,
             after_line_bom: if initial_bom && !compat_flow { pos } else { 0 },
             compat_flow,
             colon_anchors: None,
@@ -382,7 +386,7 @@ impl<'a> Scanner<'a> {
         }
         if self.flow_level == 0
             && self.compat_flow
-            && self.pos == 3
+            && self.pos == self.initial_bom_end()
             && self.initial_bom
             && self.input[self.pos..].starts_with("...\n")
             && let Some(token) = self.scan_document_marker()?
@@ -715,8 +719,16 @@ impl<'a> Scanner<'a> {
         error
     }
 
+    /// Where the stream-start run of byte order marks ends.
+    pub(super) fn initial_bom_end(&self) -> usize {
+        self.initial_bom_end
+    }
+
     /// Whether the byte at `index` follows a byte order mark at the start of a line.
     fn reserved_after_bom(&self, index: usize) -> bool {
+        if self.initial_bom && index == self.initial_bom_end() {
+            return true;
+        }
         let Some(before) = self
             .input
             .get(..index)
@@ -914,7 +926,7 @@ impl<'a> Scanner<'a> {
         // In compat, a stream-start BOM is content for marker detection, so
         // `BOM---` is a plain scalar rather than an explicit document start.
         // By default a BOM is not content.
-        if self.compat_flow && start == 3 && self.initial_bom {
+        if self.compat_flow && start == self.initial_bom_end() && self.initial_bom {
             let rest = &self.input[start..];
             if !rest.starts_with("...") || !rest[3..].chars().next().is_some_and(is_line_break) {
                 return Ok(None);

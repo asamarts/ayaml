@@ -120,7 +120,7 @@ impl LineIndex {
         let Ok((starts, ascii)) = scan_line_starts::<false>(input, &mut quoted_only) else {
             unreachable!("an unchecked scan cannot fail");
         };
-        let content_start = if input.starts_with('\u{feff}') { 3 } else { 0 };
+        let content_start = input.len() - input.trim_start_matches('\u{feff}').len();
         Self {
             starts,
             content_start,
@@ -148,10 +148,8 @@ impl LineIndex {
                 .is_some_and(starts_with_document_marker)
         {
             0
-        } else if input.starts_with('\u{feff}') {
-            3
         } else {
-            0
+            input.len() - input.trim_start_matches('\u{feff}').len()
         };
         Ok((
             Self {

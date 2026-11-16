@@ -162,7 +162,9 @@ default mode, so `\u{feff}...\n...\u{2028}` reads the second line's text. On a
 later line, the mark's column also counts for block structure, so a block
 collection after it is one column deeper. The stream's first mark takes up no
 column, as when libyaml detects the encoding itself, unless a marker follows it.
-Then the marker is text, and the line reads like a later line.
+Then the marker is text, and the line reads like a later line. A run of marks at
+the start of the stream is skipped as one mark would be; a later mark in the run
+is never content, and a `---` after the run is still text in compatibility mode.
 
 A closing `]`, `}`, or quote may sit at any indentation in both modes, including
 under a block collection, where the grammar asks for indentation, and after tabs alone.
