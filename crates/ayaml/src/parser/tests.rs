@@ -33,10 +33,9 @@ fn arena_copies(tokens: usize, chunk: usize) -> (usize, usize) {
     (copied, capacity)
 }
 
-/// A growing arena costs copies linear in its length, at most 17 times it, with less than a
-/// sixteenth of it, or one chunk, unused. Growing by a fixed chunk copied quadratically: about
-/// 37 times as much at ten million tokens, and the gap grows with the length. Up to 16 chunks,
-/// the arena grows by chunks alone.
+/// A growing arena copies at most twice its final length and keeps less than its length, or one
+/// chunk, unused. Growing by a fixed chunk copied quadratically and allocated many times the
+/// arena in total.
 #[test]
 fn the_token_arena_grows_with_linear_copying_and_bounded_waste() {
     for chunk in [TOKEN_ARENA_SMALL_CHUNK, TOKEN_ARENA_CHUNK] {
@@ -50,16 +49,16 @@ fn the_token_arena_grows_with_linear_copying_and_bounded_waste() {
             10_000_000,
         ] {
             let (copied, capacity) = arena_copies(tokens, chunk);
-            assert!(copied <= 17 * tokens, "{tokens} tokens: {copied} copied");
+            assert!(copied <= 2 * tokens, "{tokens} tokens: {copied} copied");
             assert!(
-                capacity - tokens <= chunk.max(tokens / 16),
+                capacity - tokens < tokens.max(chunk),
                 "{tokens} tokens: capacity {capacity}"
             );
         }
-        for len in [0, chunk, 16 * chunk] {
-            assert_eq!(arena_growth(len, chunk), chunk);
-        }
-        assert!(arena_growth(17 * chunk, chunk) > chunk);
+        assert_eq!(arena_growth(0, chunk), chunk);
+        assert_eq!(arena_growth(chunk, chunk), chunk);
+        assert_eq!(arena_growth(16 * chunk, chunk), 16 * chunk);
+        assert_eq!(arena_growth(17 * chunk, chunk), 17 * chunk);
     }
     let fixed: usize = (0..10_000_000 / TOKEN_ARENA_CHUNK)
         .map(|n| n * TOKEN_ARENA_CHUNK)
@@ -97,8 +96,8 @@ fn push_token_grows_a_full_arena_as_arena_growth_says() {
                 tokens.len()
             );
         }
-        // A chunk at a time to 17 chunks, then 15 sixteenths to 42 chunks.
-        assert_eq!(growths, 32, "{chunk}");
+        // The first chunk, then doubling to 64 chunks for 40 chunks of tokens.
+        assert_eq!(growths, 7, "{chunk}");
     }
 }
 

@@ -13,14 +13,15 @@ manifest="${1:-tools/alloc-corpus.tsv}"
 
 checked=0
 # The second test keeps a last row that has no trailing newline.
-while IFS=$'\t' read -r path parse_peak emit_peak parse_allocs emit_allocs serialize_peak serialize_allocs || [[ -n "$path" ]]; do
+while IFS=$'\t' read -r path parse_peak emit_peak parse_allocs emit_allocs serialize_peak serialize_allocs parse_total emit_total serialize_total || [[ -n "$path" ]]; do
     case "$path" in
         "" | \#*) continue ;;
     esac
     cargo run --quiet --release --locked --manifest-path fuzz/Cargo.toml --bin memcount -- \
         "$path" \
         "$parse_peak" "$emit_peak" "$parse_allocs" "$emit_allocs" \
-        "$serialize_peak" "$serialize_allocs"
+        "$serialize_peak" "$serialize_allocs" \
+        "$parse_total" "$emit_total" "$serialize_total"
     checked=$((checked + 1))
 done < "$manifest"
 
