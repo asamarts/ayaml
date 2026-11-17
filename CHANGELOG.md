@@ -22,6 +22,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A compact block sequence that crosses `max_depth` is now refused while scanning, rather than
+  after the whole input has been read.
+- Compatibility flow implicit-key lookahead skips nested collections in one step instead of
+  rescanning their content at every enclosing level.
 - A plain scalar's event span and raw text now end at its last non-whitespace character, leaving
   comments, line breaks, and flow separators outside the scalar.
 - A comment after a flow `?` in compatibility mode now ends at the same physical line ending as

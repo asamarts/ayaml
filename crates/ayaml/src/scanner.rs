@@ -182,6 +182,8 @@ pub(crate) struct Scanner<'a> {
     /// The start of the last line a tab was checked on, and where the byte order marks that start
     /// it end, so that a line's tabs look at its marks once.
     line_marks: (usize, usize),
+    /// The run of consecutive block entry indicators, an upper bound on compact block nesting.
+    block_run: usize,
     /// The last line a quoted scalar's indent was counted on, and that indent.
     counted_indent: (usize, usize),
     /// Where the outermost open flow collection starts.
@@ -269,6 +271,7 @@ impl<'a> Scanner<'a> {
             block_prefix: (usize::MAX, false),
             checked_line_end: 0,
             line_marks: (usize::MAX, 0),
+            block_run: 0,
             counted_indent: (usize::MAX, 0),
             flow_start: 0,
             flow_owner: (usize::MAX, Owner::Unknown, None),
@@ -584,6 +587,14 @@ impl<'a> Scanner<'a> {
         end: usize,
     ) -> Result<Option<Token<'a>>, Error> {
         self.count_token(start)?;
+        if matches!(kind, TokenKind::BlockEntry) {
+            self.block_run += 1;
+            if let Err(limit) = self.limits.check_depth(self.block_run) {
+                return Err(self.limit_at(start, limit));
+            }
+        } else {
+            self.block_run = 0;
+        }
         if self.quoted_only_next < self.quoted_only.len() {
             self.check_quoted_only(None)?;
         }
@@ -601,6 +612,7 @@ impl<'a> Scanner<'a> {
     /// keeps a line break, so it doesn't count against `max_events`, and a
     /// blank or comment line costs nothing there.
     fn make_line_break(&mut self, start: usize, end: usize) -> Result<Option<Token<'a>>, Error> {
+        self.block_run = 0;
         if self.quoted_only_next < self.quoted_only.len() {
             self.check_quoted_only(None)?;
         }
@@ -620,6 +632,12 @@ impl<'a> Scanner<'a> {
     ) -> Result<Option<Token<'a>>, Error> {
         // No reader keeps the stream's start and end tokens: they become its
         // stream events, which count as events.
+        if !matches!(
+            kind,
+            TokenKind::StreamStart | TokenKind::StreamEnd | TokenKind::LineBreak
+        ) {
+            self.block_run = 0;
+        }
         if !matches!(kind, TokenKind::StreamStart | TokenKind::StreamEnd) {
             self.count_token(start)?;
         }

@@ -7,7 +7,7 @@
 //! `Parser::run`), so nesting depth costs heap, not native stack.
 
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use crate::composer::StreamingComposer;
 use crate::error::{Code, Error, ErrorKind};
@@ -213,6 +213,8 @@ impl<'a> EventSink<'a> {
 struct Parser<'a> {
     lines: Vec<Line>,
     token_arena: Vec<Token<'a>>,
+    /// Matching closing token positions for every flow collection, by absolute token index.
+    flow_ends: HashMap<usize, usize>,
     sink: EventSink<'a>,
     limits: Limits,
     input: &'a str,
@@ -471,6 +473,24 @@ impl<'a> EventCursor<'a> {
     }
 }
 
+/// Pair every flow collection's opening token with its closing token.
+fn flow_ends(tokens: &[Token<'_>]) -> HashMap<usize, usize> {
+    let mut ends = HashMap::new();
+    let mut stack = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart => stack.push(index),
+            TokenKind::FlowSequenceEnd | TokenKind::FlowMappingEnd => {
+                if let Some(open) = stack.pop() {
+                    ends.insert(open, index);
+                }
+            }
+            _ => {}
+        }
+    }
+    ends
+}
+
 /// Parse one document's lines for the pull cursor. Its events count on from the `counted` events
 /// before them, and the count after them comes back with them. `end` is where the lines stop.
 fn parse_lines<'a>(
@@ -481,9 +501,11 @@ fn parse_lines<'a>(
     end: usize,
 ) -> Result<(Vec<Event<'a>>, usize), Error> {
     let event_capacity = event_capacity(&lines.lines, &lines.tokens);
+    let flow_ends = flow_ends(&lines.tokens);
     let mut parser = Parser {
         lines: lines.lines,
         token_arena: lines.tokens,
+        flow_ends,
         sink: EventSink::Events(Vec::with_capacity(event_capacity)),
         limits: limits.clone(),
         input,
@@ -567,10 +589,12 @@ fn parse_events_with_compat<'a>(
     } = read_lines(&mut scanner)?;
 
     let event_capacity = event_capacity(&lines, &tokens).saturating_add(2);
+    let flow_ends = flow_ends(&tokens);
     let end = stream_end.map_or(input.len(), Span::start);
     let mut parser = Parser {
         lines,
         token_arena: tokens,
+        flow_ends,
         sink: EventSink::Events(Vec::with_capacity(event_capacity)),
         limits: limits.clone(),
         input,
@@ -604,9 +628,11 @@ pub(crate) fn parse_documents(
 ) -> Result<Vec<Value>, Error> {
     let mut scanner = Scanner::new(input, limits.clone())?;
     let lines = read_lines(&mut scanner)?;
+    let flow_ends = flow_ends(&lines.tokens);
     let mut parser = Parser {
         lines: lines.lines,
         token_arena: lines.tokens,
+        flow_ends,
         sink: EventSink::Streaming(Box::new(StreamingComposer::new(
             limits.clone(),
             input.len(),
