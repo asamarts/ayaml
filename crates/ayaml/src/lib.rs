@@ -464,6 +464,7 @@ pub struct EventStream<'a> {
     inner: parser::EventCursor<'a>,
 }
 
+#[cfg(feature = "libyaml-compat")]
 impl<'a> EventStream<'a> {
     pub(crate) fn from_cursor(inner: parser::EventCursor<'a>) -> Self {
         Self { inner }

@@ -210,8 +210,47 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
     })
 }
 
+/// Events in fixed-size chunks, so a typed read does not retain a vector's spare capacity.
+#[derive(Debug)]
+pub(crate) struct EventChunks<'a> {
+    chunks: Vec<Vec<Event<'a>>>,
+    current: Vec<Event<'a>>,
+    chunk_size: usize,
+}
+
+impl<'a> EventChunks<'a> {
+    const MAX_CHUNK: usize = 8_192;
+
+    fn with_chunk_size(chunk_size: usize) -> Self {
+        let chunk_size = chunk_size.clamp(16, Self::MAX_CHUNK);
+        Self {
+            chunks: Vec::new(),
+            current: Vec::with_capacity(chunk_size),
+            chunk_size,
+        }
+    }
+
+    fn push(&mut self, event: Event<'a>) {
+        if self.current.len() == self.chunk_size {
+            self.chunks.push(std::mem::replace(
+                &mut self.current,
+                Vec::with_capacity(self.chunk_size),
+            ));
+        }
+        self.current.push(event);
+    }
+
+    pub(crate) fn into_chunks(mut self) -> Vec<Vec<Event<'a>>> {
+        if !self.current.is_empty() {
+            self.chunks.push(self.current);
+        }
+        self.chunks
+    }
+}
+
 enum EventSink<'a> {
     Events(Vec<Event<'a>>),
+    Chunks(EventChunks<'a>),
     Streaming(Box<StreamingComposer<'a>>),
 }
 
@@ -224,6 +263,10 @@ impl<'a> EventSink<'a> {
                 if events.len() == events.capacity() {
                     events.reserve_exact((events.capacity() / 2).max(16));
                 }
+                events.push(event);
+                Ok(())
+            }
+            Self::Chunks(events) => {
                 events.push(event);
                 Ok(())
             }
@@ -559,7 +602,9 @@ fn parse_lines<'a>(
     parser.parse_stream()?;
     match parser.sink {
         EventSink::Events(events) => Ok((events, parser.emitted)),
-        EventSink::Streaming(_) => unreachable!("event sink kind changed during parsing"),
+        EventSink::Chunks(_) | EventSink::Streaming(_) => {
+            unreachable!("event sink kind changed during parsing")
+        }
     }
 }
 
@@ -602,6 +647,52 @@ pub(crate) fn parse_document_events<'a>(
     // Stop at the second document's start and let the typed builder build the first one first
     // (AY-027). The second start is the marker the builder turns into a trailing-document error.
     parse_events_with_compat(input, limits, compat_flow, true, true)
+}
+
+pub(crate) fn parse_document_event_chunks<'a>(
+    input: &'a str,
+    limits: &Limits,
+    compat_flow: bool,
+) -> Result<EventChunks<'a>, Error> {
+    let mut scanner = Scanner::with_compat(input, limits.clone(), compat_flow)?;
+    let Lines {
+        lines,
+        tokens,
+        stream_start,
+        stream_end,
+        positions,
+    } = read_lines(&mut scanner)?;
+    let chunk_size = event_capacity(&lines, &tokens).saturating_add(2);
+    let flow_ends = flow_ends(&tokens);
+    let end = stream_end.map_or(input.len(), Span::start);
+    let mut parser = Parser {
+        lines,
+        token_arena: tokens,
+        flow_ends,
+        sink: EventSink::Chunks(EventChunks::with_chunk_size(chunk_size)),
+        limits: limits.clone(),
+        input,
+        positions,
+        compat: compat_flow,
+        documents: 0,
+        emitted: 0,
+        single_document: true,
+        stop_at_second: true,
+        end,
+    };
+    parser.emit(Event::StreamStart {
+        span: stream_start.unwrap_or_else(|| Span::empty(0)),
+    })?;
+    parser.parse_stream()?;
+    parser.emit(Event::StreamEnd {
+        span: stream_end.unwrap_or_else(|| Span::empty(input.len())),
+    })?;
+    match parser.sink {
+        EventSink::Chunks(events) => Ok(events),
+        EventSink::Events(_) | EventSink::Streaming(_) => {
+            unreachable!("event sink kind changed during parsing")
+        }
+    }
 }
 
 fn parse_events_with_compat<'a>(
@@ -647,7 +738,9 @@ fn parse_events_with_compat<'a>(
     })?;
     match parser.sink {
         EventSink::Events(events) => Ok(events),
-        EventSink::Streaming(_) => unreachable!("event sink kind changed during parsing"),
+        EventSink::Chunks(_) | EventSink::Streaming(_) => {
+            unreachable!("event sink kind changed during parsing")
+        }
     }
 }
 
@@ -694,7 +787,9 @@ pub(crate) fn parse_documents(
         EventSink::Streaming(composer) => composer
             .finish()
             .map_err(|error| error.with_location_from(&positions, input)),
-        EventSink::Events(_) => unreachable!("event sink kind changed during parsing"),
+        EventSink::Events(_) | EventSink::Chunks(_) => {
+            unreachable!("event sink kind changed during parsing")
+        }
     }
 }
 
