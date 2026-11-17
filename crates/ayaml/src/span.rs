@@ -6,6 +6,55 @@
 
 use std::ops::Range;
 
+/// A byte offset with one-based line and column values.
+///
+/// This is the pre-byte-span position type. Spans no longer store it; use
+/// [`LineIndex`](crate::LineIndex) for positions derived from a span.
+#[deprecated(note = "use Span byte offsets with LineIndex and Position")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Marker {
+    index: usize,
+    line: usize,
+    column: usize,
+}
+
+#[allow(deprecated, reason = "this is the compatibility type itself")]
+impl Marker {
+    /// Create a marker at a byte offset and one-based line/column.
+    #[must_use]
+    pub const fn new(index: usize, line: usize, column: usize) -> Self {
+        Self {
+            index,
+            line,
+            column,
+        }
+    }
+
+    /// The zero-based byte offset from the start of the input.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.index
+    }
+
+    /// The one-based line number.
+    #[must_use]
+    pub const fn line(self) -> usize {
+        self.line
+    }
+
+    /// The one-based column number.
+    #[must_use]
+    pub const fn column(self) -> usize {
+        self.column
+    }
+
+    /// The line/column location, without the byte offset.
+    #[must_use]
+    pub const fn location(self) -> Position {
+        Position::new(self.line, self.column)
+    }
+}
+
 /// A one-based line and column, suitable for diagnostics and editors.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Position {
@@ -35,6 +84,13 @@ impl Position {
 
 /// A one-based line and column, suitable for diagnostics and editors.
 pub type Location = Position;
+
+#[allow(deprecated, reason = "converts the compatibility marker")]
+impl From<Marker> for Position {
+    fn from(marker: Marker) -> Self {
+        marker.location()
+    }
+}
 
 /// A half-open byte range in the original input.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

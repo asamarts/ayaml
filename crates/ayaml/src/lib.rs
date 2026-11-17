@@ -149,7 +149,8 @@ pub use limits::{
 pub use mapping::{Entry, Mapping};
 pub use number::Number;
 pub use position::{ColumnEncoding, LineIndex, PositionError};
-pub use span::{Location, Position, Span};
+#[allow(deprecated, reason = "re-export the compatibility marker")]
+pub use span::{Location, Marker, Position, Span};
 pub use tag::{Tag, TaggedValue};
 pub use value::Value;
 

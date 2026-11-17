@@ -544,14 +544,13 @@ that lower any of the four counts keep their stricter behavior. The other budget
 depth and alias expansion, still apply even with `for_max_input()`, so a syntactically valid
 document can still be refused for those reasons.
 
-
 ## D89 — Spans are byte ranges, and line columns come from a public index
 
 **Date:** 2026-11-16
 **Status:** Accepted
 
-**Decision.** `Span` holds two byte offsets and converts to `Range<usize>`. The old `Marker` is
-removed from spans. `LineIndex`, `Position`, `PositionError`, and `ColumnEncoding` are public;
+**Decision.** `Span` holds two byte offsets and converts to `Range<usize>`. The old `Marker` remains as a deprecated compatibility value type, but
+spans no longer store it. `LineIndex`, `Position`, `PositionError`, and `ColumnEncoding` are public;
 columns can count UTF-8 bytes, Unicode scalar values, or UTF-16 code units. Conversions reject
 out-of-bounds offsets and offsets inside a UTF-8 character instead of clamping them. A leading
 byte-order mark is included in byte offsets and excluded from columns. `Error::location()` still
@@ -569,7 +568,7 @@ errors and editor consumers. Byte ranges make the common path smaller; an on-dem
 each consumer the encoding it needs.
 
 **Consequences.** This is a breaking API migration: `Span::start` and `Span::end` return
-`usize`, `Marker` is gone, and a manually constructed `Error` uses `with_location` when it needs
+`usize`, spans no longer use `Marker`, and a manually constructed `Error` uses `with_location` when it needs
 a location. On a 64-bit release build the event size falls from 176 to 144 bytes, `Span` from 48
 to 16, and `Error` from 112 to 104. The hosted performance gates decide whether the scanner and
 parser remain within their instruction and allocation budgets.
