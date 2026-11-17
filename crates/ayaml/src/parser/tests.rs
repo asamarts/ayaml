@@ -896,6 +896,17 @@ fn chunked_document_events_match_the_collected_stream() {
 }
 
 #[test]
+fn mid_size_inputs_reserve_a_token_arena_from_their_length() {
+    assert_eq!(super::mid_input_token_capacity(20_493, 435), Some(2_049));
+    assert_eq!(super::mid_input_token_capacity(4_097, 100), Some(409));
+    assert_eq!(super::mid_input_token_capacity(32_768, 1_000), Some(3_276));
+    assert_eq!(super::mid_input_token_capacity(4_096, 100), None);
+    assert_eq!(super::mid_input_token_capacity(32_769, 1_000), None);
+    assert_eq!(super::mid_input_token_capacity(20_000, 2), None);
+    assert_eq!(super::mid_input_token_capacity(20_000, 0), None);
+}
+
+#[test]
 fn event_capacity_reserves_from_the_token_count() {
     let token = Token {
         kind: TokenKind::Scalar {

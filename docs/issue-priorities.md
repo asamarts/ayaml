@@ -19,7 +19,7 @@ The diagnostics queue is empty.
 ## API and performance
 
 1. **#127.** Remaining libyaml-relative total allocation comparison. The large-document
-   peak work (AY-096) is complete.
+   peak work (AY-096) and the mid-size token-arena reserve (AY-098) are complete.
 2. **AY-085 — #126.** Document that event readers do not validate alias
     targets.
 

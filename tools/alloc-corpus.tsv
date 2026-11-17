@@ -2,7 +2,7 @@
 # Each is about 1.25 times the measured value, rounded up. Raise one in the change that
 # needs it, and say why.
 # path	parse_peak	emit_peak	parse_allocs	emit_allocs	serialize_peak	serialize_allocs	parse_total	emit_total	serialize_total
-tests/fixtures/compat/toolchain-pins.yml	410000	62000	2100	36	130000	1400	779900	82100	123100
+tests/fixtures/compat/toolchain-pins.yml	410000	62000	2100	36	130000	1400	620000	82100	123100
 tests/fixtures/compat/scalar-tags-merges-aliases.yml	18000	450	99	32	4500	60	24000	700	4900
 @tiny	9000	24	30	17	17	17	7500	100	100
 @large-scalar	1300000	3800000	30	18	1300000	17	1989000	3750000	1250000
