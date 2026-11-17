@@ -70,7 +70,8 @@ in total; their measured values are in `tools/alloc-corpus.tsv`. Large-scalar pa
 about 53% fewer bytes in total, the 20,000-entry short map about 38% fewer, and the short
 explicit-pair workload about 31% fewer than before this change. Peak heap falls about 13% on
 short sequences and 19% on short explicit pairs, and the affected budgets are tightened to the
-new measurements.
+new measurements. Event vectors reserve four fifths of the token count plus headroom; on the
+1 MB nested test document this lowers the typed parse peak from about 64.8 MB to 49.4 MB.
 
 The release process keeps comparison results private. This document describes
 the methodology so that absolute or relative measurements can be reviewed on

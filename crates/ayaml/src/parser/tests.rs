@@ -870,3 +870,22 @@ fn empty_flow_mapping_value_is_null() {
             >= 1
     );
 }
+
+#[test]
+fn event_capacity_reserves_from_the_token_count() {
+    let token = Token {
+        kind: TokenKind::Scalar {
+            value: "x".into(),
+            raw: "x".into(),
+            style: crate::event::ScalarStyle::Plain,
+        },
+        span: Span::empty(0),
+    };
+    let tokens = vec![token; 1_000];
+    let lines = vec![super::Line {
+        start: 0,
+        end: tokens.len(),
+        indent: 0,
+    }];
+    assert_eq!(super::event_capacity(&lines, &tokens), 1_000 * 4 / 5 + 200);
+}
