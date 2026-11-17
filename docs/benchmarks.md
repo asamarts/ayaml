@@ -64,12 +64,13 @@ Timing uses repeated samples and reports medians rather than a single run.
 Allocation probes report allocated bytes, allocation count, and peak allocated
 bytes. Peak memory is measured for parsing, emission, and serialization separately.
 
-The token arena doubles after its first chunk, which lowers the bytes a read allocates in total
-while keeping its peak within the existing per-workload budgets. The generated short-node budgets
-currently allow at most 250 times the input bytes in total; their measured values are in
-`tools/alloc-corpus.tsv`. Large-scalar parsing allocates about 53% fewer bytes in total, the
-20,000-entry short map about 38% fewer, and the short explicit-pair workload about 31% fewer than
-before this change.
+The token arena doubles after its first chunk, and inputs dense in short lines start with a
+wider chunk. The generated short-node budgets currently allow at most 250 times the input bytes
+in total; their measured values are in `tools/alloc-corpus.tsv`. Large-scalar parsing allocates
+about 53% fewer bytes in total, the 20,000-entry short map about 38% fewer, and the short
+explicit-pair workload about 31% fewer than before this change. Peak heap falls about 13% on
+short sequences and 19% on short explicit pairs, and the affected budgets are tightened to the
+new measurements.
 
 The release process keeps comparison results private. This document describes
 the methodology so that absolute or relative measurements can be reviewed on

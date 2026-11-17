@@ -78,6 +78,8 @@ impl Line {
 /// capacity on wide inputs; fixed chunks bound the waste. Small inputs use a
 /// smaller first chunk so the shrink-to-fit transient stays cheap.
 const TOKEN_ARENA_CHUNK: usize = 8 * 1024;
+/// A first chunk for input dense in short lines, where more tokens share each allocation.
+const TOKEN_ARENA_WIDE_CHUNK: usize = 16 * 1024;
 const TOKEN_ARENA_SMALL_CHUNK: usize = 64;
 const TOKEN_ARENA_MID_CHUNK: usize = 256;
 
@@ -88,13 +90,18 @@ fn push_token<'a>(tokens: &mut Vec<Token<'a>>, token: Token<'a>, chunk: usize) {
     tokens.push(token);
 }
 
-/// How many tokens a full arena of `len` grows by: the first chunk, then doubling. Growing by a
-/// fixed chunk alone copies the arena once per chunk and allocates many times its final length in
-/// total. Doubling keeps the copied and total bytes within a small multiple of the final length,
-/// while the unused capacity stays under the final length; inputs with only a few tokens still
-/// pay for one chunk.
+/// How many tokens a full arena of `len` grows by. A wide first chunk for short-line input keeps
+/// growing by chunks, which holds peak and total allocation down for many small nodes. Other
+/// inputs double after their first chunk, so a few large scalars do not reserve a wide arena.
 const fn arena_growth(len: usize, chunk: usize) -> usize {
-    if len > chunk { len } else { chunk }
+    if len <= chunk {
+        chunk
+    } else if chunk == TOKEN_ARENA_WIDE_CHUNK {
+        let sixteenth = len / 16;
+        if sixteenth > chunk { sixteenth } else { chunk }
+    } else {
+        len
+    }
 }
 
 /// Logical lines read from the scanner, plus the stream boundary spans.
@@ -117,10 +124,21 @@ struct Lines<'a> {
 /// so it flushes the logical line immediately.
 fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
     let input = scanner.input();
-    let chunk = match scanner.input_len() {
+    let input_len = scanner.input_len();
+    let chunk = match input_len {
         0..=4096 => TOKEN_ARENA_SMALL_CHUNK,
         4097..=32768 => TOKEN_ARENA_MID_CHUNK,
-        _ => TOKEN_ARENA_CHUNK,
+        _ => {
+            // Short lines carry many tokens for their bytes, so a wider first chunk saves
+            // reallocations. A few long lines, such as one large scalar, keep the small chunk so
+            // an empty arena does not reserve a wide one.
+            let lines = scanner.line_index().line_count();
+            if lines > 0 && input_len / lines <= 10 {
+                TOKEN_ARENA_WIDE_CHUNK
+            } else {
+                TOKEN_ARENA_CHUNK
+            }
+        }
     };
     let mut lines = Vec::new();
     let mut tokens = Vec::new();
