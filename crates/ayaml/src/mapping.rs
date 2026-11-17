@@ -11,7 +11,7 @@ use std::hash::{BuildHasher, Hash, Hasher, RandomState};
 use std::ops::Index as OpsIndex;
 use std::sync::OnceLock;
 
-use indexmap::IndexMap;
+use indexmap::{Equivalent, IndexMap};
 
 /// A zero-sized hasher that uses one process-wide random seed, leaving room for the hash cache.
 #[derive(Clone, Default)]
@@ -27,6 +27,23 @@ impl BuildHasher for GlobalHasher {
 }
 
 use crate::value::{NULL_VALUE, Value};
+
+/// A borrowed string key that hashes and compares as `Value::String` does.
+struct StringKey<'a>(&'a str);
+
+impl Hash for StringKey<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Match the derived `Hash` for `Value::String`: its discriminant, then the text.
+        std::mem::discriminant(&Value::String(String::new())).hash(state);
+        self.0.hash(state);
+    }
+}
+
+impl Equivalent<Value> for StringKey<'_> {
+    fn equivalent(&self, key: &Value) -> bool {
+        matches!(key, Value::String(text) if text == self.0)
+    }
+}
 
 /// A YAML mapping with insertion-order iteration and swap-remove semantics.
 #[derive(Clone, Default)]
@@ -135,7 +152,7 @@ impl Mapping {
     /// Look up a value by string key.
     #[must_use]
     pub fn get_str(&self, key: &str) -> Option<&Value> {
-        self.map.get(&Value::String(key.to_owned()))
+        self.map.get(&StringKey(key))
     }
 
     /// Mutably look up a value by key.
@@ -149,7 +166,7 @@ impl Mapping {
     #[must_use]
     pub fn get_str_mut(&mut self, key: &str) -> Option<&mut Value> {
         self.hash.take();
-        self.map.get_mut(&Value::String(key.to_owned()))
+        self.map.get_mut(&StringKey(key))
     }
 
     /// Whether the mapping contains a key.
@@ -343,26 +360,26 @@ impl private::Sealed for str {}
 
 impl Index for str {
     fn contains_key(&self, mapping: &Mapping) -> bool {
-        mapping.map.contains_key(&Value::String(self.to_owned()))
+        mapping.map.contains_key(&StringKey(self))
     }
 
     fn get<'a>(&self, mapping: &'a Mapping) -> Option<&'a Value> {
-        mapping.map.get(&Value::String(self.to_owned()))
+        mapping.map.get(&StringKey(self))
     }
 
     fn get_mut<'a>(&self, mapping: &'a mut Mapping) -> Option<&'a mut Value> {
         mapping.hash.take();
-        mapping.map.get_mut(&Value::String(self.to_owned()))
+        mapping.map.get_mut(&StringKey(self))
     }
 
     fn swap_remove(&self, mapping: &mut Mapping) -> Option<Value> {
         mapping.hash.take();
-        mapping.map.swap_remove(&Value::String(self.to_owned()))
+        mapping.map.swap_remove(&StringKey(self))
     }
 
     fn shift_remove(&self, mapping: &mut Mapping) -> Option<Value> {
         mapping.hash.take();
-        mapping.map.shift_remove(&Value::String(self.to_owned()))
+        mapping.map.shift_remove(&StringKey(self))
     }
 }
 
@@ -490,6 +507,22 @@ mod tests {
         );
         let keys: Vec<_> = map.keys().cloned().collect();
         assert_eq!(keys, vec![key("a"), key("b")]);
+    }
+
+    #[test]
+    fn borrowed_string_lookups_match_value_keys() {
+        let mut map = Mapping::new();
+        map.insert(key("a"), Value::from(1_u64));
+        map.insert(key("b"), Value::from(2_u64));
+        assert!(map.contains_key("a"));
+        assert!(map.get("a").is_some());
+        assert_eq!(map.get("b"), Some(&Value::from(2_u64)));
+        assert_eq!(map.get_str("a"), Some(&Value::from(1_u64)));
+        *map.get_str_mut("a").expect("mutable lookup") = Value::from(3_u64);
+        *map.get_mut("b").expect("generic mutable lookup") = Value::from(4_u64);
+        assert_eq!(map.remove("a"), Some(Value::from(3_u64)));
+        assert_eq!(map.shift_remove("b"), Some(Value::from(4_u64)));
+        assert!(map.is_empty());
     }
 
     #[test]

@@ -22,6 +22,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Mapping lookups by `&str`, including `get_str`, `get_str_mut`, `get`, `get_mut`, and
+  `contains_key`, no longer allocate a `String` per lookup.
 - A compatibility indentation mistake now names the collection whose indentation it breaks,
   instead of reporting the line as unexpected content after the document.
 - A short quoted continuation with no closing quote now reports the opening quote.
