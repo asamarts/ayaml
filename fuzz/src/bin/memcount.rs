@@ -259,7 +259,9 @@ fn main() {
     if let Some(limit) = serialize_total_limit
         && serialize_allocated > limit
     {
-        eprintln!("serialize total allocation {serialize_allocated} bytes exceeds limit {limit} bytes");
+        eprintln!(
+            "serialize total allocation {serialize_allocated} bytes exceeds limit {limit} bytes"
+        );
         std::process::exit(1);
     }
 }
