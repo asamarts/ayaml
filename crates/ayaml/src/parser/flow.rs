@@ -73,7 +73,7 @@ impl<'a> Parser<'a> {
                 depth,
             }));
         }
-        if let Some(colon) = self.implicit_flow_colon(self.tokens(tokens), index) {
+        if let Some(colon) = self.implicit_flow_colon(tokens, index) {
             stack.push(Cont::FlowSequenceItem {
                 state,
                 inline: false,
@@ -439,11 +439,23 @@ impl<'a> Parser<'a> {
         clippy::unused_self,
         reason = "the method is part of a uniform grammar or diagnostic surface"
     )]
-    pub(super) fn implicit_flow_colon(&self, tokens: &[Token<'a>], start: usize) -> Option<usize> {
+    pub(super) fn implicit_flow_colon(&self, run: Run, start: usize) -> Option<usize> {
+        let tokens = self.tokens(run);
+        let base = self.lines[run.line].start + run.start;
         let mut depth = 0usize;
-        for (index, token) in tokens.iter().enumerate().skip(start) {
+        let mut index = start;
+        while index < tokens.len() {
+            let token = &tokens[index];
             match token.kind {
-                TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart => depth += 1,
+                TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart => {
+                    // A nested collection is one key candidate. Jump over it in one step rather
+                    // than rescanning its content at every enclosing level.
+                    if let Some(&close) = self.flow_ends.get(&(base + index)) {
+                        index = close - base + 1;
+                        continue;
+                    }
+                    depth += 1;
+                }
                 TokenKind::FlowSequenceEnd | TokenKind::FlowMappingEnd => {
                     if depth == 0 {
                         return None;
@@ -464,6 +476,7 @@ impl<'a> Parser<'a> {
                 TokenKind::FlowEntry if depth == 0 => return None,
                 _ => {}
             }
+            index += 1;
         }
         None
     }

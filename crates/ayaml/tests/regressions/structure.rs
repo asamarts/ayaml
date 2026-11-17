@@ -1577,3 +1577,23 @@ fn plain_scalar_spans_and_raw_end_at_their_content() {
         json!({"a": "value", "b": ["x", "y"], "c": "tail", "d": "q"})
     );
 }
+
+/// A compact block sequence reports the depth limit while scanning, before the rest of a large
+/// input can fill the token or event budget. Issue #165.
+#[test]
+fn a_deep_compact_sequence_fails_at_the_depth_limit_early() {
+    let limits = ayaml::Limits::default().with_max_events(1_000);
+    let input = "- ".repeat(1 << 20);
+    let error = ayaml::parse_value_with_limits(&input, &limits).unwrap_err();
+    assert_eq!(
+        error.limit().map(ayaml::LimitExceeded::kind),
+        Some(ayaml::LimitKind::Depth)
+    );
+    assert_eq!(error.limit().map(ayaml::LimitExceeded::observed), Some(129));
+    assert_eq!(
+        error
+            .location()
+            .map(|location| (location.line(), location.column())),
+        Some((1, 257))
+    );
+}
