@@ -73,7 +73,10 @@ short sequences and 19% on short explicit pairs, and the affected budgets are ti
 new measurements. Event vectors reserve four fifths of the token count plus headroom, and typed
 source reads over 4 KiB keep events in chunks of at most 8K events rather than one
 spare-capacity vector. The 1 MB nested test document peaks at about 43.5 MB, and the 11 MB one
-at about 392 MB against the 376 MB libyaml reference.
+at about 392 MB against the 376 MB libyaml reference. Mid-sized documents with ordinary lines
+reserve one token arena from their input length instead of growing through several copies; a
+20 KB configuration fixture falls from about 624 KB to 495 KB allocated in total, with no peak
+change.
 
 The release process keeps comparison results private. This document describes
 the methodology so that absolute or relative measurements can be reviewed on

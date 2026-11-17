@@ -117,6 +117,18 @@ struct Lines<'a> {
     positions: LineIndex,
 }
 
+/// The token arena capacity to reserve before scanning a mid-sized document, or `None` to grow
+/// as tokens arrive. Ordinary lines are dense enough that one estimate from the input length
+/// avoids several arena copies; long-line inputs skip it, so a large scalar does not reserve an
+/// arena it will not use.
+fn mid_input_token_capacity(input_len: usize, line_count: usize) -> Option<usize> {
+    if (4097..=32768).contains(&input_len) && line_count > 0 && input_len / line_count <= 80 {
+        Some(input_len / 10)
+    } else {
+        None
+    }
+}
+
 /// Group scanner tokens into logical lines as they arrive.
 ///
 /// This avoids first collecting every token in one vector and then copying
@@ -142,6 +154,9 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
     };
     let mut lines = Vec::new();
     let mut tokens = Vec::new();
+    if let Some(capacity) = mid_input_token_capacity(input_len, scanner.line_index().line_count()) {
+        tokens.reserve_exact(capacity);
+    }
     let mut line_start = 0;
     let mut stream_start = None;
     let mut stream_end = None;
