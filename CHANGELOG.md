@@ -17,6 +17,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `SpannedTree` and `SpannedNode` provide path lookup, value and entry byte spans, source scalar
+  text, and conservative ambiguity handling for aliases, merge keys, duplicate keys, and multiple
+  documents.
 - `compat::parse_events` and `compat::parse_events_with_limits` return the same lazy
   `EventStream` as default mode; `compat::parse_events_eager_with_limits` keeps the eager vector.
 - `Limits::for_max_input()` lifts the four count limits for a valid document within

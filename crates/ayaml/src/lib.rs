@@ -128,6 +128,7 @@ mod resolver;
 )]
 mod scanner;
 mod serde_impl;
+mod spanned;
 mod typed;
 
 pub mod error;
@@ -151,6 +152,7 @@ pub use number::Number;
 pub use position::{ColumnEncoding, LineIndex, PositionError};
 #[allow(deprecated, reason = "re-export the compatibility marker")]
 pub use span::{Location, Marker, Position, Span};
+pub use spanned::{SpannedNode, SpannedTree};
 pub use tag::{Tag, TaggedValue};
 pub use value::Value;
 
