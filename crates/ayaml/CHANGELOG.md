@@ -60,7 +60,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   counts. Large-scalar parsing allocates about 53% fewer bytes in total, the generated short map
   about 38% fewer, and the short explicit-pair workload about 31% fewer. Peak heap falls about
   13% on the short-sequence workload and 19% on short explicit pairs, and the affected budgets
-  are tightened.
+  are tightened. Event vectors now reserve from the token count, which lowers the typed
+  large-document peak from about 64.8 MB to 49.4 MB on the 1 MB nested document.
 - Mappings and typed mapping keys cache their structural hash, so a mapping nested inside a
   mapping key is hashed once per level instead of once for every outer level and entry.
 

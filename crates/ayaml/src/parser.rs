@@ -564,27 +564,20 @@ fn parse_lines<'a>(
 }
 
 fn event_capacity(lines: &[Line], tokens: &[Token<'_>]) -> usize {
-    let emitting = tokens
-        .iter()
-        .filter(|token| {
-            !matches!(
-                token.kind,
-                TokenKind::LineBreak
-                    | TokenKind::BlockEntry
-                    | TokenKind::Key
-                    | TokenKind::Value
-                    | TokenKind::FlowEntry
-                    | TokenKind::Anchor(_)
-                    | TokenKind::Tag(_)
-            )
-        })
-        .count();
     let headroom = if lines.iter().any(|line| line.indent > 0) {
         256
     } else {
         200
     };
-    emitting.saturating_add(headroom)
+    // An event can represent an implicit collection that has no token of its own. Four fifths
+    // of the token count plus a small headroom reserves close to the actual event count on
+    // nested documents without doubling a short document's reservation; if it is still short,
+    // EventSink grows by half rather than doubling.
+    tokens
+        .len()
+        .saturating_mul(4)
+        .saturating_div(5)
+        .saturating_add(headroom)
 }
 
 /// Parse a UTF-8 input into spanned events.
