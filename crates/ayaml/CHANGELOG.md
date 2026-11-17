@@ -22,6 +22,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A compatibility indentation mistake now names the collection whose indentation it breaks,
+  instead of reporting the line as unexpected content after the document.
+- A short quoted continuation with no closing quote now reports the opening quote.
+- Serde `invalid_type` errors now name the actual unexpected value for string and enum targets.
 - A compact block sequence that crosses `max_depth` is now refused while scanning, rather than
   after the whole input has been read.
 - Compatibility flow implicit-key lookahead skips nested collections in one step instead of

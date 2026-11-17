@@ -593,3 +593,92 @@ fn an_unknown_core_tag_on_a_scalar_is_kept() {
     let rendered = ayaml::to_string_value(&composed).expect("emit");
     assert_eq!(ayaml::parse_value(&rendered).expect("reparse"), composed);
 }
+
+/// `invalid_type` errors name the value Serde found, for string and enum targets, in both the
+/// value-tree and direct event readers. Issue #162.
+#[test]
+fn serde_invalid_type_errors_name_the_unexpected_value() {
+    #[derive(Debug, serde::Deserialize)]
+    #[allow(dead_code, reason = "the test only checks the error text")]
+    struct StringField {
+        pattern: String,
+    }
+    #[derive(Debug, serde::Deserialize)]
+    enum UnitOnly {
+        A,
+    }
+    #[derive(Debug, serde::Deserialize)]
+    #[allow(dead_code, reason = "the test only checks the error text")]
+    struct EnumField {
+        e: UnitOnly,
+    }
+
+    for (input, expected) in [
+        (
+            "pattern: 1\n",
+            "pattern: invalid type: integer `1`, expected a string",
+        ),
+        (
+            "pattern: true\n",
+            "pattern: invalid type: boolean `true`, expected a string",
+        ),
+        (
+            "pattern: ~\n",
+            "pattern: invalid type: unit value, expected a string",
+        ),
+        (
+            "pattern: 1.5\n",
+            "pattern: invalid type: floating point `1.5`, expected a string",
+        ),
+        (
+            "pattern: [1]\n",
+            "pattern: invalid type: sequence, expected a string",
+        ),
+        (
+            "pattern: {a: b}\n",
+            "pattern: invalid type: map, expected a string",
+        ),
+    ] {
+        let value = ayaml::parse_value(input).expect("value");
+        assert_eq!(
+            ayaml::from_value::<StringField>(value)
+                .unwrap_err()
+                .to_string(),
+            expected,
+            "{input:?}"
+        );
+    }
+
+    for (input, expected) in [
+        (
+            "e: 1\n",
+            "e: invalid type: integer `1`, expected enum UnitOnly",
+        ),
+        (
+            "e: true\n",
+            "e: invalid type: boolean `true`, expected enum UnitOnly",
+        ),
+        (
+            "e: ~\n",
+            "e: invalid type: unit value, expected enum UnitOnly",
+        ),
+        (
+            "e: [x]\n",
+            "e: invalid type: sequence, expected enum UnitOnly",
+        ),
+    ] {
+        assert_eq!(
+            ayaml::from_str::<EnumField>(input).unwrap_err().to_string(),
+            format!("{expected} at line 1 column 4"),
+            "from_str {input:?}"
+        );
+        let value = ayaml::parse_value(input).expect("value");
+        assert_eq!(
+            ayaml::from_value::<EnumField>(value)
+                .unwrap_err()
+                .to_string(),
+            expected,
+            "from_value {input:?}"
+        );
+    }
+}
