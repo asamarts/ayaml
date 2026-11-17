@@ -160,3 +160,27 @@ fn the_repository_lint_policy_is_the_one_the_plan_requires() {
     assert!(local.contains("alint check --fail-on-warning"));
     assert!(local.contains("alint 0.22.0"));
 }
+
+/// Every allocation workload budgets total bytes as well as peak bytes and allocation counts.
+#[test]
+fn allocation_budgets_include_total_bytes() {
+    let Some(root) = repository_root() else {
+        return;
+    };
+    let budgets = read(&root, "tools/alloc-corpus.tsv");
+    let mut rows = 0;
+    for line in budgets.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let columns: Vec<_> = line.split('\t').collect();
+        assert_eq!(columns.len(), 10, "bad allocation row: {line}");
+        for column in &columns[7..] {
+            column
+                .parse::<u64>()
+                .unwrap_or_else(|error| panic!("{line}: {error}"));
+        }
+        rows += 1;
+    }
+    assert!(rows > 0, "no allocation workloads found");
+}

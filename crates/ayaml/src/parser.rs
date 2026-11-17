@@ -88,14 +88,13 @@ fn push_token<'a>(tokens: &mut Vec<Token<'a>>, token: Token<'a>, chunk: usize) {
     tokens.push(token);
 }
 
-/// How many tokens a full arena of `len` grows by: its chunk while that's at least a sixteenth of
-/// it, then a sixteenth. Growing by a fixed chunk alone copies the arena once per chunk, which is
-/// quadratic in its length where `realloc` copies. A sixteenth keeps all the copying under 17
-/// times the final length, and the unused capacity under a sixteenth of it. Up to 16 chunks the
-/// arena grows as it did by chunks alone, so a typical file's peak doesn't move.
+/// How many tokens a full arena of `len` grows by: the first chunk, then doubling. Growing by a
+/// fixed chunk alone copies the arena once per chunk and allocates many times its final length in
+/// total. Doubling keeps the copied and total bytes within a small multiple of the final length,
+/// while the unused capacity stays under the final length; inputs with only a few tokens still
+/// pay for one chunk.
 const fn arena_growth(len: usize, chunk: usize) -> usize {
-    let sixteenth = len / 16;
-    if sixteenth > chunk { sixteenth } else { chunk }
+    if len > chunk { len } else { chunk }
 }
 
 /// Logical lines read from the scanner, plus the stream boundary spans.
@@ -202,6 +201,11 @@ impl<'a> EventSink<'a> {
     fn event(&mut self, event: Event<'a>) -> Result<(), Error> {
         match self {
             Self::Events(events) => {
+                // Grow by half instead of doubling. The capacity estimate is close but can be
+                // short on nested documents; this avoids reserving twice the events that fit.
+                if events.len() == events.capacity() {
+                    events.reserve_exact((events.capacity() / 2).max(16));
+                }
                 events.push(event);
                 Ok(())
             }

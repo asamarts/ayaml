@@ -6,7 +6,7 @@
 //! `forbid(unsafe_code)` graph, because a counting allocator needs `unsafe`.
 //!
 //! Usage: `memcount PATH|@NAME [PARSE_PEAK EMIT_PEAK PARSE_ALLOCS EMIT_ALLOCS
-//! SERIALIZE_PEAK SERIALIZE_ALLOCS]`.
+//! SERIALIZE_PEAK SERIALIZE_ALLOCS PARSE_TOTAL EMIT_TOTAL SERIALIZE_TOTAL]`.
 #![allow(
     unsafe_code,
     reason = "the counting global allocator is the crate-local unsafe exception"
@@ -159,6 +159,9 @@ fn main() {
     let emit_allocation_limit = budget(&mut args);
     let serialize_limit = budget(&mut args);
     let serialize_allocation_limit = budget(&mut args);
+    let parse_total_limit = budget(&mut args);
+    let emit_total_limit = budget(&mut args);
+    let serialize_total_limit = budget(&mut args);
     let input = generated_input(&path)
         .unwrap_or_else(|| std::fs::read_to_string(&path).expect("read input"));
 
@@ -239,6 +242,24 @@ fn main() {
         && serialize_allocations > limit
     {
         eprintln!("serialize allocation count {serialize_allocations} exceeds limit {limit}");
+        std::process::exit(1);
+    }
+    if let Some(limit) = parse_total_limit
+        && parse_allocated > limit
+    {
+        eprintln!("parse total allocation {parse_allocated} bytes exceeds limit {limit} bytes");
+        std::process::exit(1);
+    }
+    if let Some(limit) = emit_total_limit
+        && emit_allocated > limit
+    {
+        eprintln!("emit total allocation {emit_allocated} bytes exceeds limit {limit} bytes");
+        std::process::exit(1);
+    }
+    if let Some(limit) = serialize_total_limit
+        && serialize_allocated > limit
+    {
+        eprintln!("serialize total allocation {serialize_allocated} bytes exceeds limit {limit} bytes");
         std::process::exit(1);
     }
 }

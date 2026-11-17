@@ -50,6 +50,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Performance
 
+- The token arena doubles after its first chunk, and the allocation gate now budgets total bytes
+  per read as well as peak bytes and allocation counts. Large-scalar parsing allocates about 53%
+  fewer bytes in total, the generated short map about 38% fewer, and the short explicit-pair
+  workload about 31% fewer.
 - Mappings and typed mapping keys cache their structural hash, so a mapping nested inside a
   mapping key is hashed once per level instead of once for every outer level and entry.
 
