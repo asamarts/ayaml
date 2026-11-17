@@ -1,10 +1,16 @@
 //! Byte offsets and one-based source locations.
 //!
-//! Spans are half-open ranges over the original UTF-8 input. `index` is a byte
-//! offset; `line` and `column` are one-based and are supplied by the scanner,
-//! not derived by character-counting here.
+//! Spans are half-open byte ranges over the original UTF-8 input. A line and
+//! column come from a [`LineIndex`](crate::LineIndex), which can count UTF-8
+//! bytes, Unicode scalar values, or UTF-16 code units.
 
-/// A position in the original input.
+use std::ops::Range;
+
+/// A byte offset with one-based line and column values.
+///
+/// This is the pre-byte-span position type. Spans no longer store it; use
+/// [`LineIndex`](crate::LineIndex) for positions derived from a span.
+#[deprecated(note = "use Span byte offsets with LineIndex and Position")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Marker {
     index: usize,
@@ -12,6 +18,7 @@ pub struct Marker {
     column: usize,
 }
 
+#[allow(deprecated, reason = "this is the compatibility type itself")]
 impl Marker {
     /// Create a marker at a byte offset and one-based line/column.
     #[must_use]
@@ -43,20 +50,20 @@ impl Marker {
 
     /// The line/column location, without the byte offset.
     #[must_use]
-    pub const fn location(self) -> Location {
-        Location::new(self.line, self.column)
+    pub const fn location(self) -> Position {
+        Position::new(self.line, self.column)
     }
 }
 
 /// A one-based line and column, suitable for diagnostics and editors.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Location {
+pub struct Position {
     line: usize,
     column: usize,
 }
 
-impl Location {
-    /// Create a one-based line/column location.
+impl Position {
+    /// Create a one-based line/column position.
     #[must_use]
     pub const fn new(line: usize, column: usize) -> Self {
         Self { line, column }
@@ -75,7 +82,11 @@ impl Location {
     }
 }
 
-impl From<Marker> for Location {
+/// A one-based line and column, suitable for diagnostics and editors.
+pub type Location = Position;
+
+#[allow(deprecated, reason = "converts the compatibility marker")]
+impl From<Marker> for Position {
     fn from(marker: Marker) -> Self {
         marker.location()
     }
@@ -84,42 +95,48 @@ impl From<Marker> for Location {
 /// A half-open byte range in the original input.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Span {
-    start: Marker,
-    end: Marker,
+    start: usize,
+    end: usize,
 }
 
 impl Span {
-    /// Create a half-open span.
+    /// Create a half-open span from byte offsets.
     #[must_use]
-    pub const fn new(start: Marker, end: Marker) -> Self {
+    pub const fn new(start: usize, end: usize) -> Self {
         Self { start, end }
     }
 
-    /// A zero-width span at `marker`.
+    /// A zero-width span at `offset`.
     #[must_use]
-    pub const fn empty(marker: Marker) -> Self {
+    pub const fn empty(offset: usize) -> Self {
         Self {
-            start: marker,
-            end: marker,
+            start: offset,
+            end: offset,
         }
     }
 
-    /// The start (inclusive) marker.
+    /// The start (inclusive) byte offset.
     #[must_use]
-    pub const fn start(self) -> Marker {
+    pub const fn start(self) -> usize {
         self.start
     }
 
-    /// The end (exclusive) marker.
+    /// The end (exclusive) byte offset.
     #[must_use]
-    pub const fn end(self) -> Marker {
+    pub const fn end(self) -> usize {
         self.end
+    }
+
+    /// The span as a half-open byte range.
+    #[must_use]
+    pub const fn range(self) -> Range<usize> {
+        self.start..self.end
     }
 
     /// The number of bytes in the span.
     #[must_use]
     pub const fn len(self) -> usize {
-        self.end.index - self.start.index
+        self.end - self.start
     }
 
     /// Whether the span is zero-width.
@@ -131,7 +148,7 @@ impl Span {
     /// Whether `index` is inside the half-open range.
     #[must_use]
     pub const fn contains(self, index: usize) -> bool {
-        index >= self.start.index && index < self.end.index
+        index >= self.start && index < self.end
     }
 
     /// Slice `source` with this span.
@@ -140,45 +157,54 @@ impl Span {
     /// bounds.
     #[must_use]
     pub fn slice(self, source: &str) -> Option<&str> {
-        source.get(self.start.index..self.end.index)
+        source.get(self.start..self.end)
+    }
+}
+
+impl From<Span> for Range<usize> {
+    fn from(span: Span) -> Self {
+        span.range()
+    }
+}
+
+impl From<Range<usize>> for Span {
+    fn from(range: Range<usize>) -> Self {
+        Self::new(range.start, range.end)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Location, Marker, Span};
+    use super::{Position, Span};
 
     #[test]
-    fn markers_are_one_based_and_byte_indexed() {
-        let marker = Marker::new(4, 2, 3);
-        assert_eq!(marker.index(), 4);
-        assert_eq!(marker.line(), 2);
-        assert_eq!(marker.column(), 3);
-        assert_eq!(marker.location(), Location::new(2, 3));
+    fn positions_are_one_based() {
+        let position = Position::new(2, 3);
+        assert_eq!(position.line(), 2);
+        assert_eq!(position.column(), 3);
     }
 
     #[test]
     fn spans_are_half_open_and_slice_utf8() {
         let text = "é: 1\n";
-        let start = Marker::new(0, 1, 1);
-        let end = Marker::new(2, 1, 2);
-        let span = Span::new(start, end);
+        let span = Span::new(0, 2);
         assert_eq!(span.len(), 2);
         assert_eq!(span.slice(text), Some("é"));
         assert!(!span.contains(2));
         assert!(span.contains(1));
+        assert_eq!(span.range(), 0..2);
+        assert_eq!(Span::from(0..2), span);
     }
 
     #[test]
     fn invalid_utf8_boundary_is_none() {
         let text = "é";
-        let span = Span::new(Marker::new(0, 1, 1), Marker::new(1, 1, 2));
-        assert_eq!(span.slice(text), None);
+        assert_eq!(Span::new(0, 1).slice(text), None);
     }
 
     #[test]
     fn empty_span_has_zero_length() {
-        let span = Span::empty(Marker::new(3, 1, 4));
+        let span = Span::empty(3);
         assert!(span.is_empty());
         assert_eq!(span.len(), 0);
     }

@@ -26,7 +26,7 @@ use crate::limits::{AliasBudget, Limits};
 use crate::number::Number;
 use crate::parser;
 use crate::resolver::{float_from_text, plain_resolves_to_string, resolve_scalar};
-use crate::span::{Marker, Span};
+use crate::span::Span;
 use crate::tag::Tag;
 use crate::value::{Value, key_text_full, push_quoted_key};
 
@@ -176,8 +176,10 @@ pub(crate) fn from_str_with_options<'de, T: Deserialize<'de>>(
     limits: &Limits,
     options: NodeOptions,
 ) -> Result<T, Error> {
-    let node = parse_document(input, limits, options)?;
+    let node = parse_document(input, limits, options)
+        .map_err(|error| error.with_input_location(input, options.compat_flow))?;
     T::deserialize(NodeDeserializer::new(&node))
+        .map_err(|error| error.with_input_location(input, options.compat_flow))
 }
 
 #[cfg(feature = "libyaml-compat")]
@@ -187,8 +189,11 @@ pub(crate) fn from_str_visitor<'de, V: Visitor<'de>>(
     options: NodeOptions,
     visitor: V,
 ) -> Result<V::Value, Error> {
-    let node = parse_document(input, limits, options)?;
-    NodeDeserializer::new(&node).deserialize_any(visitor)
+    let node = parse_document(input, limits, options)
+        .map_err(|error| error.with_input_location(input, options.compat_flow))?;
+    NodeDeserializer::new(&node)
+        .deserialize_any(visitor)
+        .map_err(|error| error.with_input_location(input, options.compat_flow))
 }
 
 #[cfg(feature = "libyaml-compat")]
@@ -198,8 +203,10 @@ pub(crate) fn from_str_seed_with_options<'de, T: DeserializeSeed<'de>>(
     options: NodeOptions,
     seed: T,
 ) -> Result<T::Value, Error> {
-    let node = parse_document(input, limits, options)?;
+    let node = parse_document(input, limits, options)
+        .map_err(|error| error.with_input_location(input, options.compat_flow))?;
     seed.deserialize(NodeDeserializer::new(&node))
+        .map_err(|error| error.with_input_location(input, options.compat_flow))
 }
 
 /// Decode one document from an already-collected event slice, charging its
@@ -233,7 +240,7 @@ fn parse_document<'de>(
 ) -> Result<Node<'de>, Error> {
     limits
         .check_input(input.len())
-        .map_err(|error| Error::from(error).with_span(Span::empty(Marker::new(0, 1, 1))))?;
+        .map_err(|error| Error::from(error).with_span(Span::empty(0)))?;
     let events = parser::parse_document_events(input, limits, options.compat_flow)?;
     build(
         events,
@@ -392,7 +399,7 @@ impl<'de> Builder<'de, '_> {
                 _ => return Err(self.error_at(self.span(), "expected a document start")),
             }
         }
-        Ok(document.unwrap_or_else(|| Node::null(Span::empty(Marker::new(self.input_len, 1, 1)))))
+        Ok(document.unwrap_or_else(|| Node::null(Span::empty(self.input_len))))
     }
 
     /// Build one document's root node.
@@ -602,10 +609,9 @@ impl<'de> Builder<'de, '_> {
     }
 
     fn span(&self) -> Span {
-        self.events.get(self.index).map_or_else(
-            || Span::empty(Marker::new(self.input_len, 1, 1)),
-            Event::span,
-        )
+        self.events
+            .get(self.index)
+            .map_or_else(|| Span::empty(self.input_len), Event::span)
     }
 
     #[allow(

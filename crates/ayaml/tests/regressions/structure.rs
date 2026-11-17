@@ -1545,7 +1545,7 @@ fn plain_scalar_spans_and_raw_end_at_their_content() {
         let pairs: Vec<_> = scalars
             .iter()
             .map(|(value, raw, span)| {
-                let text = &input[span.start().index()..span.end().index()];
+                let text = &input[span.start()..span.end()];
                 (value.as_str(), raw.as_str(), text)
             })
             .collect();
@@ -1565,21 +1565,12 @@ fn plain_scalar_spans_and_raw_end_at_their_content() {
             "{mode}"
         );
         assert!(
-            input[scalars[1].2.end().index()..].starts_with("   # note"),
+            input[scalars[1].2.end()..].starts_with("   # note"),
             "{mode}"
         );
-        assert!(
-            input[scalars[3].2.end().index()..].starts_with(" ,"),
-            "{mode}"
-        );
-        assert!(
-            input[scalars[4].2.end().index()..].starts_with(" ]"),
-            "{mode}"
-        );
-        assert!(
-            input[scalars[6].2.end().index()..].starts_with("   \n"),
-            "{mode}"
-        );
+        assert!(input[scalars[3].2.end()..].starts_with(" ,"), "{mode}");
+        assert!(input[scalars[4].2.end()..].starts_with(" ]"), "{mode}");
+        assert!(input[scalars[6].2.end()..].starts_with("   \n"), "{mode}");
     }
     assert_eq!(
         parse(input),

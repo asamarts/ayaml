@@ -567,7 +567,7 @@ fn unicode_span_is_byte_based() {
         }
     }
     assert_eq!(spans.len(), 1);
-    assert_eq!((spans[0].start().index(), spans[0].end().index()), (0, 2));
+    assert_eq!((spans[0].start(), spans[0].end()), (0, 2));
 }
 
 #[test]

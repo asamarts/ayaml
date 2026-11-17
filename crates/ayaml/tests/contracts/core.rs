@@ -9,9 +9,12 @@ use super::*;
 #[test]
 fn span_offsets_are_byte_based_and_locations_are_one_based() {
     let text = "é: 1\n";
-    let span = Span::new(Marker::new(0, 1, 1), Marker::new(2, 1, 2));
+    let span = Span::new(0, 2);
     assert_eq!(span.slice(text), Some("é"));
-    assert_eq!(span.start().location(), Location::new(1, 1));
+    assert_eq!(
+        LineIndex::new(text).position(text, span.start(), ColumnEncoding::Scalar),
+        Ok(Location::new(1, 1))
+    );
     assert_eq!(span.len(), 2);
 }
 
@@ -28,8 +31,10 @@ fn duplicate_key_diagnostics_print_the_key_and_location() {
 
 #[test]
 fn error_categories_and_locations_are_public() {
-    let span = Span::new(Marker::new(3, 2, 4), Marker::new(4, 2, 5));
-    let error = Error::new(ErrorKind::Alias, "unknown anchor").with_span(span);
+    let span = Span::new(3, 4);
+    let error = Error::new(ErrorKind::Alias, "unknown anchor")
+        .with_span(span)
+        .with_location(Location::new(2, 4));
     assert_eq!(error.kind(), ErrorKind::Alias);
     assert_eq!(error.location(), Some(Location::new(2, 4)));
     assert_eq!(error.to_string(), "unknown anchor at line 2 column 4");
@@ -99,7 +104,7 @@ fn remove_swaps_the_last_entry() {
 
 #[test]
 fn events_carry_style_tag_anchor_and_span() {
-    let span = Span::new(Marker::new(0, 1, 1), Marker::new(2, 1, 3));
+    let span = Span::new(0, 2);
     let event = Event::Scalar {
         value: "hi".into(),
         raw: "\"hi\"".into(),
@@ -328,10 +333,13 @@ fn event_places_match_their_offsets() {
     for &(name, read) in readers {
         for input in inputs {
             for event in read(input) {
-                for marker in [event.span().start(), event.span().end()] {
+                for offset in [event.span().start(), event.span().end()] {
+                    let position = LineIndex::new(input)
+                        .position(input, offset, ColumnEncoding::Scalar)
+                        .expect("position");
                     assert_eq!(
-                        (marker.line(), marker.column()),
-                        place_of(input, marker.index()),
+                        (position.line(), position.column()),
+                        place_of(input, offset),
                         "{name} {input:?} {event:?}"
                     );
                 }
@@ -602,4 +610,61 @@ fn deep_serialization_returns_a_depth_error_on_a_small_stack() {
             }
         });
     }
+}
+
+/// A byte span converts to a range, and the line index reports UTF-8, scalar, and UTF-16 columns.
+/// A leading mark is outside the columns but inside the byte offsets.
+#[test]
+fn line_index_supports_byte_scalar_and_utf16_columns() {
+    let input = "\u{feff}é𝄞x\n";
+    let index = LineIndex::new(input);
+    let position = |offset, encoding| {
+        index
+            .position(input, offset, encoding)
+            .unwrap_or_else(|error| panic!("{offset} {encoding:?}: {error}"))
+    };
+    assert_eq!(
+        [
+            position(3, ColumnEncoding::Utf8),
+            position(3, ColumnEncoding::Scalar),
+            position(3, ColumnEncoding::Utf16),
+        ],
+        [Location::new(1, 1); 3]
+    );
+    assert_eq!(
+        [
+            position(5, ColumnEncoding::Utf8),
+            position(5, ColumnEncoding::Scalar),
+            position(5, ColumnEncoding::Utf16),
+        ],
+        [
+            Location::new(1, 3),
+            Location::new(1, 2),
+            Location::new(1, 2),
+        ]
+    );
+    assert_eq!(
+        [
+            position(9, ColumnEncoding::Utf8),
+            position(9, ColumnEncoding::Scalar),
+            position(9, ColumnEncoding::Utf16),
+        ],
+        [
+            Location::new(1, 7),
+            Location::new(1, 3),
+            Location::new(1, 4),
+        ]
+    );
+    assert_eq!(
+        index.position(input, 4, ColumnEncoding::Scalar),
+        Err(ayaml::PositionError::NotCharBoundary)
+    );
+    assert_eq!(
+        index.position(input, input.len() + 1, ColumnEncoding::Scalar),
+        Err(ayaml::PositionError::OutOfBounds)
+    );
+    assert_eq!(Span::new(3, 5).range(), 3..5);
+    assert_eq!(std::ops::Range::from(Span::new(3, 5)), 3..5);
+    let range: std::ops::Range<usize> = Span::new(3, 5).into();
+    assert_eq!(range, 3..5);
 }

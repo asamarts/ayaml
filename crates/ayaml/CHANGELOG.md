@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `Span` now holds byte offsets and converts to `Range<usize>`. `Marker` remains deprecated for
+  migration, but spans no longer store it; use the public
+  `LineIndex`, `Position`, and `ColumnEncoding` to obtain UTF-8, scalar, or UTF-16 columns.
+  `Error::location()` still returns a one-based line and column, and a manually built error can
+  attach one with `Error::with_location`. The event size falls from 176 to 144 bytes, a span from
+  48 to 16, and an error from 112 to 104 on 64-bit targets.
+
 ### Added
 
 - `Limits::for_max_input()` lifts the four count limits for a valid document within

@@ -8,8 +8,8 @@ mod typed;
 mod writer;
 
 use ayaml::{
-    Anchor, CollectionStyle, Error, ErrorKind, Event, LimitKind, Limits, Location, Mapping, Marker,
-    Number, ScalarStyle, Span, Tag, TaggedValue, Value,
+    Anchor, CollectionStyle, ColumnEncoding, Error, ErrorKind, Event, LimitKind, Limits, LineIndex,
+    Location, Mapping, Number, ScalarStyle, Span, Tag, TaggedValue, Value,
 };
 
 /// A reader of a whole event stream.

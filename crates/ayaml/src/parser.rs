@@ -15,7 +15,7 @@ use crate::event::{Anchor, CollectionStyle, Event, ScalarStyle};
 use crate::limits::Limits;
 use crate::position::LineIndex;
 use crate::scanner::{Scanner, Token, TokenKind};
-use crate::span::{Marker, Span};
+use crate::span::{Position, Span};
 use crate::tag::Tag;
 use crate::value::Value;
 
@@ -36,10 +36,18 @@ impl Line {
     /// The line of `tokens[start..end]`, from `input`. Its indent is its first token's column,
     /// less any tab before that token and what follows the tab: YAML indents with spaces alone
     /// (production 63), so a tab there separates and `k:\n\tv` holds `v` at indent 0.
-    fn new(tokens: &[Token<'_>], start: usize, end: usize, input: &str) -> Self {
+    fn new(
+        tokens: &[Token<'_>],
+        start: usize,
+        end: usize,
+        input: &str,
+        positions: &LineIndex,
+    ) -> Self {
         let indent = tokens.get(start).map_or(0, |token| {
-            let column = token.span.start().column().saturating_sub(1);
-            let offset = token.span.start().index();
+            let offset = token.span.start();
+            let column = positions
+                .marker(input, offset)
+                .map_or(0, |position| position.column().saturating_sub(1));
             let blanks = input.as_bytes()[..offset]
                 .iter()
                 .rev()
@@ -100,6 +108,7 @@ struct Lines<'a> {
     tokens: Vec<Token<'a>>,
     stream_start: Option<Span>,
     stream_end: Option<Span>,
+    positions: LineIndex,
 }
 
 /// Group scanner tokens into logical lines as they arrive.
@@ -128,7 +137,13 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
             }
             TokenKind::LineBreak => {
                 if tokens.len() > line_start {
-                    lines.push(Line::new(&tokens, line_start, tokens.len(), input));
+                    lines.push(Line::new(
+                        &tokens,
+                        line_start,
+                        tokens.len(),
+                        input,
+                        scanner.line_index(),
+                    ));
                     line_start = tokens.len();
                 }
             }
@@ -142,14 +157,26 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
                 );
                 push_token(&mut tokens, token, chunk);
                 if block_scalar {
-                    lines.push(Line::new(&tokens, line_start, tokens.len(), input));
+                    lines.push(Line::new(
+                        &tokens,
+                        line_start,
+                        tokens.len(),
+                        input,
+                        scanner.line_index(),
+                    ));
                     line_start = tokens.len();
                 }
             }
         }
     }
     if tokens.len() > line_start {
-        lines.push(Line::new(&tokens, line_start, tokens.len(), input));
+        lines.push(Line::new(
+            &tokens,
+            line_start,
+            tokens.len(),
+            input,
+            scanner.line_index(),
+        ));
     }
     // Small token arenas gain more from exact capacity than the one-time copy
     // costs in peak memory. Large arenas keep their growth capacity so the
@@ -162,6 +189,7 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
         tokens,
         stream_start,
         stream_end,
+        positions: scanner.line_index().clone(),
     })
 }
 
@@ -188,6 +216,7 @@ struct Parser<'a> {
     sink: EventSink<'a>,
     limits: Limits,
     input: &'a str,
+    positions: LineIndex,
     /// Word a malformed flow collection's error as libyaml does, and count positions as compat's
     /// scanner does.
     compat: bool,
@@ -203,7 +232,7 @@ struct Parser<'a> {
     stop_at_second: bool,
     /// Where the lines end: the stream end, or for one document of a lazy read, the next
     /// document's first token. An empty node after the last line is placed here.
-    end: Marker,
+    end: usize,
 }
 
 /// A document-bounded pull cursor used by the public event traversal.
@@ -212,6 +241,7 @@ pub(crate) struct EventCursor<'a> {
     scanner: Scanner<'a>,
     limits: Limits,
     input: &'a str,
+    positions: LineIndex,
     pending_line: Option<Vec<Token<'a>>>,
     queue: VecDeque<Event<'a>>,
     stream_started: bool,
@@ -230,15 +260,19 @@ impl<'a> EventCursor<'a> {
         reason = "the method is part of a uniform grammar or diagnostic surface"
     )]
     fn limit_at(&self, span: Span, limit: crate::limits::LimitExceeded) -> Error {
-        Error::from(limit).with_span(span)
+        Error::from(limit)
+            .with_span(span)
+            .with_location_from(&self.positions, self.input)
     }
 
     pub(crate) fn new(input: &'a str, limits: &Limits) -> Result<Self, Error> {
         let scanner = Scanner::new(input, limits.clone())?;
+        let positions = scanner.line_index().clone();
         Ok(Self {
             scanner,
             limits: limits.clone(),
             input,
+            positions,
             pending_line: None,
             queue: VecDeque::new(),
             stream_started: false,
@@ -251,7 +285,9 @@ impl<'a> EventCursor<'a> {
     }
 
     pub(crate) fn next_event(&mut self) -> Result<Option<Event<'a>>, Error> {
-        let result = self.next_event_inner();
+        let result = self
+            .next_event_inner()
+            .map_err(|error| error.with_location_from(&self.positions, self.input));
         if result.is_err() {
             self.stream_ended = true;
             self.queue.clear();
@@ -266,7 +302,7 @@ impl<'a> EventCursor<'a> {
             // after a byte order mark.
             let span = match self.scanner.next_token()? {
                 Some(token) if matches!(token.kind, TokenKind::StreamStart) => token.span,
-                _ => Span::empty(Marker::new(0, 1, 1)),
+                _ => Span::empty(0),
             };
             self.events += 1;
             self.limits
@@ -288,7 +324,7 @@ impl<'a> EventCursor<'a> {
                 self.stream_ended = true;
                 let span = self
                     .stream_end
-                    .unwrap_or_else(|| Span::empty(Marker::new(self.input.len(), 1, 1)));
+                    .unwrap_or_else(|| Span::empty(self.input.len()));
                 self.events += 1;
                 self.limits
                     .check_events(self.events)
@@ -330,7 +366,13 @@ impl<'a> EventCursor<'a> {
                 );
             let start = tokens.len();
             tokens.extend(line_tokens);
-            lines.push(Line::new(&tokens, start, tokens.len(), self.input));
+            lines.push(Line::new(
+                &tokens,
+                start,
+                tokens.len(),
+                self.input,
+                &self.positions,
+            ));
             if is_end {
                 break;
             }
@@ -348,13 +390,14 @@ impl<'a> EventCursor<'a> {
             .map(|token| token.span.start())
             .or_else(|| self.stream_end.map(Span::start))
             .or_else(|| tokens.last().map(|token| token.span.end()))
-            .unwrap_or_else(|| Marker::new(self.input.len(), 1, 1));
+            .unwrap_or(self.input.len());
         let (events, counted) = parse_lines(
             Lines {
                 lines,
                 tokens,
                 stream_start: None,
                 stream_end: None,
+                positions: self.positions.clone(),
             },
             &self.limits,
             self.input,
@@ -373,7 +416,7 @@ impl<'a> EventCursor<'a> {
                 Event::DocumentStart { span, .. } => Some(*span),
                 _ => None,
             })
-            .unwrap_or_else(|| Span::empty(Marker::new(self.input.len(), 1, 1)));
+            .unwrap_or_else(|| Span::empty(self.input.len()));
         self.limits
             .check_documents(self.documents)
             .map_err(|error| self.limit_at(span, error))?;
@@ -435,7 +478,7 @@ fn parse_lines<'a>(
     limits: &Limits,
     input: &'a str,
     counted: usize,
-    end: Marker,
+    end: usize,
 ) -> Result<(Vec<Event<'a>>, usize), Error> {
     let event_capacity = event_capacity(&lines.lines, &lines.tokens);
     let mut parser = Parser {
@@ -444,6 +487,7 @@ fn parse_lines<'a>(
         sink: EventSink::Events(Vec::with_capacity(event_capacity)),
         limits: limits.clone(),
         input,
+        positions: lines.positions,
         compat: false,
         documents: 0,
         emitted: counted,
@@ -519,16 +563,18 @@ fn parse_events_with_compat<'a>(
         tokens,
         stream_start,
         stream_end,
+        positions,
     } = read_lines(&mut scanner)?;
 
     let event_capacity = event_capacity(&lines, &tokens).saturating_add(2);
-    let end = stream_end.map_or_else(|| Marker::new(input.len(), 1, 1), Span::start);
+    let end = stream_end.map_or(input.len(), Span::start);
     let mut parser = Parser {
         lines,
         token_arena: tokens,
         sink: EventSink::Events(Vec::with_capacity(event_capacity)),
         limits: limits.clone(),
         input,
+        positions,
         compat: compat_flow,
         documents: 0,
         emitted: 0,
@@ -537,11 +583,11 @@ fn parse_events_with_compat<'a>(
         end,
     };
     parser.emit(Event::StreamStart {
-        span: stream_start.unwrap_or_else(|| Span::empty(Marker::new(0, 1, 1))),
+        span: stream_start.unwrap_or_else(|| Span::empty(0)),
     })?;
     parser.parse_stream()?;
     parser.emit(Event::StreamEnd {
-        span: stream_end.unwrap_or_else(|| Span::empty(Marker::new(input.len(), 1, 1))),
+        span: stream_end.unwrap_or_else(|| Span::empty(input.len())),
     })?;
     match parser.sink {
         EventSink::Events(events) => Ok(events),
@@ -567,34 +613,40 @@ pub(crate) fn parse_documents(
         ))),
         limits: limits.clone(),
         input,
+        positions: lines.positions,
         compat: false,
         documents: 0,
         emitted: 0,
         single_document,
         stop_at_second: false,
-        end: lines
-            .stream_end
-            .map_or_else(|| Marker::new(input.len(), 1, 1), Span::start),
+        end: lines.stream_end.map_or(input.len(), Span::start),
     };
     // The composer ignores the stream events, but they count as an event parse counts them.
     parser.emit(Event::StreamStart {
-        span: lines
-            .stream_start
-            .unwrap_or_else(|| Span::empty(Marker::new(0, 1, 1))),
+        span: lines.stream_start.unwrap_or_else(|| Span::empty(0)),
     })?;
-    parser.parse_stream()?;
+    parser
+        .parse_stream()
+        .map_err(|error| error.with_location_from(&parser.positions, input))?;
     parser.emit(Event::StreamEnd {
-        span: lines
-            .stream_end
-            .unwrap_or_else(|| Span::empty(Marker::new(input.len(), 1, 1))),
+        span: lines.stream_end.unwrap_or_else(|| Span::empty(input.len())),
     })?;
+    let positions = parser.positions;
     match parser.sink {
-        EventSink::Streaming(composer) => composer.finish(),
+        EventSink::Streaming(composer) => composer
+            .finish()
+            .map_err(|error| error.with_location_from(&positions, input)),
         EventSink::Events(_) => unreachable!("event sink kind changed during parsing"),
     }
 }
 
 impl<'a> Parser<'a> {
+    fn at(&self, offset: usize) -> Position {
+        self.positions
+            .marker(self.input, offset)
+            .unwrap_or_default()
+    }
+
     fn parse_stream(&mut self) -> Result<(), Error> {
         let mut index = 0;
         while index < self.lines.len() {
@@ -769,7 +821,7 @@ impl<'a> Parser<'a> {
                 let span = self
                     .line_first(index)
                     .map_or_else(|| self.empty_span(index), |token| token.span);
-                let tabbed = root_block && tab_leads_line(self.input, span.start().index());
+                let tabbed = root_block && tab_leads_line(self.input, span.start());
                 let message = if tabbed {
                     "unexpected content after document"
                 } else {
@@ -784,7 +836,7 @@ impl<'a> Parser<'a> {
                         Some(TokenKind::Scalar { .. })
                             if root_block
                                 && self.lines[index].indent > 0
-                                && previous_line_is_blank(self.input, span.start().index()) =>
+                                && previous_line_is_blank(self.input, span.start()) =>
                         {
                             "a mapping line is missing a `:`"
                         }
@@ -1120,7 +1172,7 @@ const MAX_IMPLICIT_KEY_CHARS: usize = 1024;
 
 /// Whether an implicit key starting at `key` and ending before the `:` at
 /// `colon`, on the same line, is short enough.
-fn implicit_key_fits(key: Marker, colon: Marker) -> bool {
+fn implicit_key_fits(key: Position, colon: Position) -> bool {
     colon.column().saturating_sub(key.column()) <= MAX_IMPLICIT_KEY_CHARS
 }
 

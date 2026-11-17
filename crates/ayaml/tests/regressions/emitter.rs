@@ -241,7 +241,7 @@ fn emitters_enforce_the_depth_limit() {
     let error = ayaml::to_string_value(&value).expect_err("depth");
     assert_eq!(error.kind(), ayaml::ErrorKind::Limit);
 
-    let span = ayaml::Span::new(ayaml::Marker::new(0, 1, 1), ayaml::Marker::new(0, 1, 1));
+    let span = ayaml::Span::new(0, 0);
     let mut events = vec![
         ayaml::Event::StreamStart { span },
         ayaml::Event::DocumentStart {

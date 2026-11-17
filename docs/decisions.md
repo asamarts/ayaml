@@ -543,3 +543,32 @@ that trade explicit and leaves the default fail-closed for hostile input.
 that lower any of the four counts keep their stricter behavior. The other budgets, including
 depth and alias expansion, still apply even with `for_max_input()`, so a syntactically valid
 document can still be refused for those reasons.
+
+## D89 — Spans are byte ranges, and line columns come from a public index
+
+**Date:** 2026-11-16
+**Status:** Accepted
+
+**Decision.** `Span` holds two byte offsets and converts to `Range<usize>`. The old `Marker` remains as a deprecated compatibility value type, but
+spans no longer store it. `LineIndex`, `Position`, `PositionError`, and `ColumnEncoding` are public;
+columns can count UTF-8 bytes, Unicode scalar values, or UTF-16 code units. Conversions reject
+out-of-bounds offsets and offsets inside a UTF-8 character instead of clamping them. A leading
+byte-order mark is included in byte offsets and excluded from columns. `Error::location()` still
+returns a one-based `Position`, filled from the reader's line index when the error reaches a
+boundary.
+
+**Alternatives.** Keep eager markers in every span: that is 48 bytes per span and a line/column
+calculation on the scanner's hot path. Derive locations only when formatting an error: an error
+does not own its input, so it would have to copy the input or lose its location. Retain UTF-8
+columns only: consumers such as language servers need UTF-16 columns and would keep converting
+themselves.
+
+**Why.** Events and tokens are produced in bulk, while line/column positions are needed only for
+errors and editor consumers. Byte ranges make the common path smaller; an on-demand index gives
+each consumer the encoding it needs.
+
+**Consequences.** This is a breaking API migration: `Span::start` and `Span::end` return
+`usize`, spans no longer use `Marker`, and a manually constructed `Error` uses `with_location` when it needs
+a location. On a 64-bit release build the event size falls from 176 to 144 bytes, `Span` from 48
+to 16, and `Error` from 112 to 104. The hosted performance gates decide whether the scanner and
+parser remain within their instruction and allocation budgets.

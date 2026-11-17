@@ -212,7 +212,9 @@ impl<'a> Scanner<'a> {
     ) -> Result<Self, Error> {
         limits.validate()?;
         limits.check_input(input.len()).map_err(|error| {
-            Error::from(error).with_span(Span::empty(crate::span::Marker::new(0, 1, 1)))
+            Error::from(error)
+                .with_span(Span::empty(0))
+                .with_location(crate::span::Position::new(1, 1))
         })?;
         let (line_index, quoted_only) = match LineIndex::new_checked(input, compat_flow) {
             Ok(checked) => checked,
@@ -224,7 +226,7 @@ impl<'a> Scanner<'a> {
                 };
                 let error = non_printable_error(input, index);
                 return Err(match marker {
-                    Some(marker) => error.with_span(Span::empty(marker)),
+                    Some(marker) => error.with_span(Span::empty(index)).with_location(marker),
                     None => error,
                 });
             }
@@ -285,6 +287,11 @@ impl<'a> Scanner<'a> {
     /// The text being scanned.
     pub(crate) fn input(&self) -> &'a str {
         self.input
+    }
+
+    /// The line index built for this input, for a parser that needs columns.
+    pub(crate) fn line_index(&self) -> &LineIndex {
+        &self.line_index
     }
 
     /// Return the next token, or `None` after the stream end has been emitted.
@@ -551,7 +558,7 @@ impl<'a> Scanner<'a> {
             if !quoted.as_ref().is_some_and(|range| range.contains(&index)) {
                 let error = non_printable_error(self.input, index);
                 return Err(match self.line_index.marker(self.input, index) {
-                    Some(marker) => error.with_span(Span::empty(marker)),
+                    Some(marker) => error.with_span(Span::empty(index)).with_location(marker),
                     None => error,
                 });
             }
@@ -715,7 +722,7 @@ impl<'a> Scanner<'a> {
     fn limit_at(&self, index: usize, limit: crate::limits::LimitExceeded) -> Error {
         let mut error = Error::from(limit);
         if let Some(marker) = self.line_index.marker(self.input, index) {
-            error = error.with_span(Span::empty(marker));
+            error = error.with_span(Span::empty(index)).with_location(marker);
         }
         error
     }
@@ -741,10 +748,10 @@ impl<'a> Scanner<'a> {
     }
 
     fn error_at(&self, index: usize, message: impl Into<String>) -> Error {
-        let span = self.line_index.marker(self.input, index).map(Span::empty);
-        let mut error = Error::new(ErrorKind::Scanner, message);
-        if let Some(span) = span {
-            error = error.with_span(span);
+        let marker = self.line_index.marker(self.input, index);
+        let mut error = Error::new(ErrorKind::Scanner, message).with_span(Span::empty(index));
+        if let Some(marker) = marker {
+            error = error.with_location(marker);
         }
         error
     }

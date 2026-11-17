@@ -1640,7 +1640,7 @@ fn a_block_scalar_counts_its_header_toward_the_scalar_limit() {
                 let limit = error.limit().expect("a structured limit");
                 assert_eq!(limit.kind(), LimitKind::ScalarBytes, "{name}: {error}");
                 assert_eq!(limit.observed(), size as u64, "{name}, {input:?}");
-                let at = error.span().expect("a span").start().index();
+                let at = error.span().expect("a span").start();
                 assert_eq!(at, start, "{name}, {input:?}");
             }
         }

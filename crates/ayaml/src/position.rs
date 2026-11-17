@@ -6,13 +6,47 @@
 //! (U+2028), and PS (U+2029) are content in YAML 1.2, not line breaks.
 
 use std::cell::Cell;
+use std::fmt;
+use std::sync::Arc;
 
-use crate::span::Marker;
+use crate::span::{Position, Span};
+
+/// The unit that a [`LineIndex`] column counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ColumnEncoding {
+    /// UTF-8 bytes.
+    Utf8,
+    /// Unicode scalar values, one per `char`.
+    Scalar,
+    /// UTF-16 code units, as an editor's LSP positions use.
+    Utf16,
+}
+
+/// A byte offset that cannot be turned into a [`Position`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PositionError {
+    /// The offset is past the end of the input.
+    OutOfBounds,
+    /// The offset is not on a UTF-8 character boundary.
+    NotCharBoundary,
+}
+
+impl fmt::Display for PositionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::OutOfBounds => "byte offset is past the end of the input",
+            Self::NotCharBoundary => "byte offset is not on a UTF-8 character boundary",
+        })
+    }
+}
+
+impl std::error::Error for PositionError {}
 
 /// A line-start index over a UTF-8 input.
 #[derive(Clone, Debug)]
-pub(crate) struct LineIndex {
-    starts: Vec<usize>,
+pub struct LineIndex {
+    starts: Arc<Vec<usize>>,
     content_start: usize,
     /// Whether a BOM at the start of a later line takes up no column, as one on the first line
     /// does. Compat counts one, as libyaml does.
@@ -115,14 +149,14 @@ fn scan_line_starts<const CHECK: bool>(
 impl LineIndex {
     /// Build an index for `input`.
     #[must_use]
-    pub(crate) fn new(input: &str) -> Self {
+    pub fn new(input: &str) -> Self {
         let mut quoted_only = Vec::new();
         let Ok((starts, ascii)) = scan_line_starts::<false>(input, &mut quoted_only) else {
             unreachable!("an unchecked scan cannot fail");
         };
         let content_start = input.len() - input.trim_start_matches('\u{feff}').len();
         Self {
-            starts,
+            starts: Arc::new(starts),
             content_start,
             skip_line_boms: !ascii,
             len: input.len(),
@@ -153,7 +187,7 @@ impl LineIndex {
         };
         Ok((
             Self {
-                starts,
+                starts: Arc::new(starts),
                 content_start,
                 skip_line_boms: !count_line_boms && !ascii,
                 len: input.len(),
@@ -191,55 +225,24 @@ impl LineIndex {
     /// [`Self::counting_line_boms`] builds when `count_line_boms`. It holds no line starts, so an
     /// error at the end of the input doesn't hold a second index beside the scanner's.
     #[must_use]
-    pub(crate) fn end_marker(input: &str, count_line_boms: bool) -> Marker {
-        let bytes = input.as_bytes();
-        let (mut line, mut start, mut at) = (0, 0, 0);
-        while at < bytes.len() {
-            match bytes[at] {
-                b'\n' => {
-                    at += 1;
-                    line += 1;
-                    start = at;
-                }
-                b'\r' => {
-                    at += 1;
-                    if bytes.get(at) == Some(&b'\n') {
-                        at += 1;
-                    }
-                    line += 1;
-                    start = at;
-                }
-                _ => at += 1,
-            }
-        }
-        let end = input.len();
-        if line == 0 {
-            // One line, whose index holds one start, and whose columns may start past a mark.
-            let index = if count_line_boms {
-                Self::counting_line_boms(input)
-            } else {
-                Self::new(input)
-            };
-            return index
-                .marker(input, end)
-                .unwrap_or_else(|| Marker::new(end, 1, 1));
-        }
-        let mut last = &input[start..];
-        if !count_line_boms {
-            while let Some(rest) = last.strip_prefix('\u{feff}') {
-                last = rest;
-            }
-        }
-        Marker::new(end, line + 1, last.chars().count() + 1)
+    pub(crate) fn end_marker(input: &str, _count_line_boms: bool) -> usize {
+        input.len()
     }
 
-    /// The column of `index` on `line`.
-    #[inline]
-    fn column(&self, input: &str, line: usize, index: usize) -> usize {
-        if self.ascii {
-            return index - self.starts[line] + 1;
+    /// The column of `index` on `line`, in the requested encoding.
+    fn column(&self, input: &str, line: usize, index: usize, encoding: ColumnEncoding) -> usize {
+        let start = self.line_content_start(input, line);
+        if index <= start {
+            return 1;
         }
-        self.counted_column_of(input, line, index)
+        if self.ascii {
+            return index - start + 1;
+        }
+        match encoding {
+            ColumnEncoding::Utf8 => index - start + 1,
+            ColumnEncoding::Scalar => self.counted_column_of(input, line, index),
+            ColumnEncoding::Utf16 => input[start..index].encode_utf16().count() + 1,
+        }
     }
 
     fn counted_column_of(&self, input: &str, line: usize, index: usize) -> usize {
@@ -271,12 +274,28 @@ impl LineIndex {
         start
     }
 
-    /// Return the marker at `index`, or `None` if it is out of bounds or not a
-    /// UTF-8 boundary.
-    #[must_use]
-    pub(crate) fn marker(&self, input: &str, index: usize) -> Option<Marker> {
-        if index > self.len || (!self.ascii && !input.is_char_boundary(index)) {
-            return None;
+    /// Return the one-based line and column at `index`.
+    ///
+    /// `encoding` selects whether a column counts UTF-8 bytes, Unicode scalar values, or UTF-16
+    /// code units. A leading byte order mark is excluded from the column and included in the byte
+    /// offset. An offset outside the input or inside a UTF-8 character is an error rather than a
+    /// clamped position.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PositionError::OutOfBounds`] past the end of `input`, or
+    /// [`PositionError::NotCharBoundary`] inside a UTF-8 character.
+    pub fn position(
+        &self,
+        input: &str,
+        index: usize,
+        encoding: ColumnEncoding,
+    ) -> Result<Position, PositionError> {
+        if index > self.len {
+            return Err(PositionError::OutOfBounds);
+        }
+        if !self.ascii && !input.is_char_boundary(index) {
+            return Err(PositionError::NotCharBoundary);
         }
         let mut line = self.last_line.get();
         if index < self.starts[line] {
@@ -290,48 +309,42 @@ impl LineIndex {
             }
         }
         self.last_line.set(line);
-        Some(Marker::new(
-            index,
+        Ok(Position::new(
             line + 1,
-            self.column(input, line, index),
+            self.column(input, line, index, encoding),
         ))
     }
 
-    /// Return a span for `start..end`, reusing the start line for the common
-    /// same-line case.
+    /// Return the scalar position at `index`.
     #[must_use]
-    pub(crate) fn span(&self, input: &str, start: usize, end: usize) -> Option<crate::span::Span> {
-        let start_marker = self.marker(input, start)?;
-        if end < start {
-            return None;
-        }
-        if end == start {
-            return Some(crate::span::Span::empty(start_marker));
-        }
-        if end > self.len || (!self.ascii && !input.is_char_boundary(end)) {
-            return None;
-        }
-        let line = self.last_line.get();
-        let next_start = self.starts.get(line + 1).copied().unwrap_or(self.len);
-        if end < next_start || (end == next_start && line + 1 == self.starts.len()) {
-            let end_marker = Marker::new(end, line + 1, self.column(input, line, end));
-            return Some(crate::span::Span::new(start_marker, end_marker));
-        }
-        self.marker(input, end)
-            .map(|end_marker| crate::span::Span::new(start_marker, end_marker))
+    pub(crate) fn marker(&self, input: &str, index: usize) -> Option<Position> {
+        self.position(input, index, ColumnEncoding::Scalar).ok()
     }
 
-    /// Return the number of lines (including a final empty line after a break).
+    /// Return a byte span for `start..end`.
     #[must_use]
+    pub(crate) fn span(&self, input: &str, start: usize, end: usize) -> Option<Span> {
+        if start > end || end > self.len {
+            return None;
+        }
+        if !(self.ascii || (input.is_char_boundary(start) && input.is_char_boundary(end))) {
+            return None;
+        }
+        Some(Span::new(start, end))
+    }
+
     /// Byte offset of the line containing `index`.
-    pub(crate) fn line_start(&self, index: usize) -> usize {
+    #[must_use]
+    pub fn line_start(&self, index: usize) -> usize {
         match self.starts.binary_search(&index) {
             Ok(line) => self.starts[line],
             Err(next) => self.starts[next.saturating_sub(1)],
         }
     }
 
-    pub(crate) fn line_count(&self) -> usize {
+    /// The number of lines, including a final empty line after a break.
+    #[must_use]
+    pub fn line_count(&self) -> usize {
         self.starts.len()
     }
 }
@@ -339,7 +352,7 @@ impl LineIndex {
 #[cfg(test)]
 mod tests {
     use super::{LineIndex, lines_at_most};
-    use crate::span::Marker;
+    use crate::span::Position;
 
     /// The index is allocated once, at its length when no CR is followed by an LF and under twice
     /// it otherwise, on every text of up to five characters from line breaks, ASCII, and the
@@ -384,20 +397,15 @@ mod tests {
         assert_eq!(lines_at_most(b""), 1);
     }
 
-    /// The end's marker is the one a whole index gives, in either mode, on every text of up to five
-    /// characters from line breaks, ASCII, marks, and other characters.
+    /// The end is the input's byte length in either mode, so an error at the end needs no second
+    /// index.
     #[test]
-    fn the_end_is_where_an_index_puts_it() {
+    fn the_end_is_the_input_length() {
         let check = |text: &str| {
             for count_line_boms in [false, true] {
-                let index = if count_line_boms {
-                    LineIndex::counting_line_boms(text)
-                } else {
-                    LineIndex::new(text)
-                };
                 assert_eq!(
-                    Some(LineIndex::end_marker(text, count_line_boms)),
-                    index.marker(text, text.len()),
+                    LineIndex::end_marker(text, count_line_boms),
+                    text.len(),
                     "{text:?}, {count_line_boms}"
                 );
             }
@@ -433,9 +441,9 @@ mod tests {
     fn ascii_lines_and_columns() {
         let input = "a: 1\nb: 2\n";
         let index = LineIndex::new(input);
-        assert_eq!(index.marker(input, 0), Some(Marker::new(0, 1, 1)));
-        assert_eq!(index.marker(input, 5), Some(Marker::new(5, 2, 1)));
-        assert_eq!(index.marker(input, 8), Some(Marker::new(8, 2, 4)));
+        assert_eq!(index.marker(input, 0), Some(Position::new(1, 1)));
+        assert_eq!(index.marker(input, 5), Some(Position::new(2, 1)));
+        assert_eq!(index.marker(input, 8), Some(Position::new(2, 4)));
         assert_eq!(index.line_count(), 3);
     }
 
@@ -443,18 +451,18 @@ mod tests {
     fn unicode_columns_count_scalars_not_bytes() {
         let input = "é: 1\nkéy: 2\n";
         let index = LineIndex::new(input);
-        assert_eq!(index.marker(input, 0), Some(Marker::new(0, 1, 1)));
-        assert_eq!(index.marker(input, 2), Some(Marker::new(2, 1, 2)));
+        assert_eq!(index.marker(input, 0), Some(Position::new(1, 1)));
+        assert_eq!(index.marker(input, 2), Some(Position::new(1, 2)));
         // "kéy" starts at byte 6, after the newline.
-        assert_eq!(index.marker(input, 6), Some(Marker::new(6, 2, 1)));
-        assert_eq!(index.marker(input, 9), Some(Marker::new(9, 2, 3)));
+        assert_eq!(index.marker(input, 6), Some(Position::new(2, 1)));
+        assert_eq!(index.marker(input, 9), Some(Position::new(2, 3)));
     }
 
     #[test]
     fn crlf_is_one_line_break() {
         let input = "a\r\nb\r\n";
         let index = LineIndex::new(input);
-        assert_eq!(index.marker(input, 3), Some(Marker::new(3, 2, 1)));
+        assert_eq!(index.marker(input, 3), Some(Position::new(2, 1)));
         assert_eq!(index.line_count(), 3);
     }
 
@@ -464,7 +472,7 @@ mod tests {
             let input = format!("a{separator}b");
             let index = LineIndex::new(&input);
             let after = 1 + separator.len_utf8();
-            assert_eq!(index.marker(&input, after), Some(Marker::new(after, 1, 3)));
+            assert_eq!(index.marker(&input, after), Some(Position::new(1, 3)));
         }
     }
 
@@ -472,8 +480,8 @@ mod tests {
     fn leading_bom_is_not_a_column() {
         let input = "\u{feff}k: v\n";
         let index = LineIndex::new(input);
-        assert_eq!(index.marker(input, 3), Some(Marker::new(3, 1, 1)));
-        assert_eq!(index.marker(input, 4), Some(Marker::new(4, 1, 2)));
+        assert_eq!(index.marker(input, 3), Some(Position::new(1, 1)));
+        assert_eq!(index.marker(input, 4), Some(Position::new(1, 2)));
     }
 
     #[test]
