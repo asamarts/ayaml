@@ -261,6 +261,10 @@ struct Parser<'a> {
 
 /// A document-bounded pull cursor used by the public event traversal.
 #[derive(Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "the flags describe independent scanner and stream states, not an enum"
+)]
 pub(crate) struct EventCursor<'a> {
     scanner: Scanner<'a>,
     limits: Limits,
@@ -276,6 +280,8 @@ pub(crate) struct EventCursor<'a> {
     documents: usize,
     /// The events counted so far, each once, as an eager parse of the stream counts them.
     events: usize,
+    /// Use the compatibility scanner and parser rules.
+    compat: bool,
 }
 
 impl<'a> EventCursor<'a> {
@@ -290,7 +296,15 @@ impl<'a> EventCursor<'a> {
     }
 
     pub(crate) fn new(input: &'a str, limits: &Limits) -> Result<Self, Error> {
-        let scanner = Scanner::new(input, limits.clone())?;
+        Self::with_compat(input, limits, false)
+    }
+
+    pub(crate) fn with_compat(
+        input: &'a str,
+        limits: &Limits,
+        compat: bool,
+    ) -> Result<Self, Error> {
+        let scanner = Scanner::with_compat(input, limits.clone(), compat)?;
         let positions = scanner.line_index().clone();
         Ok(Self {
             scanner,
@@ -305,6 +319,7 @@ impl<'a> EventCursor<'a> {
             stream_end: None,
             documents: 0,
             events: 0,
+            compat,
         })
     }
 
@@ -427,6 +442,7 @@ impl<'a> EventCursor<'a> {
             self.input,
             self.events,
             end,
+            self.compat,
         )?;
         self.events = counted;
         let documents = events
@@ -521,6 +537,7 @@ fn parse_lines<'a>(
     input: &'a str,
     counted: usize,
     end: usize,
+    compat: bool,
 ) -> Result<(Vec<Event<'a>>, usize), Error> {
     let event_capacity = event_capacity(&lines.lines, &lines.tokens);
     let flow_ends = flow_ends(&lines.tokens);
@@ -532,7 +549,7 @@ fn parse_lines<'a>(
         limits: limits.clone(),
         input,
         positions: lines.positions,
-        compat: false,
+        compat,
         documents: 0,
         emitted: counted,
         single_document: false,

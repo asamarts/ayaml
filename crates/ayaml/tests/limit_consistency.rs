@@ -131,8 +131,10 @@ fn readers() -> Vec<Reader> {
     ];
     #[cfg(feature = "libyaml-compat")]
     readers.push(Reader {
-        name: "compat::parse_events_with_limits",
-        read: |input, limits| ayaml::compat::parse_events_with_limits(input, limits).map(drop),
+        name: "compat::parse_events_eager_with_limits",
+        read: |input, limits| {
+            ayaml::compat::parse_events_eager_with_limits(input, limits).map(drop)
+        },
         values: false,
         stream: true,
     });

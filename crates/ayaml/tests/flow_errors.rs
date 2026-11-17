@@ -137,7 +137,7 @@ fn compat_failure_is(input: &str, message: &str, failure: At) {
         ),
         (
             "parse_events_with_limits",
-            ayaml::compat::parse_events_with_limits(input, &Limits::default()).map(drop),
+            ayaml::compat::parse_events_eager_with_limits(input, &Limits::default()).map(drop),
         ),
     ];
     for (reader, result) in errors {

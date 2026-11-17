@@ -1216,8 +1216,8 @@ fn limited_readers(input: &str, limits: &Limits) -> Vec<(&'static str, Result<()
     let mut readers = limited_entry_points(input, limits);
     #[cfg(feature = "libyaml-compat")]
     readers.push((
-        "compat::parse_events_with_limits",
-        ok(ayaml::compat::parse_events_with_limits(input, limits)),
+        "compat::parse_events_eager_with_limits",
+        ok(ayaml::compat::parse_events_eager_with_limits(input, limits)),
     ));
     readers
 }
@@ -1229,7 +1229,10 @@ fn assert_depth_error(shape: &str, name: &str, result: Result<(), ayaml::Error>)
     if stopped_where_json_cannot_follow(shape, &result) {
         return;
     }
-    if shape == "alias chain" && name == "parse_events_with_limits" {
+    if shape == "alias chain"
+        && (name.ends_with("parse_events_with_limits")
+            || name.ends_with("parse_events_eager_with_limits"))
+    {
         result.unwrap_or_else(|error| panic!("{shape}, {name}: {error}"));
         return;
     }
@@ -1528,7 +1531,9 @@ fn a_node_cost_of_zero_is_rejected_on_every_entry_point() {
             .with_max_alias_expansion_bytes(256 << 10)
             .with_alias_bytes_per_input_byte(0);
         for (name, result) in limited_readers(&empty_node_bomb(), &small) {
-            if name.ends_with("parse_events_with_limits") {
+            if name.ends_with("parse_events_with_limits")
+                || name.ends_with("parse_events_eager_with_limits")
+            {
                 result.unwrap_or_else(|error| panic!("{name}: {error}"));
                 continue;
             }

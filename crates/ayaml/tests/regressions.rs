@@ -225,8 +225,8 @@ fn entry_points(input: &str) -> Vec<(&'static str, Result<(), String>)> {
         ("parse_events", text(lazy())),
         #[cfg(feature = "libyaml-compat")]
         (
-            "compat::parse_events_with_limits",
-            text(ayaml::compat::parse_events_with_limits(
+            "compat::parse_events_eager_with_limits",
+            text(ayaml::compat::parse_events_eager_with_limits(
                 input,
                 &ayaml::Limits::default(),
             )),

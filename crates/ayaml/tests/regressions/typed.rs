@@ -88,7 +88,7 @@ fn compat_does_not_mistake_a_scalar_for_a_document_error() {
 fn compat_reports_limits_as_the_docs_say() {
     let limits = ayaml::Limits::default();
     let deep = format!("{}{}", "[".repeat(129), "]".repeat(129));
-    let error = ayaml::compat::parse_events_with_limits(&deep, &limits).unwrap_err();
+    let error = ayaml::compat::parse_events_eager_with_limits(&deep, &limits).unwrap_err();
     assert_eq!(error.kind(), ayaml::ErrorKind::Limit, "{error}");
     assert!(error.limit().is_some() && error.span().is_some(), "{error}");
     let error = ayaml::compat::from_str::<ayaml::Value>(&deep).unwrap_err();
@@ -697,8 +697,9 @@ fn core_tags_on_other_node_kinds_are_dropped() {
                 expected,
                 "{input:?}"
             );
-            let events = ayaml::compat::parse_events_with_limits(input, &ayaml::Limits::default())
-                .expect("compat events");
+            let events =
+                ayaml::compat::parse_events_eager_with_limits(input, &ayaml::Limits::default())
+                    .expect("compat events");
             for event in events {
                 match event {
                     ayaml::Event::SequenceStart { tag, .. }
