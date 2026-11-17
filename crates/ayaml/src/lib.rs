@@ -148,7 +148,8 @@ pub use limits::{
 };
 pub use mapping::{Entry, Mapping};
 pub use number::Number;
-pub use span::{Location, Marker, Span};
+pub use position::{ColumnEncoding, LineIndex, PositionError};
+pub use span::{Location, Position, Span};
 pub use tag::{Tag, TaggedValue};
 pub use value::Value;
 
@@ -193,7 +194,12 @@ pub mod compat {
                 "found character that cannot start any token",
             );
             return if let Some(span) = error.span() {
-                mapped.with_span(span)
+                let mapped = mapped.with_span(span);
+                if let Some(location) = error.location() {
+                    mapped.with_location(location)
+                } else {
+                    mapped
+                }
             } else {
                 mapped
             };
@@ -204,7 +210,12 @@ pub mod compat {
         {
             let mapped = Error::new(ErrorKind::Serde, "recursion limit exceeded");
             return if let Some(span) = error.span() {
-                mapped.with_span(span)
+                let mapped = mapped.with_span(span);
+                if let Some(location) = error.location() {
+                    mapped.with_location(location)
+                } else {
+                    mapped
+                }
             } else {
                 mapped
             };
@@ -215,7 +226,12 @@ pub mod compat {
                 "mapping values are not allowed in this context",
             );
             return if let Some(span) = error.span() {
-                mapped.with_span(span)
+                let mapped = mapped.with_span(span);
+                if let Some(location) = error.location() {
+                    mapped.with_location(location)
+                } else {
+                    mapped
+                }
             } else {
                 mapped
             };
@@ -227,7 +243,12 @@ pub mod compat {
         {
             let mapped = Error::new(ErrorKind::Parser, "more than one document in stream");
             return if let Some(span) = error.span() {
-                mapped.with_span(span)
+                let mapped = mapped.with_span(span);
+                if let Some(location) = error.location() {
+                    mapped.with_location(location)
+                } else {
+                    mapped
+                }
             } else {
                 mapped
             };
@@ -437,6 +458,7 @@ impl<'a> Iterator for EventStream<'a> {
 pub struct Deserializer<'a> {
     events: EventStream<'a>,
     limits: Limits,
+    input: &'a str,
     input_len: usize,
     finished: bool,
     /// One alias budget for the whole stream.
@@ -468,6 +490,7 @@ impl<'a> Deserializer<'a> {
         Ok(Self {
             events,
             limits,
+            input,
             input_len: input.len(),
             finished: false,
             budget: limits::AliasBudget::default(),
@@ -487,7 +510,9 @@ impl<'a> Deserializer<'a> {
         let Some(value) = self.next_value()? else {
             return Ok(None);
         };
-        from_value(value).map(Some)
+        from_value(value)
+            .map(Some)
+            .map_err(|error| error.with_input_location(self.input, false))
     }
 
     /// Deserialize the next document, borrowing simple strings from the input.
@@ -499,7 +524,9 @@ impl<'a> Deserializer<'a> {
         let Some(events) = self.next_events()? else {
             return Ok(None);
         };
-        typed::from_events(events, self.input_len, &self.limits, &mut self.budget).map(Some)
+        typed::from_events(events, self.input_len, &self.limits, &mut self.budget)
+            .map(Some)
+            .map_err(|error| error.with_input_location(self.input, false))
     }
 
     /// Deserialize the next document with a seed, borrowing simple strings.
@@ -516,6 +543,7 @@ impl<'a> Deserializer<'a> {
         };
         typed::from_events_seed(events, self.input_len, &self.limits, &mut self.budget, seed)
             .map(Some)
+            .map_err(|error| error.with_input_location(self.input, false))
     }
 
     /// Deserialize the next document using a caller-supplied seed.
@@ -530,7 +558,9 @@ impl<'a> Deserializer<'a> {
         let Some(value) = self.next_value()? else {
             return Ok(None);
         };
-        from_value_seed(value, seed).map(Some)
+        from_value_seed(value, seed)
+            .map(Some)
+            .map_err(|error| error.with_input_location(self.input, false))
     }
 
     fn next_value(&mut self) -> Result<Option<Value>, Error> {
@@ -542,7 +572,8 @@ impl<'a> Deserializer<'a> {
             self.input_len,
             &self.limits,
             &mut self.budget,
-        )?
+        )
+        .map_err(|error| error.with_input_location(self.input, false))?
         .into_iter()
         .next()
         .ok_or_else(|| Error::new(ErrorKind::Composition, "document produced no value"))?;
@@ -647,9 +678,11 @@ pub fn parse_value(input: &str) -> Result<Value, Error> {
 ///
 /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
 pub fn parse_value_with_limits(input: &str, limits: &Limits) -> Result<Value, Error> {
-    limits
-        .check_input(input.len())
-        .map_err(|error| Error::from(error).with_span(Span::empty(Marker::new(0, 1, 1))))?;
+    limits.check_input(input.len()).map_err(|error| {
+        Error::from(error)
+            .with_span(Span::empty(0))
+            .with_location(Position::new(1, 1))
+    })?;
     let mut documents = parser::parse_documents(input, limits, true)?;
     if documents.len() > 1 {
         return Err(Error::new(
@@ -678,9 +711,11 @@ pub fn parse_documents(input: &str) -> Result<Vec<Value>, Error> {
 ///
 /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
 pub fn parse_documents_with_limits(input: &str, limits: &Limits) -> Result<Vec<Value>, Error> {
-    limits
-        .check_input(input.len())
-        .map_err(|error| Error::from(error).with_span(Span::empty(Marker::new(0, 1, 1))))?;
+    limits.check_input(input.len()).map_err(|error| {
+        Error::from(error)
+            .with_span(Span::empty(0))
+            .with_location(Position::new(1, 1))
+    })?;
     parser::parse_documents(input, limits, false)
 }
 

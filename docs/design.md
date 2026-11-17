@@ -61,12 +61,14 @@ resource model is described in [limits.md](limits.md).
 
 ## Spans and diagnostics
 
-Spans are half-open UTF-8 byte ranges over the original input. `Marker` carries
-a byte index plus one-based line and column values. Block and flow collections,
-scalars, tags, anchors, aliases, and directives expose source spans in the
-event stream. A plain scalar's span and raw text end at its last non-whitespace
-character, so the separation before a comment, line break, or flow indicator
-stays outside it.
+Spans are half-open UTF-8 byte ranges over the original input. A `Span` holds
+only its byte offsets and converts to `Range<usize>`. `LineIndex` turns an
+offset into a one-based `Position`, counting UTF-8 bytes, Unicode scalar values,
+or UTF-16 code units with `ColumnEncoding`; a leading byte-order mark is outside
+the columns and inside the offsets. Block and flow collections, scalars, tags,
+anchors, aliases, and directives expose source spans in the event stream. A
+plain scalar's span and raw text end at its last non-whitespace character, so
+the separation before a comment, line break, or flow indicator stays outside it.
 
 Errors have a stable `ErrorKind`, an optional span and location, a message, and
 an optional source. Resource-limit errors additionally expose a structured

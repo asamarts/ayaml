@@ -981,9 +981,8 @@ fn compat_counts_a_column_for_a_line_start_bom() {
     ] {
         let error = ayaml::compat::from_str::<Value>(input).unwrap_err();
         let start = error
-            .span()
-            .unwrap_or_else(|| panic!("{input:?}: {error}"))
-            .start();
+            .location()
+            .unwrap_or_else(|| panic!("{input:?}: {error}"));
         assert_eq!(
             (start.line(), start.column()),
             (2, column),

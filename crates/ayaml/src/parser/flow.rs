@@ -452,8 +452,10 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::Value if depth == 0 => {
                     let key_start = tokens[start].span.start();
-                    let implicit_key = key_start.line() == token.span.start().line()
-                        && implicit_key_fits(key_start, token.span.start());
+                    let key_position = self.at(key_start);
+                    let colon_position = self.at(token.span.start());
+                    let implicit_key = key_position.line() == colon_position.line()
+                        && implicit_key_fits(key_position, colon_position);
                     if implicit_key || matches!(tokens[start].kind, TokenKind::Key) {
                         return Some(index);
                     }
@@ -538,7 +540,7 @@ impl<'a> Parser<'a> {
         } else {
             ("mapping", '}')
         };
-        let from = opening.start();
+        let from = self.at(opening.start());
         let there = format!("at line {} column {}", from.line(), from.column());
         let lack = if self.compat {
             self.libyaml_flow_lack(tokens, index, sequence, lack)
@@ -843,7 +845,9 @@ impl<'a> Parser<'a> {
         reason = "the method is part of a uniform grammar or diagnostic surface"
     )]
     pub(super) fn error(&self, span: Span, message: impl Into<String>) -> Error {
-        Error::new(ErrorKind::Parser, message).with_span(span)
+        Error::new(ErrorKind::Parser, message)
+            .with_span(span)
+            .with_location_from(&self.positions, self.input)
     }
 
     #[allow(
@@ -851,6 +855,8 @@ impl<'a> Parser<'a> {
         reason = "the method is part of a uniform grammar or diagnostic surface"
     )]
     pub(super) fn limit_at(&self, span: Span, limit: crate::limits::LimitExceeded) -> Error {
-        Error::from(limit).with_span(span)
+        Error::from(limit)
+            .with_span(span)
+            .with_location_from(&self.positions, self.input)
     }
 }

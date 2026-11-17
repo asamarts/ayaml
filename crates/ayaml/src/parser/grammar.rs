@@ -293,7 +293,10 @@ impl<'a> Parser<'a> {
                     "properties cannot precede a compact block sequence",
                 ));
             }
-            let nested_indent = content_first.span.start().column().saturating_sub(1);
+            let nested_indent = self
+                .at(content_first.span.start())
+                .column()
+                .saturating_sub(1);
             return Ok(Step::Call(Call::SequenceFirst {
                 index: next_index.saturating_sub(1),
                 first: content,
@@ -314,7 +317,10 @@ impl<'a> Parser<'a> {
             // On a sequence item, properties before the first block key belong
             // to that key, not to the mapping node, so the mapping starts at
             // the first property (`- &x a: b` has its keys at column 2).
-            let mapping_indent = self.token(rest, 0).span.start().column().saturating_sub(1);
+            let mapping_indent = self
+                .at(self.token(rest, 0).span.start())
+                .column()
+                .saturating_sub(1);
             return Ok(Step::Call(Call::MappingFirst {
                 first: rest,
                 next_index,
@@ -495,9 +501,10 @@ impl<'a> Parser<'a> {
             let key = value_index.map_or(tokens, |index| tokens.until(index));
             if !key.is_empty() {
                 let key_tokens = self.tokens(key);
-                let key_line = key_tokens[0].span.start().line();
+                let key_line = self.at(key_tokens[0].span.start()).line();
                 if key_tokens.iter().any(|token| {
-                    token.span.start().line() != key_line || token.span.end().line() != key_line
+                    self.at(token.span.start()).line() != key_line
+                        || self.at(token.span.end()).line() != key_line
                 }) && flow_brackets_match(key_tokens)
                 {
                     return Err(self.error(
@@ -507,8 +514,8 @@ impl<'a> Parser<'a> {
                 }
                 if let Some(value_index) = value_index
                     && !implicit_key_fits(
-                        key_tokens[0].span.start(),
-                        self.token(tokens, value_index).span.start(),
+                        self.at(key_tokens[0].span.start()),
+                        self.at(self.token(tokens, value_index).span.start()),
                     )
                 {
                     return Err(self.error(
@@ -636,7 +643,7 @@ impl<'a> Parser<'a> {
                 })
                 && self
                     .line_first(current_index)
-                    .is_some_and(|token| token.span.start().column() == 1)
+                    .is_some_and(|token| self.at(token.span.start()).column() == 1)
                 && current_index > 0
                 && self
                     .line_tokens(current_index - 1)
@@ -666,7 +673,10 @@ impl<'a> Parser<'a> {
                     "properties cannot precede a compact block sequence",
                 ));
             }
-            let sequence_indent = content_first.span.start().column().saturating_sub(1);
+            let sequence_indent = self
+                .at(content_first.span.start())
+                .column()
+                .saturating_sub(1);
             return Ok(Step::Call(Call::SequenceFirst {
                 index: current_index.saturating_sub(1),
                 first: content,
@@ -686,7 +696,10 @@ impl<'a> Parser<'a> {
             }
             // As on a sequence item: properties belong to the first key, and
             // the compact mapping starts at the first property.
-            let mapping_indent = self.token(value, 0).span.start().column().saturating_sub(1);
+            let mapping_indent = self
+                .at(self.token(value, 0).span.start())
+                .column()
+                .saturating_sub(1);
             return Ok(Step::Call(Call::MappingFirst {
                 first: value,
                 next_index: current_index,

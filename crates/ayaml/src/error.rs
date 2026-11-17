@@ -91,6 +91,7 @@ pub struct Error {
     /// How much of the end of `message` is context that the error's location goes before.
     context_len: u16,
     span: Option<Span>,
+    location: Option<Location>,
     message: String,
     limit: Option<Box<crate::limits::LimitExceeded>>,
     source: Option<Box<dyn StdError + Send + Sync + 'static>>,
@@ -106,6 +107,7 @@ impl Error {
             path_len: 0,
             context_len: 0,
             span: None,
+            location: None,
             message: message.into(),
             limit: None,
             source: None,
@@ -127,9 +129,57 @@ impl Error {
     }
 
     /// Attach a source span.
+    ///
+    /// A span carries byte offsets. [`location`](Self::location) is filled in when the error
+    /// crosses a reader that has the input's [`LineIndex`](crate::LineIndex); a manually built
+    /// error has no location until [`with_location`](Self::with_location) supplies one.
     #[must_use]
     pub fn with_span(mut self, span: Span) -> Self {
         self.span = Some(span);
+        self.location = None;
+        self
+    }
+
+    /// Attach the one-based line and column for this error's span.
+    #[must_use]
+    pub fn with_location(mut self, location: Location) -> Self {
+        self.location = Some(location);
+        self
+    }
+
+    /// Fill in the line and column from this error's byte span, using `input`'s line index.
+    ///
+    /// This is the boundary step for an error that was built from a byte span deeper in a
+    /// reader. It leaves an error that already has a location, or has no span, unchanged.
+    #[must_use]
+    pub(crate) fn with_input_location(self, input: &str, compat: bool) -> Self {
+        if self.location.is_some() || self.span.is_none() {
+            return self;
+        }
+        let index = if compat {
+            crate::position::LineIndex::counting_line_boms(input)
+        } else {
+            crate::position::LineIndex::new(input)
+        };
+        self.with_location_from(&index, input)
+    }
+
+    /// Fill in the line and column from an index the reader already holds.
+    #[must_use]
+    pub(crate) fn with_location_from(
+        mut self,
+        index: &crate::position::LineIndex,
+        input: &str,
+    ) -> Self {
+        if self.location.is_some() {
+            return self;
+        }
+        let Some(span) = self.span else {
+            return self;
+        };
+        if let Ok(position) = index.position(input, span.start(), crate::ColumnEncoding::Scalar) {
+            self.location = Some(position);
+        }
         self
     }
 
@@ -174,10 +224,10 @@ impl Error {
         self.span
     }
 
-    /// The one-based line/column, if the error has a span.
+    /// The one-based line/column, if the error has a location.
     #[must_use]
     pub fn location(&self) -> Option<Location> {
-        self.span.map(|span| span.start().location())
+        self.location
     }
 
     /// The human-readable message without location decoration.
@@ -310,13 +360,12 @@ fn hides_text(character: char) -> bool {
 
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Some(span) = self.span else {
+        let (Some(_span), Some(location)) = (self.span, self.location) else {
             return formatter.write_str(&self.message);
         };
         let (problem, context) = self
             .message
             .split_at(self.message.len() - self.context_len as usize);
-        let location = span.start().location();
         write!(
             formatter,
             "{problem} at line {} column {}{context}",
@@ -353,7 +402,7 @@ impl serde::ser::Error for Error {
 #[cfg(test)]
 mod tests {
     use super::{Error, ErrorKind};
-    use crate::span::{Marker, Span};
+    use crate::span::{Position, Span};
     use std::error::Error as _;
 
     #[test]
@@ -368,8 +417,10 @@ mod tests {
 
     #[test]
     fn span_and_location_are_one_based() {
-        let span = Span::new(Marker::new(4, 2, 3), Marker::new(5, 2, 4));
-        let error = Error::new(ErrorKind::Scanner, "bad token").with_span(span);
+        let span = Span::new(4, 5);
+        let error = Error::new(ErrorKind::Scanner, "bad token")
+            .with_span(span)
+            .with_location(Position::new(2, 3));
         assert_eq!(error.span(), Some(span));
         let location = error.location().expect("location");
         assert_eq!((location.line(), location.column()), (2, 3));
@@ -451,13 +502,15 @@ mod tests {
     /// Text that reads like a location, in a key or in the message, never stands for the error's.
     #[test]
     fn a_location_in_the_text_does_not_stand_for_the_error_s() {
-        let span = Span::new(Marker::new(4, 2, 3), Marker::new(5, 2, 4));
+        let span = Span::new(4, 5);
         let error = Error::new(ErrorKind::Serde, "bad")
             .with_span(span)
+            .with_location(Position::new(2, 3))
             .inside_key("at line 9");
         assert_eq!(error.to_string(), "[\"at line 9\"]: bad at line 2 column 3");
         let error = Error::new(ErrorKind::Serde, "invalid type: string \"at line 9\"")
             .with_span(span)
+            .with_location(Position::new(2, 3))
             .inside_key("a");
         assert_eq!(
             error.to_string(),
@@ -468,8 +521,8 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn an_error_stays_small() {
-        assert_eq!(size_of::<Error>(), 112);
-        assert_eq!(size_of::<Result<crate::Value, Error>>(), 112);
+        assert_eq!(size_of::<Error>(), 104);
+        assert_eq!(size_of::<Result<crate::Value, Error>>(), 104);
     }
 
     /// A path's steps are as long as `inside` lets them be, and a context too long to keep its
@@ -489,11 +542,12 @@ mod tests {
         let start: String = error.message().chars().take(40).collect();
         assert!(error.message().starts_with('…'), "{start}");
         assert!(error.message().len() < 2_048);
-        let span = Span::new(Marker::new(4, 2, 3), Marker::new(5, 2, 4));
+        let span = Span::new(4, 5);
         let context = format!(", {}", "c".repeat(70_000));
         let error = Error::new(ErrorKind::Parser, "bad")
             .with_context(&context)
-            .with_span(span);
+            .with_span(span)
+            .with_location(Position::new(2, 3));
         assert_eq!(
             error.to_string(),
             format!("bad{context} at line 2 column 3")
@@ -502,10 +556,11 @@ mod tests {
 
     #[test]
     fn the_location_goes_before_the_context() {
-        let span = Span::new(Marker::new(4, 2, 3), Marker::new(5, 2, 4));
+        let span = Span::new(4, 5);
         let error = Error::new(ErrorKind::Parser, "unterminated flow sequence")
             .with_context(", opened at line 1 column 1")
-            .with_span(span);
+            .with_span(span)
+            .with_location(Position::new(2, 3));
         assert_eq!(
             error.message(),
             "unterminated flow sequence, opened at line 1 column 1"

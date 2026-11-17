@@ -11,7 +11,7 @@ use crate::error::ErrorKind;
 use crate::event::Event;
 use crate::limits::Limits;
 use crate::scanner::{Token, TokenKind};
-use crate::span::{Marker, Span};
+use crate::span::Span;
 
 fn fixture(name: &str) -> Option<String> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/compat");
@@ -73,7 +73,7 @@ fn the_token_arena_grows_with_linear_copying_and_bounded_waste() {
 fn push_token_grows_a_full_arena_as_arena_growth_says() {
     let token = Token {
         kind: TokenKind::FlowEntry,
-        span: Span::empty(Marker::new(0, 1, 1)),
+        span: Span::empty(0),
     };
     for chunk in [
         TOKEN_ARENA_SMALL_CHUNK,

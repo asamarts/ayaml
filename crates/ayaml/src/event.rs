@@ -172,14 +172,11 @@ impl Event<'_> {
 #[cfg(test)]
 mod tests {
     use super::{Anchor, CollectionStyle, Event, ScalarStyle};
-    use crate::span::{Marker, Span};
+    use crate::span::Span;
     use crate::tag::Tag;
 
     fn span(start: usize, end: usize) -> Span {
-        Span::new(
-            Marker::new(start, 1, start + 1),
-            Marker::new(end, 1, end + 1),
-        )
+        Span::new(start, end)
     }
 
     #[test]
