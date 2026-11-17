@@ -253,6 +253,13 @@ impl<'a> Scanner<'a> {
         // Only the closing quote is exempt: a line that starts with the other kind of quote, or
         // with `''` in a single-quoted scalar, is text and is held to the indent.
         if !closes && (indent < start_indent || (!allow_same_indent && indent == start_indent)) {
+            // A short continuation line can be the consequence of an unclosed quote. In that
+            // case name the opening, where the reader has to add the quote, rather than the
+            // indentation rule that noticed it first.
+            if !self.quoted_closes_from(self.pos, quote) {
+                let name = if quote == '"' { "double" } else { "single" };
+                return Err(self.error_at(start, format!("unterminated {name}-quoted scalar")));
+            }
             return Err(self.error_at(
                 self.pos,
                 "quoted scalar continuation must be indented more than its parent",
@@ -1268,6 +1275,25 @@ impl<'a> Scanner<'a> {
             .chars()
             .next_back()
             .is_some_and(is_blank)
+    }
+
+    /// Whether a closing `quote` appears in the remaining input, with escapes and `''` skipped.
+    fn quoted_closes_from(&self, from: usize, quote: char) -> bool {
+        let mut chars = self.input[from..].chars();
+        while let Some(ch) = chars.next() {
+            if quote == '"' && ch == '\\' {
+                chars.next();
+                continue;
+            }
+            if ch == quote {
+                if quote == '\'' && chars.clone().next() == Some('\'') {
+                    chars.next();
+                    continue;
+                }
+                return true;
+            }
+        }
+        false
     }
 
     pub(super) fn trim_trailing_whitespace(&self, start: usize, end: usize) -> usize {

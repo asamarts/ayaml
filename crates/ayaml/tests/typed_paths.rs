@@ -963,9 +963,7 @@ fn a_bare_tag_fills_a_struct_variant_s_defaults() {
     for input in ["true", "1"] {
         for (name, error, _) in every_reader::<Shape>(input) {
             assert!(
-                error
-                    .message()
-                    .contains("enum value must be tagged or a single-entry mapping"),
+                error.message().contains("invalid type:"),
                 "{name}: {input:?}: {error}"
             );
         }

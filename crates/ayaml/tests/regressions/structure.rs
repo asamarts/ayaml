@@ -1397,7 +1397,7 @@ fn a_stream_start_run_of_marks_is_not_content() {
             assert!(
                 error.starts_with(
                     "quoted scalar continuation must be indented more than its parent"
-                ),
+                ) || error.starts_with("unterminated double-quoted scalar"),
                 "{input:?} in {mode}: {error}"
             );
         }
@@ -1596,4 +1596,63 @@ fn a_deep_compact_sequence_fails_at_the_depth_limit_early() {
             .map(|location| (location.line(), location.column())),
         Some((1, 257))
     );
+}
+
+/// Compatibility mode names the collection whose indentation a line breaks, instead of calling
+/// the line trailing content. Issue #160.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_names_the_collection_for_an_indentation_mistake() {
+    for (input, expected) in [
+        (
+            "version: 1\nrules:\n  - id: a\n   kind: file_exists\n",
+            "this line is indented differently from the sequence at line 3 column 3 at line 4 \
+             column 4",
+        ),
+        (
+            "a:\n  b: 1\n   c: 2\n",
+            "this line is indented differently from the mapping at line 2 column 3 at line 3 \
+             column 4",
+        ),
+        (
+            "a:\n  b: 1\n c: 2\n",
+            "this line is indented differently from the mapping at line 1 column 1 at line 3 \
+             column 2",
+        ),
+    ] {
+        assert_eq!(
+            ayaml::compat::from_str::<ayaml::Value>(input)
+                .unwrap_err()
+                .to_string(),
+            expected,
+            "{input:?}"
+        );
+    }
+}
+
+/// A short quoted continuation with no closing quote reports the opening quote. Issue #161.
+#[test]
+fn an_unclosed_quoted_scalar_reports_its_opening() {
+    let input =
+        "version: 1\nrules:\n  - id: a\n    kind: file_exists\n    paths: \"x\n    level: error\n";
+    for (mode, read) in readings(input) {
+        let error = read.expect_err(input);
+        assert!(
+            error.starts_with("unterminated double-quoted scalar at line 5 column 12"),
+            "{input:?} in {mode}: {error}"
+        );
+    }
+    for input in ["k: \"a\nb\n", "k: 'a\nb\n"] {
+        for (mode, read) in readings(input) {
+            let error = read.expect_err(input);
+            assert!(
+                error.starts_with("unterminated "),
+                "{input:?} in {mode}: {error}"
+            );
+            assert!(
+                error.contains("at line 1 column 4"),
+                "{input:?} in {mode}: {error}"
+            );
+        }
+    }
 }

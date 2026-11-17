@@ -708,6 +708,20 @@ fn resolve<'a, 'de>(mut node: &'a Node<'de>) -> &'a Node<'de> {
     node
 }
 
+/// Describe a node's actual kind to Serde's `invalid_type` error.
+fn unexpected_node<'a>(node: &'a Node<'_>) -> serde::de::Unexpected<'a> {
+    match &node.kind {
+        NodeKind::Null => serde::de::Unexpected::Unit,
+        NodeKind::Bool(value) => serde::de::Unexpected::Bool(*value),
+        NodeKind::Number(value) => crate::serde_impl::unexpected_number(*value),
+        NodeKind::String(value) => serde::de::Unexpected::Str(value),
+        NodeKind::Sequence(_) => serde::de::Unexpected::Seq,
+        NodeKind::Mapping(_) => serde::de::Unexpected::Map,
+        NodeKind::Tagged(_, inner) => unexpected_node(inner),
+        NodeKind::Alias(inner) => unexpected_node(inner),
+    }
+}
+
 /// The node a target that isn't an enum, a string, or any value reads: past aliases, and past a
 /// tag outside YAML's own `tag:yaml.org,2002:` names. That tag means what the application says,
 /// not something a number or a sequence can hold, so `!port 80` reads as `80` into a `u16`. A
@@ -1127,12 +1141,8 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
                 .deserialize_any(visitor)
                 .map_err(|error| with_span(error, span));
         }
-        let unexpected = match &node.kind {
-            NodeKind::Sequence(_) => serde::de::Unexpected::Seq,
-            _ => serde::de::Unexpected::Other("non-mapping YAML value"),
-        };
         Err(with_span(
-            serde::de::Error::invalid_type(unexpected, &visitor),
+            serde::de::Error::invalid_type(unexpected_node(node), &visitor),
             span,
         ))
     }
@@ -1170,6 +1180,15 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
     ) -> Result<V::Value, Self::Error> {
         let node = self.target();
         let span = node.span;
+        if !matches!(
+            &node.kind,
+            NodeKind::Tagged(_, _) | NodeKind::String(_) | NodeKind::Mapping(_)
+        ) {
+            return Err(with_span(
+                serde::de::Error::invalid_type(unexpected_node(node), &visitor),
+                span,
+            ));
+        }
         let (variant, variant_span, value) = match &node.kind {
             // A tag names the variant by its whole name (`Tag::variant_name`), so `!<tag:x:B>`
             // and `!e!B` under `%TAG !e! tag:x:` select the same variant.

@@ -319,6 +319,31 @@ fn untagged(mut value: Value) -> Value {
     }
 }
 
+/// Describe the actual value to a Serde visitor's `invalid_type` error.
+fn unexpected(value: &Value) -> serde::de::Unexpected<'_> {
+    match value {
+        Value::Null => serde::de::Unexpected::Unit,
+        Value::Bool(value) => serde::de::Unexpected::Bool(*value),
+        Value::Number(value) => unexpected_number(*value),
+        Value::String(value) => serde::de::Unexpected::Str(value),
+        Value::Sequence(_) => serde::de::Unexpected::Seq,
+        Value::Mapping(_) => serde::de::Unexpected::Map,
+        Value::Tagged(tagged) => unexpected(&tagged.value),
+    }
+}
+
+pub(crate) fn unexpected_number(value: Number) -> serde::de::Unexpected<'static> {
+    if value.is_f64() {
+        serde::de::Unexpected::Float(value.as_f64().unwrap_or(f64::NAN))
+    } else if let Some(value) = value.as_u64() {
+        serde::de::Unexpected::Unsigned(value)
+    } else if let Some(value) = value.as_i64() {
+        serde::de::Unexpected::Signed(value)
+    } else {
+        serde::de::Unexpected::Other("integer outside the 64-bit range")
+    }
+}
+
 /// Deserializer methods for targets that read a value as `deserialize_any` does, past an
 /// application tag (see `untagged`).
 macro_rules! plain_targets {
@@ -427,15 +452,9 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
             Value::String(value) => visitor.visit_string(value),
             Value::Tagged(tagged) => match tagged.value {
                 Value::String(value) => visitor.visit_string(value),
-                _ => Err(serde::de::Error::invalid_type(
-                    serde::de::Unexpected::Other("tagged non-string YAML value"),
-                    &visitor,
-                )),
+                value => Err(serde::de::Error::invalid_type(unexpected(&value), &visitor)),
             },
-            _ => Err(serde::de::Error::invalid_type(
-                serde::de::Unexpected::Other("non-string YAML value"),
-                &visitor,
-            )),
+            value => Err(serde::de::Error::invalid_type(unexpected(&value), &visitor)),
         }
     }
 
@@ -493,14 +512,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
                 serde::de::Unexpected::Unit,
                 &visitor,
             )),
-            Value::Sequence(_) => Err(serde::de::Error::invalid_type(
-                serde::de::Unexpected::Seq,
-                &visitor,
-            )),
-            _ => Err(serde::de::Error::invalid_type(
-                serde::de::Unexpected::Other("non-mapping YAML value"),
-                &visitor,
-            )),
+            value => Err(serde::de::Error::invalid_type(unexpected(&value), &visitor)),
         }
     }
 
@@ -521,6 +533,15 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
         _variants: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
+        if !matches!(
+            &self.value,
+            Value::String(_) | Value::Tagged(_) | Value::Mapping(_)
+        ) {
+            return Err(serde::de::Error::invalid_type(
+                unexpected(&self.value),
+                &visitor,
+            ));
+        }
         let bare = matches!(
             self.value,
             Value::String(_) | Value::Bool(_) | Value::Number(_)

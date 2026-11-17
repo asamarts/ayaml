@@ -667,6 +667,44 @@ pub(crate) fn parse_documents(
 }
 
 impl<'a> Parser<'a> {
+    /// A compatibility-mode explanation for a line that does not fit the indentation of the
+    /// collection before it. Real trailing content returns `None`.
+    fn compat_indentation_message(&self, index: usize) -> Option<String> {
+        let tokens = self.line_tokens(index);
+        let structural = has_value_indicator(tokens)
+            || tokens.first().is_some_and(|token| {
+                matches!(
+                    token.kind,
+                    TokenKind::BlockEntry | TokenKind::Key | TokenKind::Value
+                )
+            });
+        if !structural {
+            return None;
+        }
+        let indent = self.lines.get(index)?.indent;
+        if index == 0 && indent > 0 {
+            return Some("a document's first node cannot be indented".to_owned());
+        }
+        let parent = (0..index)
+            .rev()
+            .find(|&line| self.lines[line].indent < indent)?;
+        if indent != self.lines[parent].indent + 1 {
+            return None;
+        }
+        let token = self.line_first(parent)?;
+        let position = self.at(token.span.start());
+        let kind = if matches!(token.kind, TokenKind::BlockEntry) {
+            "sequence"
+        } else {
+            "mapping"
+        };
+        Some(format!(
+            "this line is indented differently from the {kind} at line {} column {}",
+            position.line(),
+            position.column()
+        ))
+    }
+
     fn at(&self, offset: usize) -> Position {
         self.positions
             .marker(self.input, offset)
@@ -848,26 +886,28 @@ impl<'a> Parser<'a> {
                     .line_first(index)
                     .map_or_else(|| self.empty_span(index), |token| token.span);
                 let tabbed = root_block && tab_leads_line(self.input, span.start());
-                let message = if tabbed {
-                    "unexpected content after document"
-                } else {
-                    match tokens.first().map(|token| &token.kind) {
-                        Some(TokenKind::Scalar {
-                            style: ScalarStyle::Literal | ScalarStyle::Folded,
-                            ..
-                        }) => "a block scalar is not indented past its parent",
-                        Some(TokenKind::BlockEntry) => {
-                            "a block entry is indented less than its parent"
-                        }
-                        Some(TokenKind::Scalar { .. })
-                            if root_block
-                                && self.lines[index].indent > 0
-                                && previous_line_is_blank(self.input, span.start()) =>
-                        {
-                            "a mapping line is missing a `:`"
-                        }
-                        _ => "unexpected content after document",
+                let fallback = match tokens.first().map(|token| &token.kind) {
+                    Some(TokenKind::Scalar {
+                        style: ScalarStyle::Literal | ScalarStyle::Folded,
+                        ..
+                    }) => "a block scalar is not indented past its parent",
+                    Some(TokenKind::BlockEntry) => "a block entry is indented less than its parent",
+                    Some(TokenKind::Scalar { .. })
+                        if root_block
+                            && self.lines[index].indent > 0
+                            && previous_line_is_blank(self.input, span.start()) =>
+                    {
+                        "a mapping line is missing a `:`"
                     }
+                    _ => "unexpected content after document",
+                }
+                .to_owned();
+                let message = if tabbed {
+                    "unexpected content after document".to_owned()
+                } else if self.compat {
+                    self.compat_indentation_message(index).unwrap_or(fallback)
+                } else {
+                    fallback
                 };
                 let error = self.error(span, message);
                 // A node that only a tab seemed to indent under a key or an entry sits at its
