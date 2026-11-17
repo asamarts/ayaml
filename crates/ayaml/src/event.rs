@@ -141,6 +141,11 @@ pub enum Event<'a> {
         span: Span,
     },
     /// An alias use.
+    ///
+    /// The event reports the alias as written. The event readers do not check that an earlier
+    /// anchor in the document defines [`anchor`](Self::Alias::anchor); value composition does
+    /// that check. A consumer that composes aliases must track the anchors it has seen and report
+    /// an unknown one itself.
     Alias {
         /// Referenced anchor.
         anchor: Anchor<'a>,
