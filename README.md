@@ -119,6 +119,7 @@ fn main() -> Result<(), ayaml::Error> {
 | A document stream as values | `parse_documents`, `parse_documents_with_limits` |
 | Spanned events | `parse_events`, `parse_events_with_limits`, `EventStream` |
 | Compatibility events | `compat::parse_events`, its `_with_limits` form, and the eager `compat::parse_events_eager_with_limits` |
+| Spanned tree | `SpannedTree`, `SpannedNode`, path lookup, entry spans, and scalar source text |
 | Typed decoding | `from_str`, `from_slice`, `from_str_borrowed`, `Deserializer` |
 | Value/Serde conversion | `from_value`, `from_value_seed`, `to_value` |
 | Emission | `to_string`, `to_writer`, `Emitter`, `to_string_events` |

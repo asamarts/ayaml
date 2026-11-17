@@ -70,6 +70,10 @@ anchors, aliases, and directives expose source spans in the event stream. A
 plain scalar's span and raw text end at its last non-whitespace character, so
 the separation before a comment, line break, or flow indicator stays outside it.
 
+`SpannedTree` builds a read-only tree from the same events and answers path lookups with a
+node's byte span, its removable entry span, and the original scalar text. Aliases, merge keys,
+duplicate keys, and multi-document streams return `None` rather than guessing.
+
 Errors have a stable `ErrorKind`, an optional span and location, a message, and
 an optional source. Resource-limit errors additionally expose a structured
 `LimitExceeded` value through `Error::limit()`. Human-readable `Display` output
