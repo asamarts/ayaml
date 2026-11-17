@@ -324,15 +324,37 @@ pub mod compat {
         .map_err(map_error)
     }
 
-    /// Parse a whole stream into events with the libyaml-compatible scanner.
+    /// Parse a stream into a lazy event traversal with the libyaml-compatible scanner.
     ///
-    /// This is the event stream behind the compatibility deserializers; the
-    /// conformance runner uses it to check compat-mode deviations.
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+    pub fn parse_events(input: &str) -> Result<crate::EventStream<'_>, Error> {
+        parse_events_with_limits(input, &crate::Limits::default())
+    }
+
+    /// Parse a stream into a lazy event traversal with explicit limits and the
+    /// libyaml-compatible scanner.
     ///
     /// # Errors
     ///
     /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
     pub fn parse_events_with_limits<'a>(
+        input: &'a str,
+        limits: &crate::Limits,
+    ) -> Result<crate::EventStream<'a>, Error> {
+        crate::parser::EventCursor::with_compat(input, limits, true)
+            .map(crate::EventStream::from_cursor)
+    }
+
+    /// Parse a whole stream into an eager event vector with the
+    /// libyaml-compatible scanner. The conformance runner uses this to check
+    /// compatibility deviations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+    pub fn parse_events_eager_with_limits<'a>(
         input: &'a str,
         limits: &crate::Limits,
     ) -> Result<Vec<crate::Event<'a>>, Error> {
@@ -438,6 +460,12 @@ pub mod internals {
 #[derive(Debug)]
 pub struct EventStream<'a> {
     inner: parser::EventCursor<'a>,
+}
+
+impl<'a> EventStream<'a> {
+    pub(crate) fn from_cursor(inner: parser::EventCursor<'a>) -> Self {
+        Self { inner }
+    }
 }
 
 impl<'a> Iterator for EventStream<'a> {

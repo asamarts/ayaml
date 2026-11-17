@@ -1036,9 +1036,11 @@ fn compat_counts_that_column_for_block_structure() {
 #[cfg(feature = "libyaml-compat")]
 #[test]
 fn compat_reads_a_marker_after_a_bom_as_text() {
-    let events =
-        ayaml::compat::parse_events_with_limits("a\n...\n\u{feff}---\nb\n", &Limits::default())
-            .unwrap();
+    let events = ayaml::compat::parse_events_eager_with_limits(
+        "a\n...\n\u{feff}---\nb\n",
+        &Limits::default(),
+    )
+    .unwrap();
     let scalars: Vec<&str> = events
         .iter()
         .filter_map(|event| match event {

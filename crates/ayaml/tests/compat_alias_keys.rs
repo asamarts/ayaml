@@ -47,7 +47,7 @@ impl<'de> Visitor<'de> for Keys {
 }
 
 fn aliases(input: &str) -> Vec<String> {
-    compat::parse_events_with_limits(input, &Limits::default())
+    compat::parse_events_eager_with_limits(input, &Limits::default())
         .expect("events")
         .into_iter()
         .filter_map(|event| match event {

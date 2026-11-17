@@ -1525,7 +1525,7 @@ fn plain_scalar_spans_and_raw_end_at_their_content() {
         .expect("default events");
     #[cfg(feature = "libyaml-compat")]
     let compat: Vec<ayaml::Event<'_>> =
-        ayaml::compat::parse_events_with_limits(input, &ayaml::Limits::default())
+        ayaml::compat::parse_events_eager_with_limits(input, &ayaml::Limits::default())
             .expect("compat events");
     #[cfg(feature = "libyaml-compat")]
     let readers = [("default", default), ("compat", compat)];

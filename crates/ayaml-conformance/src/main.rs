@@ -403,7 +403,7 @@ fn events(input: &str) -> Result<Vec<Event<'_>>, ayaml::Error> {
 
 #[cfg(feature = "compat")]
 fn events(input: &str) -> Result<Vec<Event<'_>>, ayaml::Error> {
-    ayaml::compat::parse_events_with_limits(input, &suite_limits())
+    ayaml::compat::parse_events_eager_with_limits(input, &suite_limits())
 }
 
 #[cfg(not(feature = "compat"))]

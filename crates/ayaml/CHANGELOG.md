@@ -17,6 +17,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `compat::parse_events` and `compat::parse_events_with_limits` return the same lazy
+  `EventStream` as default mode; `compat::parse_events_eager_with_limits` keeps the eager vector.
 - `Limits::for_max_input()` lifts the four count limits for a valid document within
   `MAX_INPUT_BYTES`, while the default profile stays memory-bounded.
 

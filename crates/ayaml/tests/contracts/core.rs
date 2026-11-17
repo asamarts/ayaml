@@ -326,8 +326,9 @@ fn event_places_match_their_offsets() {
                 .expect("events")
         }),
         #[cfg(feature = "libyaml-compat")]
-        ("compat::parse_events_with_limits", |input| {
-            ayaml::compat::parse_events_with_limits(input, &Limits::default()).expect("events")
+        ("compat::parse_events_eager_with_limits", |input| {
+            ayaml::compat::parse_events_eager_with_limits(input, &Limits::default())
+                .expect("events")
         }),
     ];
     for &(name, read) in readers {
@@ -667,4 +668,46 @@ fn line_index_supports_byte_scalar_and_utf16_columns() {
     assert_eq!(std::ops::Range::from(Span::new(3, 5)), 3..5);
     let range: std::ops::Range<usize> = Span::new(3, 5).into();
     assert_eq!(range, 3..5);
+}
+
+/// The compatibility event traversal has the same pull shape as default mode, yields errors as
+/// items, and agrees with the eager compatibility event vector.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_lazy_events_match_eager_and_yield_errors() {
+    let input = "a: [1, {b: 2}]\n--- c\n";
+    let lazy: Vec<_> = ayaml::compat::parse_events(input)
+        .expect("lazy stream")
+        .collect::<Result<_, _>>()
+        .expect("lazy events");
+    let eager = ayaml::compat::parse_events_eager_with_limits(input, &Limits::default())
+        .expect("eager events");
+    assert_eq!(lazy, eager);
+
+    let invalid = "[a";
+    let mut stream = ayaml::compat::parse_events(invalid).expect("lazy stream");
+    assert_eq!(
+        stream.next().expect("stream start").expect("stream start"),
+        Event::StreamStart {
+            span: Span::empty(0)
+        }
+    );
+    let error = stream.find_map(Result::err).expect("an error item");
+    let eager_error = ayaml::compat::parse_events_eager_with_limits(invalid, &Limits::default())
+        .expect_err("eager error");
+    assert_eq!(error.kind(), eager_error.kind());
+    assert_eq!(error.message(), eager_error.message());
+    assert_eq!(error.location(), eager_error.location());
+
+    let limits = Limits::default().with_max_events(1);
+    let mut stream = ayaml::compat::parse_events_with_limits("a\n", &limits).expect("lazy stream");
+    assert!(stream.next().expect("stream start").is_ok());
+    assert!(stream.next().expect("event").is_err());
+
+    let mut early = ayaml::compat::parse_events("--- a\n--- @\n").expect("lazy stream");
+    assert!(early.next().is_some(), "the first event is available");
+    assert!(
+        early.any(|item| item.is_err()),
+        "the later error is an item"
+    );
 }
