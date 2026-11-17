@@ -24,7 +24,7 @@ use crate::error::{Code, Error, ErrorKind};
 use crate::event::{Anchor, Event, ScalarStyle};
 use crate::limits::{AliasBudget, Limits};
 use crate::number::Number;
-use crate::parser;
+use crate::parser::{self, EventChunks};
 use crate::resolver::{float_from_text, plain_resolves_to_string, resolve_scalar};
 use crate::span::Span;
 use crate::tag::Tag;
@@ -232,6 +232,10 @@ pub(crate) fn from_events_seed<'de, T: DeserializeSeed<'de>>(
     seed.deserialize(NodeDeserializer::new(&node))
 }
 
+/// Inputs above this size keep events in chunks; smaller reads use the eager builder, whose
+/// lower per-event overhead matters more than the spare capacity of one small vector.
+const CHUNKED_INPUT_THRESHOLD: usize = 4 * 1024;
+
 /// Parse one document and build its node tree.
 fn parse_document<'de>(
     input: &'de str,
@@ -241,14 +245,53 @@ fn parse_document<'de>(
     limits
         .check_input(input.len())
         .map_err(|error| Error::from(error).with_span(Span::empty(0)))?;
-    let events = parser::parse_document_events(input, limits, options.compat_flow)?;
-    build(
-        events,
-        input.len(),
-        limits,
-        options,
-        &mut AliasBudget::default(),
-    )
+    if input.len() <= CHUNKED_INPUT_THRESHOLD {
+        let events = parser::parse_document_events(input, limits, options.compat_flow)?;
+        build(
+            events,
+            input.len(),
+            limits,
+            options,
+            &mut AliasBudget::default(),
+        )
+    } else {
+        let chunks = parser::parse_document_event_chunks(input, limits, options.compat_flow)?;
+        build_chunks(
+            chunks,
+            input.len(),
+            limits,
+            options,
+            &mut AliasBudget::default(),
+        )
+    }
+}
+
+/// The event source the builder reads.
+enum EventFeed<'de> {
+    Collected(std::vec::IntoIter<Event<'de>>),
+    Chunks {
+        chunks: std::vec::IntoIter<Vec<Event<'de>>>,
+        current: std::vec::IntoIter<Event<'de>>,
+    },
+}
+
+impl<'de> EventFeed<'de> {
+    fn next(&mut self) -> Result<Option<Event<'de>>, Error> {
+        loop {
+            match self {
+                Self::Collected(events) => return Ok(events.next()),
+                Self::Chunks { chunks, current } => {
+                    if let Some(event) = current.next() {
+                        return Ok(Some(event));
+                    }
+                    let Some(chunk) = chunks.next() else {
+                        return Ok(None);
+                    };
+                    *current = chunk.into_iter();
+                }
+            }
+        }
+    }
 }
 
 fn build<'de>(
@@ -258,9 +301,43 @@ fn build<'de>(
     options: NodeOptions,
     budget: &mut AliasBudget,
 ) -> Result<Node<'de>, Error> {
+    build_feed(
+        EventFeed::Collected(events.into_iter()),
+        input_len,
+        limits,
+        options,
+        budget,
+    )
+}
+
+fn build_chunks<'de>(
+    chunks: EventChunks<'de>,
+    input_len: usize,
+    limits: &Limits,
+    options: NodeOptions,
+    budget: &mut AliasBudget,
+) -> Result<Node<'de>, Error> {
+    build_feed(
+        EventFeed::Chunks {
+            chunks: chunks.into_chunks().into_iter(),
+            current: Vec::new().into_iter(),
+        },
+        input_len,
+        limits,
+        options,
+        budget,
+    )
+}
+
+fn build_feed<'de>(
+    events: EventFeed<'de>,
+    input_len: usize,
+    limits: &Limits,
+    options: NodeOptions,
+    budget: &mut AliasBudget,
+) -> Result<Node<'de>, Error> {
     Builder {
         events,
-        index: 0,
         limits: limits.clone(),
         input_len,
         anchors: Anchors::new(),
@@ -271,8 +348,7 @@ fn build<'de>(
 }
 
 struct Builder<'de, 'b> {
-    events: Vec<Event<'de>>,
-    index: usize,
+    events: EventFeed<'de>,
     limits: Limits,
     input_len: usize,
     anchors: Anchors<Anchored<'de>>,
@@ -369,34 +445,40 @@ enum Frame<'de> {
 impl<'de> Builder<'de, '_> {
     fn build(mut self) -> Result<Node<'de>, Error> {
         let mut document = None;
-        while self.index < self.events.len() {
-            match &self.events[self.index] {
-                Event::StreamStart { .. } | Event::Directive { .. } => {
-                    self.index += 1;
-                }
-                Event::StreamEnd { .. } => {
-                    self.index += 1;
-                    break;
-                }
+        loop {
+            let Some(event) = self.events.next()? else {
+                break;
+            };
+            match event {
+                Event::StreamStart { .. } | Event::Directive { .. } => {}
+                Event::StreamEnd { .. } => break,
                 Event::DocumentStart { span, .. } => {
                     if document.is_some() {
                         return Err(Error::new(
                             ErrorKind::Parser,
                             "expected a single YAML document, but found trailing documents",
                         )
-                        .with_span(*span)
+                        .with_span(span)
                         .with_code(Code::TrailingDocuments));
                     }
-                    self.index += 1;
                     self.anchors.clear();
                     let node = self.root()?;
-                    match self.events.get(self.index) {
-                        Some(Event::DocumentEnd { .. }) => self.index += 1,
-                        _ => return Err(self.error_at(self.span(), "expected document end")),
+                    match self.events.next()? {
+                        Some(Event::DocumentEnd { .. }) => {}
+                        Some(event) => {
+                            return Err(self.error_at(event.span(), "expected document end"));
+                        }
+                        None => {
+                            return Err(
+                                self.error_at(Span::empty(self.input_len), "expected document end")
+                            );
+                        }
                     }
                     document = Some(node);
                 }
-                _ => return Err(self.error_at(self.span(), "expected a document start")),
+                event => {
+                    return Err(self.error_at(event.span(), "expected a document start"));
+                }
             }
         }
         Ok(document.unwrap_or_else(|| Node::null(Span::empty(self.input_len))))
@@ -406,13 +488,13 @@ impl<'de> Builder<'de, '_> {
     fn root(&mut self) -> Result<Node<'de>, Error> {
         let mut stack: Vec<Frame<'de>> = Vec::new();
         loop {
-            let span = self.span();
-            let Some(slot) = self.events.get_mut(self.index) else {
-                return Err(self.error_at(span, "unexpected end of event stream"));
+            let Some(event) = self.events.next()? else {
+                return Err(self.error_at(
+                    Span::empty(self.input_len),
+                    "unexpected end of event stream",
+                ));
             };
-            // Each event is read once, so it can be moved out of the vector.
-            let event = std::mem::replace(slot, Event::StreamEnd { span });
-            self.index += 1;
+            let event_span = event.span();
             let built = match event {
                 Event::Scalar {
                     value,
@@ -510,7 +592,7 @@ impl<'de> Builder<'de, '_> {
                             size.saturating_add(tag_cost(&node, self.limits.node_cost_bytes));
                         self.anchored(anchor.as_ref(), node, size, height + 1, Anchors::close)
                     }
-                    _ => return Err(self.error_at(span, "unexpected sequence end")),
+                    _ => return Err(self.error_at(event_span, "unexpected sequence end")),
                 },
                 Event::MappingEnd { .. } => match stack.pop() {
                     Some(Frame::Mapping {
@@ -528,9 +610,9 @@ impl<'de> Builder<'de, '_> {
                             size.saturating_add(tag_cost(&node, self.limits.node_cost_bytes));
                         self.anchored(anchor.as_ref(), node, size, height + 1, Anchors::close)
                     }
-                    _ => return Err(self.error_at(span, "unexpected mapping end")),
+                    _ => return Err(self.error_at(event_span, "unexpected mapping end")),
                 },
-                _ => return Err(self.error_at(span, "unexpected event in node position")),
+                _ => return Err(self.error_at(event_span, "unexpected event in node position")),
             };
             match stack.last_mut() {
                 None => return Ok(built.node),
@@ -606,12 +688,6 @@ impl<'de> Builder<'de, '_> {
             size,
             height,
         }
-    }
-
-    fn span(&self) -> Span {
-        self.events
-            .get(self.index)
-            .map_or_else(|| Span::empty(self.input_len), Event::span)
     }
 
     #[allow(
@@ -1651,5 +1727,31 @@ mod tests {
             panic!("alias target mapping");
         };
         assert_eq!(target_entries.len(), 1);
+    }
+
+    #[test]
+    fn a_large_document_uses_the_chunked_event_feed() {
+        use std::fmt::Write as _;
+
+        let mut input = String::from("values:\n");
+        for index in 0..1_500 {
+            writeln!(input, "- value-{index}").expect("write");
+        }
+        assert!(input.len() > CHUNKED_INPUT_THRESHOLD);
+
+        let limits = Limits::for_max_input();
+        let node = parse_document(&input, &limits, NodeOptions::default()).expect("node");
+        let NodeKind::Mapping(entries) = &node.kind else {
+            panic!("root mapping");
+        };
+        let (_, values) = entries.first().expect("values entry");
+        let NodeKind::Sequence(values) = &values.kind else {
+            panic!("values sequence");
+        };
+        assert_eq!(values.len(), 1_500);
+        assert!(matches!(
+            &values[1_499].kind,
+            NodeKind::String(value) if value == "value-1499"
+        ));
     }
 }

@@ -3,7 +3,9 @@
 
 use std::fmt::Write as _;
 
-use ayaml::{ErrorKind, Limits, Value};
+#[cfg(feature = "libyaml-compat")]
+use ayaml::Value;
+use ayaml::{ErrorKind, Limits};
 
 fn dense_inputs() -> Vec<(&'static str, String)> {
     let mut mapping = String::with_capacity(7 * 1024 * 1024);

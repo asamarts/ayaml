@@ -872,6 +872,30 @@ fn empty_flow_mapping_value_is_null() {
 }
 
 #[test]
+fn chunked_document_events_match_the_collected_stream() {
+    use std::fmt::Write as _;
+
+    let mut input = String::new();
+    for index in 0..20_000 {
+        writeln!(input, "- {index}").expect("write");
+    }
+    let limits = Limits::for_max_input();
+    let collected = super::parse_document_events(&input, &limits, false).expect("collected events");
+    let chunks =
+        super::parse_document_event_chunks(&input, &limits, false).expect("chunked events");
+    let chunk_count = chunks.chunks.len() + usize::from(!chunks.current.is_empty());
+    assert!(
+        chunk_count > 1,
+        "the fixture should span more than one chunk: {chunk_count} chunks, {} events, {} in the current chunk, chunk size {}",
+        collected.len(),
+        chunks.current.len(),
+        chunks.chunk_size
+    );
+    let flattened: Vec<Event<'_>> = chunks.into_chunks().into_iter().flatten().collect();
+    assert_eq!(collected, flattened);
+}
+
+#[test]
 fn event_capacity_reserves_from_the_token_count() {
     let token = Token {
         kind: TokenKind::Scalar {
