@@ -156,7 +156,8 @@ entry points explicitly. Its typed and visitor readers also provide
 `_with_limits` forms for callers that need their own budgets. `compat::parse_events`
 and its `_with_limits` form return the same lazy `EventStream` as default mode;
 `compat::parse_events_eager_with_limits` keeps the whole-stream vector used by
-the conformance runner.
+the conformance runner. These event readers report an alias as written and do not
+check it against earlier anchors; the compatibility value readers do that check.
 
 libyaml counts a column for a byte-order mark at the start of a line, so in
 compatibility mode a `---` right after one, or a `...` followed by more text on

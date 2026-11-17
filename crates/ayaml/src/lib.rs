@@ -328,6 +328,9 @@ pub mod compat {
 
     /// Parse a stream into a lazy event traversal with the libyaml-compatible scanner.
     ///
+    /// As in default mode, an alias is reported as written and is not checked against earlier
+    /// anchors; the compatibility value readers do that check.
+    ///
     /// # Errors
     ///
     /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
@@ -337,6 +340,9 @@ pub mod compat {
 
     /// Parse a stream into a lazy event traversal with explicit limits and the
     /// libyaml-compatible scanner.
+    ///
+    /// Aliases are reported as written and are not checked against earlier anchors, as in
+    /// [`parse_events`].
     ///
     /// # Errors
     ///
@@ -352,6 +358,9 @@ pub mod compat {
     /// Parse a whole stream into an eager event vector with the
     /// libyaml-compatible scanner. The conformance runner uses this to check
     /// compatibility deviations.
+    ///
+    /// Aliases are reported as written and are not checked against earlier anchors, as in
+    /// [`parse_events`].
     ///
     /// # Errors
     ///
@@ -457,8 +466,10 @@ pub mod internals {
 /// Events are produced lazily in document-sized chunks. Pulling stops further
 /// scanning when the consumer drops the stream, and syntax errors are returned
 /// as iterator items rather than being discovered only after the whole input is
-/// parsed. The current implementation buffers one document at a time; finer
-/// per-event streaming and bounded line buffering remain hardening work.
+/// parsed. An alias is reported as written and is not checked against earlier
+/// anchors; composing values does that check. The current implementation
+/// buffers one document at a time; finer per-event streaming and bounded line
+/// buffering remain hardening work.
 #[derive(Debug)]
 pub struct EventStream<'a> {
     inner: parser::EventCursor<'a>,
@@ -661,6 +672,18 @@ impl<'a> Deserializer<'a> {
 /// This exposes the shared scanner/parser pipeline without composing values.
 /// Duplicate mapping entries remain visible to the caller. Syntax and limit
 /// errors are returned by the iterator.
+///
+/// An [`Event::Alias`] is reported as written. These readers do not check that an earlier anchor
+/// in the document defines it; the value readers compose and check aliases. A consumer that
+/// resolves aliases must track anchors itself.
+///
+/// ```
+/// let events: Vec<ayaml::Event<'_>> = ayaml::parse_events("a: *missing\n")?
+///     .collect::<Result<_, _>>()?;
+/// assert!(events.iter().any(|event| matches!(event, ayaml::Event::Alias { .. })));
+/// assert!(ayaml::parse_value("a: *missing\n").is_err());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 ///
 /// # Errors
 ///

@@ -23,7 +23,9 @@ Each layer has a narrow responsibility:
   and tracks byte offsets and one-based line/column positions.
 - The **parser** turns tokens into stream, document, collection, scalar, tag,
   anchor, alias, and directive events. Collections use explicit stacks, so
-  hostile nesting consumes heap rather than the native call stack.
+  hostile nesting consumes heap rather than the native call stack. Event readers
+  stop at this layer: an alias is reported as written and is not checked against
+  earlier anchors. The composer below is what resolves and checks aliases.
 - The **composer** registers anchors, measures anchored subtrees, charges alias
   expansion before allocating a copy, and builds the generic value model.
 - The **resolver** implements the documented scalar profile. Events always
