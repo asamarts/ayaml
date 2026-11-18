@@ -99,6 +99,12 @@ fn push_token_grows_a_full_arena_as_arena_growth_says() {
         // The first chunk, then doubling to 64 chunks for 40 chunks of tokens.
         assert_eq!(growths, 7, "{chunk}");
     }
+    // The arena stops at the tokens the limits let a reader keep: 64, then 100 and not 128.
+    let mut tokens = Vec::new();
+    for _ in 0..100 {
+        push_token(&mut tokens, token.clone(), TOKEN_ARENA_SMALL_CHUNK, 100);
+    }
+    assert_eq!(tokens.capacity(), 100);
 }
 
 fn event_kinds(input: &str) -> Vec<&'static str> {
@@ -922,90 +928,161 @@ fn prefix_token_estimate_uses_the_scanned_density_with_a_cap() {
     // estimate adds a sixty-fourth, and one reservation stays within eight times the tokens
     // already scanned.
     assert_eq!(
-        super::prefix_token_capacity(1_024, 5_177, 10_012_509, 396_005, most),
+        super::prefix_token_capacity(1_024, 5_177, 10_012_509, most),
         Some(8_192)
     );
     assert_eq!(
-        super::prefix_token_capacity(524_288, 2_650_624, 10_012_509, 396_005, most),
+        super::prefix_token_capacity(524_288, 2_650_624, 10_012_509, most),
         Some(1_980_453 + 1_980_453 / 64)
     );
     assert_eq!(
-        super::prefix_token_capacity(1_023, 5_177, 10_012_509, 396_005, most),
+        super::prefix_token_capacity(1_023, 5_177, 10_012_509, most),
         None
     );
     assert_eq!(
-        super::prefix_token_capacity(1_024, 0, 10_012_509, 396_005, most),
+        super::prefix_token_capacity(1_024, 0, 10_012_509, most),
         None
     );
-    // A dense prefix cannot reserve more than half the input, or eight tokens per line, and it
+    // A token takes a byte at least, so an estimate stays within the input's length, and it
     // never asks for less than the tokens already scanned.
     assert_eq!(
-        super::prefix_token_capacity(1_024, 1_000, 100_000, 200, most),
-        Some(1_600)
+        super::prefix_token_capacity(1_024, 1_024, 3_000, most),
+        Some(3_000)
     );
     assert_eq!(
-        super::prefix_token_capacity(1_024, 1_000, 100_000, 100, most),
-        Some(1_024)
+        super::prefix_token_capacity(2_000, 1_000, 1_500, most),
+        Some(2_000)
+    );
+    // The lines of the input don't enter into it: one long line is estimated like any other.
+    assert_eq!(
+        super::prefix_token_capacity(8_192, 8_192, 1_000_000, most),
+        Some(65_536)
     );
     // Nor more than the limits let a reader keep.
     assert_eq!(
-        super::prefix_token_capacity(524_288, 2_650_624, 10_012_509, 396_005, 1_000_000),
+        super::prefix_token_capacity(524_288, 2_650_624, 10_012_509, 1_000_000),
         Some(1_000_000)
     );
 }
 
-/// The arena capacity [`read_lines`] ends with for `input`, and its token count.
-fn arena_of(input: &str, limits: Limits) -> (usize, usize) {
+/// The product of the tokens and the input's length passes 64 bits here. Worked in `usize` it
+/// would saturate, and the estimate would fall to the tokens already scanned.
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn prefix_token_estimate_does_not_saturate() {
+    assert_eq!(
+        super::prefix_token_capacity(1 << 40, 1 << 41, 1 << 42, usize::MAX),
+        Some((1 << 41) + (1 << 35))
+    );
+}
+
+/// A full arena grows to its estimate, by a sixteenth of itself or a chunk at least, and never
+/// past the tokens the limits let a reader keep.
+#[test]
+fn an_estimated_arena_grows_within_its_bounds() {
+    let chunk = TOKEN_ARENA_CHUNK;
+    let most = usize::MAX;
+    // To the estimate, when that is more than the least step.
+    assert_eq!(
+        super::estimated_growth(65_536, 600_000, chunk, most),
+        534_464
+    );
+    // By a sixteenth, when the estimate expects fewer tokens than that, or none.
+    assert_eq!(
+        super::estimated_growth(160_000, 161_000, chunk, most),
+        10_000
+    );
+    assert_eq!(
+        super::estimated_growth(160_000, 100_000, chunk, most),
+        10_000
+    );
+    // By a chunk, when a sixteenth is less.
+    assert_eq!(super::estimated_growth(16_000, 16_100, chunk, most), chunk);
+    // Up to the token limit and no further, whichever of them asks for more.
+    assert_eq!(
+        super::estimated_growth(65_536, 600_000, chunk, 100_000),
+        34_464
+    );
+    assert_eq!(
+        super::estimated_growth(160_000, 161_000, chunk, 165_000),
+        5_000
+    );
+    // A full arena at the limit still takes the token that the scanner let through.
+    assert_eq!(super::estimated_growth(100_000, 100_000, chunk, 100_000), 1);
+}
+
+/// What [`read_lines`] ends with for `input`: the arena's capacity, its tokens, and how many
+/// times it was reallocated.
+fn arena_of(input: &str, limits: Limits) -> (usize, usize, usize) {
     let mut scanner = crate::scanner::Scanner::new(input, limits).expect("scanner");
     let lines = read_lines(&mut scanner).expect("lines");
-    (lines.tokens.capacity(), lines.tokens.len())
+    (lines.tokens.capacity(), lines.tokens.len(), lines.growths)
+}
+
+/// A document of even density takes a few reservations, each from a later estimate, and ends
+/// close to its tokens, whether its lines are short, long, or one.
+#[test]
+fn a_document_of_even_density_takes_few_reservations() {
+    let short_lines = "- ab\n".repeat(150_000);
+    let long_lines = "- [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]\n".repeat(40_000);
+    let one_line = format!("[{}a]\n", "a,".repeat(300_000));
+    for (name, input, tokens) in [
+        ("short lines", &short_lines, 300_000),
+        ("long lines", &long_lines, 880_000),
+        ("one line", &one_line, 600_003),
+    ] {
+        let (capacity, len, growths) = arena_of(input, Limits::for_max_input());
+        assert_eq!(len, tokens, "{name}");
+        assert!(
+            capacity <= len + len / 32,
+            "{name}: {capacity} tokens reserved for {len}"
+        );
+        assert!(growths <= 5, "{name}: {growths} reallocations");
+    }
 }
 
 #[test]
 fn a_dense_prefix_reserves_no_arena_for_a_sparse_rest() {
-    // 1,100 dense entries, then comment lines that hold no token: the density of the prefix
-    // says the whole input is as dense, and the rest of it never arrives.
-    let mut input = "a: b\n".repeat(1_100);
+    // 20,000 dense entries, then comment lines that hold no token. The density of the prefix
+    // says the whole input is as dense, which would be over a million tokens, and the rest of
+    // them never arrive. The arena stays within eight times the tokens it holds.
+    let mut input = "a: b\n".repeat(20_000);
     input.push_str(&"#\n".repeat(1_000_000));
-    let (capacity, len) = arena_of(&input, Limits::for_max_input());
-    assert_eq!(len, 3_300);
+    let (capacity, len, growths) = arena_of(&input, Limits::for_max_input());
+    assert_eq!(len, 60_000);
     assert!(
         capacity <= len * super::TOKEN_ARENA_AHEAD,
         "{capacity} tokens reserved for {len}"
     );
-}
-
-#[test]
-fn a_uniform_document_reserves_close_to_its_tokens() {
-    let input = "- a\n".repeat(300_000);
-    let (capacity, len) = arena_of(&input, Limits::for_max_input());
-    assert_eq!(len, 600_000);
-    assert!(
-        capacity <= len + len / 16,
-        "{capacity} tokens reserved for {len}"
-    );
+    assert!(growths <= 3, "{growths} reallocations");
 }
 
 #[test]
 fn a_sparse_prefix_grows_to_a_dense_rest_in_few_steps() {
     // The estimate from the sparse prefix is far too low. Each time the arena fills it is
-    // estimated again, and grows by a sixteenth at least, so the copies stay few.
+    // estimated again, so the copies stay few and the arena ends close to its tokens.
     let mut input = "key: value # a long comment that holds no token at all\n".repeat(600);
     input.push_str(&"- a\n".repeat(300_000));
-    let (capacity, len) = arena_of(&input, Limits::for_max_input());
+    let (capacity, len, growths) = arena_of(&input, Limits::for_max_input());
     assert_eq!(len, 601_800);
     assert!(
         capacity <= len + len / 8,
         "{capacity} tokens reserved for {len}"
     );
+    assert!(growths <= 6, "{growths} reallocations");
 }
 
 #[test]
 fn the_arena_never_reserves_past_the_token_limit() {
-    // Twice the tokens the limit allows: the scanner refuses the input, and until it does the
-    // arena holds no more than the limit.
-    let limits = Limits::default().with_max_events(50_000);
+    // As many tokens as the limit allows: an estimate that runs ahead of the tokens scanned
+    // would pass the limit, and the arena stops at it.
     let input = "- a\n".repeat(50_000);
+    let limits = Limits::default().with_max_events(100_000);
+    let (capacity, len, _) = arena_of(&input, limits);
+    assert_eq!((capacity, len), (100_000, 100_000));
+    // One token more than the limit allows is refused, by the scanner.
+    let input = "- a\n".repeat(50_001);
+    let limits = Limits::default().with_max_events(100_000);
     let mut scanner = crate::scanner::Scanner::new(&input, limits).expect("scanner");
     let Err(error) = read_lines(&mut scanner) else {
         panic!("the input is over the token limit");
@@ -1014,11 +1091,45 @@ fn the_arena_never_reserves_past_the_token_limit() {
         error.limit().map(crate::limits::LimitExceeded::kind),
         Some(crate::limits::LimitKind::Events)
     );
-    let most = 50_000;
-    for tokens in [1_024, 8_192, 16_384, 40_000, 50_000] {
-        let capacity = super::prefix_token_capacity(tokens, tokens * 2, input.len(), 50_000, most)
-            .expect("an estimate");
-        assert!(capacity <= most, "{capacity} tokens reserved at {tokens}");
+}
+
+/// What a parse tells its consumer to reserve for root collections.
+#[derive(Default)]
+struct Reserved(std::rc::Rc<std::cell::RefCell<Vec<usize>>>);
+
+impl<'a> super::EventConsumer<'a> for Reserved {
+    fn event(&mut self, _event: Event<'a>) -> Result<(), crate::error::Error> {
+        Ok(())
+    }
+
+    fn reserve_collection(&mut self, entries: usize) {
+        self.0.borrow_mut().push(entries);
+    }
+
+    fn finish(&mut self) -> Result<(), crate::error::Error> {
+        Ok(())
+    }
+}
+
+/// A root flow collection reserves its entry count on whichever line of the stream it opens,
+/// and a collection inside another reserves nothing.
+#[test]
+fn a_root_flow_collection_reserves_its_entries_on_any_line() {
+    for (input, entries) in [
+        ("[1, 2, 3]\n", vec![3]),
+        ("---\n[1, 2, 3]\n", vec![3]),
+        ("%YAML 1.2\n---\n{a: 1, b: 2}\n", vec![2]),
+        ("# a comment\n\n[1, [2, 3], {a: [4]}]\n", vec![3]),
+        ("--- !t\n[1, 2]\n", vec![2]),
+        ("[1,\n 2,\n 3, 4]\n", vec![4]),
+        ("a: [1, 2, 3]\n", vec![]),
+        ("- [1, 2, 3]\n", vec![]),
+    ] {
+        let reserved = Reserved::default();
+        let seen = std::rc::Rc::clone(&reserved.0);
+        super::parse_document_with_consumer(input, &Limits::default(), false, Box::new(reserved))
+            .unwrap_or_else(|error| panic!("{input:?}: {error}"));
+        assert_eq!(*seen.borrow(), entries, "{input:?}");
     }
 }
 

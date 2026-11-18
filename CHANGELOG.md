@@ -15,13 +15,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   attach one with `Error::with_location`. The event size falls from 176 to 144 bytes, a span from
   48 to 16, and an error from 112 to 104 on 64-bit targets.
 - A reader of one document into a type, such as `from_str`, now reports the first problem in the
-  document at every input size, as `parse_value` does. With a duplicate key and a later syntax
-  error it reports the duplicate key, where 0.1.3 reported the syntax error. The `Deserializer`
-  still reads a document's events before it builds from them, so there the syntax error comes
-  first.
-- A scalar that a core tag makes a number, a boolean, or a null still reads into a string target
-  by its text, in every style. The exception is a value that only an escape sequence spells, as
-  in `!!int "1\x32"`: it reads as the type its tag gives, and a string target now refuses it.
+  document at every input size, as `parse_value` does: any that the scanner finds, and then the
+  first that parsing or building meets. With a duplicate key and a later flow collection that
+  never closes it reports the duplicate key, where 0.1.3 reported the syntax error. The
+  `Deserializer` still reads a document's events before it builds from them, so there the syntax
+  error comes first.
 
 ### Added
 
@@ -39,6 +37,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A bare variant name no longer fills a variant that holds a sequence or a mapping with an empty
+  one, as D87 decided and `from_value` already said: `List` is an error for a variant
+  `List(Vec<u32>)`. `List: []`, `List:`, and `!List` still read as the empty list, and a bare
+  name still fills a unit variant and one that holds an `Option`.
+- `from_slice` and `from_slice_borrowed` refuse input over the input limit before they check
+  that it is UTF-8, so they read none of it.
 - Mapping lookups by `&str`, including `get_str`, `get_str_mut`, `get`, `get_mut`, and
   `contains_key`, no longer allocate a `String` per lookup.
 - A compatibility indentation mistake now names the collection whose indentation it breaks,

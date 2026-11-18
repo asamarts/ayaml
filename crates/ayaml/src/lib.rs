@@ -832,10 +832,7 @@ pub fn from_str_borrowed_with_limits<'de, T: serde::Deserialize<'de>>(
 ///
 /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
 pub fn from_slice_borrowed<'de, T: serde::Deserialize<'de>>(input: &'de [u8]) -> Result<T, Error> {
-    let input = std::str::from_utf8(input).map_err(|error| {
-        Error::new(ErrorKind::InvalidEncoding, "input is not valid UTF-8").with_source(error)
-    })?;
-    from_str_borrowed(input)
+    from_str_borrowed(text_of(input)?)
 }
 
 /// Deserialize one UTF-8 YAML document from bytes.
@@ -844,10 +841,22 @@ pub fn from_slice_borrowed<'de, T: serde::Deserialize<'de>>(input: &'de [u8]) ->
 ///
 /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
 pub fn from_slice<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, Error> {
-    let input = std::str::from_utf8(input).map_err(|error| {
+    from_str(text_of(input)?)
+}
+
+/// The bytes as text, for the readers of bytes at the default limits. The input limit comes
+/// first: checking that bytes over it are UTF-8 would read all of them.
+fn text_of(input: &[u8]) -> Result<&str, Error> {
+    Limits::default()
+        .check_input(input.len())
+        .map_err(|error| {
+            Error::from(error)
+                .with_span(Span::empty(0))
+                .with_location(Position::new(1, 1))
+        })?;
+    std::str::from_utf8(input).map_err(|error| {
         Error::new(ErrorKind::InvalidEncoding, "input is not valid UTF-8").with_source(error)
-    })?;
-    from_str(input)
+    })
 }
 
 /// The crate version.

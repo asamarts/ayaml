@@ -28,7 +28,8 @@ mode; that mode has its own `ayaml::compat` entry points.
 ### Count profile for the input limit
 
 The default count limits are a lower profile than `max_input_bytes`: they bound the tokens
-an eager read keeps to about 32 MB. A dense but valid document can therefore reach
+an eager read keeps to between 32 MB and about 80 MB, by what the tokens are (see
+[Memory](#memory)). A dense but valid document can therefore reach
 `max_events`, `max_collection_entries`, `max_anchors`, or `max_alias_dereferences` before it
 reaches the 32 MiB input limit. This is intentional for hostile input.
 
@@ -47,8 +48,8 @@ let value = parse_value_with_limits("[1, 2, 3]\n", &limits)?;
 ```
 
 That profile sets the four count limits to `usize::MAX`; the input, depth, scalar,
-tag-expansion, document, and alias budgets still bound the read. Counts and the token arena
-can then reach gigabytes for a 32 MiB input, so use `Limits::default()` for untrusted input.
+tag-expansion, document, and alias budgets still bound the read. The tokens alone can then
+take a gigabyte for a 32 MiB input, so use `Limits::default()` for untrusted input.
 The four reproduced dense shapes are covered by
 `crates/ayaml/tests/limit_profiles.rs`: the default profile refuses each one, and
 `Limits::for_max_input()` reads it.
@@ -76,11 +77,12 @@ report different ones, because they don't check in the same order:
 - `parse_events` and the `Deserializer` read a stream a document at a time, and count its start
   before they scan anything. They can stop at an earlier document than the readers that scan the
   whole stream before they parse it.
-- `parse_value`, `parse_documents`, and the readers of one document into a type build as events
-  arrive. With two problems in a document, they report the one that comes first, after any that
-  the scanner finds, whatever the input's size. The `Deserializer` reads a document's events
-  before it builds from them, so within a document it reports a syntax error before an earlier
-  problem in what the events build, such as a duplicate key.
+- `parse_value`, `parse_documents`, and the readers of one document into a type, such as
+  `from_str`, report the first problem in a document, whatever the input's size: any that the
+  scanner finds, which reads the whole input first, and then the first that parsing or building
+  meets. The `Deserializer` reads a document's events before it builds from them, so within a
+  document it reports a syntax error before an earlier problem in what the events build, such
+  as a duplicate key.
 
 ## What the limits count
 
@@ -156,13 +158,18 @@ that document's tokens. Every other reader holds the tokens of the whole stream.
   byte each, costs 8 times its size there. That is 8 bytes a line, or under 16 where
   lines end in CRLF. An error at the end of the input is placed without a second index.
 - A token takes 32 bytes on a 64-bit target, and every token a read keeps counts against
-  `max_events`, so at the default limit a read holds about 32 MB of tokens at most. The arena
-  that holds them reserves room for no more tokens than that limit allows, whatever the input
-  promises. Past its first chunk it is sized from the density of the input scanned so far:
-  one reservation is at most eight times the tokens already scanned, and when it fills the
-  next is made from a later estimate. An arena whose estimate fell short grows by a sixteenth
-  of itself, or by a chunk of up to 16,384 tokens when that is more. So its copying stays
-  linear in the tokens, and its capacity stays within eight times the tokens it holds.
+  `max_events`. A tag, a directive, and a scalar that is quoted, a block scalar, or on several
+  lines each hold a second allocation of 32 to 48 bytes, and their text where decoding changes
+  it. So at the default limit a read holds about 32 MB of tokens when they are plain scalars
+  and indicators, and about 80 MB when every one is a tag.
+- The readers that scan the whole stream keep its tokens in one arena, which reserves room for
+  no more tokens than `max_events` allows, whatever the input promises. Past its first chunk
+  the arena is sized from the density of the input scanned so far: one reservation is at most
+  eight times the tokens already scanned, and when it fills the next is made from a later
+  estimate, and is a sixteenth of the arena at least. An input of at most 32 KiB may double
+  the arena instead. So the copying stays linear in the tokens, and an arena of more than
+  8,192 tokens ends within eight times the tokens it holds; a smaller one is trimmed to them.
+  `parse_events` and the `Deserializer` keep one document's tokens, in vectors that double.
 - A block scalar is built as it is read. At its peak a read of one takes about 5 times
   its input in resident memory for short lines, and about 10 times for blank lines,
   where the index costs most. Counting the capacity it reserves without touching, a

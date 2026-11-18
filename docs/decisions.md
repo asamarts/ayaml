@@ -625,9 +625,10 @@ different problem once it grew past that size. One rule for every size makes the
 testable against each other, and agreeing with `parse_value` leaves one order to document.
 
 **Consequences.** A small document with two problems can report a different one than 0.1.3 did,
-which the changelog states. A refused input of at most 8 KiB is read twice, and an accepted one
-once, as before. The `Deserializer` is unchanged: it reads a document's events before it builds
-from them, at every size, so within a document it reports a syntax error first.
+which the changelog states. An input of at most 8 KiB that fails while it is scanned or parsed is
+read twice. One that is accepted, or that fails only while it is built, is read once, as before.
+The `Deserializer` is unchanged: it reads a document's events before it builds from them, at
+every size, so within a document it reports a syntax error first.
 
 ## D92 — An entry span is given only where its removal is exact
 
