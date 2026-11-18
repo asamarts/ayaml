@@ -14,6 +14,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Error::location()` still returns a one-based line and column, and a manually built error can
   attach one with `Error::with_location`. The event size falls from 176 to 144 bytes, a span from
   48 to 16, and an error from 112 to 104 on 64-bit targets.
+- A reader of one document into a type, such as `from_str`, now reports the first problem in the
+  document at every input size, as `parse_value` does. With a duplicate key and a later syntax
+  error it reports the duplicate key, where 0.1.3 reported the syntax error. The `Deserializer`
+  still reads a document's events before it builds from them, so there the syntax error comes
+  first.
+- A scalar that a core tag makes a number, a boolean, or a null still reads into a string target
+  by its text, in every style. The exception is a value that only an escape sequence spells, as
+  in `!!int "1\x32"`: it reads as the type its tag gives, and a string target now refuses it.
 
 ### Added
 

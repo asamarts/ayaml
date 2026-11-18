@@ -37,6 +37,8 @@ blocked_by:
 - AY-104
 - AY-105
 - AY-106
+- AY-107
+- AY-108
 tags:
 - milestone
 - hardening

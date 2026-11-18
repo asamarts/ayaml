@@ -473,6 +473,7 @@ impl<'a> IntoIterator for &'a mut Mapping {
     type IntoIter = indexmap::map::IterMut<'a, Value, Value>;
 
     fn into_iter(self) -> Self::IntoIter {
+        self.hash.take();
         self.map.iter_mut()
     }
 }
@@ -626,6 +627,14 @@ mod tests {
         }
         for value in fresh.values_mut() {
             *value = Value::Null;
+        }
+        assert_eq!(digest(&map), digest(&fresh));
+        // A `for` loop over `&mut map` hands out the values too.
+        for (_, value) in &mut map {
+            *value = Value::from(4_u64);
+        }
+        for value in fresh.values_mut() {
+            *value = Value::from(4_u64);
         }
         assert_eq!(digest(&map), digest(&fresh));
         map.remove("a");
