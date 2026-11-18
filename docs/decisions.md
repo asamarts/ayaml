@@ -572,3 +572,60 @@ each consumer the encoding it needs.
 a location. On a 64-bit release build the event size falls from 176 to 144 bytes, `Span` from 48
 to 16, and `Error` from 112 to 104. The hosted performance gates decide whether the scanner and
 parser remain within their instruction and allocation budgets.
+
+## D90 — 0.2.0 carries every known break, and the additive interface work follows it
+
+**Date:** 2026-11-18
+**Status:** Accepted
+
+**Decision.** The next release is 0.2.0, cut from `main` once the limit and typed-reader
+regressions found after 0.1.3 are fixed and the short-scalar peak in #178 is settled. It holds
+every breaking change the plan knows of: byte-offset spans (D89), the lazy
+`compat::parse_events` readers, and the `Mapping` iterator newtypes that AY-044 planned, which move
+ahead of the rest of AY-048. Stable error codes, masked errors, the options values, the shared
+position vectors, and the documentation book are additive, so they follow in 0.2.x releases.
+
+**Alternatives.** Hold 0.2.0 until the whole interface milestone is done: one coherent release, but
+about seven more working days before fixes that are already merged reach a user. Release 0.2.0
+without the iterator newtypes: sooner, but they would then force a 0.3.0, a second breaking
+release. Backport the fixes to a 0.1.4: the memory work is built on byte-offset spans, so its bound
+can't be backported, and the release procedure tags `main` only.
+
+**Why.** `main` has carried breaking changes since #166, so no 0.1.x release can come from it, and
+every fix merged since 0.1.3 waits for the next minor release. A breaking release costs each
+consumer one migration, so it should hold every break that is already decided, and nothing
+additive needs to wait in front of it.
+
+**Consequences.** The plan's 0.2 milestone is re-cut in the change that adds the release's own
+task: the iterator newtypes become a task of their own that blocks 0.2.0, and the additive tasks
+move to a later milestone. `SECURITY.md` names the versions that get fixes when 0.2.0 ships. The
+release is qualified as 0.1.2 and 0.1.3 were, with the timing comparison D68 asks for.
+
+## D91 — A typed reader of one document reports its first problem at every input size
+
+**Date:** 2026-11-18
+**Status:** Accepted
+
+**Decision.** `from_str`, `from_slice`, their borrowed forms, and the compatibility readers of one
+document report the problem that comes first in the document: any that the scanner finds, then
+the first that the parser or the builder meets, then decoding into the target. That is what
+`parse_value` reports. An input of at most 8 KiB is still parsed whole and then built, which is
+faster when it succeeds. When that fails, the input is read again the way a larger one is, built
+as it is parsed, and that answer is the one reported.
+
+**Alternatives.** Report the syntax error first at every size, as 0.1.3 did, by holding back a
+builder's error until the parser reaches the end: no change for a small document, but a large one
+with an early duplicate key is parsed to its end before it is refused, and the typed readers keep
+disagreeing with `parse_value`. Leave both behaviors and document that the answer depends on the
+input's size: adding a comment to a document could then change which error it reports, and no
+test could compare the paths.
+
+**Why.** Since #179 an input over 8 KiB is built as it is parsed, so the same document reported a
+different problem once it grew past that size. One rule for every size makes the three paths
+testable against each other, and agreeing with `parse_value` leaves one order to document.
+
+**Consequences.** A small document with two problems can report a different one than 0.1.3 did,
+which the changelog states. A refused input of at most 8 KiB is read twice, and an accepted one
+once, as before. The `Deserializer` is unchanged: it reads a document's events before it builds
+from them, at every size, so within a document it reports a syntax error first.
+

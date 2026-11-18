@@ -76,8 +76,11 @@ report different ones, because they don't check in the same order:
 - `parse_events` and the `Deserializer` read a stream a document at a time, and count its start
   before they scan anything. They can stop at an earlier document than the readers that scan the
   whole stream before they parse it.
-- `parse_value` and `parse_documents` build values as events arrive, and the typed readers build
-  them from a document's events once it is read, so they can meet two limits in a different order.
+- `parse_value`, `parse_documents`, and the readers of one document into a type build as events
+  arrive. With two problems in a document, they report the one that comes first, after any that
+  the scanner finds, whatever the input's size. The `Deserializer` reads a document's events
+  before it builds from them, so within a document it reports a syntax error before an earlier
+  problem in what the events build, such as a duplicate key.
 
 ## What the limits count
 

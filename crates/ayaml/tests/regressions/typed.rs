@@ -937,3 +937,200 @@ fn typed_scalars_read_like_composed_values() {
         );
     }
 }
+
+/// Every reader of one document from text, each into a map of `T`.
+fn typed_readers<T: serde::de::DeserializeOwned>(
+    input: &str,
+) -> Vec<(
+    &'static str,
+    Result<std::collections::BTreeMap<String, T>, ayaml::Error>,
+)> {
+    #[cfg_attr(
+        not(feature = "libyaml-compat"),
+        allow(unused_mut, reason = "the list is extended only by the compat reader")
+    )]
+    let mut readers = vec![
+        ("from_str", ayaml::from_str(input)),
+        ("from_slice", ayaml::from_slice(input.as_bytes())),
+        (
+            "from_str_borrowed_with_limits",
+            ayaml::from_str_borrowed_with_limits(input, &ayaml::Limits::default()),
+        ),
+    ];
+    #[cfg(feature = "libyaml-compat")]
+    readers.push(("compat::from_str", ayaml::compat::from_str(input)));
+    readers
+}
+
+/// A scalar that a core tag makes a number, a boolean, or a null reads into a string target by
+/// its text, whatever its style, as a plain one does. Its text is what the source spells: a
+/// hexadecimal integer stays hexadecimal, and a float keeps its trailing zero.
+#[test]
+fn a_scalar_a_core_tag_retypes_reads_into_a_string_by_its_text() {
+    for (input, text) in [
+        ("x: !!int 12\n", "12"),
+        ("x: !!int \"12\"\n", "12"),
+        ("x: !!int '12'\n", "12"),
+        ("x: !!int |-\n  12\n", "12"),
+        ("x: !!int >-\n  12\n", "12"),
+        ("x: !!int \"0x1F\"\n", "0x1F"),
+        ("x: !!float \"1.50\"\n", "1.50"),
+        ("x: !!bool 'True'\n", "True"),
+        ("x: !!null \"~\"\n", "~"),
+        ("x: !!null 'null'\n", "null"),
+    ] {
+        for (reader, result) in typed_readers::<String>(input) {
+            let read = result.unwrap_or_else(|error| panic!("{reader} {input:?}: {error}"));
+            assert_eq!(read["x"], text, "{reader} {input:?}");
+        }
+    }
+    // The tag still decides the type that a target of that type reads.
+    for (reader, result) in typed_readers::<u32>("x: !!int \"0x1F\"\n") {
+        assert_eq!(result.expect(reader)["x"], 31, "{reader}");
+    }
+}
+
+/// A value that only an escape spells is not in the source, so the node keeps no text for it. It
+/// reads as the type its tag gives, and a string target refuses it instead of guessing a text.
+#[test]
+fn a_retyped_scalar_that_only_an_escape_spells_has_no_text() {
+    let input = "x: !!int \"1\\x32\"\n";
+    for (reader, result) in typed_readers::<u32>(input) {
+        assert_eq!(result.expect(reader)["x"], 12, "{reader}");
+    }
+    for (reader, result) in typed_readers::<String>(input) {
+        let error = result.expect_err(reader);
+        assert_eq!(error.kind(), ayaml::ErrorKind::Serde, "{reader}: {error}");
+        assert!(
+            error.to_string().contains("expected a string"),
+            "{reader}: {error}"
+        );
+    }
+}
+
+/// An explicit null is not an empty collection in any style, tagged or not (D87). A scalar with
+/// no text at all, quoted or block, is a missing value, as an empty plain one is.
+#[test]
+fn a_quoted_null_under_a_tag_is_an_explicit_null() {
+    for input in [
+        "x: !!null \"~\"\n",
+        "x: !!null 'null'\n",
+        "x: !!null \"\\x7e\"\n",
+        "x: !!null ~\n",
+        "x: ~\n",
+    ] {
+        for (reader, result) in typed_readers::<Vec<i32>>(input) {
+            let error = result.expect_err(reader);
+            assert!(
+                error.to_string().contains("expected a sequence"),
+                "{reader} {input:?}: {error}"
+            );
+        }
+        for (reader, result) in typed_readers::<std::collections::BTreeMap<String, i32>>(input) {
+            let error = result.expect_err(reader);
+            assert!(
+                error.to_string().contains("expected a map"),
+                "{reader} {input:?}: {error}"
+            );
+        }
+        for (reader, result) in typed_readers::<Option<i32>>(input) {
+            assert_eq!(result.expect(reader)["x"], None, "{reader} {input:?}");
+        }
+    }
+    for input in [
+        "x:\n",
+        "x: !!null\n",
+        "x: !!null \"\"\n",
+        "x: !!null ''\n",
+        "x: !!null |-\n",
+        "x: !!null \"\\\n\"\n",
+    ] {
+        for (reader, result) in typed_readers::<Vec<i32>>(input) {
+            let read = result.unwrap_or_else(|error| panic!("{reader} {input:?}: {error}"));
+            assert!(read["x"].is_empty(), "{reader} {input:?}");
+        }
+    }
+}
+
+/// Comment lines before `input`, to at least `bytes` bytes: the lines, and how many.
+fn comments(bytes: usize) -> (String, usize) {
+    const LINE: &str = "# a comment line that holds no token\n";
+    let lines = bytes.div_ceil(LINE.len());
+    (LINE.repeat(lines), lines)
+}
+
+/// A typed reader takes one of three paths by the input's length: at most 4 KiB, at most 8 KiB,
+/// and above. With two problems in a document, each path reports the one that comes first, as
+/// `parse_value` does, and reports it the same way: the comments move the place and nothing else.
+#[test]
+fn a_typed_reader_reports_the_first_problem_at_every_input_size() {
+    use ayaml::ErrorKind;
+
+    // Each input, and the kinds its first problem may have: a syntax error comes from the
+    // scanner or the parser.
+    let syntax = [ErrorKind::Scanner, ErrorKind::Parser];
+    let cases: [(&str, &[ErrorKind]); 6] = [
+        // A duplicate key, then a sequence that never closes.
+        ("a: 1\na: 2\nb: [\n", &[ErrorKind::DuplicateKey]),
+        // The other way round: the syntax error is first.
+        ("b: [\na: 1\na: 2\n", &syntax),
+        // An alias to no anchor, then a mapping that never closes.
+        ("a: *nowhere\nb: {\n", &[ErrorKind::Composition]),
+        // One problem alone, of each kind.
+        ("a: 1\na: 2\n", &[ErrorKind::DuplicateKey]),
+        ("a: [\n", &syntax),
+        ("a: *nowhere\n", &[ErrorKind::Composition]),
+    ];
+    for (input, kinds) in cases {
+        let kind = ayaml::parse_value(input).expect_err(input).kind();
+        assert!(
+            kinds.contains(&kind),
+            "{input:?}: parse_value says {kind:?}"
+        );
+        // What each reader says of the input alone. Compat reads a repeated key as libyaml
+        // does, so there it is no problem; the others agree with `parse_value`.
+        let plain = typed_readers::<ayaml::Value>(input);
+        for (reader, result) in &plain {
+            if !reader.starts_with("compat") {
+                let error = result.as_ref().expect_err(reader);
+                assert_eq!(error.kind(), kind, "{reader} {input:?}: {error}");
+            }
+        }
+        for bytes in [4_200, 8_300] {
+            let (before, lines) = comments(bytes);
+            let longer = format!("{before}{input}");
+            for ((reader, result), (_, plain)) in typed_readers::<ayaml::Value>(&longer)
+                .into_iter()
+                .zip(&plain)
+            {
+                let (error, plain) = match (result, plain) {
+                    (Ok(read), Ok(plain)) => {
+                        assert_eq!(&read, plain, "{reader} {input:?} after {bytes}");
+                        continue;
+                    }
+                    (Err(error), Err(plain)) => (error, plain),
+                    (result, plain) => {
+                        panic!("{reader} {input:?} after {bytes}: {result:?}, alone {plain:?}")
+                    }
+                };
+                let place = plain.location().expect("a location");
+                let span = plain.span().expect("a span");
+                assert_eq!(
+                    error.kind(),
+                    plain.kind(),
+                    "{reader} {input:?} after {bytes}: {error}"
+                );
+                assert_eq!(
+                    error.span().map(|span| span.start()),
+                    Some(span.start() + before.len()),
+                    "{reader} {input:?} after {bytes}: {error}"
+                );
+                assert_eq!(
+                    error.location().map(|at| (at.line(), at.column())),
+                    Some((place.line() + lines, place.column())),
+                    "{reader} {input:?} after {bytes}: {error}"
+                );
+            }
+        }
+    }
+}

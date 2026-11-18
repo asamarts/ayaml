@@ -267,41 +267,58 @@ fn parse_document<'de>(
             .with_span(Span::empty(0))
             .with_location(Position::new(1, 1))
     })?;
-    if input.len() <= CHUNKED_INPUT_THRESHOLD {
-        let events = parser::parse_document_events(input, limits, options.compat_flow)?;
-        build(
-            events,
-            input.len(),
-            limits,
-            options,
-            &mut AliasBudget::default(),
-        )
-    } else if input.len() <= STREAMING_INPUT_THRESHOLD {
-        let chunks = parser::parse_document_event_chunks(input, limits, options.compat_flow)?;
-        build_chunks(
-            chunks,
-            input.len(),
-            limits,
-            options,
-            &mut AliasBudget::default(),
-        )
-    } else {
-        let result = Rc::new(RefCell::new(None));
-        let builder = Builder::streaming(input.len(), limits, options, Rc::clone(&result));
-        parser::parse_document_with_consumer(
-            input,
-            limits,
-            options.compat_flow,
-            Box::new(builder),
-        )?;
-        result.borrow_mut().take().ok_or_else(|| {
-            Error::new(
-                ErrorKind::Parser,
-                "the event stream ended without a document",
-            )
-            .with_span(Span::empty(input.len()))
-        })
+    if input.len() > STREAMING_INPUT_THRESHOLD {
+        return parse_streaming(input, limits, options);
     }
+    let built = if input.len() <= CHUNKED_INPUT_THRESHOLD {
+        parser::parse_document_events(input, limits, options.compat_flow).map(|events| {
+            build(
+                events,
+                input.len(),
+                limits,
+                options,
+                &mut AliasBudget::default(),
+            )
+        })
+    } else {
+        parser::parse_document_event_chunks(input, limits, options.compat_flow).map(|chunks| {
+            build_chunks(
+                chunks,
+                input.len(),
+                limits,
+                options,
+                &mut AliasBudget::default(),
+            )
+        })
+    };
+    match built {
+        Ok(built) => built,
+        // A small input is parsed whole and then built, so a syntax error would come before an
+        // earlier problem in what its events build, such as a duplicate key. A larger input is
+        // built as it is parsed and reports whichever comes first. Reading the input again that
+        // way gives a small input the same answer, at a cost that only a refused input pays.
+        Err(error) => Err(parse_streaming(input, limits, options)
+            .err()
+            .unwrap_or(error)),
+    }
+}
+
+/// Parse one document, building its node tree as the events arrive.
+fn parse_streaming<'de>(
+    input: &'de str,
+    limits: &Limits,
+    options: NodeOptions,
+) -> Result<Node<'de>, Error> {
+    let result = Rc::new(RefCell::new(None));
+    let builder = Builder::streaming(input.len(), limits, options, Rc::clone(&result));
+    parser::parse_document_with_consumer(input, limits, options.compat_flow, Box::new(builder))?;
+    result.borrow_mut().take().ok_or_else(|| {
+        Error::new(
+            ErrorKind::Parser,
+            "the event stream ended without a document",
+        )
+        .with_span(Span::empty(input.len()))
+    })
 }
 
 /// The event source the builder reads.
@@ -1131,9 +1148,26 @@ fn node_from_value<'de>(
     };
     let text = match raw {
         Cow::Borrowed(text) if style == ScalarStyle::Plain => Some(*text),
-        _ => None,
+        _ if style == ScalarStyle::Plain => None,
+        _ => spelled_text(&scalar_text, raw),
     };
     Node::scalar(kind, text, style, span)
+}
+
+/// The text of a scalar that isn't plain and that a tag makes a null, a boolean, or a number, as
+/// the source spells it. That is the value when the value is a slice of the source, and
+/// otherwise the place in the scalar's source text where the value stands, as a block scalar's
+/// does. It is `None` when only decoding gives the value, as an escape does. An empty value is
+/// always kept, so a scalar of these styles with no text has a value that isn't empty.
+fn spelled_text<'de>(value: &Cow<'de, str>, raw: &Cow<'de, str>) -> Option<&'de str> {
+    match (value, raw) {
+        (Cow::Borrowed(value), _) => Some(*value),
+        (Cow::Owned(value), _) if value.is_empty() => Some(""),
+        (Cow::Owned(value), Cow::Borrowed(raw)) => raw
+            .find(value.as_str())
+            .and_then(|at| raw.get(at..at + value.len())),
+        (Cow::Owned(_), Cow::Owned(_)) => None,
+    }
 }
 
 /// A string that a tag makes one, as in `!!str 01` or `! 01`, keeps no text, which only a float
@@ -1611,7 +1645,12 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
 /// An empty scalar, such as a missing value, reads as an empty sequence,
 /// map, or struct; an explicit `~` or `null` does not.
 fn is_empty_scalar(node: &Node<'_>) -> bool {
-    matches!(node.kind, NodeKind::Null) && node.text.is_none_or(str::is_empty)
+    // A missing value is a plain null with no text. A quoted or block scalar with no text has a
+    // value that only decoding gives, which isn't empty (see `spelled_text`).
+    matches!(node.kind, NodeKind::Null)
+        && node
+            .text
+            .map_or(node.style == ScalarStyle::Plain, str::is_empty)
 }
 
 /// An explicit `~` or `null` is not an empty collection. It's reported before
