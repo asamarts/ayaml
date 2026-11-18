@@ -61,10 +61,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   about 38% fewer, and the short explicit-pair workload about 31% fewer. Peak heap falls about
   13% on the short-sequence workload and 19% on short explicit pairs, and the affected budgets
   are tightened. Typed reads over 8 KiB stream events into the builder, and the token arena
-  estimates its size from the scanned prefix. The 1 MB nested document peaks at about 43.3 MB;
-  the 11 MB one peaks at about 432 MB and allocates about 596 MB in total, against the 376 MB
-  peak and roughly 673 MB total of the libyaml reference. A 20 KB configuration fixture peaks
-  at about 353 KB and allocates about 703 KB in total.
+  estimates its size from the scanned prefix. Scalar tokens keep their raw text as a span and
+  box only the values that need decoding, and typed nodes box tags instead of holding them in
+  every node. The 1 MB nested document peaks at about 33.3 MB; the 11 MB one peaks at about
+  333 MB and allocates about 459 MB in total, against the 376 MB peak and roughly 673 MB total
+  of the libyaml reference. A 20 KB configuration fixture peaks at about 281 KB and allocates
+  about 509 KB in total.
 - Mappings and typed mapping keys cache their structural hash, so a mapping nested inside a
   mapping key is hashed once per level instead of once for every outer level and entry.
 

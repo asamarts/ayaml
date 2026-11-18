@@ -51,13 +51,9 @@ impl<'a> Parser<'a> {
                 // A block scalar header may sit at any column here, as in
                 // libyaml; YAML 1.2.2 wants `min_indent`.
                 let next_is_block_scalar = self.line_starts_with(next_index, |kind| {
-                    matches!(
-                        kind,
-                        TokenKind::Scalar {
-                            style: ScalarStyle::Literal | ScalarStyle::Folded,
-                            ..
-                        }
-                    )
+                    kind.scalar_style().is_some_and(|style| {
+                        matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
+                    })
                 });
                 // Other content may sit left of the property line, down to
                 // the parent's bound (`-\n    !t\n  x`).
@@ -200,13 +196,14 @@ impl<'a> Parser<'a> {
             // Emit it inline so a wide sequence does not pay a continuation
             // stack push/pop and nested parser call for every item.
             if let Some(token) = self.single_scalar(rest) {
+                let span = token.2;
                 let event = Event::Scalar {
                     value: token.0.clone(),
-                    raw: token.1.clone(),
-                    style: token.2,
+                    raw: Cow::Borrowed(&self.input[span.start()..span.end()]),
+                    style: token.1,
                     tag: None,
                     anchor: None,
-                    span: token.3,
+                    span,
                 };
                 self.emit(event)?;
                 state.current_index = next_index;
@@ -224,18 +221,18 @@ impl<'a> Parser<'a> {
     }
 
     /// A one-token scalar entry that needs no property or nested-node work.
-    pub(super) fn single_scalar(
-        &self,
-        run: Run,
-    ) -> Option<(Cow<'a, str>, Cow<'a, str>, ScalarStyle, Span)> {
+    pub(super) fn single_scalar(&self, run: Run) -> Option<(Cow<'a, str>, ScalarStyle, Span)> {
         if run.len() != 1 {
             return None;
         }
         let token = self.token(run, 0);
         match &token.kind {
-            TokenKind::Scalar { value, raw, style } => {
-                Some((value.clone(), raw.clone(), *style, token.span))
-            }
+            TokenKind::PlainScalar => Some((
+                Cow::Borrowed(&self.input[token.span.start()..token.span.end()]),
+                ScalarStyle::Plain,
+                token.span,
+            )),
+            TokenKind::Scalar(scalar) => Some((scalar.value.clone(), scalar.style, token.span)),
             _ => None,
         }
     }
@@ -416,22 +413,24 @@ impl<'a> Parser<'a> {
                         state.entries += 1;
                         self.limits
                             .check_collection_entries(state.entries)
-                            .map_err(|error| self.limit_at(key.3, error))?;
+                            .map_err(|error| self.limit_at(key.2, error))?;
+                        let key_span = key.2;
                         self.emit(Event::Scalar {
                             value: key.0,
-                            raw: key.1,
-                            style: key.2,
+                            raw: Cow::Borrowed(&self.input[key_span.start()..key_span.end()]),
+                            style: key.1,
                             tag: None,
                             anchor: None,
-                            span: key.3,
+                            span: key_span,
                         })?;
+                        let value_span = value.2;
                         self.emit(Event::Scalar {
                             value: value.0,
-                            raw: value.1,
-                            style: value.2,
+                            raw: Cow::Borrowed(&self.input[value_span.start()..value_span.end()]),
+                            style: value.1,
                             tag: None,
                             anchor: None,
-                            span: value.3,
+                            span: value_span,
                         })?;
                         state.current_index = current_index + 1;
                         continue;
@@ -633,13 +632,9 @@ impl<'a> Parser<'a> {
             // `&a::\n|`. The scanner has already established that this line is the scalar.
             let block_scalar = self.compat
                 && self.line_starts_with(current_index, |kind| {
-                    matches!(
-                        kind,
-                        TokenKind::Scalar {
-                            style: ScalarStyle::Literal | ScalarStyle::Folded,
-                            ..
-                        }
-                    )
+                    kind.scalar_style().is_some_and(|style| {
+                        matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
+                    })
                 })
                 && self
                     .line_first(current_index)
@@ -648,7 +643,7 @@ impl<'a> Parser<'a> {
                 && self
                     .line_tokens(current_index - 1)
                     .iter()
-                    .any(|token| matches!(token.kind, TokenKind::Anchor(_)));
+                    .any(|token| matches!(token.kind, TokenKind::Anchor));
             if current_index < self.lines.len()
                 && (next_indent > indent || indentless_sequence || block_scalar)
             {
@@ -748,11 +743,11 @@ impl<'a> Parser<'a> {
         let token = self.token(tokens, index);
         let span = token.span;
         match &token.kind {
-            TokenKind::Scalar { value, raw, style } => {
+            TokenKind::PlainScalar => {
                 let event = Event::Scalar {
-                    value: value.clone(),
-                    raw: raw.clone(),
-                    style: *style,
+                    value: Cow::Borrowed(&self.input[span.start()..span.end()]),
+                    raw: Cow::Borrowed(&self.input[span.start()..span.end()]),
+                    style: ScalarStyle::Plain,
                     tag,
                     anchor,
                     span,
@@ -760,12 +755,24 @@ impl<'a> Parser<'a> {
                 self.emit(event)?;
                 Ok(Step::Return(index + 1))
             }
-            TokenKind::Alias(name) => {
+            TokenKind::Scalar(scalar) => {
+                let event = Event::Scalar {
+                    value: scalar.value.clone(),
+                    raw: Cow::Borrowed(&self.input[span.start()..span.end()]),
+                    style: scalar.style,
+                    tag,
+                    anchor,
+                    span,
+                };
+                self.emit(event)?;
+                Ok(Step::Return(index + 1))
+            }
+            TokenKind::Alias => {
                 if tag.is_some() || anchor.is_some() {
                     return Err(self.error(span, "aliases cannot carry tags or anchors"));
                 }
                 let event = Event::Alias {
-                    anchor: Anchor::new(name.clone()),
+                    anchor: Anchor::new(&self.input[span.start() + 1..span.end()]),
                     span,
                 };
                 self.emit(event)?;

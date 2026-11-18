@@ -933,13 +933,14 @@ fn prefix_token_estimate_uses_the_scanned_density_with_a_cap() {
 }
 
 #[test]
+fn a_token_stays_small() {
+    assert!(size_of::<Token<'_>>() <= 32, "{}", size_of::<Token<'_>>());
+}
+
+#[test]
 fn event_capacity_reserves_from_the_token_count() {
     let token = Token {
-        kind: TokenKind::Scalar {
-            value: "x".into(),
-            raw: "x".into(),
-            style: crate::event::ScalarStyle::Plain,
-        },
+        kind: TokenKind::PlainScalar,
         span: Span::empty(0),
     };
     let tokens = vec![token; 1_000];

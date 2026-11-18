@@ -1,4 +1,4 @@
 # Typed allocation budgets, checked by tools/check_alloc_corpus.sh with AYAML_TYPED=1.
 # Each is about 1.25 times the measured value, rounded up.
 # path	parse_peak	emit_peak	parse_allocs	emit_allocs	serialize_peak	serialize_allocs	parse_total	emit_total	serialize_total
-tests/fixtures/compat/toolchain-pins.yml	445000	62000	2300	30	125000	1400	880000	83000	125000
+tests/fixtures/compat/toolchain-pins.yml	352000	62000	2380	30	125000	1400	637000	83000	125000

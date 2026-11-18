@@ -50,7 +50,7 @@ enum NodeKind<'de> {
     String(Cow<'de, str>),
     Sequence(Vec<Node<'de>>),
     Mapping(Vec<(Node<'de>, Node<'de>)>),
-    Tagged(Tag, Box<Node<'de>>),
+    Tagged(Box<Tag>, Box<Node<'de>>),
     Alias(Arc<Node<'de>>),
 }
 
@@ -1004,7 +1004,7 @@ fn apply_tag(tag: Option<Tag>, node: Node<'_>) -> Node<'_> {
         Some(tag) if tag.is_core_collection() || tag.is_core_scalar() => node,
         Some(tag) => {
             let span = node.span;
-            Node::new(NodeKind::Tagged(tag, Box::new(node)), span)
+            Node::new(NodeKind::Tagged(Box::new(tag), Box::new(node)), span)
         }
         None => node,
     }
@@ -1029,7 +1029,7 @@ fn scalar_node<'de>(
                 span,
             );
             return Ok(Node::scalar(
-                NodeKind::Tagged(tag.clone(), Box::new(inner)),
+                NodeKind::Tagged(Box::new(tag.clone()), Box::new(inner)),
                 scalar_text,
                 style,
                 span,
@@ -1044,7 +1044,7 @@ fn scalar_node<'de>(
                     span,
                 );
                 return Ok(Node::scalar(
-                    NodeKind::Tagged(tag.clone(), Box::new(inner)),
+                    NodeKind::Tagged(Box::new(tag.clone()), Box::new(inner)),
                     scalar_text,
                     style,
                     span,
@@ -1061,7 +1061,7 @@ fn scalar_node<'de>(
                     span,
                 );
                 return Ok(Node::scalar(
-                    NodeKind::Tagged(tag.clone(), Box::new(inner)),
+                    NodeKind::Tagged(Box::new(tag.clone()), Box::new(inner)),
                     scalar_text,
                     style,
                     span,
@@ -1110,7 +1110,7 @@ fn node_from_value<'de>(
         ),
         Value::Tagged(tagged) => {
             let inner = node_from_value(tagged.value, text, raw, style, span);
-            NodeKind::Tagged(tagged.tag, Box::new(inner))
+            NodeKind::Tagged(Box::new(tagged.tag), Box::new(inner))
         }
     };
     Node::scalar(kind, scalar_text, style, span)
@@ -1146,9 +1146,10 @@ fn owned_node<'de>(value: Value, span: Span) -> Node<'de> {
                 .map(|(key, value)| (owned_node(key, span), owned_node(value, span)))
                 .collect(),
         ),
-        Value::Tagged(tagged) => {
-            NodeKind::Tagged(tagged.tag, Box::new(owned_node(tagged.value, span)))
-        }
+        Value::Tagged(tagged) => NodeKind::Tagged(
+            Box::new(tagged.tag),
+            Box::new(owned_node(tagged.value, span)),
+        ),
     };
     Node::new(kind, span)
 }
@@ -1882,6 +1883,11 @@ mod tests {
             &mut AliasBudget::default(),
         )
         .expect("node")
+    }
+
+    #[test]
+    fn a_node_stays_small() {
+        assert!(size_of::<Node<'_>>() <= 96);
     }
 
     #[test]

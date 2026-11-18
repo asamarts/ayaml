@@ -23,10 +23,13 @@ fn tokens(input: &str) -> Vec<TokenKind<'_>> {
 }
 
 fn scalar(input: &str) -> (String, ScalarStyle, String) {
-    let tokens = tokens(input);
-    for token in tokens {
-        if let TokenKind::Scalar { value, raw, style } = token {
-            return (value.into_owned(), style, raw.into_owned());
+    let mut scanner = Scanner::new(input, Limits::default()).expect("scanner");
+    while let Some(token) = scanner.next_token().expect("token") {
+        let raw = input[token.span.start()..token.span.end()].to_owned();
+        match token.kind {
+            TokenKind::PlainScalar => return (raw.clone(), ScalarStyle::Plain, raw),
+            TokenKind::Scalar(scalar) => return (scalar.value.into_owned(), scalar.style, raw),
+            _ => {}
         }
     }
     panic!("no scalar in {input:?}");
@@ -498,50 +501,40 @@ fn escaped_line_break_in_double_quotes_is_a_continuation() {
 fn anchors_aliases_tags_and_directives() {
     let kinds = tokens("%YAML 1.2\n---\na: &b !Custom {x: 1}\nc: *b\n");
     assert!(
-        kinds
-            .iter()
-            .any(|kind| matches!(kind, TokenKind::Directive { name, .. } if name == "YAML"))
+        kinds.iter().any(
+            |kind| matches!(kind, TokenKind::Directive(directive) if directive.name == "YAML")
+        )
     );
     assert!(
         kinds
             .iter()
             .any(|kind| matches!(kind, TokenKind::DocumentStart { explicit: true }))
     );
+    assert!(kinds.iter().any(|kind| matches!(kind, TokenKind::Anchor)));
+    assert!(kinds.iter().any(|kind| matches!(kind, TokenKind::Alias)));
     assert!(
-        kinds
-            .iter()
-            .any(|kind| matches!(kind, TokenKind::Anchor(name) if name == "b"))
-    );
-    assert!(
-        kinds
-            .iter()
-            .any(|kind| matches!(kind, TokenKind::Alias(name) if name == "b"))
-    );
-    assert!(
-        kinds
-            .iter()
-            .any(|kind| matches!(kind, TokenKind::Tag(tag) if tag == &Tag::local("Custom")))
+        kinds.iter().any(
+            |kind| matches!(kind, TokenKind::Tag(tag) if tag.as_ref() == &Tag::local("Custom"))
+        )
     );
 }
 
 #[test]
 fn comments_are_skipped_and_line_breaks_are_tokens() {
-    let kinds = tokens("a: 1 # comment\nb: 2\n");
-    assert!(
-        kinds
-            .iter()
-            .any(|kind| matches!(kind, TokenKind::LineBreak))
-    );
-    assert!(
-        kinds
-            .iter()
-            .any(|kind| matches!(kind, TokenKind::Scalar { value, .. } if value == "1"))
-    );
-    assert!(
-        !kinds.iter().any(
-            |kind| matches!(kind, TokenKind::Scalar { value, .. } if value.contains("comment"))
-        )
-    );
+    let input = "a: 1 # comment\nb: 2\n";
+    let mut scanner = Scanner::new(input, Limits::default()).expect("scanner");
+    let mut values = Vec::new();
+    while let Some(token) = scanner.next_token().expect("token") {
+        match token.kind {
+            TokenKind::PlainScalar => {
+                values.push(input[token.span.start()..token.span.end()].to_owned());
+            }
+            TokenKind::Scalar(scalar) => values.push(scalar.value.into_owned()),
+            _ => {}
+        }
+    }
+    assert!(values.iter().any(|value| value == "1"));
+    assert!(!values.iter().any(|value| value.contains("comment")));
 }
 
 #[test]
@@ -560,9 +553,12 @@ fn unicode_span_is_byte_based() {
     let mut scanner = Scanner::new("é: 1", Limits::default()).expect("scanner");
     let mut spans = Vec::new();
     while let Some(token) = scanner.next_token().expect("token") {
-        if let TokenKind::Scalar { value, .. } = &token.kind
-            && value == "é"
-        {
+        let value = match &token.kind {
+            TokenKind::PlainScalar => Some(&"é: 1"[token.span.start()..token.span.end()]),
+            TokenKind::Scalar(scalar) => Some(scalar.value.as_ref()),
+            _ => None,
+        };
+        if value == Some("é") {
             spans.push(token.span);
         }
     }

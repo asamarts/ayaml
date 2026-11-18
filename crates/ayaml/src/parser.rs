@@ -202,13 +202,9 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
                 }
             }
             _ => {
-                let block_scalar = matches!(
-                    token.kind,
-                    TokenKind::Scalar {
-                        style: ScalarStyle::Literal | ScalarStyle::Folded,
-                        ..
-                    }
-                );
+                let block_scalar = token.kind.scalar_style().is_some_and(|style| {
+                    matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
+                });
                 let consumed = token.span.end();
                 push_token(&mut tokens, token, chunk);
                 if !estimated
@@ -500,7 +496,7 @@ impl<'a> EventCursor<'a> {
             seen_document |= is_start
                 || !matches!(
                     line_tokens.first().map(|token| &token.kind),
-                    Some(TokenKind::Directive { .. })
+                    Some(TokenKind::Directive(_))
                 );
             let start = tokens.len();
             tokens.extend(line_tokens);
@@ -593,13 +589,9 @@ impl<'a> EventCursor<'a> {
                     }
                 }
                 Some(token) => {
-                    let block_scalar = matches!(
-                        token.kind,
-                        TokenKind::Scalar {
-                            style: ScalarStyle::Literal | ScalarStyle::Folded,
-                            ..
-                        }
-                    );
+                    let block_scalar = token.kind.scalar_style().is_some_and(|style| {
+                        matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
+                    });
                     current.push(token);
                     if block_scalar {
                         return Ok(Some(current));
@@ -944,15 +936,15 @@ impl<'a> Parser<'a> {
         let mut index = 0;
         while index < self.lines.len() {
             let mut saw_directive = false;
-            while let Some(TokenKind::Directive { name, value }) =
+            while let Some(TokenKind::Directive(directive)) =
                 self.line_first(index).map(|token| &token.kind)
             {
                 let Some(span) = self.line_first(index).map(|token| token.span) else {
                     break;
                 };
                 let event = Event::Directive {
-                    name: name.clone(),
-                    value: value.clone(),
+                    name: directive.name.clone(),
+                    value: directive.value.clone(),
                     span,
                 };
                 self.emit(event)?;
@@ -1116,12 +1108,15 @@ impl<'a> Parser<'a> {
                     .map_or_else(|| self.empty_span(index), |token| token.span);
                 let tabbed = root_block && tab_leads_line(self.input, span.start());
                 let fallback = match tokens.first().map(|token| &token.kind) {
-                    Some(TokenKind::Scalar {
-                        style: ScalarStyle::Literal | ScalarStyle::Folded,
-                        ..
-                    }) => "a block scalar is not indented past its parent",
+                    Some(kind)
+                        if kind.scalar_style().is_some_and(|style| {
+                            matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
+                        }) =>
+                    {
+                        "a block scalar is not indented past its parent"
+                    }
                     Some(TokenKind::BlockEntry) => "a block entry is indented less than its parent",
-                    Some(TokenKind::Scalar { .. })
+                    Some(TokenKind::PlainScalar | TokenKind::Scalar(_))
                         if root_block
                             && self.lines[index].indent > 0
                             && previous_line_is_blank(self.input, span.start()) =>

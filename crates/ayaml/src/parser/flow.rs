@@ -676,7 +676,7 @@ impl<'a> Parser<'a> {
     pub(super) fn starts_with_property(&self, run: Run) -> bool {
         matches!(
             self.tokens(run).first().map(|token| &token.kind),
-            Some(TokenKind::Tag(_) | TokenKind::Anchor(_))
+            Some(TokenKind::Tag(_) | TokenKind::Anchor)
         )
     }
 
@@ -686,8 +686,12 @@ impl<'a> Parser<'a> {
         let mut index = 0;
         for token in self.tokens(run) {
             let duplicate = match &token.kind {
-                TokenKind::Tag(value) => tag.replace(value.clone()).is_some(),
-                TokenKind::Anchor(value) => anchor.replace(Anchor::new(value.clone())).is_some(),
+                TokenKind::Tag(value) => tag.replace(value.as_ref().clone()).is_some(),
+                TokenKind::Anchor => anchor
+                    .replace(Anchor::new(
+                        &self.input[token.span.start() + 1..token.span.end()],
+                    ))
+                    .is_some(),
                 _ => break,
             };
             if duplicate {
