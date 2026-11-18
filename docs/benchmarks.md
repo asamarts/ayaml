@@ -82,6 +82,12 @@ reference. A 20 KB configuration fixture peaks at about 250 KB and allocates abo
 total; `tools/typed-alloc-corpus.tsv` budgets that typed path, while `tools/alloc-corpus.tsv`
 keeps the value path.
 
+The short-scalar work tracked by #178 has current 1 MB peaks of about 98 MB for a flow sequence
+of `1`, 169 MB for an integer flow sequence, 82 MB for a flow mapping, and 56 MB for a short-word
+block sequence. The token arena is 32 bytes per token and an untagged typed node is 80 bytes.
+The remaining gap is the typed node tree overlapping the serde value tree, plus the whole-input
+token arena; `AY-104` tracks composition without the intermediate tree.
+
 The release process keeps comparison results private. This document describes
 the methodology so that absolute or relative measurements can be reviewed on
 their merits when they are published.
