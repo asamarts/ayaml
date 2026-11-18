@@ -677,3 +677,58 @@ none exists. The rule is tested by what it promises: on generated documents that
 of entry next to every other, each span a tree gives is deleted and the rest read, in both modes.
 Flow entries, only entries, and entries that share a line wait for the edit crate's verified
 edits (AY-050).
+
+## D93 — The allocation gate budgets an issue's shapes by the issue's own measure
+
+**Date:** 2026-11-18
+**Status:** Accepted
+
+**Decision.** When an issue reports memory on generated document shapes, the allocation gate
+budgets those shapes measured as the issue measures them. For #178 that is an untyped decode into
+a JSON tree through the compatibility reader, with the count limits lifted, and a reallocation
+counted by the bytes it adds. The counter in the fuzz workspace generates the nine shapes and
+decodes them that way, and `tools/json-alloc-corpus.tsv` holds a peak, an allocation count, and a
+total for each. The fuzz workspace takes `serde_json` for the tree, at the version the tests use.
+A budget is about 1.10 times the measured value, and a shape that is over the issue's target has
+its measured value for a budget.
+
+**Alternatives.** Decode into a JSON-like tree written in the counter: no dependency, but its
+sizes would be close to the issue's and not equal, so a regression near the target could be
+misjudged. Budget nothing here and leave the measure to whoever filed the issue: a regression is
+then found after it merges.
+
+**Why.** The gate's typed row decoded into ayaml's own `Value`, a larger tree than the issue's.
+Figures from that row were set beside the issue's reference in the plan and in the issue's thread,
+and they overstated the gap: by the issue's measure eight of the nine shapes were within its
+target while the plan still called for a three-day rewrite to reach it. A figure can only be
+compared with a reference that was measured the same way.
+
+**Consequences.** The fuzz workspace's lockfile gains `serde_json` and what it needs; nothing that
+is published depends on them. The ten percent of room keeps a shape that is within 1.2 times the
+issue's reference there, since none is over 1.06 times today; a row is lowered in the change that
+lowers its measurement. The gate script no longer passes over a budget file that is missing.
+
+## D94 — The last shape of #178 is closed by composing without the intermediate tree
+
+**Date:** 2026-11-18
+**Status:** Accepted
+
+**Decision.** AY-104 keeps its scope: an untyped decode builds its value as the events arrive,
+without a complete typed node tree in between. That is the work that brings the ninth shape of
+#178, a megabyte block sequence of short words, from 1.28 times the issue's reference to within
+1.2 times.
+
+**Alternatives.** A narrower change, estimated at a day: line records of 12 bytes in place of 24,
+and room reserved for a root block collection from its line count. It was estimated to bring that
+shape to about 1.16 times, and it would refuse an input of more than four billion tokens. Or
+accept 1.28 times as a documented exception, which leaves the issue's target unmet.
+
+**Why.** At that shape's peak the typed node vector is the largest thing live, 10.5 MB of 23.1 MB,
+beside the token arena, the line records, and the line index, and the JSON tree is not yet built.
+Building the value directly takes the node vector out of every untyped decode's peak, where the
+narrower change trims one shape and leaves little room under the target.
+
+**Consequences.** #178 stays open until AY-104 lands, and by D90 the 0.2.0 release waits for it.
+The narrower change is not planned. The budgets in `tools/json-alloc-corpus.tsv` are lowered in
+the change that closes AY-104.
+
