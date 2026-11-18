@@ -628,4 +628,3 @@ testable against each other, and agreeing with `parse_value` leaves one order to
 which the changelog states. A refused input of at most 8 KiB is read twice, and an accepted one
 once, as before. The `Deserializer` is unchanged: it reads a document's events before it builds
 from them, at every size, so within a document it reports a syntax error first.
-
