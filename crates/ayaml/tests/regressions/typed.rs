@@ -938,13 +938,14 @@ fn typed_scalars_read_like_composed_values() {
     }
 }
 
-/// Every reader of one document from text, each into a map of `T`.
-fn typed_readers<T: serde::de::DeserializeOwned>(
-    input: &str,
-) -> Vec<(
+/// What each reader of one document from text says of an input, read into a map of `T`.
+type Readings<T> = Vec<(
     &'static str,
     Result<std::collections::BTreeMap<String, T>, ayaml::Error>,
-)> {
+)>;
+
+/// Every reader of one document from text, each into a map of `T`.
+fn typed_readers<T: serde::de::DeserializeOwned>(input: &str) -> Readings<T> {
     #[cfg_attr(
         not(feature = "libyaml-compat"),
         allow(unused_mut, reason = "the list is extended only by the compat reader")
@@ -1121,7 +1122,7 @@ fn a_typed_reader_reports_the_first_problem_at_every_input_size() {
                     "{reader} {input:?} after {bytes}: {error}"
                 );
                 assert_eq!(
-                    error.span().map(|span| span.start()),
+                    error.span().map(ayaml::Span::start),
                     Some(span.start() + before.len()),
                     "{reader} {input:?} after {bytes}: {error}"
                 );
