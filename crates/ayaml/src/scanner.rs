@@ -63,8 +63,8 @@ pub(crate) enum TokenKind<'a> {
     LineBreak,
     PlainScalar,
     Scalar(Box<ScalarToken<'a>>),
-    Anchor(Box<Cow<'a, str>>),
-    Alias(Box<Cow<'a, str>>),
+    Anchor,
+    Alias,
     Tag(Box<Tag>),
 }
 
@@ -118,8 +118,8 @@ impl fmt::Display for TokenKind<'_> {
             Self::FlowEntry => formatter.write_str(","),
             Self::LineBreak => formatter.write_str("line break"),
             Self::PlainScalar | Self::Scalar(_) => formatter.write_str("scalar"),
-            Self::Anchor(_) => formatter.write_str("anchor"),
-            Self::Alias(_) => formatter.write_str("alias"),
+            Self::Anchor => formatter.write_str("anchor"),
+            Self::Alias => formatter.write_str("alias"),
             Self::Tag(_) => formatter.write_str("tag"),
         }
     }
@@ -702,7 +702,7 @@ impl<'a> Scanner<'a> {
                 self.indicator_end = end;
             }
             TokenKind::Directive(_) => self.directive_pending = true,
-            TokenKind::Tag(_) | TokenKind::Anchor(_) => self.document_open = true,
+            TokenKind::Tag(_) | TokenKind::Anchor => self.document_open = true,
             TokenKind::StreamStart | TokenKind::StreamEnd | TokenKind::LineBreak => {}
             _ => {
                 self.document_open = true;
@@ -1187,7 +1187,7 @@ impl<'a> Scanner<'a> {
         }
         let name = Cow::Borrowed(&self.input[name_start..self.pos]);
         if alias {
-            self.make(TokenKind::Alias(Box::new(name)), start, self.pos)
+            self.make(TokenKind::Alias, start, self.pos)
         } else {
             self.anchors += 1;
             self.limits
@@ -1199,7 +1199,7 @@ impl<'a> Scanner<'a> {
                     .entry(&self.input[name_start..self.pos])
                     .or_insert(start);
             }
-            self.make(TokenKind::Anchor(Box::new(name)), start, self.pos)
+            self.make(TokenKind::Anchor, start, self.pos)
         }
     }
 

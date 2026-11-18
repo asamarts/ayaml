@@ -510,16 +510,8 @@ fn anchors_aliases_tags_and_directives() {
             .iter()
             .any(|kind| matches!(kind, TokenKind::DocumentStart { explicit: true }))
     );
-    assert!(
-        kinds
-            .iter()
-            .any(|kind| matches!(kind, TokenKind::Anchor(name) if name.as_ref() == "b"))
-    );
-    assert!(
-        kinds
-            .iter()
-            .any(|kind| matches!(kind, TokenKind::Alias(name) if name.as_ref() == "b"))
-    );
+    assert!(kinds.iter().any(|kind| matches!(kind, TokenKind::Anchor)));
+    assert!(kinds.iter().any(|kind| matches!(kind, TokenKind::Alias)));
     assert!(
         kinds.iter().any(
             |kind| matches!(kind, TokenKind::Tag(tag) if tag.as_ref() == &Tag::local("Custom"))

@@ -643,7 +643,7 @@ impl<'a> Parser<'a> {
                 && self
                     .line_tokens(current_index - 1)
                     .iter()
-                    .any(|token| matches!(token.kind, TokenKind::Anchor(_)));
+                    .any(|token| matches!(token.kind, TokenKind::Anchor));
             if current_index < self.lines.len()
                 && (next_indent > indent || indentless_sequence || block_scalar)
             {
@@ -767,12 +767,12 @@ impl<'a> Parser<'a> {
                 self.emit(event)?;
                 Ok(Step::Return(index + 1))
             }
-            TokenKind::Alias(name) => {
+            TokenKind::Alias => {
                 if tag.is_some() || anchor.is_some() {
                     return Err(self.error(span, "aliases cannot carry tags or anchors"));
                 }
                 let event = Event::Alias {
-                    anchor: Anchor::new(name.as_ref().clone()),
+                    anchor: Anchor::new(&self.input[span.start() + 1..span.end()]),
                     span,
                 };
                 self.emit(event)?;
