@@ -28,6 +28,11 @@ pub struct SpannedTree<'a> {
 pub struct SpannedNode<'a> {
     span: Span,
     entry_span: Option<Span>,
+    /// Where the node's last character ends. A block collection's is its last entry's, which
+    /// its span can pass.
+    content_end: usize,
+    /// The node, or a node inside it, defines an anchor.
+    anchored: bool,
     kind: Kind<'a>,
 }
 
@@ -123,8 +128,8 @@ impl<'a> SpannedTree<'a> {
         self.lookup(path).map(SpannedNode::span)
     }
 
-    /// The span that removes the entry at `path`. For a block entry this includes its
-    /// indentation and ending line break; for a flow entry it covers the key and value.
+    /// The span that removes the entry at `path` and nothing else, or `None` when no span does.
+    /// See [`SpannedNode::entry_span`] for which entries have one.
     #[must_use]
     pub fn entry_span_at(&self, path: &[PathSegment]) -> Option<Span> {
         self.lookup(path).and_then(SpannedNode::entry_span)
@@ -152,7 +157,23 @@ impl SpannedNode<'_> {
         self.span
     }
 
-    /// The span that removes this node from its parent entry, when it has one.
+    /// The span that removes this node's entry from its parent, when deleting those bytes
+    /// removes that entry and leaves the rest of the document as it was.
+    ///
+    /// A block mapping's entry and a block sequence's item have one when they begin their own
+    /// line and nothing follows them on their last line but a comment. The span runs from the
+    /// start of that line through the entry's last line break, so it takes the entry's
+    /// indentation, a value on later lines, a block scalar, and a comment after the value. A
+    /// byte-order mark before the first entry stays outside it.
+    ///
+    /// The other entries have none, since no span of theirs is exact: an entry of a flow
+    /// collection, whose separator belongs to its neighbor as much as to it; the first key of a
+    /// mapping that begins on a sequence's `-` line; an entry with an explicit `?`, or with a
+    /// tag or an anchor before its key; an item with no value; and an entry that defines an
+    /// anchor, which an alias elsewhere may name.
+    ///
+    /// Removing a block collection's only entry leaves it with none, and it then reads as an
+    /// empty value, not as an empty collection.
     #[must_use]
     pub const fn entry_span(&self) -> Option<Span> {
         self.entry_span
@@ -275,6 +296,8 @@ struct Builder<'a> {
 struct Frame<'a> {
     open: Span,
     style: crate::event::CollectionStyle,
+    /// The collection has an anchor of its own.
+    anchored: bool,
     kind: FrameKind<'a>,
 }
 
@@ -282,7 +305,8 @@ enum FrameKind<'a> {
     Sequence(Vec<SpannedNode<'a>>),
     Mapping {
         entries: Vec<Entry<'a>>,
-        key: Option<SpannedNode<'a>>,
+        /// The key that waits for its value. Boxed, so a sequence's frame isn't as large.
+        key: Option<Box<SpannedNode<'a>>>,
         seen: HashMap<Value, usize>,
     },
 }
@@ -302,12 +326,14 @@ impl<'a> Builder<'a> {
                 raw,
                 style,
                 tag,
+                anchor,
                 span,
-                ..
             } => {
                 let node = SpannedNode {
                     span,
                     entry_span: None,
+                    content_end: span.end(),
+                    anchored: anchor.is_some(),
                     kind: Kind::Scalar {
                         value,
                         raw,
@@ -321,14 +347,22 @@ impl<'a> Builder<'a> {
                 let node = SpannedNode {
                     span,
                     entry_span: None,
+                    content_end: span.end(),
+                    anchored: false,
                     kind: Kind::Alias,
                 };
                 self.add(node);
             }
-            Event::SequenceStart { span, style, .. } => {
+            Event::SequenceStart {
+                span,
+                style,
+                anchor,
+                ..
+            } => {
                 self.stack.push(Frame {
                     open: span,
                     style,
+                    anchored: anchor.is_some(),
                     kind: FrameKind::Sequence(Vec::new()),
                 });
             }
@@ -339,17 +373,29 @@ impl<'a> Builder<'a> {
                 let FrameKind::Sequence(items) = frame.kind else {
                     return Err(Error::new(ErrorKind::Parser, "sequence end for a mapping"));
                 };
+                let flow = frame.style == crate::event::CollectionStyle::Flow;
                 let node = SpannedNode {
                     span: Span::new(frame.open.start(), span.end()),
                     entry_span: None,
+                    content_end: match items.last() {
+                        Some(last) if !flow => last.content_end,
+                        _ => span.end(),
+                    },
+                    anchored: frame.anchored || items.iter().any(|item| item.anchored),
                     kind: Kind::Sequence(items),
                 };
                 self.add(node);
             }
-            Event::MappingStart { span, style, .. } => {
+            Event::MappingStart {
+                span,
+                style,
+                anchor,
+                ..
+            } => {
                 self.stack.push(Frame {
                     open: span,
                     style,
+                    anchored: anchor.is_some(),
                     kind: FrameKind::Mapping {
                         entries: Vec::new(),
                         key: None,
@@ -364,9 +410,18 @@ impl<'a> Builder<'a> {
                 let FrameKind::Mapping { entries, .. } = frame.kind else {
                     return Err(Error::new(ErrorKind::Parser, "mapping end for a sequence"));
                 };
+                let flow = frame.style == crate::event::CollectionStyle::Flow;
                 let node = SpannedNode {
                     span: Span::new(frame.open.start(), span.end()),
                     entry_span: None,
+                    content_end: match entries.last() {
+                        Some(last) if !flow => last.value.content_end,
+                        _ => span.end(),
+                    },
+                    anchored: frame.anchored
+                        || entries
+                            .iter()
+                            .any(|entry| entry.key.anchored || entry.value.anchored),
                     kind: Kind::Mapping(entries),
                 };
                 self.add(node);
@@ -382,17 +437,39 @@ impl<'a> Builder<'a> {
         };
         match &mut frame.kind {
             FrameKind::Sequence(items) => {
-                node.entry_span = Some(entry_span(self.input, node.span, frame.style));
+                node.entry_span = block_entry_span(
+                    self.input,
+                    frame.style,
+                    Lead::Item,
+                    node.span.start(),
+                    node.content_end,
+                    node.anchored,
+                );
                 items.push(node);
             }
             FrameKind::Mapping { entries, key, seen } => {
-                let Some(mut key_node) = key.take() else {
+                let Some(key_node) = key.take() else {
                     node.entry_span = None;
-                    *key = Some(node);
+                    *key = Some(Box::new(node));
                     return;
                 };
+                let mut key_node = *key_node;
                 key_node.entry_span = None;
-                let span = entry_span(self.input, key_node.span, frame.style);
+                if node.is_missing_value() {
+                    // The parser places a value that isn't there at the next token. It stands
+                    // after its key, where a value would be written.
+                    let at = after_key(self.input, key_node.content_end);
+                    node.span = Span::empty(at);
+                    node.content_end = at;
+                }
+                let span = block_entry_span(
+                    self.input,
+                    frame.style,
+                    Lead::Key,
+                    key_node.span.start(),
+                    node.content_end,
+                    key_node.anchored || node.anchored,
+                );
                 let key_value = key_node.resolved_value();
                 let mut ambiguous = is_merge_key(&key_node);
                 if let Some(value) = &key_value
@@ -407,7 +484,7 @@ impl<'a> Builder<'a> {
                     let index = entries.len();
                     seen.entry(value).or_insert(index);
                 }
-                node.entry_span = Some(span);
+                node.entry_span = span;
                 entries.push(Entry {
                     key: key_node,
                     value: node,
@@ -415,6 +492,23 @@ impl<'a> Builder<'a> {
                 });
             }
         }
+    }
+}
+
+impl SpannedNode<'_> {
+    /// Whether this is the empty scalar that stands for a value the source doesn't write.
+    fn is_missing_value(&self) -> bool {
+        self.span.is_empty()
+            && !self.anchored
+            && matches!(
+                &self.kind,
+                Kind::Scalar {
+                    raw,
+                    style: ScalarStyle::Plain,
+                    tag: None,
+                    ..
+                } if raw.is_empty()
+            )
     }
 }
 
@@ -429,11 +523,76 @@ fn is_merge_key(node: &SpannedNode<'_>) -> bool {
     )
 }
 
-fn entry_span(input: &str, node: Span, style: crate::event::CollectionStyle) -> Span {
-    if style == crate::event::CollectionStyle::Flow {
-        return node;
+/// What stands before a block entry on its first line.
+#[derive(Clone, Copy)]
+enum Lead {
+    /// A mapping's key: indentation alone.
+    Key,
+    /// A sequence's item: indentation, its `-`, and spaces.
+    Item,
+}
+
+/// The span whose removal removes one block entry and nothing else, or `None` when the entry
+/// has no such span (see [`SpannedNode::entry_span`]). The entry begins at `first`, its last
+/// character ends at `content_end`, and `anchored` says whether it defines an anchor.
+fn block_entry_span(
+    input: &str,
+    style: crate::event::CollectionStyle,
+    lead: Lead,
+    first: usize,
+    content_end: usize,
+    anchored: bool,
+) -> Option<Span> {
+    if style == crate::event::CollectionStyle::Flow || anchored {
+        return None;
     }
-    Span::new(line_start(input, node.start()), line_end(input, node.end()))
+    let mut start = line_start(input, first);
+    // A byte-order mark opens the input, not the first entry.
+    if start == 0 && input.starts_with('\u{feff}') {
+        start = '\u{feff}'.len_utf8();
+    }
+    let before = input.get(start..first)?;
+    let begins_its_line = match lead {
+        Lead::Key => before.bytes().all(|byte| byte == b' '),
+        Lead::Item => before
+            .trim_start_matches(' ')
+            .strip_prefix('-')
+            .is_some_and(|blanks| !blanks.is_empty() && blanks.bytes().all(|byte| byte == b' ')),
+    };
+    if !begins_its_line {
+        return None;
+    }
+    let end = entry_end(input, content_end)?;
+    (end > start).then(|| Span::new(start, end))
+}
+
+/// Where an entry whose last character ends at `content_end` ends: after its line break, or
+/// `None` when more than a comment follows it on that line.
+fn entry_end(input: &str, content_end: usize) -> Option<usize> {
+    let (before, rest) = input.split_at_checked(content_end)?;
+    // A block scalar's text runs through its last line break.
+    if before.ends_with(['\n', '\r']) {
+        return Some(content_end);
+    }
+    let line = rest.split(['\n', '\r']).next().unwrap_or(rest);
+    let after = line.trim_start_matches([' ', '\t']);
+    // A comment needs a blank before its `#`.
+    let comment = after.starts_with('#') && after.len() < line.len();
+    (after.is_empty() || comment).then(|| line_end(input, content_end))
+}
+
+/// Where a value that the source doesn't write stands: after the `:` that follows its key on
+/// the key's line, or after the key when none does.
+fn after_key(input: &str, key_end: usize) -> usize {
+    let Some(rest) = input.get(key_end..) else {
+        return key_end;
+    };
+    let blanks = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+    if rest[blanks..].starts_with(':') {
+        key_end + blanks + 1
+    } else {
+        key_end
+    }
 }
 
 fn line_start(input: &str, index: usize) -> usize {

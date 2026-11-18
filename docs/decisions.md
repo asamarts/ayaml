@@ -628,3 +628,33 @@ testable against each other, and agreeing with `parse_value` leaves one order to
 which the changelog states. A refused input of at most 8 KiB is read twice, and an accepted one
 once, as before. The `Deserializer` is unchanged: it reads a document's events before it builds
 from them, at every size, so within a document it reports a syntax error first.
+
+## D92 — An entry span is given only where its removal is exact
+
+**Date:** 2026-11-18
+**Status:** Accepted
+
+**Decision.** `SpannedNode::entry_span` returns a span only when deleting those bytes removes
+that entry and leaves the rest of the document reading as it did. A block mapping entry or a block
+sequence item has one when it begins its own line and nothing follows it on its last line but a
+comment. The span runs from the start of that line through the entry's last line break, so it
+takes a nested value, a block scalar, and a trailing comment, and leaves a byte-order mark. Every
+other entry returns `None`: an entry of a flow collection, the first key of a mapping or the
+first item of a sequence that begins on a `-` line, an entry with an explicit `?` or with a
+property before its key, an item with no value, and an entry that defines an anchor. A value that
+the source doesn't write has an empty span right after its key's `:`.
+
+**Alternatives.** Give a span for single-line block entries only: the least code, but a nested
+entry could not be removed through the API. Give flow entries a span that takes one neighboring
+separator: complete, but which comma and which blanks belong to an entry is a rule about edits,
+and it belongs with the edits that are checked by reading their result.
+
+**Why.** The first version computed a block entry's span from its key alone, so a nested entry's
+span was its key line, and a flow entry's was its key. A caller that deleted such a span broke
+the document or changed another entry. A span that is absent sends the caller to another way of
+editing; a span that is wrong corrupts a file.
+
+**Consequences.** Each span the tests name is checked by deleting it and reading the rest. Removing
+a block collection's only entry leaves a collection with none, which reads as an empty value, so
+a caller that wants an empty collection writes one. Flow entries, and entries that share a line,
+wait for the edit crate's verified edits (AY-050).
