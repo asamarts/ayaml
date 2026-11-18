@@ -129,6 +129,25 @@ fn mid_input_token_capacity(input_len: usize, line_count: usize) -> Option<usize
     }
 }
 
+/// Tokens to reserve after scanning a prefix, or `None` before enough tokens show the density.
+/// The estimate assumes the rest of the input has the prefix's token density, capped at half the
+/// input length and at eight tokens per line. A comment-only prefix never reaches the threshold,
+/// and a large scalar keeps its one token instead of reserving an arena it will not use.
+fn prefix_token_capacity(
+    tokens: usize,
+    consumed: usize,
+    input_len: usize,
+    line_count: usize,
+) -> Option<usize> {
+    const THRESHOLD: usize = 1_024;
+    if tokens < THRESHOLD || consumed == 0 {
+        return None;
+    }
+    let estimate = tokens.saturating_mul(input_len) / consumed;
+    let cap = (input_len / 2).min(line_count.saturating_mul(8));
+    Some(estimate.min(cap).max(tokens))
+}
+
 /// Group scanner tokens into logical lines as they arrive.
 ///
 /// This avoids first collecting every token in one vector and then copying
@@ -154,8 +173,11 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
     };
     let mut lines = Vec::new();
     let mut tokens = Vec::new();
-    if let Some(capacity) = mid_input_token_capacity(input_len, scanner.line_index().line_count()) {
+    let mut estimated = false;
+    let line_count = scanner.line_index().line_count();
+    if let Some(capacity) = mid_input_token_capacity(input_len, line_count) {
         tokens.reserve_exact(capacity);
+        estimated = true;
     }
     let mut line_start = 0;
     let mut stream_start = None;
@@ -187,7 +209,17 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
                         ..
                     }
                 );
+                let consumed = token.span.end();
                 push_token(&mut tokens, token, chunk);
+                if !estimated
+                    && let Some(capacity) =
+                        prefix_token_capacity(tokens.len(), consumed, input_len, line_count)
+                {
+                    estimated = true;
+                    if capacity > tokens.capacity() {
+                        tokens.reserve_exact(capacity - tokens.len());
+                    }
+                }
                 if block_scalar {
                     lines.push(Line::new(
                         &tokens,
@@ -263,10 +295,18 @@ impl<'a> EventChunks<'a> {
     }
 }
 
+/// A consumer that receives events as the parser produces them.
+pub(crate) trait EventConsumer<'a> {
+    fn event(&mut self, event: Event<'a>) -> Result<(), Error>;
+
+    fn finish(&mut self) -> Result<(), Error>;
+}
+
 enum EventSink<'a> {
     Events(Vec<Event<'a>>),
     Chunks(EventChunks<'a>),
     Streaming(Box<StreamingComposer<'a>>),
+    Consumer(Box<dyn EventConsumer<'a> + 'a>),
 }
 
 impl<'a> EventSink<'a> {
@@ -286,6 +326,7 @@ impl<'a> EventSink<'a> {
                 Ok(())
             }
             Self::Streaming(composer) => composer.event(event),
+            Self::Consumer(consumer) => consumer.event(event),
         }
     }
 }
@@ -617,7 +658,7 @@ fn parse_lines<'a>(
     parser.parse_stream()?;
     match parser.sink {
         EventSink::Events(events) => Ok((events, parser.emitted)),
-        EventSink::Chunks(_) | EventSink::Streaming(_) => {
+        EventSink::Chunks(_) | EventSink::Streaming(_) | EventSink::Consumer(_) => {
             unreachable!("event sink kind changed during parsing")
         }
     }
@@ -704,7 +745,53 @@ pub(crate) fn parse_document_event_chunks<'a>(
     })?;
     match parser.sink {
         EventSink::Chunks(events) => Ok(events),
-        EventSink::Events(_) | EventSink::Streaming(_) => {
+        EventSink::Events(_) | EventSink::Streaming(_) | EventSink::Consumer(_) => {
+            unreachable!("event sink kind changed during parsing")
+        }
+    }
+}
+
+pub(crate) fn parse_document_with_consumer<'a>(
+    input: &'a str,
+    limits: &Limits,
+    compat_flow: bool,
+    consumer: Box<dyn EventConsumer<'a> + 'a>,
+) -> Result<(), Error> {
+    let mut scanner = Scanner::with_compat(input, limits.clone(), compat_flow)?;
+    let Lines {
+        lines,
+        tokens,
+        stream_start,
+        stream_end,
+        positions,
+    } = read_lines(&mut scanner)?;
+    let flow_ends = flow_ends(&tokens);
+    let end = stream_end.map_or(input.len(), Span::start);
+    let mut parser = Parser {
+        lines,
+        token_arena: tokens,
+        flow_ends,
+        sink: EventSink::Consumer(consumer),
+        limits: limits.clone(),
+        input,
+        positions,
+        compat: compat_flow,
+        documents: 0,
+        emitted: 0,
+        single_document: true,
+        stop_at_second: true,
+        end,
+    };
+    parser.emit(Event::StreamStart {
+        span: stream_start.unwrap_or_else(|| Span::empty(0)),
+    })?;
+    parser.parse_stream()?;
+    parser.emit(Event::StreamEnd {
+        span: stream_end.unwrap_or_else(|| Span::empty(input.len())),
+    })?;
+    match parser.sink {
+        EventSink::Consumer(mut consumer) => consumer.finish(),
+        EventSink::Events(_) | EventSink::Chunks(_) | EventSink::Streaming(_) => {
             unreachable!("event sink kind changed during parsing")
         }
     }
@@ -753,7 +840,7 @@ fn parse_events_with_compat<'a>(
     })?;
     match parser.sink {
         EventSink::Events(events) => Ok(events),
-        EventSink::Chunks(_) | EventSink::Streaming(_) => {
+        EventSink::Chunks(_) | EventSink::Streaming(_) | EventSink::Consumer(_) => {
             unreachable!("event sink kind changed during parsing")
         }
     }
@@ -802,7 +889,7 @@ pub(crate) fn parse_documents(
         EventSink::Streaming(composer) => composer
             .finish()
             .map_err(|error| error.with_location_from(&positions, input)),
-        EventSink::Events(_) | EventSink::Chunks(_) => {
+        EventSink::Events(_) | EventSink::Chunks(_) | EventSink::Consumer(_) => {
             unreachable!("event sink kind changed during parsing")
         }
     }

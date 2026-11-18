@@ -70,13 +70,14 @@ in total; their measured values are in `tools/alloc-corpus.tsv`. Large-scalar pa
 about 53% fewer bytes in total, the 20,000-entry short map about 38% fewer, and the short
 explicit-pair workload about 31% fewer than before this change. Peak heap falls about 13% on
 short sequences and 19% on short explicit pairs, and the affected budgets are tightened to the
-new measurements. Event vectors reserve four fifths of the token count plus headroom, and typed
-source reads over 4 KiB keep events in chunks of at most 8K events rather than one
-spare-capacity vector. The 1 MB nested test document peaks at about 43.5 MB, and the 11 MB one
-at about 392 MB against the 376 MB libyaml reference. Mid-sized documents with ordinary lines
-reserve one token arena from their input length instead of growing through several copies; a
-20 KB configuration fixture falls from about 624 KB to 495 KB allocated in total, with no peak
-change.
+new measurements. Event vectors reserve four fifths of the token count plus headroom. Typed
+source reads over 8 KiB stream events straight into the builder, so no document event vector is
+retained, and the token arena estimates its final size from the density of the scanned prefix.
+The 1 MB nested test document peaks at about 43.3 MB; the 11 MB one peaks at about 432 MB and
+allocates about 596 MB in total, against the 376 MB peak and roughly 673 MB total of the libyaml
+reference. A 20 KB configuration fixture peaks at about 353 KB and allocates about 703 KB in
+total; `tools/typed-alloc-corpus.tsv` budgets that typed path, while `tools/alloc-corpus.tsv`
+keeps the value path.
 
 The release process keeps comparison results private. This document describes
 the methodology so that absolute or relative measurements can be reviewed on
