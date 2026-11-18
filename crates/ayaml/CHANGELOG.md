@@ -27,7 +27,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `SpannedTree` and `SpannedNode` provide path lookup, value and entry byte spans, source scalar
   text, and conservative ambiguity handling for aliases, merge keys, duplicate keys, and multiple
-  documents.
+  documents. An entry span is given only where deleting it removes that entry and nothing else:
+  for a block mapping entry or block sequence item that begins its own line, through its last
+  line break, with any nested value, block scalar, and trailing comment. A flow entry, an entry
+  that shares its first line, and an entry that defines an anchor have none. A value that the
+  source doesn't write has an empty span right after its key's `:`.
 - `compat::parse_events` and `compat::parse_events_with_limits` return the same lazy
   `EventStream` as default mode; `compat::parse_events_eager_with_limits` keeps the eager vector.
 - `Limits::for_max_input()` lifts the four count limits for a valid document within
