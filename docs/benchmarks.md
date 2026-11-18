@@ -40,7 +40,7 @@ The timing harness is `crates/ayaml-bench/benches/throughput.rs`. Allocation bud
 come from `tools/check_alloc_corpus.sh` and its counting allocator,
 `fuzz/src/bin/memcount.rs`; instruction counts use `tools/check_instructions.py`
 with `tools/instruction-probe.rs`. Each allocation row budgets peak bytes, allocation count,
-and total bytes for parsing, emission, and serialization.
+and total bytes, for parsing, emission, and serialization or for one decode.
 
 ```sh
 cargo bench -p ayaml-bench                     # timing, with criterion
@@ -64,34 +64,44 @@ Timing uses repeated samples and reports medians rather than a single run.
 Allocation probes report allocated bytes, allocation count, and peak allocated
 bytes. Peak memory is measured for parsing, emission, and serialization separately.
 
-The token arena doubles after its first chunk, and inputs dense in short lines start with a
-wider chunk. The generated short-node budgets currently allow at most 250 times the input bytes
-in total; their measured values are in `tools/alloc-corpus.tsv`. Large-scalar parsing allocates
-about 53% fewer bytes in total, the 20,000-entry short map about 38% fewer, and the short
-explicit-pair workload about 31% fewer than before this change. Peak heap falls about 13% on
-short sequences and 19% on short explicit pairs, and the affected budgets are tightened to the
-new measurements. Event vectors reserve four fifths of the token count plus headroom. Typed
-source reads over 8 KiB stream events straight into the builder, so no document event vector is
-retained, and the token arena is sized from the density of the input scanned so far, within the
-token limit.
-Scalar tokens keep their raw text as a span and box only values that need decoding; typed nodes
-box tags, keep scalar text as a source slice, and cache hashes in one atomic word. Root flow
-collections reserve their entry count from the parser before their items are built. The 1 MB
-nested test document peaks at about 29.7 MB; the 11 MB one peaks at about 297 MB and allocates
-about 420 MB in total, against the 376 MB peak and roughly 673 MB total of the libyaml
-reference. A 20 KB configuration fixture peaks at about 250 KB and allocates about 470 KB in
-total; `tools/typed-alloc-corpus.tsv` budgets that typed path, while `tools/alloc-corpus.tsv`
-keeps the value path.
+The allocation gate has three sets of budgets, all counted by the same allocator:
 
-The short-scalar work tracked by #178 has current 1 MB peaks of about 98 MB for a flow sequence
-of `1`, 169 MB for an integer flow sequence, 82 MB for a flow mapping, and 56 MB for a short-word
-block sequence. The token arena is 32 bytes per token and an untagged typed node is 80 bytes.
-The remaining gap is the typed node tree overlapping the serde value tree, plus the whole-input
-token arena; `AY-104` tracks composition without the intermediate tree.
+- `tools/alloc-corpus.tsv` budgets the value path: parsing, emission, and serialization of
+  fixtures and generated workloads. Each budget is about 1.25 times its measured value. Against
+  0.1.3 the peak budgets are 4% to 67% lower: 40% lower on the short-sequence workload, 34% on
+  short explicit pairs, and 31% on the short map. The short-node workloads may allocate at most
+  130 times their input bytes in total.
+- `tools/typed-alloc-corpus.tsv` budgets typed decoding of a 20 KB configuration fixture, which
+  peaks at about 250 KB and allocates about 470 KB in total.
+- `tools/json-alloc-corpus.tsv` budgets an untyped decode into a JSON tree through the
+  compatibility reader, as a consumer that reads YAML into JSON does, on the nine document shapes
+  of issue #178. It counts a reallocation by the bytes it adds, as the issue does, so its figures
+  are the issue's. Each budget is about 1.10 times its measured value.
 
-The release process keeps comparison results private. This document describes
-the methodology so that absolute or relative measurements can be reviewed on
-their merits when they are published.
+What holds those peaks down: the token arena is sized from the density of the input scanned so
+far, within the token limit (`docs/limits.md` gives its bounds). Event vectors reserve four
+fifths of the token count plus headroom. A typed read of more than 8 KiB streams events straight
+into the builder, so no document event vector is kept. Scalar tokens keep their raw text as a
+span and box only values that need decoding; typed nodes box tags, keep scalar text as a source
+slice, and cache hashes in one atomic word. Root flow collections reserve their entry count
+from the parser before their items are built. The 1 MB nested test document peaks at about
+29.7 MB; the 11 MB one peaks at about 297 MB and allocates about 420 MB in total, against the
+376 MB peak and roughly 673 MB total that issues #127 and #163 give for a libyaml-based
+reader.
+
+On the nine shapes of #178, the three service descriptions peak at about 30 bytes for each input
+byte, and five of the six megabyte documents at 19 to 72 bytes: all within the 1.2 times that the
+issue asks for, at 0.61 to 1.06 times its reference. The ninth, a megabyte block sequence of
+short words, peaks at 23.1 MB, where 1.2 times allows 21.7 MB. At that peak the token arena
+(8.4 MB), the typed node vector (10.5 MB), the line records (3.2 MB), and the line index
+(1.0 MB) are all live, and the JSON tree, 4.8 MB, is not yet built. AY-104 tracks composition
+without the intermediate node tree, which takes the node vector out of that peak. Earlier
+figures for these shapes in this document and in the issue's thread, such as 98 MB for a flow
+sequence of `1`, measured a decode into ayaml's own `Value`, a larger tree than the issue's.
+
+The release process keeps the results of its timing and comparison gates private; `CONTRIBUTING.md`
+says what those gates are. The figures here are the ones that CI budgets. Where an issue reports
+memory against a libyaml-based reader, its reference is quoted from the issue.
 
 ## Interpreting results
 
