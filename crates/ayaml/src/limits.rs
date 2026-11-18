@@ -224,8 +224,8 @@ impl Limits {
     /// The default profile with the four count limits lifted, for a valid document within
     /// [`MAX_INPUT_BYTES`] that exceeds the memory-bounded defaults.
     ///
-    /// The default count limits deliberately bound the tokens an eager read keeps to about
-    /// 32 MB, so a dense document can reach one of them before the input limit. This profile
+    /// The default count limits deliberately bound the tokens an eager read keeps, to between
+    /// 32 MB and about 80 MB, so a dense document can reach one of them before the input limit. This profile
     /// sets `max_events`, `max_collection_entries`, `max_anchors`, and
     /// `max_alias_dereferences` to `usize::MAX`; the input, depth, scalar, tag-expansion,
     /// document, and alias budgets still apply. A read at this profile can hold a

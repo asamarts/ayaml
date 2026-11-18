@@ -1700,9 +1700,10 @@ const BLOCK_SCALARS: [(&str, &str, &str, u64); 4] = [
 ];
 
 /// Entries in the flow sequence whose tokens the arena holds, and the most memory a read may hold
-/// for each token. A read holds about 190 bytes a token: the token, and the event it becomes.
+/// for each token. A read holds 75 to 120 bytes a token: the token, 32 bytes of it, and what it
+/// becomes, which is most for the reader that builds a value.
 const FLOW_ENTRIES: usize = 200_000;
-const MOST_PER_TOKEN: u64 = 300;
+const MOST_PER_TOKEN: u64 = 160;
 
 /// Line breaks after an unclosed `[`, which fails at the end of the input, and the most memory a
 /// read may hold for each. The scanner's index holds 8 bytes a line, and the error's position is
@@ -1713,6 +1714,11 @@ const MOST_PER_LINE: u64 = 12;
 /// The input a memory case reads, the most memory a read of it may hold at its peak, and whether
 /// the read succeeds.
 fn memory_case(case: &str) -> (String, u64, bool) {
+    if case == REFUSED_DENSE {
+        let input = "- a\n".repeat(DENSE_LINES);
+        let bound = MOST_REFUSED_PER_BYTE * input.len() as u64;
+        return (input, bound, false);
+    }
     if case == "flow sequence" {
         let tokens = 2 * FLOW_ENTRIES + 3;
         let input = format!("[{}a]\n", "a,".repeat(FLOW_ENTRIES));
@@ -1767,7 +1773,12 @@ fn measure_one_read() {
             .unwrap_or_else(|| panic!("no reader {reader:?}"));
         let (input, most, succeeds) = memory_case(case);
         let mut succeeded = !succeeds;
-        let growth = peak_growth(|| succeeded = read(&input));
+        // Room that is reserved and never written shows in the address space alone.
+        let growth = if case == REFUSED_DENSE {
+            address_space_growth(|| succeeded = read(&input))
+        } else {
+            peak_growth(|| succeeded = read(&input))
+        };
         assert_eq!(
             succeeded, succeeds,
             "{case}, {reader}: whether the read succeeded"
@@ -1806,16 +1817,26 @@ fn an_error_at_the_end_holds_one_index_of_lines() {
 
 /// An input over `max_input_bytes` is refused before any of it is read, on every entry point:
 /// the error is at the input's start, and placing it there takes no index of the input's lines.
-/// A line break costs an index 8 bytes, so indexing this input would hold 8 times its size.
+/// A line break costs an index 8 bytes, so indexing this input would hold 8 times its size. A
+/// reader of bytes refuses it before it checks that the bytes are UTF-8, which they aren't here.
 #[test]
 fn an_input_over_the_limit_is_refused_before_it_is_read() {
     in_child!(|| {
         let input = "\n".repeat(ayaml::MAX_INPUT_BYTES + 1);
+        let bytes = vec![0xff_u8; ayaml::MAX_INPUT_BYTES + 1];
         let mut results = Vec::new();
         let mut read = || {
             results = entry_points(&input);
             results.push(("parse_events", ok(ayaml::parse_events(&input))));
             results.push(("SpannedTree::parse", ok(ayaml::SpannedTree::parse(&input))));
+            results.push((
+                "from_slice (not UTF-8)",
+                ok(ayaml::from_slice::<Value>(&bytes)),
+            ));
+            results.push((
+                "from_slice_borrowed (not UTF-8)",
+                ok(ayaml::from_slice_borrowed::<IgnoredAny>(&bytes)),
+            ));
         };
         let growth = if MEASURES_MEMORY {
             Some(peak_growth(&mut read))
@@ -1836,10 +1857,12 @@ fn an_input_over_the_limit_is_refused_before_it_is_read() {
                 "{name}: {error}"
             );
         }
+        // An index of this input's lines would be 8 times its size. A quarter of it leaves room
+        // for the pages of code that these readers run for the first time.
         if let Some(growth) = growth {
             println!("an input over the limit: {growth} bytes at the peak");
             assert!(
-                growth <= 1 << 20,
+                growth <= input.len() as u64 / 4,
                 "refusing an input over the limit held {growth} bytes"
             );
         }
@@ -1866,28 +1889,25 @@ const DENSE_LINES: usize = ayaml::MAX_INPUT_BYTES / 4;
 /// from the input's density alone, it took 16 bytes for each byte of input.
 const MOST_REFUSED_PER_BYTE: u64 = 8;
 
+/// The memory case of a dense input that the default `max_events` refuses.
+const REFUSED_DENSE: &str = "refused dense input";
+
 /// A reader reserves room for no more tokens than `max_events` allows, however many the input's
 /// density promises: the scanner refuses the input at the limit, so the room would stay unused.
+/// Each reader is measured in a child of its own, since a process's peak can't be reset. Where
+/// it can't be measured, the readers still have to refuse the input.
 #[test]
 fn a_refused_dense_input_reserves_no_tokens_past_the_limit() {
+    if MEASURES_MEMORY {
+        measure_in_children(REFUSED_DENSE);
+        return;
+    }
     in_child!(|| {
-        if !MEASURES_MEMORY {
-            println!("not measured, since only Linux reports a process's address space");
-            return;
-        }
-        let input = "- a\n".repeat(DENSE_LINES);
+        let (input, _, _) = memory_case(REFUSED_DENSE);
         for (reader, read) in measured_readers() {
-            let mut refused = false;
-            let growth = address_space_growth(|| refused = !read(&input));
             assert!(
-                refused,
+                !read(&input),
                 "{reader}: the input is over the default max_events"
-            );
-            let ratio = growth as f64 / input.len() as f64;
-            println!("{reader}: {growth} bytes of address space, {ratio:.2} times the input");
-            assert!(
-                growth <= MOST_REFUSED_PER_BYTE * input.len() as u64,
-                "{reader}: {growth} bytes of address space for a refused input"
             );
         }
     });

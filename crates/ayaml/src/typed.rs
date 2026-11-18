@@ -36,19 +36,49 @@ use crate::value::{Value, key_text_full, push_quoted_key};
 #[derive(Debug)]
 struct Node<'de> {
     kind: NodeKind<'de>,
-    text: Option<&'de str>,
-    style: ScalarStyle,
+    text: Text<'de>,
     span: Span,
     /// The hash of the resolved kind, cached so nested mapping keys aren't traversed again.
     hash: AtomicU64,
+}
+
+/// The text a scalar node keeps beside what it resolves to.
+///
+/// A null, a boolean, or a number reads into a string target by its text, as the source or its
+/// decoding gives it, and a null with no text is a value the source doesn't write. A string is
+/// its own text, and keeps the plain text here only for a float target (see `deserialize_f64`).
+#[derive(Clone, Debug)]
+enum Text<'de> {
+    /// No text: a value the source doesn't write, a collection, or a string that isn't plain.
+    None,
+    /// No text, and not a value the source left out: what a bare variant name holds, which is
+    /// nothing. It fills a unit variant and an optional one, and no collection (D87).
+    Nothing,
+    /// A plain scalar's text in the source.
+    Plain(&'de str),
+    /// The value of a quoted or block scalar that a tag makes a null, a boolean, or a number,
+    /// where it is a slice of the source.
+    Spelled(&'de str),
+    /// The same, where only decoding gives the value, as an escape or a block scalar does.
+    Decoded(Box<str>),
+}
+
+impl Text<'_> {
+    /// The text, if the node keeps any.
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::None | Self::Nothing => None,
+            Self::Plain(text) | Self::Spelled(text) => Some(text),
+            Self::Decoded(text) => Some(text),
+        }
+    }
 }
 
 impl Clone for Node<'_> {
     fn clone(&self) -> Self {
         Self {
             kind: self.kind.clone(),
-            text: self.text,
-            style: self.style,
+            text: self.text.clone(),
             span: self.span,
             hash: AtomicU64::new(self.hash.load(Ordering::Relaxed)),
         }
@@ -150,18 +180,16 @@ impl<'de> Node<'de> {
     fn new(kind: NodeKind<'de>, span: Span) -> Self {
         Self {
             kind,
-            text: None,
-            style: ScalarStyle::Plain,
+            text: Text::None,
             span,
             hash: AtomicU64::new(0),
         }
     }
 
-    fn scalar(kind: NodeKind<'de>, text: Option<&'de str>, style: ScalarStyle, span: Span) -> Self {
+    fn scalar(kind: NodeKind<'de>, text: Text<'de>, span: Span) -> Self {
         Self {
             kind,
             text,
-            style,
             span,
             hash: AtomicU64::new(0),
         }
@@ -1066,21 +1094,19 @@ fn scalar_node<'de>(
     let scalar_text = borrowed_or_owned(value, raw, style);
     let string = match tag {
         Some(tag) if tag.is_non_specific() => {
-            let inner = Node::scalar(NodeKind::String(scalar_text.clone()), None, style, span);
+            let inner = Node::scalar(NodeKind::String(scalar_text.clone()), Text::None, span);
             return Ok(Node::scalar(
                 NodeKind::Tagged(Box::new(tag.clone()), Box::new(inner)),
-                None,
-                style,
+                Text::None,
                 span,
             ));
         }
         Some(tag) if tag.is_core() => {
             if !matches!(tag.suffix(), "str" | "int" | "float" | "bool" | "null") {
-                let inner = Node::scalar(NodeKind::String(scalar_text.clone()), None, style, span);
+                let inner = Node::scalar(NodeKind::String(scalar_text.clone()), Text::None, span);
                 return Ok(Node::scalar(
                     NodeKind::Tagged(Box::new(tag.clone()), Box::new(inner)),
-                    None,
-                    style,
+                    Text::None,
                     span,
                 ));
             }
@@ -1088,11 +1114,10 @@ fn scalar_node<'de>(
         }
         Some(tag) => {
             if style != ScalarStyle::Plain || plain_resolves_to_string(text) {
-                let inner = Node::scalar(NodeKind::String(scalar_text.clone()), None, style, span);
+                let inner = Node::scalar(NodeKind::String(scalar_text.clone()), Text::None, span);
                 return Ok(Node::scalar(
                     NodeKind::Tagged(Box::new(tag.clone()), Box::new(inner)),
-                    None,
-                    style,
+                    Text::None,
                     span,
                 ));
             }
@@ -1102,15 +1127,10 @@ fn scalar_node<'de>(
     };
     if string {
         let text = match raw {
-            Cow::Borrowed(text) if style == ScalarStyle::Plain => Some(*text),
-            _ => None,
+            Cow::Borrowed(text) if style == ScalarStyle::Plain => Text::Plain(text),
+            _ => Text::None,
         };
-        return Ok(Node::scalar(
-            NodeKind::String(scalar_text),
-            text,
-            style,
-            span,
-        ));
+        return Ok(Node::scalar(NodeKind::String(scalar_text), text, span));
     }
     let resolved = resolve_scalar(text, style, tag).map_err(|error| error.with_span(span))?;
     Ok(node_from_value(resolved, value, raw, style, span))
@@ -1146,28 +1166,16 @@ fn node_from_value<'de>(
             NodeKind::Tagged(Box::new(tagged.tag), Box::new(inner))
         }
     };
-    let text = match raw {
-        Cow::Borrowed(text) if style == ScalarStyle::Plain => Some(*text),
-        _ if style == ScalarStyle::Plain => None,
-        _ => spelled_text(&scalar_text, raw),
+    // A plain scalar keeps its source text. A quoted or block scalar reaches here only when a
+    // tag makes it a null, a boolean, or a number, and keeps its value, which is what a string
+    // target reads and what tells an explicit null from a value that isn't written.
+    let text = match (style, raw, scalar_text) {
+        (ScalarStyle::Plain, Cow::Borrowed(text), _) => Text::Plain(text),
+        (ScalarStyle::Plain, Cow::Owned(_), _) => Text::None,
+        (_, _, Cow::Borrowed(value)) => Text::Spelled(value),
+        (_, _, Cow::Owned(value)) => Text::Decoded(value.into_boxed_str()),
     };
-    Node::scalar(kind, text, style, span)
-}
-
-/// The text of a scalar that isn't plain and that a tag makes a null, a boolean, or a number, as
-/// the source spells it. That is the value when the value is a slice of the source, and
-/// otherwise the place in the scalar's source text where the value stands, as a block scalar's
-/// does. It is `None` when only decoding gives the value, as an escape does. An empty value is
-/// always kept, so a scalar of these styles with no text has a value that isn't empty.
-fn spelled_text<'de>(value: &Cow<'de, str>, raw: &Cow<'de, str>) -> Option<&'de str> {
-    match (value, raw) {
-        (Cow::Borrowed(value), _) => Some(*value),
-        (Cow::Owned(value), _) if value.is_empty() => Some(""),
-        (Cow::Owned(value), Cow::Borrowed(raw)) => raw
-            .find(value.as_str())
-            .and_then(|at| raw.get(at..at + value.len())),
-        (Cow::Owned(_), Cow::Owned(_)) => None,
-    }
+    Node::scalar(kind, text, span)
 }
 
 /// A string that a tag makes one, as in `!!str 01` or `! 01`, keeps no text, which only a float
@@ -1178,7 +1186,7 @@ fn forget_string_text(node: &mut Node<'_>) {
         _ => node,
     };
     if matches!(node.kind, NodeKind::String(_)) {
-        node.text = None;
+        node.text = Text::None;
     }
 }
 
@@ -1375,9 +1383,10 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
                     .deserialize_string(visitor)
                     .map_err(|error| with_span(error, span));
             }
-            _ => match node.text {
-                Some(value) => visitor.visit_borrowed_str(value),
-                None => {
+            _ => match &node.text {
+                Text::Plain(value) | Text::Spelled(value) => visitor.visit_borrowed_str(value),
+                Text::Decoded(value) => visitor.visit_str(value),
+                Text::None | Text::Nothing => {
                     return NodeDeserializer::new(node)
                         .deserialize_any(visitor)
                         .map_err(|error| with_span(error, span));
@@ -1498,10 +1507,12 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
             // A tag names the variant by its whole name (`Tag::variant_name`), so `!<tag:x:B>`
             // and `!e!B` under `%TAG !e! tag:x:` select the same variant.
             NodeKind::Tagged(tag, value) => (tag.variant_name(), span, NodeValue::Ref(value)),
+            // A bare name holds nothing. That is a unit variant, and it is not an empty
+            // collection for a variant that holds one: `List` is not `List: []`.
             NodeKind::String(variant) => (
                 variant.as_ref().to_owned(),
                 span,
-                NodeValue::Null(Node::new(NodeKind::Null, span)),
+                NodeValue::Null(Node::scalar(NodeKind::Null, Text::Nothing, span)),
             ),
             NodeKind::Mapping(entries) => {
                 let mut iter = entries.iter();
@@ -1571,9 +1582,7 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
         // a number spelling with a leading zero, as in `01`, which resolves to a string. Other text,
         // such as `inf` or `1e999`, doesn't, and nor does a string that a tag makes one, which
         // keeps no text.
-        if node.style == ScalarStyle::Plain
-            && let Some(text) = node.text
-        {
+        if let Text::Plain(text) = node.text {
             match &node.kind {
                 NodeKind::Number(_) => {
                     if let Ok(value) = text.parse::<f64>() {
@@ -1645,12 +1654,12 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
 /// An empty scalar, such as a missing value, reads as an empty sequence,
 /// map, or struct; an explicit `~` or `null` does not.
 fn is_empty_scalar(node: &Node<'_>) -> bool {
-    // A missing value is a plain null with no text. A quoted or block scalar with no text has a
-    // value that only decoding gives, which isn't empty (see `spelled_text`).
+    // A value that the source doesn't write is a null with no text. A written null keeps its
+    // text in every style, and is explicit unless that text is empty, as in `!!null ""`. What
+    // a bare variant name holds is no value at all.
     matches!(node.kind, NodeKind::Null)
-        && node
-            .text
-            .map_or(node.style == ScalarStyle::Plain, str::is_empty)
+        && !matches!(node.text, Text::Nothing)
+        && node.text.as_str().is_none_or(str::is_empty)
 }
 
 /// An explicit `~` or `null` is not an empty collection. It's reported before

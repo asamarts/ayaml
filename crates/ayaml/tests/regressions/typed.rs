@@ -938,34 +938,58 @@ fn typed_scalars_read_like_composed_values() {
     }
 }
 
-/// What each reader of one document from text says of an input, read into a map of `T`.
+/// What each reader says of an input, read into a map of `T`.
 type Readings<T> = Vec<(
     &'static str,
     Result<std::collections::BTreeMap<String, T>, ayaml::Error>,
 )>;
 
-/// Every reader of one document from text, each into a map of `T`.
-fn typed_readers<T: serde::de::DeserializeOwned>(input: &str) -> Readings<T> {
+/// The readers of one document from text that build as they parse (D91), each into a map of `T`.
+fn document_readers<T: serde::de::DeserializeOwned>(input: &str) -> Readings<T> {
     #[cfg_attr(
         not(feature = "libyaml-compat"),
-        allow(unused_mut, reason = "the list is extended only by the compat reader")
+        allow(unused_mut, reason = "the list is extended only by the compat readers")
     )]
     let mut readers = vec![
         ("from_str", ayaml::from_str(input)),
         ("from_slice", ayaml::from_slice(input.as_bytes())),
-        (
-            "from_str_borrowed_with_limits",
-            ayaml::from_str_borrowed_with_limits(input, &ayaml::Limits::default()),
-        ),
     ];
     #[cfg(feature = "libyaml-compat")]
-    readers.push(("compat::from_str", ayaml::compat::from_str(input)));
+    readers.extend([
+        ("compat::from_str", ayaml::compat::from_str(input)),
+        (
+            "compat::from_str_seed",
+            ayaml::compat::from_str_seed(input, std::marker::PhantomData),
+        ),
+    ]);
+    readers
+}
+
+/// Every reader that decodes from text, each into a map of `T`: the readers of one document, and
+/// the cursor over a stream, which builds a document from its events once it has them all.
+fn source_readers<T: serde::de::DeserializeOwned>(input: &str) -> Readings<T> {
+    let mut readers = document_readers(input);
+    readers.extend([
+        (
+            "Deserializer::next_borrowed",
+            ayaml::Deserializer::from_str(input)
+                .and_then(|mut cursor| cursor.next_borrowed())
+                .map(|document| document.expect("a document")),
+        ),
+        (
+            "Deserializer::next_seed_borrowed",
+            ayaml::Deserializer::from_str(input)
+                .and_then(|mut cursor| cursor.next_seed_borrowed(std::marker::PhantomData))
+                .map(|document| document.expect("a document")),
+        ),
+    ]);
     readers
 }
 
 /// A scalar that a core tag makes a number, a boolean, or a null reads into a string target by
 /// its text, whatever its style, as a plain one does. Its text is what the source spells: a
-/// hexadecimal integer stays hexadecimal, and a float keeps its trailing zero.
+/// hexadecimal integer stays hexadecimal, and a float keeps its trailing zero. Where only an
+/// escape or an escaped line break spells the value, the text is the decoded value.
 #[test]
 fn a_scalar_a_core_tag_retypes_reads_into_a_string_by_its_text() {
     for (input, text) in [
@@ -979,33 +1003,67 @@ fn a_scalar_a_core_tag_retypes_reads_into_a_string_by_its_text() {
         ("x: !!bool 'True'\n", "True"),
         ("x: !!null \"~\"\n", "~"),
         ("x: !!null 'null'\n", "null"),
+        ("x: !!int \"1\\x32\"\n", "12"),
+        ("x: !!int \"\\x31\"\n", "1"),
+        ("x: !!int \"1\\\n  2\"\n", "12"),
+        ("x: !!float \"1.\\x35\"\n", "1.5"),
+        ("x: !!bool \"tr\\x75e\"\n", "true"),
+        ("x: !!null \"\\x7e\"\n", "~"),
     ] {
-        for (reader, result) in typed_readers::<String>(input) {
+        for (reader, result) in source_readers::<String>(input) {
             let read = result.unwrap_or_else(|error| panic!("{reader} {input:?}: {error}"));
             assert_eq!(read["x"], text, "{reader} {input:?}");
         }
     }
     // The tag still decides the type that a target of that type reads.
-    for (reader, result) in typed_readers::<u32>("x: !!int \"0x1F\"\n") {
-        assert_eq!(result.expect(reader)["x"], 31, "{reader}");
+    for input in ["x: !!int \"0x1F\"\n", "x: !!int \"\\x331\"\n"] {
+        for (reader, result) in source_readers::<u32>(input) {
+            assert_eq!(result.expect(reader)["x"], 31, "{reader} {input:?}");
+        }
     }
 }
 
-/// A value that only an escape spells is not in the source, so the node keeps no text for it. It
-/// reads as the type its tag gives, and a string target refuses it instead of guessing a text.
+/// A key names a field by its text, never by its number: an integer key is not the field at that
+/// index, whatever style and escapes spell it.
 #[test]
-fn a_retyped_scalar_that_only_an_escape_spells_has_no_text() {
-    let input = "x: !!int \"1\\x32\"\n";
-    for (reader, result) in typed_readers::<u32>(input) {
-        assert_eq!(result.expect(reader)["x"], 12, "{reader}");
+fn a_number_key_names_a_field_by_its_text() {
+    #[derive(Debug, serde::Deserialize)]
+    struct Fields {
+        a: u32,
+        #[serde(default)]
+        b: u32,
     }
-    for (reader, result) in typed_readers::<String>(input) {
-        let error = result.expect_err(reader);
-        assert_eq!(error.kind(), ayaml::ErrorKind::Serde, "{reader}: {error}");
-        assert!(
-            error.to_string().contains("expected a string"),
-            "{reader}: {error}"
-        );
+    let read = |input: &str| -> Vec<(&'static str, Result<Fields, ayaml::Error>)> {
+        vec![
+            ("from_str", ayaml::from_str(input)),
+            (
+                "Deserializer::next_borrowed",
+                ayaml::Deserializer::from_str(input)
+                    .and_then(|mut cursor| cursor.next_borrowed())
+                    .map(|document| document.expect("a document")),
+            ),
+        ]
+    };
+    for input in [
+        "0: 7\n",
+        "!!int \"0\": 7\n",
+        "!!int \"0\\x30\": 7\n",
+        "!!int '0': 7\n",
+    ] {
+        for (reader, result) in read(input) {
+            let error = result.expect_err(reader);
+            assert!(
+                error.to_string().contains("missing field `a`"),
+                "{reader} {input:?}: {error}"
+            );
+        }
+    }
+    // The key after `a` is no field's name, so it is passed over and `b` keeps its default.
+    for input in ["a: 1\n1: 7\n", "a: 1\n!!int \"\\x2b1\": 7\n"] {
+        for (reader, result) in read(input) {
+            let fields = result.unwrap_or_else(|error| panic!("{reader} {input:?}: {error}"));
+            assert_eq!((fields.a, fields.b), (1, 0), "{reader} {input:?}");
+        }
     }
 }
 
@@ -1013,6 +1071,21 @@ fn a_retyped_scalar_that_only_an_escape_spells_has_no_text() {
 /// no text at all, quoted or block, is a missing value, as an empty plain one is.
 #[test]
 fn a_quoted_null_under_a_tag_is_an_explicit_null() {
+    use std::collections::BTreeMap;
+
+    #[derive(Debug, Default, serde::Deserialize)]
+    #[serde(default)]
+    struct Defaults {
+        a: u32,
+    }
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    enum Shape {
+        Point { x: u32 },
+    }
+    assert_eq!(
+        ayaml::from_str::<Shape>("Point:\n  x: 1\n").ok(),
+        Some(Shape::Point { x: 1 })
+    );
     for input in [
         "x: !!null \"~\"\n",
         "x: !!null 'null'\n",
@@ -1020,23 +1093,38 @@ fn a_quoted_null_under_a_tag_is_an_explicit_null() {
         "x: !!null ~\n",
         "x: ~\n",
     ] {
-        for (reader, result) in typed_readers::<Vec<i32>>(input) {
+        for (reader, result) in source_readers::<Vec<i32>>(input) {
             let error = result.expect_err(reader);
             assert!(
                 error.to_string().contains("expected a sequence"),
                 "{reader} {input:?}: {error}"
             );
         }
-        for (reader, result) in typed_readers::<std::collections::BTreeMap<String, i32>>(input) {
+        for (reader, result) in source_readers::<BTreeMap<String, i32>>(input) {
             let error = result.expect_err(reader);
             assert!(
                 error.to_string().contains("expected a map"),
                 "{reader} {input:?}: {error}"
             );
         }
-        for (reader, result) in typed_readers::<Option<i32>>(input) {
+        for (reader, result) in source_readers::<Defaults>(input) {
+            let error = result.expect_err(reader);
+            assert!(
+                error.to_string().contains("expected struct Defaults"),
+                "{reader} {input:?}: {error}"
+            );
+        }
+        for (reader, result) in source_readers::<Option<i32>>(input) {
             assert_eq!(result.expect(reader)["x"], None, "{reader} {input:?}");
         }
+        // A struct variant, named by the entry's key.
+        let variant = input.replacen("x:", "Point:", 1);
+        let error = ayaml::from_str::<Shape>(&variant).expect_err(&variant);
+        assert_eq!(
+            error.kind(),
+            ayaml::ErrorKind::Serde,
+            "{variant:?}: {error}"
+        );
     }
     for input in [
         "x:\n",
@@ -1046,92 +1134,172 @@ fn a_quoted_null_under_a_tag_is_an_explicit_null() {
         "x: !!null |-\n",
         "x: !!null \"\\\n\"\n",
     ] {
-        for (reader, result) in typed_readers::<Vec<i32>>(input) {
+        for (reader, result) in source_readers::<Vec<i32>>(input) {
             let read = result.unwrap_or_else(|error| panic!("{reader} {input:?}: {error}"));
             assert!(read["x"].is_empty(), "{reader} {input:?}");
+        }
+        for (reader, result) in source_readers::<BTreeMap<String, i32>>(input) {
+            let read = result.unwrap_or_else(|error| panic!("{reader} {input:?}: {error}"));
+            assert!(read["x"].is_empty(), "{reader} {input:?}");
+        }
+        for (reader, result) in source_readers::<Defaults>(input) {
+            let read = result.unwrap_or_else(|error| panic!("{reader} {input:?}: {error}"));
+            assert_eq!(read["x"].a, 0, "{reader} {input:?}");
         }
     }
 }
 
-/// Comment lines before `input`, to at least `bytes` bytes: the lines, and how many.
+/// A bare variant name holds nothing, so it fills a unit variant and an optional one, and it is
+/// not an empty collection for a variant that holds one (D87). A tag with no value, and a key
+/// with no value, are a value the source doesn't write, which still reads as an empty one.
+#[test]
+fn a_bare_variant_name_does_not_fill_a_collection() {
+    use std::collections::BTreeMap;
+
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    enum Holds {
+        List(Vec<u32>),
+        Map(BTreeMap<String, u32>),
+        Opt(Option<u32>),
+        Data(u32),
+        Text(String),
+        Unit,
+    }
+    for input in ["List\n", "Map\n", "Data\n", "Text\n", "\"List\"\n"] {
+        for (path, result) in ["from_str", "from_str_borrowed", "from_value"]
+            .into_iter()
+            .zip(every_path::<Holds>(input))
+        {
+            assert!(result.is_err(), "{path} {input:?}: {result:?}");
+        }
+    }
+    for (input, variant) in [("Opt\n", Holds::Opt(None)), ("Unit\n", Holds::Unit)] {
+        for (path, result) in ["from_str", "from_str_borrowed", "from_value"]
+            .into_iter()
+            .zip(every_path::<Holds>(input))
+        {
+            assert_eq!(result.as_ref(), Ok(&variant), "{path} {input:?}");
+        }
+    }
+    for (input, variant) in [
+        ("List: []\n", Holds::List(Vec::new())),
+        ("!List []\n", Holds::List(Vec::new())),
+        ("List:\n", Holds::List(Vec::new())),
+        ("!List\n", Holds::List(Vec::new())),
+        ("Map: {}\n", Holds::Map(BTreeMap::new())),
+    ] {
+        assert_eq!(
+            ayaml::from_str::<Holds>(input).as_ref().ok(),
+            Some(&variant),
+            "{input:?}"
+        );
+    }
+}
+
+/// Comment lines to at least `bytes` bytes: the lines, and how many.
 fn comments(bytes: usize) -> (String, usize) {
     const LINE: &str = "# a comment line that holds no token\n";
     let lines = bytes.div_ceil(LINE.len());
     (LINE.repeat(lines), lines)
 }
 
-/// A typed reader takes one of three paths by the input's length: at most 4 KiB, at most 8 KiB,
-/// and above. With two problems in a document, each path reports the one that comes first, as
-/// `parse_value` does, and reports it the same way: the comments move the place and nothing else.
+/// `text` with every number after `line ` lowered by `lines`.
+fn lines_lowered(text: &str, lines: usize) -> String {
+    let mut lowered = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("line ") {
+        let (before, after) = rest.split_at(at + "line ".len());
+        lowered.push_str(before);
+        let digits = after.len() - after.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if let Ok(number) = after[..digits].parse::<usize>() {
+            lowered.push_str(&(number - lines).to_string());
+        }
+        rest = &after[digits..];
+    }
+    lowered.push_str(rest);
+    lowered
+}
+
+/// A reader of one document takes one of three paths by the input's length: at most 4 KiB, at
+/// most 8 KiB, and above. With two problems in a document, each path reports the one that comes
+/// first, after any that the scanner finds, as `parse_value` does. Comment lines before the
+/// document move the place of the problem and change nothing else, in the message either.
 #[test]
 fn a_typed_reader_reports_the_first_problem_at_every_input_size() {
     use ayaml::ErrorKind;
 
-    // Each input, and the kinds its first problem may have: a syntax error comes from the
-    // scanner or the parser.
-    let syntax = [ErrorKind::Scanner, ErrorKind::Parser];
-    let cases: [(&str, &[ErrorKind]); 6] = [
-        // A duplicate key, then a sequence that never closes.
-        ("a: 1\na: 2\nb: [\n", &[ErrorKind::DuplicateKey]),
-        // The other way round: the syntax error is first.
-        ("b: [\na: 1\na: 2\n", &syntax),
+    // Each input, and the kind of its first problem for a reader that refuses a repeated key.
+    let cases = [
+        // A duplicate key, then a sequence that never closes, which the parser finds.
+        ("a: 1\na: 2\nb: [\n", ErrorKind::DuplicateKey),
+        // A duplicate key, then a quote that never closes. The scanner reads the whole input
+        // before anything is parsed, so what it finds comes first.
+        ("a: 1\na: 2\nb: \"x\n", ErrorKind::Scanner),
         // An alias to no anchor, then a mapping that never closes.
-        ("a: *nowhere\nb: {\n", &[ErrorKind::Composition]),
+        ("a: *nowhere\nb: {\n", ErrorKind::Composition),
+        // A tag that its scalar can't take, then a duplicate key: both the builder's.
+        ("a: !!int x\nb: 1\nb: 2\n", ErrorKind::Resolution),
         // One problem alone, of each kind.
-        ("a: 1\na: 2\n", &[ErrorKind::DuplicateKey]),
-        ("a: [\n", &syntax),
-        ("a: *nowhere\n", &[ErrorKind::Composition]),
+        ("a: 1\na: 2\n", ErrorKind::DuplicateKey),
+        ("a: [\n", ErrorKind::Parser),
+        ("a: *nowhere\n", ErrorKind::Composition),
     ];
-    for (input, kinds) in cases {
-        let kind = ayaml::parse_value(input).expect_err(input).kind();
-        assert!(
-            kinds.contains(&kind),
-            "{input:?}: parse_value says {kind:?}"
-        );
+    for (input, kind) in cases {
+        let value = ayaml::parse_value(input).expect_err(input);
+        assert_eq!(value.kind(), kind, "{input:?}: parse_value says {value}");
         // What each reader says of the input alone. Compat reads a repeated key as libyaml
-        // does, so there it is no problem; the others agree with `parse_value`.
-        let plain = typed_readers::<ayaml::Value>(input);
-        for (reader, result) in &plain {
+        // does, so there it is no problem; the others say what `parse_value` says, word for
+        // word.
+        let alone = document_readers::<ayaml::Value>(input);
+        for (reader, result) in &alone {
             if !reader.starts_with("compat") {
                 let error = result.as_ref().expect_err(reader);
-                assert_eq!(error.kind(), kind, "{reader} {input:?}: {error}");
+                assert_eq!(error.to_string(), value.to_string(), "{reader} {input:?}");
             }
         }
         for bytes in [4_200, 8_300] {
             let (before, lines) = comments(bytes);
             let longer = format!("{before}{input}");
-            for ((reader, result), (_, plain)) in typed_readers::<ayaml::Value>(&longer)
+            for ((reader, result), (_, alone)) in document_readers::<ayaml::Value>(&longer)
                 .into_iter()
-                .zip(&plain)
+                .zip(&alone)
             {
-                let (error, plain) = match (result, plain) {
-                    (Ok(read), Ok(plain)) => {
-                        assert_eq!(&read, plain, "{reader} {input:?} after {bytes}");
+                let (error, alone) = match (result, alone) {
+                    (Ok(read), Ok(alone)) => {
+                        assert_eq!(&read, alone, "{reader} {input:?} after {bytes}");
                         continue;
                     }
-                    (Err(error), Err(plain)) => (error, plain),
-                    (result, plain) => {
-                        panic!("{reader} {input:?} after {bytes}: {result:?}, alone {plain:?}")
+                    (Err(error), Err(alone)) => (error, alone),
+                    (result, alone) => {
+                        panic!("{reader} {input:?} after {bytes}: {result:?}, alone {alone:?}")
                     }
                 };
-                let place = plain.location().expect("a location");
-                let span = plain.span().expect("a span");
                 assert_eq!(
                     error.kind(),
-                    plain.kind(),
+                    alone.kind(),
                     "{reader} {input:?} after {bytes}: {error}"
+                );
+                assert_eq!(
+                    lines_lowered(&error.to_string(), lines),
+                    alone.to_string(),
+                    "{reader} {input:?} after {bytes}"
                 );
                 assert_eq!(
                     error.span().map(ayaml::Span::start),
-                    Some(span.start() + before.len()),
-                    "{reader} {input:?} after {bytes}: {error}"
-                );
-                assert_eq!(
-                    error.location().map(|at| (at.line(), at.column())),
-                    Some((place.line() + lines, place.column())),
+                    alone.span().map(|span| span.start() + before.len()),
                     "{reader} {input:?} after {bytes}: {error}"
                 );
             }
         }
+    }
+    // The cursor over a stream reads a document's events before it builds from them, at every
+    // size, so within a document it reports a syntax error before an earlier duplicate key.
+    for bytes in [0, 4_200, 8_300] {
+        let (before, _) = comments(bytes);
+        let input = format!("{before}a: 1\na: 2\nb: [\n");
+        let error = ayaml::Deserializer::from_str(&input)
+            .and_then(|mut cursor| cursor.next_borrowed::<ayaml::Value>())
+            .expect_err("a syntax error");
+        assert_eq!(error.kind(), ErrorKind::Parser, "after {bytes}: {error}");
     }
 }
