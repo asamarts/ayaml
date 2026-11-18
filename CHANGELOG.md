@@ -63,10 +63,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are tightened. Typed reads over 8 KiB stream events into the builder, and the token arena
   estimates its size from the scanned prefix. Scalar tokens keep their raw text as a span and
   box only the values that need decoding; typed nodes box tags, keep scalar text as a source
-  slice, and cache hashes in one atomic word. The 1 MB nested document peaks at about 29.7 MB;
-  the 11 MB one peaks at about 297 MB and allocates about 420 MB in total, against the 376 MB
-  peak and roughly 673 MB total of the libyaml reference. A 20 KB configuration fixture peaks
-  at about 250 KB and allocates about 470 KB in total.
+  slice, and cache hashes in one atomic word. Root flow collections reserve their entry count
+  before their items are built, so a wide flow collection avoids a final vector copy. The 1 MB
+  nested document peaks at about 29.7 MB; the 11 MB one peaks at about 297 MB and allocates
+  about 420 MB in total, against the 376 MB peak and roughly 673 MB total of the libyaml
+  reference. A 20 KB configuration fixture peaks at about 250 KB and allocates about 470 KB in
+  total.
 - Mappings and typed mapping keys cache their structural hash, so a mapping nested inside a
   mapping key is hashed once per level instead of once for every outer level and entry.
 

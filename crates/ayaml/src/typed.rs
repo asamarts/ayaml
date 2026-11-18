@@ -382,6 +382,7 @@ fn build_feed<'de>(
         root: None,
         in_document: false,
         result: None,
+        pending_capacity: None,
     };
     let result = builder.build();
     *budget = builder.budget;
@@ -400,6 +401,7 @@ struct Builder<'de> {
     root: Option<Node<'de>>,
     in_document: bool,
     result: Option<Rc<RefCell<Option<Node<'de>>>>>,
+    pending_capacity: Option<usize>,
 }
 
 impl<'de> Builder<'de> {
@@ -421,6 +423,7 @@ impl<'de> Builder<'de> {
             root: None,
             in_document: false,
             result: Some(result),
+            pending_capacity: None,
         }
     }
 }
@@ -514,6 +517,10 @@ enum Frame<'de> {
 impl<'de> EventConsumer<'de> for Builder<'de> {
     fn event(&mut self, event: Event<'de>) -> Result<(), Error> {
         self.push(event)
+    }
+
+    fn reserve_collection(&mut self, entries: usize) {
+        self.pending_capacity = Some(entries);
     }
 
     fn finish(&mut self) -> Result<(), Error> {
@@ -687,6 +694,7 @@ impl<'de> Builder<'de> {
     /// `DocumentEnd`; any other node attaches to the open collection on the stack.
     fn push_node(&mut self, event: Event<'de>) -> Result<(), Error> {
         let event_span = event.span();
+        let capacity = self.pending_capacity.take().unwrap_or(0);
         if self.root.is_some() && self.stack.is_empty() {
             return Err(self.error_at(event_span, "expected document end"));
         }
@@ -745,7 +753,7 @@ impl<'de> Builder<'de> {
                     tag,
                     anchor,
                     span,
-                    items: Vec::new(),
+                    items: Vec::with_capacity(capacity),
                     size: self.limits.node_cost_bytes,
                     height: 0,
                 });
@@ -764,7 +772,7 @@ impl<'de> Builder<'de> {
                     tag,
                     anchor,
                     span,
-                    entries: Vec::new(),
+                    entries: Vec::with_capacity(capacity),
                     seen: HashSet::new(),
                     key: None,
                     size: self.limits.node_cost_bytes,
