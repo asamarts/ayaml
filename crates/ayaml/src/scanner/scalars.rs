@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use super::ScalarToken;
 use super::line::{
     Continuation, LineShape, LineStop, Owner, block_prefix, is_blank, is_line_break,
     leading_spaces, line_shape, strip_comment, walk_line,
@@ -39,7 +40,6 @@ impl<'a> Scanner<'a> {
             }
         }
         let raw_text = &self.input[start..self.pos];
-        let raw = Cow::Borrowed(raw_text);
         let value = scalar_cow(
             value,
             raw_text
@@ -47,11 +47,10 @@ impl<'a> Scanner<'a> {
                 .unwrap_or(""),
         );
         self.make(
-            TokenKind::Scalar {
+            TokenKind::Scalar(Box::new(ScalarToken {
                 value,
-                raw,
                 style: ScalarStyle::SingleQuoted,
-            },
+            })),
             start,
             self.pos,
         )
@@ -359,7 +358,6 @@ impl<'a> Scanner<'a> {
             }
         }
         let raw_text = &self.input[start..self.pos];
-        let raw = Cow::Borrowed(raw_text);
         let value = scalar_cow(
             value,
             raw_text
@@ -367,11 +365,10 @@ impl<'a> Scanner<'a> {
                 .unwrap_or(""),
         );
         self.make(
-            TokenKind::Scalar {
+            TokenKind::Scalar(Box::new(ScalarToken {
                 value,
-                raw,
                 style: ScalarStyle::DoubleQuoted,
-            },
+            })),
             start,
             self.pos,
         )
@@ -714,17 +711,15 @@ impl<'a> Scanner<'a> {
         self.pos = end;
 
         let value = build_block_scalar(text, final_break, literal, chomping);
-        let raw = Cow::Borrowed(&self.input[start..end]);
         self.make(
-            TokenKind::Scalar {
+            TokenKind::Scalar(Box::new(ScalarToken {
                 value: Cow::Owned(value),
-                raw,
                 style: if literal {
                     ScalarStyle::Literal
                 } else {
                     ScalarStyle::Folded
                 },
-            },
+            })),
             start,
             end,
         )
@@ -1033,21 +1028,14 @@ impl<'a> Scanner<'a> {
         if let Some((_, line)) = self.short_flow_scalar {
             self.short_flow_scalar = Some((end, line));
         }
-        let raw_text = &self.input[start..end];
-        let raw = Cow::Borrowed(raw_text);
-        let value = match value {
-            Some(value) => Cow::Owned(value),
-            None => Cow::Borrowed(&self.input[start..self.trim_trailing_whitespace(start, end)]),
-        };
-        self.make(
-            TokenKind::Scalar {
-                value,
-                raw,
+        let kind = match value {
+            Some(value) => TokenKind::Scalar(Box::new(ScalarToken {
+                value: Cow::Owned(value),
                 style: ScalarStyle::Plain,
-            },
-            start,
-            end,
-        )
+            })),
+            None => TokenKind::PlainScalar,
+        };
+        self.make(kind, start, end)
     }
 
     /// The indentation of the next line after the current position that holds more than white

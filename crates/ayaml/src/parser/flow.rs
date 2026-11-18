@@ -686,8 +686,10 @@ impl<'a> Parser<'a> {
         let mut index = 0;
         for token in self.tokens(run) {
             let duplicate = match &token.kind {
-                TokenKind::Tag(value) => tag.replace(value.clone()).is_some(),
-                TokenKind::Anchor(value) => anchor.replace(Anchor::new(value.clone())).is_some(),
+                TokenKind::Tag(value) => tag.replace(value.as_ref().clone()).is_some(),
+                TokenKind::Anchor(value) => anchor
+                    .replace(Anchor::new(value.as_ref().clone()))
+                    .is_some(),
                 _ => break,
             };
             if duplicate {

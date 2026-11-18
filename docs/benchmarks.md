@@ -73,11 +73,12 @@ short sequences and 19% on short explicit pairs, and the affected budgets are ti
 new measurements. Event vectors reserve four fifths of the token count plus headroom. Typed
 source reads over 8 KiB stream events straight into the builder, so no document event vector is
 retained, and the token arena estimates its final size from the density of the scanned prefix.
-The 1 MB nested test document peaks at about 43.3 MB; the 11 MB one peaks at about 432 MB and
-allocates about 596 MB in total, against the 376 MB peak and roughly 673 MB total of the libyaml
-reference. A 20 KB configuration fixture peaks at about 353 KB and allocates about 703 KB in
-total; `tools/typed-alloc-corpus.tsv` budgets that typed path, while `tools/alloc-corpus.tsv`
-keeps the value path.
+Scalar tokens keep their raw text as a span and box only values that need decoding; typed nodes
+box tags instead of holding them in every node. The 1 MB nested test document peaks at about
+33.3 MB; the 11 MB one peaks at about 333 MB and allocates about 459 MB in total, against the
+376 MB peak and roughly 673 MB total of the libyaml reference. A 20 KB configuration fixture
+peaks at about 281 KB and allocates about 509 KB in total; `tools/typed-alloc-corpus.tsv`
+budgets that typed path, while `tools/alloc-corpus.tsv` keeps the value path.
 
 The release process keeps comparison results private. This document describes
 the methodology so that absolute or relative measurements can be reviewed on

@@ -49,14 +49,9 @@ const EMPTY_LINE_TAB: &str =
 pub(crate) enum TokenKind<'a> {
     StreamStart,
     StreamEnd,
-    DocumentStart {
-        explicit: bool,
-    },
+    DocumentStart { explicit: bool },
     DocumentEnd,
-    Directive {
-        name: Cow<'a, str>,
-        value: Cow<'a, str>,
-    },
+    Directive(Box<Directive<'a>>),
     BlockEntry,
     Key,
     Value,
@@ -66,14 +61,37 @@ pub(crate) enum TokenKind<'a> {
     FlowMappingEnd,
     FlowEntry,
     LineBreak,
-    Scalar {
-        value: Cow<'a, str>,
-        raw: Cow<'a, str>,
-        style: ScalarStyle,
-    },
-    Anchor(Cow<'a, str>),
-    Alias(Cow<'a, str>),
-    Tag(Tag),
+    PlainScalar,
+    Scalar(Box<ScalarToken<'a>>),
+    Anchor(Box<Cow<'a, str>>),
+    Alias(Box<Cow<'a, str>>),
+    Tag(Box<Tag>),
+}
+
+/// A `%YAML` or `%TAG` directive's name and value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Directive<'a> {
+    pub(crate) name: Cow<'a, str>,
+    pub(crate) value: Cow<'a, str>,
+}
+
+/// A scalar token's decoded value and presentation, boxed because most tokens are plain
+/// scalars, whose value is their source span.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ScalarToken<'a> {
+    pub(crate) value: Cow<'a, str>,
+    pub(crate) style: ScalarStyle,
+}
+
+impl TokenKind<'_> {
+    /// The style of a scalar token, or `None` for any other token.
+    pub(crate) fn scalar_style(&self) -> Option<ScalarStyle> {
+        match self {
+            Self::PlainScalar => Some(ScalarStyle::Plain),
+            Self::Scalar(scalar) => Some(scalar.style),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for TokenKind<'_> {
@@ -89,7 +107,7 @@ impl fmt::Display for TokenKind<'_> {
                 write!(formatter, "document start ({explicit})")
             }
             Self::DocumentEnd => formatter.write_str("document end"),
-            Self::Directive { name, .. } => write!(formatter, "directive %{name}"),
+            Self::Directive(directive) => write!(formatter, "directive %{}", directive.name),
             Self::BlockEntry => formatter.write_str("block entry"),
             Self::Key => formatter.write_str("key indicator"),
             Self::Value => formatter.write_str("value indicator"),
@@ -99,7 +117,7 @@ impl fmt::Display for TokenKind<'_> {
             Self::FlowMappingEnd => formatter.write_str("}"),
             Self::FlowEntry => formatter.write_str(","),
             Self::LineBreak => formatter.write_str("line break"),
-            Self::Scalar { .. } => formatter.write_str("scalar"),
+            Self::PlainScalar | Self::Scalar(_) => formatter.write_str("scalar"),
             Self::Anchor(_) => formatter.write_str("anchor"),
             Self::Alias(_) => formatter.write_str("alias"),
             Self::Tag(_) => formatter.write_str("tag"),
@@ -644,30 +662,33 @@ impl<'a> Scanner<'a> {
         if self.quoted_only_next < self.quoted_only.len() {
             let quoted = matches!(
                 kind,
-                TokenKind::Scalar {
-                    style: ScalarStyle::SingleQuoted | ScalarStyle::DoubleQuoted,
-                    ..
-                }
+                TokenKind::Scalar(ref scalar)
+                    if matches!(
+                        scalar.style,
+                        ScalarStyle::SingleQuoted | ScalarStyle::DoubleQuoted
+                    )
             );
             self.check_quoted_only(quoted.then_some(start..end))?;
         }
         // A scalar's size is the larger of its text and its value: `\L` and
         // `\P` take 2 bytes of text and 3 of value.
-        if let TokenKind::Scalar { value, raw, .. } = &kind {
+        let scalar_value = match &kind {
+            TokenKind::PlainScalar => end - start,
+            TokenKind::Scalar(scalar) => scalar.value.len(),
+            _ => 0,
+        };
+        if scalar_value > 0 {
             self.limits
-                .check_scalar_bytes(raw.len().max(value.len()))
+                .check_scalar_bytes((end - start).max(scalar_value))
                 .map_err(|error| self.limit_at(start, error))?;
         }
         self.last_token_end = end;
-        self.previous_flow_end = matches!(
-            kind,
-            TokenKind::FlowSequenceEnd
-                | TokenKind::FlowMappingEnd
-                | TokenKind::Scalar {
-                    style: ScalarStyle::SingleQuoted | ScalarStyle::DoubleQuoted,
-                    ..
-                }
-        );
+        self.previous_flow_end =
+            matches!(kind, TokenKind::FlowSequenceEnd | TokenKind::FlowMappingEnd)
+                || matches!(
+                    kind.scalar_style(),
+                    Some(ScalarStyle::SingleQuoted | ScalarStyle::DoubleQuoted)
+                );
         match kind {
             TokenKind::DocumentEnd => {
                 self.document_open = false;
@@ -680,7 +701,7 @@ impl<'a> Scanner<'a> {
                 self.directive_pending = false;
                 self.indicator_end = end;
             }
-            TokenKind::Directive { .. } => self.directive_pending = true,
+            TokenKind::Directive(_) => self.directive_pending = true,
             TokenKind::Tag(_) | TokenKind::Anchor(_) => self.document_open = true,
             TokenKind::StreamStart | TokenKind::StreamEnd | TokenKind::LineBreak => {}
             _ => {
@@ -1098,7 +1119,11 @@ impl<'a> Scanner<'a> {
                 .map_err(|_| self.error_at(start, "tag %-escapes do not form valid UTF-8"))?;
             self.pending_tag_handles.insert(handle.to_owned(), prefix);
         }
-        self.make(TokenKind::Directive { name, value }, start, self.pos)
+        self.make(
+            TokenKind::Directive(Box::new(Directive { name, value })),
+            start,
+            self.pos,
+        )
     }
 
     fn scan_anchor(&mut self, alias: bool) -> Result<Option<Token<'a>>, Error> {
@@ -1162,7 +1187,7 @@ impl<'a> Scanner<'a> {
         }
         let name = Cow::Borrowed(&self.input[name_start..self.pos]);
         if alias {
-            self.make(TokenKind::Alias(name), start, self.pos)
+            self.make(TokenKind::Alias(Box::new(name)), start, self.pos)
         } else {
             self.anchors += 1;
             self.limits
@@ -1174,7 +1199,7 @@ impl<'a> Scanner<'a> {
                     .entry(&self.input[name_start..self.pos])
                     .or_insert(start);
             }
-            self.make(TokenKind::Anchor(name), start, self.pos)
+            self.make(TokenKind::Anchor(Box::new(name)), start, self.pos)
         }
     }
 
@@ -1338,7 +1363,7 @@ impl<'a> Scanner<'a> {
         if no_suffix {
             return Err(self.error_at(start, "a tag's handle needs a suffix after it"));
         }
-        self.make(TokenKind::Tag(tag), start, self.pos)
+        self.make(TokenKind::Tag(Box::new(tag)), start, self.pos)
     }
 
     /// The shorthand tag suffix from `start` to the current position, with
