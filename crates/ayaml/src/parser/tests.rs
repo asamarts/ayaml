@@ -907,6 +907,32 @@ fn mid_size_inputs_reserve_a_token_arena_from_their_length() {
 }
 
 #[test]
+fn prefix_token_estimate_uses_the_scanned_density_with_a_cap() {
+    assert_eq!(
+        super::prefix_token_capacity(1_024, 5_177, 10_012_509, 396_005),
+        Some(1_980_453)
+    );
+    assert_eq!(
+        super::prefix_token_capacity(1_023, 5_177, 10_012_509, 396_005),
+        None
+    );
+    assert_eq!(
+        super::prefix_token_capacity(1_024, 0, 10_012_509, 396_005),
+        None
+    );
+    // A dense prefix cannot reserve more than half the input, or eight tokens per line, and it
+    // never asks for less than the tokens already scanned.
+    assert_eq!(
+        super::prefix_token_capacity(1_024, 1_000, 100_000, 200),
+        Some(1_600)
+    );
+    assert_eq!(
+        super::prefix_token_capacity(1_024, 1_000, 100_000, 100),
+        Some(1_024)
+    );
+}
+
+#[test]
 fn event_capacity_reserves_from_the_token_count() {
     let token = Token {
         kind: TokenKind::Scalar {

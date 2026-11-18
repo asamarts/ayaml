@@ -11,9 +11,11 @@
 //! value. `from_value` continues to use the owned value deserializer.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use serde::de::{DeserializeSeed, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor};
@@ -24,7 +26,7 @@ use crate::error::{Code, Error, ErrorKind};
 use crate::event::{Anchor, Event, ScalarStyle};
 use crate::limits::{AliasBudget, Limits};
 use crate::number::Number;
-use crate::parser::{self, EventChunks};
+use crate::parser::{self, EventChunks, EventConsumer};
 use crate::resolver::{float_from_text, plain_resolves_to_string, resolve_scalar};
 use crate::span::Span;
 use crate::tag::Tag;
@@ -235,6 +237,8 @@ pub(crate) fn from_events_seed<'de, T: DeserializeSeed<'de>>(
 /// Inputs above this size keep events in chunks; smaller reads use the eager builder, whose
 /// lower per-event overhead matters more than the spare capacity of one small vector.
 const CHUNKED_INPUT_THRESHOLD: usize = 4 * 1024;
+/// Inputs above this size stream events into the builder instead of keeping a document's events.
+const STREAMING_INPUT_THRESHOLD: usize = 8 * 1024;
 
 /// Parse one document and build its node tree.
 fn parse_document<'de>(
@@ -254,7 +258,7 @@ fn parse_document<'de>(
             options,
             &mut AliasBudget::default(),
         )
-    } else {
+    } else if input.len() <= STREAMING_INPUT_THRESHOLD {
         let chunks = parser::parse_document_event_chunks(input, limits, options.compat_flow)?;
         build_chunks(
             chunks,
@@ -263,6 +267,22 @@ fn parse_document<'de>(
             options,
             &mut AliasBudget::default(),
         )
+    } else {
+        let result = Rc::new(RefCell::new(None));
+        let builder = Builder::streaming(input.len(), limits, options, Rc::clone(&result));
+        parser::parse_document_with_consumer(
+            input,
+            limits,
+            options.compat_flow,
+            Box::new(builder),
+        )?;
+        result.borrow_mut().take().ok_or_else(|| {
+            Error::new(
+                ErrorKind::Parser,
+                "the event stream ended without a document",
+            )
+            .with_span(Span::empty(input.len()))
+        })
     }
 }
 
@@ -336,24 +356,59 @@ fn build_feed<'de>(
     options: NodeOptions,
     budget: &mut AliasBudget,
 ) -> Result<Node<'de>, Error> {
-    Builder {
-        events,
+    let mut builder = Builder {
+        events: Some(events),
         limits: limits.clone(),
         input_len,
         anchors: Anchors::new(),
-        budget,
+        budget: std::mem::take(budget),
         options,
-    }
-    .build()
+        stack: Vec::new(),
+        document: None,
+        root: None,
+        in_document: false,
+        result: None,
+    };
+    let result = builder.build();
+    *budget = builder.budget;
+    result
 }
 
-struct Builder<'de, 'b> {
-    events: EventFeed<'de>,
+struct Builder<'de> {
+    events: Option<EventFeed<'de>>,
     limits: Limits,
     input_len: usize,
     anchors: Anchors<Anchored<'de>>,
-    budget: &'b mut AliasBudget,
+    budget: AliasBudget,
     options: NodeOptions,
+    stack: Vec<Frame<'de>>,
+    document: Option<Node<'de>>,
+    root: Option<Node<'de>>,
+    in_document: bool,
+    result: Option<Rc<RefCell<Option<Node<'de>>>>>,
+}
+
+impl<'de> Builder<'de> {
+    fn streaming(
+        input_len: usize,
+        limits: &Limits,
+        options: NodeOptions,
+        result: Rc<RefCell<Option<Node<'de>>>>,
+    ) -> Self {
+        Self {
+            events: None,
+            limits: limits.clone(),
+            input_len,
+            anchors: Anchors::new(),
+            budget: AliasBudget::default(),
+            options,
+            stack: Vec::new(),
+            document: None,
+            root: None,
+            in_document: false,
+            result: Some(result),
+        }
+    }
 }
 
 /// An anchored node, shared with every alias to it, with its size estimate
@@ -442,13 +497,24 @@ enum Frame<'de> {
     },
 }
 
-impl<'de> Builder<'de, '_> {
-    fn build(mut self) -> Result<Node<'de>, Error> {
+impl<'de> EventConsumer<'de> for Builder<'de> {
+    fn event(&mut self, event: Event<'de>) -> Result<(), Error> {
+        self.push(event)
+    }
+
+    fn finish(&mut self) -> Result<(), Error> {
+        let node = self.finish_document()?;
+        if let Some(result) = &self.result {
+            *result.borrow_mut() = Some(node);
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Builder<'de> {
+    fn build(&mut self) -> Result<Node<'de>, Error> {
         let mut document = None;
-        loop {
-            let Some(event) = self.events.next()? else {
-                break;
-            };
+        while let Some(event) = self.next_event()? {
             match event {
                 Event::StreamStart { .. } | Event::Directive { .. } => {}
                 Event::StreamEnd { .. } => break,
@@ -462,19 +528,56 @@ impl<'de> Builder<'de, '_> {
                         .with_code(Code::TrailingDocuments));
                     }
                     self.anchors.clear();
-                    let node = self.root()?;
-                    match self.events.next()? {
-                        Some(Event::DocumentEnd { .. }) => {}
-                        Some(event) => {
-                            return Err(self.error_at(event.span(), "expected document end"));
+                    self.stack.clear();
+                    self.root = None;
+                    self.in_document = true;
+                    loop {
+                        let Some(event) = self.next_event()? else {
+                            return Err(self.error_at(
+                                Span::empty(self.input_len),
+                                "unexpected end of event stream",
+                            ));
+                        };
+                        if let Event::DocumentEnd { span, .. } = event {
+                            if !self.stack.is_empty() {
+                                return Err(
+                                    self.error_at(span, "unexpected event in node position")
+                                );
+                            }
+                            let node = self
+                                .root
+                                .take()
+                                .unwrap_or_else(|| Node::null(Span::empty(self.input_len)));
+                            document = Some(node);
+                            self.in_document = false;
+                            break;
                         }
-                        None => {
-                            return Err(
-                                self.error_at(Span::empty(self.input_len), "expected document end")
-                            );
+                        self.push_node(event)?;
+                        if self.root.is_some() {
+                            match self.next_event()? {
+                                Some(Event::DocumentEnd { .. }) => {
+                                    let node = self
+                                        .root
+                                        .take()
+                                        .unwrap_or_else(|| Node::null(Span::empty(self.input_len)));
+                                    document = Some(node);
+                                    self.in_document = false;
+                                    break;
+                                }
+                                Some(event) => {
+                                    return Err(
+                                        self.error_at(event.span(), "expected document end")
+                                    );
+                                }
+                                None => {
+                                    return Err(self.error_at(
+                                        Span::empty(self.input_len),
+                                        "expected document end",
+                                    ));
+                                }
+                            }
                         }
                     }
-                    document = Some(node);
                 }
                 event => {
                     return Err(self.error_at(event.span(), "expected a document start"));
@@ -484,181 +587,253 @@ impl<'de> Builder<'de, '_> {
         Ok(document.unwrap_or_else(|| Node::null(Span::empty(self.input_len))))
     }
 
-    /// Build one document's root node.
-    fn root(&mut self) -> Result<Node<'de>, Error> {
-        let mut stack: Vec<Frame<'de>> = Vec::new();
-        loop {
-            let Some(event) = self.events.next()? else {
-                return Err(self.error_at(
-                    Span::empty(self.input_len),
-                    "unexpected end of event stream",
-                ));
-            };
-            let event_span = event.span();
-            let built = match event {
-                Event::Scalar {
-                    value,
-                    raw,
-                    style,
+    fn next_event(&mut self) -> Result<Option<Event<'de>>, Error> {
+        match self.events.as_mut() {
+            Some(events) => events.next(),
+            None => Ok(None),
+        }
+    }
+
+    fn push(&mut self, event: Event<'de>) -> Result<(), Error> {
+        match event {
+            Event::StreamStart { .. } | Event::Directive { .. } => Ok(()),
+            Event::StreamEnd { .. } => {
+                if self.in_document {
+                    Err(self.error_at(
+                        Span::empty(self.input_len),
+                        "unexpected end of event stream",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            Event::DocumentStart { span, .. } => {
+                if self.document.is_some() {
+                    return Err(Error::new(
+                        ErrorKind::Parser,
+                        "expected a single YAML document, but found trailing documents",
+                    )
+                    .with_span(span)
+                    .with_code(Code::TrailingDocuments));
+                }
+                if self.in_document {
+                    return Err(self.error_at(
+                        span,
+                        if self.root.is_some() {
+                            "expected document end"
+                        } else {
+                            "unexpected event in node position"
+                        },
+                    ));
+                }
+                self.anchors.clear();
+                self.stack.clear();
+                self.root = None;
+                self.in_document = true;
+                Ok(())
+            }
+            Event::DocumentEnd { span, .. } => {
+                if !self.in_document {
+                    return Err(self.error_at(span, "expected a document start"));
+                }
+                if !self.stack.is_empty() {
+                    return Err(self.error_at(span, "unexpected event in node position"));
+                }
+                let node = self
+                    .root
+                    .take()
+                    .unwrap_or_else(|| Node::null(Span::empty(self.input_len)));
+                self.document = Some(node);
+                self.in_document = false;
+                Ok(())
+            }
+            event => {
+                if !self.in_document {
+                    return Err(self.error_at(event.span(), "expected a document start"));
+                }
+                self.push_node(event)
+            }
+        }
+    }
+
+    fn finish_document(&mut self) -> Result<Node<'de>, Error> {
+        if self.in_document {
+            return Err(self.error_at(
+                Span::empty(self.input_len),
+                "unexpected end of event stream",
+            ));
+        }
+        Ok(self
+            .document
+            .take()
+            .unwrap_or_else(|| Node::null(Span::empty(self.input_len))))
+    }
+
+    /// Feed one node event to the open document. A node that completes the root is kept until
+    /// `DocumentEnd`; any other node attaches to the open collection on the stack.
+    fn push_node(&mut self, event: Event<'de>) -> Result<(), Error> {
+        let event_span = event.span();
+        if self.root.is_some() && self.stack.is_empty() {
+            return Err(self.error_at(event_span, "expected document end"));
+        }
+        let built = match event {
+            Event::Scalar {
+                value,
+                raw,
+                style,
+                tag,
+                anchor,
+                span,
+            } => {
+                let mut node = scalar_node(value.as_ref(), &value, &raw, style, tag.as_ref(), span)
+                    .map_err(|error| error.with_span(span))?;
+                if tag
+                    .as_ref()
+                    .is_some_and(|tag| tag.is_core() || tag.is_non_specific())
+                {
+                    forget_string_text(&mut node);
+                }
+                let size = estimate_size(&node, self.limits.node_cost_bytes);
+                self.anchored(anchor.as_ref(), node, size, 0, Anchors::define)
+            }
+            Event::Alias { anchor, span } => {
+                let target = self
+                    .anchors
+                    .resolve(anchor.as_str())
+                    .cloned()
+                    .map_err(|message| self.error_at(span, message))?;
+                self.budget
+                    .charge(&self.limits, self.input_len, target.size)
+                    .map_err(|error| error.with_span(span))?;
+                // The alias nests its target here, so the target's collections count toward the
+                // depth.
+                if target.height > 0 {
+                    self.limits
+                        .check_depth(self.stack.len() + target.height)
+                        .map_err(|error| Error::from(error).with_span(span))?;
+                }
+                Built {
+                    node: Node::new(NodeKind::Alias(target.node), span),
+                    size: target.size,
+                    height: target.height,
+                }
+            }
+            Event::SequenceStart {
+                tag, anchor, span, ..
+            } => {
+                self.limits
+                    .check_depth(self.stack.len() + 1)
+                    .map_err(|error| Error::from(error).with_span(span))?;
+                if let Some(anchor) = &anchor {
+                    self.anchors.open(anchor.as_str());
+                }
+                self.stack.push(Frame::Sequence {
                     tag,
                     anchor,
                     span,
-                } => {
-                    let mut node =
-                        scalar_node(value.as_ref(), &value, &raw, style, tag.as_ref(), span)
-                            .map_err(|error| error.with_span(span))?;
-                    if tag
-                        .as_ref()
-                        .is_some_and(|tag| tag.is_core() || tag.is_non_specific())
-                    {
-                        forget_string_text(&mut node);
-                    }
-                    let size = estimate_size(&node, self.limits.node_cost_bytes);
-                    self.anchored(anchor.as_ref(), node, size, 0, Anchors::define)
+                    items: Vec::new(),
+                    size: self.limits.node_cost_bytes,
+                    height: 0,
+                });
+                return Ok(());
+            }
+            Event::MappingStart {
+                tag, anchor, span, ..
+            } => {
+                self.limits
+                    .check_depth(self.stack.len() + 1)
+                    .map_err(|error| Error::from(error).with_span(span))?;
+                if let Some(anchor) = &anchor {
+                    self.anchors.open(anchor.as_str());
                 }
-                Event::Alias { anchor, span } => {
-                    let target = self
-                        .anchors
-                        .resolve(anchor.as_str())
-                        .cloned()
-                        .map_err(|message| self.error_at(span, message))?;
-                    self.budget
-                        .charge(&self.limits, self.input_len, target.size)
-                        .map_err(|error| error.with_span(span))?;
-                    // The alias nests its target here, so the target's
-                    // collections count toward the depth.
-                    if target.height > 0 {
-                        self.limits
-                            .check_depth(stack.len() + target.height)
-                            .map_err(|error| Error::from(error).with_span(span))?;
-                    }
-                    Built {
-                        node: Node::new(NodeKind::Alias(target.node), span),
-                        size: target.size,
-                        height: target.height,
-                    }
-                }
-                Event::SequenceStart {
-                    tag, anchor, span, ..
-                } => {
-                    self.limits
-                        .check_depth(stack.len() + 1)
-                        .map_err(|error| Error::from(error).with_span(span))?;
-                    if let Some(anchor) = &anchor {
-                        self.anchors.open(anchor.as_str());
-                    }
-                    stack.push(Frame::Sequence {
-                        tag,
-                        anchor,
-                        span,
-                        items: Vec::new(),
-                        size: self.limits.node_cost_bytes,
-                        height: 0,
-                    });
-                    continue;
-                }
-                Event::MappingStart {
-                    tag, anchor, span, ..
-                } => {
-                    self.limits
-                        .check_depth(stack.len() + 1)
-                        .map_err(|error| Error::from(error).with_span(span))?;
-                    if let Some(anchor) = &anchor {
-                        self.anchors.open(anchor.as_str());
-                    }
-                    stack.push(Frame::Mapping {
-                        tag,
-                        anchor,
-                        span,
-                        entries: Vec::new(),
-                        seen: HashSet::new(),
-                        key: None,
-                        size: self.limits.node_cost_bytes,
-                        height: 0,
-                    });
-                    continue;
-                }
-                Event::SequenceEnd { .. } => match stack.pop() {
-                    Some(Frame::Sequence {
-                        tag,
-                        anchor,
-                        span,
-                        items,
-                        size,
-                        height,
-                    }) => {
-                        let node = apply_tag(tag, Node::new(NodeKind::Sequence(items), span));
-                        let size =
-                            size.saturating_add(tag_cost(&node, self.limits.node_cost_bytes));
-                        self.anchored(anchor.as_ref(), node, size, height + 1, Anchors::close)
-                    }
-                    _ => return Err(self.error_at(event_span, "unexpected sequence end")),
-                },
-                Event::MappingEnd { .. } => match stack.pop() {
-                    Some(Frame::Mapping {
-                        tag,
-                        anchor,
-                        span,
-                        entries,
-                        key: None,
-                        size,
-                        height,
-                        ..
-                    }) => {
-                        let node = apply_tag(tag, Node::new(NodeKind::Mapping(entries), span));
-                        let size =
-                            size.saturating_add(tag_cost(&node, self.limits.node_cost_bytes));
-                        self.anchored(anchor.as_ref(), node, size, height + 1, Anchors::close)
-                    }
-                    _ => return Err(self.error_at(event_span, "unexpected mapping end")),
-                },
-                _ => return Err(self.error_at(event_span, "unexpected event in node position")),
-            };
-            match stack.last_mut() {
-                None => return Ok(built.node),
+                self.stack.push(Frame::Mapping {
+                    tag,
+                    anchor,
+                    span,
+                    entries: Vec::new(),
+                    seen: HashSet::new(),
+                    key: None,
+                    size: self.limits.node_cost_bytes,
+                    height: 0,
+                });
+                return Ok(());
+            }
+            Event::SequenceEnd { .. } => match self.stack.pop() {
                 Some(Frame::Sequence {
+                    tag,
+                    anchor,
+                    span,
                     items,
                     size,
                     height,
-                    ..
                 }) => {
-                    *size = size.saturating_add(built.size);
-                    *height = (*height).max(built.height);
-                    items.push(built.node);
+                    let node = apply_tag(tag, Node::new(NodeKind::Sequence(items), span));
+                    let size = size.saturating_add(tag_cost(&node, self.limits.node_cost_bytes));
+                    self.anchored(anchor.as_ref(), node, size, height + 1, Anchors::close)
                 }
+                _ => return Err(self.error_at(event_span, "unexpected sequence end")),
+            },
+            Event::MappingEnd { .. } => match self.stack.pop() {
                 Some(Frame::Mapping {
+                    tag,
+                    anchor,
+                    span,
                     entries,
-                    seen,
-                    key,
+                    key: None,
                     size,
                     height,
                     ..
                 }) => {
-                    *size = size.saturating_add(built.size);
-                    *height = (*height).max(built.height);
-                    match key.take() {
-                        None => *key = Some(built.node),
-                        Some(entry_key) => {
-                            if !self.options.allow_duplicates {
-                                let seen_key = SeenKey::new(&entry_key);
-                                if seen.contains(&seen_key) {
-                                    return Err(Error::new(
-                                        ErrorKind::DuplicateKey,
-                                        format!(
-                                            "duplicate mapping key: {}",
-                                            node_key_text(&entry_key)
-                                        ),
-                                    )
-                                    .with_span(entry_key.span));
-                                }
-                                seen.insert(seen_key);
+                    let node = apply_tag(tag, Node::new(NodeKind::Mapping(entries), span));
+                    let size = size.saturating_add(tag_cost(&node, self.limits.node_cost_bytes));
+                    self.anchored(anchor.as_ref(), node, size, height + 1, Anchors::close)
+                }
+                _ => return Err(self.error_at(event_span, "unexpected mapping end")),
+            },
+            _ => return Err(self.error_at(event_span, "unexpected event in node position")),
+        };
+        match self.stack.last_mut() {
+            None => self.root = Some(built.node),
+            Some(Frame::Sequence {
+                items,
+                size,
+                height,
+                ..
+            }) => {
+                *size = size.saturating_add(built.size);
+                *height = (*height).max(built.height);
+                items.push(built.node);
+            }
+            Some(Frame::Mapping {
+                entries,
+                seen,
+                key,
+                size,
+                height,
+                ..
+            }) => {
+                *size = size.saturating_add(built.size);
+                *height = (*height).max(built.height);
+                match key.take() {
+                    None => *key = Some(built.node),
+                    Some(entry_key) => {
+                        if !self.options.allow_duplicates {
+                            let seen_key = SeenKey::new(&entry_key);
+                            if seen.contains(&seen_key) {
+                                return Err(Error::new(
+                                    ErrorKind::DuplicateKey,
+                                    format!("duplicate mapping key: {}", node_key_text(&entry_key)),
+                                )
+                                .with_span(entry_key.span));
                             }
-                            entries.push((entry_key, built.node));
+                            seen.insert(seen_key);
                         }
+                        entries.push((entry_key, built.node));
                     }
                 }
             }
         }
+        Ok(())
     }
 
     /// Finish a node. An anchored node moves into an `Arc` that its aliases
@@ -1730,14 +1905,15 @@ mod tests {
     }
 
     #[test]
-    fn a_large_document_uses_the_chunked_event_feed() {
+    fn a_medium_document_uses_the_chunked_event_feed() {
         use std::fmt::Write as _;
 
         let mut input = String::from("values:\n");
-        for index in 0..1_500 {
+        for index in 0..500 {
             writeln!(input, "- value-{index}").expect("write");
         }
         assert!(input.len() > CHUNKED_INPUT_THRESHOLD);
+        assert!(input.len() <= STREAMING_INPUT_THRESHOLD);
 
         let limits = Limits::for_max_input();
         let node = parse_document(&input, &limits, NodeOptions::default()).expect("node");
@@ -1748,10 +1924,57 @@ mod tests {
         let NodeKind::Sequence(values) = &values.kind else {
             panic!("values sequence");
         };
-        assert_eq!(values.len(), 1_500);
+        assert_eq!(values.len(), 500);
         assert!(matches!(
-            &values[1_499].kind,
-            NodeKind::String(value) if value == "value-1499"
+            &values[499].kind,
+            NodeKind::String(value) if value == "value-499"
         ));
+    }
+
+    #[test]
+    fn a_larger_document_streams_events_into_the_builder() {
+        let mut input =
+            String::from("base: &base {x: 1}\ntagged: !custom value\nblock: |\n  text\nvalues:\n");
+        for _ in 0..6_000 {
+            input.push_str("- *base\n");
+        }
+        assert!(input.len() > STREAMING_INPUT_THRESHOLD);
+
+        let limits = Limits::for_max_input();
+        let node = parse_document(&input, &limits, NodeOptions::default()).expect("node");
+        let NodeKind::Mapping(entries) = &node.kind else {
+            panic!("root mapping");
+        };
+        assert!(matches!(entries[1].1.kind, NodeKind::Tagged(_, _)));
+        assert!(matches!(
+            &entries[2].1.kind,
+            NodeKind::String(text) if text == "text\n"
+        ));
+        let (_, values) = entries.get(3).expect("values entry");
+        let NodeKind::Sequence(values) = &values.kind else {
+            panic!("values sequence");
+        };
+        assert_eq!(values.len(), 6_000);
+        assert!(
+            values
+                .iter()
+                .all(|value| matches!(value.kind, NodeKind::Alias(_)))
+        );
+    }
+
+    #[test]
+    fn a_large_stream_reports_trailing_documents() {
+        use std::fmt::Write as _;
+
+        let mut input = String::from("values:\n");
+        for index in 0..1_500 {
+            writeln!(input, "- {index}").expect("write");
+        }
+        input.push_str("---\nother: 1\n");
+        assert!(input.len() > STREAMING_INPUT_THRESHOLD);
+
+        let limits = Limits::for_max_input();
+        let error = parse_document(&input, &limits, NodeOptions::default()).expect_err("error");
+        assert!(error.to_string().contains("trailing documents"), "{error}");
     }
 }

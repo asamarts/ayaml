@@ -165,11 +165,17 @@ fn main() {
     let input = generated_input(&path)
         .unwrap_or_else(|| std::fs::read_to_string(&path).expect("read input"));
 
+    let typed = std::env::var_os("AYAML_TYPED").is_some();
     let live_before_parse = LIVE.load(Ordering::Relaxed);
     let allocations_before_parse = ALLOCATIONS.load(Ordering::Relaxed);
     let bytes_before_parse = ALLOCATED_BYTES.load(Ordering::Relaxed);
     reset_peak();
-    let value = ayaml::parse_value(&input).expect("ayaml parse");
+    let value = if typed {
+        ayaml::compat::from_str_with_limits::<ayaml::Value>(&input, &ayaml::Limits::for_max_input())
+            .expect("ayaml typed parse")
+    } else {
+        ayaml::parse_value(&input).expect("ayaml parse")
+    };
     let parse_peak = PEAK
         .load(Ordering::Relaxed)
         .saturating_sub(live_before_parse);
