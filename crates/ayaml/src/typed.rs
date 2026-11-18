@@ -16,7 +16,8 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::de::{DeserializeSeed, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor};
 use serde::{Deserialize, Deserializer};
@@ -32,14 +33,26 @@ use crate::span::Span;
 use crate::tag::Tag;
 use crate::value::{Value, key_text_full, push_quoted_key};
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct Node<'de> {
     kind: NodeKind<'de>,
-    text: Option<Cow<'de, str>>,
+    text: Option<&'de str>,
     style: ScalarStyle,
     span: Span,
     /// The hash of the resolved kind, cached so nested mapping keys aren't traversed again.
-    hash: OnceLock<u64>,
+    hash: AtomicU64,
+}
+
+impl Clone for Node<'_> {
+    fn clone(&self) -> Self {
+        Self {
+            kind: self.kind.clone(),
+            text: self.text,
+            style: self.style,
+            span: self.span,
+            hash: AtomicU64::new(self.hash.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -115,13 +128,14 @@ impl Eq for Node<'_> {}
 
 impl Node<'_> {
     fn cached_hash(&self) -> u64 {
-        if let Some(hash) = self.hash.get() {
-            return *hash;
+        let cached = self.hash.load(Ordering::Relaxed);
+        if cached != 0 {
+            return cached;
         }
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         resolve(self).kind.hash(&mut hasher);
-        let hash = hasher.finish();
-        let _ = self.hash.set(hash);
+        let hash = hasher.finish().max(1);
+        self.hash.store(hash, Ordering::Relaxed);
         hash
     }
 }
@@ -139,17 +153,17 @@ impl<'de> Node<'de> {
             text: None,
             style: ScalarStyle::Plain,
             span,
-            hash: OnceLock::new(),
+            hash: AtomicU64::new(0),
         }
     }
 
-    fn scalar(kind: NodeKind<'de>, text: Cow<'de, str>, style: ScalarStyle, span: Span) -> Self {
+    fn scalar(kind: NodeKind<'de>, text: Option<&'de str>, style: ScalarStyle, span: Span) -> Self {
         Self {
             kind,
-            text: Some(text),
+            text,
             style,
             span,
-            hash: OnceLock::new(),
+            hash: AtomicU64::new(0),
         }
     }
 
@@ -1022,30 +1036,20 @@ fn scalar_node<'de>(
     let scalar_text = borrowed_or_owned(value, raw, style);
     let string = match tag {
         Some(tag) if tag.is_non_specific() => {
-            let inner = Node::scalar(
-                NodeKind::String(scalar_text.clone()),
-                scalar_text.clone(),
-                style,
-                span,
-            );
+            let inner = Node::scalar(NodeKind::String(scalar_text.clone()), None, style, span);
             return Ok(Node::scalar(
                 NodeKind::Tagged(Box::new(tag.clone()), Box::new(inner)),
-                scalar_text,
+                None,
                 style,
                 span,
             ));
         }
         Some(tag) if tag.is_core() => {
             if !matches!(tag.suffix(), "str" | "int" | "float" | "bool" | "null") {
-                let inner = Node::scalar(
-                    NodeKind::String(scalar_text.clone()),
-                    scalar_text.clone(),
-                    style,
-                    span,
-                );
+                let inner = Node::scalar(NodeKind::String(scalar_text.clone()), None, style, span);
                 return Ok(Node::scalar(
                     NodeKind::Tagged(Box::new(tag.clone()), Box::new(inner)),
-                    scalar_text,
+                    None,
                     style,
                     span,
                 ));
@@ -1054,15 +1058,10 @@ fn scalar_node<'de>(
         }
         Some(tag) => {
             if style != ScalarStyle::Plain || plain_resolves_to_string(text) {
-                let inner = Node::scalar(
-                    NodeKind::String(scalar_text.clone()),
-                    scalar_text.clone(),
-                    style,
-                    span,
-                );
+                let inner = Node::scalar(NodeKind::String(scalar_text.clone()), None, style, span);
                 return Ok(Node::scalar(
                     NodeKind::Tagged(Box::new(tag.clone()), Box::new(inner)),
-                    scalar_text,
+                    None,
                     style,
                     span,
                 ));
@@ -1072,9 +1071,13 @@ fn scalar_node<'de>(
         None => style != ScalarStyle::Plain || plain_resolves_to_string(text),
     };
     if string {
+        let text = match raw {
+            Cow::Borrowed(text) if style == ScalarStyle::Plain => Some(*text),
+            _ => None,
+        };
         return Ok(Node::scalar(
-            NodeKind::String(scalar_text.clone()),
-            scalar_text,
+            NodeKind::String(scalar_text),
+            text,
             style,
             span,
         ));
@@ -1113,7 +1116,11 @@ fn node_from_value<'de>(
             NodeKind::Tagged(Box::new(tagged.tag), Box::new(inner))
         }
     };
-    Node::scalar(kind, scalar_text, style, span)
+    let text = match raw {
+        Cow::Borrowed(text) if style == ScalarStyle::Plain => Some(*text),
+        _ => None,
+    };
+    Node::scalar(kind, text, style, span)
 }
 
 /// A string that a tag makes one, as in `!!str 01` or `! 01`, keeps no text, which only a float
@@ -1321,9 +1328,8 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
                     .deserialize_string(visitor)
                     .map_err(|error| with_span(error, span));
             }
-            _ => match &node.text {
-                Some(Cow::Borrowed(value)) => visitor.visit_borrowed_str(value),
-                Some(Cow::Owned(value)) => visitor.visit_str(value),
+            _ => match node.text {
+                Some(value) => visitor.visit_borrowed_str(value),
                 None => {
                     return NodeDeserializer::new(node)
                         .deserialize_any(visitor)
@@ -1519,7 +1525,7 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
         // such as `inf` or `1e999`, doesn't, and nor does a string that a tag makes one, which
         // keeps no text.
         if node.style == ScalarStyle::Plain
-            && let Some(text) = node.text.as_deref()
+            && let Some(text) = node.text
         {
             match &node.kind {
                 NodeKind::Number(_) => {
@@ -1592,7 +1598,7 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
 /// An empty scalar, such as a missing value, reads as an empty sequence,
 /// map, or struct; an explicit `~` or `null` does not.
 fn is_empty_scalar(node: &Node<'_>) -> bool {
-    matches!(node.kind, NodeKind::Null) && node.text.as_deref().is_none_or(str::is_empty)
+    matches!(node.kind, NodeKind::Null) && node.text.is_none_or(str::is_empty)
 }
 
 /// An explicit `~` or `null` is not an empty collection. It's reported before
@@ -1887,7 +1893,7 @@ mod tests {
 
     #[test]
     fn a_node_stays_small() {
-        assert!(size_of::<Node<'_>>() <= 96);
+        assert!(size_of::<Node<'_>>() <= 80);
     }
 
     #[test]
