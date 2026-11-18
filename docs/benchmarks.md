@@ -72,7 +72,8 @@ explicit-pair workload about 31% fewer than before this change. Peak heap falls 
 short sequences and 19% on short explicit pairs, and the affected budgets are tightened to the
 new measurements. Event vectors reserve four fifths of the token count plus headroom. Typed
 source reads over 8 KiB stream events straight into the builder, so no document event vector is
-retained, and the token arena estimates its final size from the density of the scanned prefix.
+retained, and the token arena is sized from the density of the input scanned so far, within the
+token limit.
 Scalar tokens keep their raw text as a span and box only values that need decoding; typed nodes
 box tags, keep scalar text as a source slice, and cache hashes in one atomic word. Root flow
 collections reserve their entry count from the parser before their items are built. The 1 MB

@@ -83,7 +83,7 @@ fn push_token_grows_a_full_arena_as_arena_growth_says() {
         let (mut capacity, mut growths) = (0, 0);
         for _ in 0..40 * chunk {
             let before = tokens.capacity();
-            push_token(&mut tokens, token.clone(), chunk);
+            push_token(&mut tokens, token.clone(), chunk, usize::MAX);
             if tokens.capacity() != before {
                 assert_eq!(before + 1, tokens.len(), "{chunk}: grew before it was full");
                 capacity += arena_growth(before, chunk);
@@ -897,39 +897,129 @@ fn chunked_document_events_match_the_collected_stream() {
 
 #[test]
 fn mid_size_inputs_reserve_a_token_arena_from_their_length() {
-    assert_eq!(super::mid_input_token_capacity(20_493, 435), Some(2_049));
-    assert_eq!(super::mid_input_token_capacity(4_097, 100), Some(409));
-    assert_eq!(super::mid_input_token_capacity(32_768, 1_000), Some(3_276));
-    assert_eq!(super::mid_input_token_capacity(4_096, 100), None);
-    assert_eq!(super::mid_input_token_capacity(32_769, 1_000), None);
-    assert_eq!(super::mid_input_token_capacity(20_000, 2), None);
-    assert_eq!(super::mid_input_token_capacity(20_000, 0), None);
+    let most = usize::MAX;
+    assert_eq!(
+        super::mid_input_token_capacity(20_493, 435, most),
+        Some(2_049)
+    );
+    assert_eq!(super::mid_input_token_capacity(4_097, 100, most), Some(409));
+    assert_eq!(
+        super::mid_input_token_capacity(32_768, 1_000, most),
+        Some(3_276)
+    );
+    assert_eq!(super::mid_input_token_capacity(4_096, 100, most), None);
+    assert_eq!(super::mid_input_token_capacity(32_769, 1_000, most), None);
+    assert_eq!(super::mid_input_token_capacity(20_000, 2, most), None);
+    assert_eq!(super::mid_input_token_capacity(20_000, 0, most), None);
+    // No reader keeps more tokens than the limit, so none is reserved past it.
+    assert_eq!(super::mid_input_token_capacity(20_493, 435, 100), Some(100));
 }
 
 #[test]
 fn prefix_token_estimate_uses_the_scanned_density_with_a_cap() {
+    let most = usize::MAX;
+    // The density of the prefix gives 1,980,453 tokens for the whole input, to which the
+    // estimate adds a sixty-fourth, and one reservation stays within eight times the tokens
+    // already scanned.
     assert_eq!(
-        super::prefix_token_capacity(1_024, 5_177, 10_012_509, 396_005),
-        Some(1_980_453)
+        super::prefix_token_capacity(1_024, 5_177, 10_012_509, 396_005, most),
+        Some(8_192)
     );
     assert_eq!(
-        super::prefix_token_capacity(1_023, 5_177, 10_012_509, 396_005),
+        super::prefix_token_capacity(524_288, 2_650_624, 10_012_509, 396_005, most),
+        Some(1_980_453 + 1_980_453 / 64)
+    );
+    assert_eq!(
+        super::prefix_token_capacity(1_023, 5_177, 10_012_509, 396_005, most),
         None
     );
     assert_eq!(
-        super::prefix_token_capacity(1_024, 0, 10_012_509, 396_005),
+        super::prefix_token_capacity(1_024, 0, 10_012_509, 396_005, most),
         None
     );
     // A dense prefix cannot reserve more than half the input, or eight tokens per line, and it
     // never asks for less than the tokens already scanned.
     assert_eq!(
-        super::prefix_token_capacity(1_024, 1_000, 100_000, 200),
+        super::prefix_token_capacity(1_024, 1_000, 100_000, 200, most),
         Some(1_600)
     );
     assert_eq!(
-        super::prefix_token_capacity(1_024, 1_000, 100_000, 100),
+        super::prefix_token_capacity(1_024, 1_000, 100_000, 100, most),
         Some(1_024)
     );
+    // Nor more than the limits let a reader keep.
+    assert_eq!(
+        super::prefix_token_capacity(524_288, 2_650_624, 10_012_509, 396_005, 1_000_000),
+        Some(1_000_000)
+    );
+}
+
+/// The arena capacity [`read_lines`] ends with for `input`, and its token count.
+fn arena_of(input: &str, limits: Limits) -> (usize, usize) {
+    let mut scanner = crate::scanner::Scanner::new(input, limits).expect("scanner");
+    let lines = read_lines(&mut scanner).expect("lines");
+    (lines.tokens.capacity(), lines.tokens.len())
+}
+
+#[test]
+fn a_dense_prefix_reserves_no_arena_for_a_sparse_rest() {
+    // 1,100 dense entries, then comment lines that hold no token: the density of the prefix
+    // says the whole input is as dense, and the rest of it never arrives.
+    let mut input = "a: b\n".repeat(1_100);
+    input.push_str(&"#\n".repeat(1_000_000));
+    let (capacity, len) = arena_of(&input, Limits::for_max_input());
+    assert_eq!(len, 3_300);
+    assert!(
+        capacity <= len * super::TOKEN_ARENA_AHEAD,
+        "{capacity} tokens reserved for {len}"
+    );
+}
+
+#[test]
+fn a_uniform_document_reserves_close_to_its_tokens() {
+    let input = "- a\n".repeat(300_000);
+    let (capacity, len) = arena_of(&input, Limits::for_max_input());
+    assert_eq!(len, 600_000);
+    assert!(
+        capacity <= len + len / 16,
+        "{capacity} tokens reserved for {len}"
+    );
+}
+
+#[test]
+fn a_sparse_prefix_grows_to_a_dense_rest_in_few_steps() {
+    // The estimate from the sparse prefix is far too low. Each time the arena fills it is
+    // estimated again, and grows by a sixteenth at least, so the copies stay few.
+    let mut input = "key: value # a long comment that holds no token at all\n".repeat(600);
+    input.push_str(&"- a\n".repeat(300_000));
+    let (capacity, len) = arena_of(&input, Limits::for_max_input());
+    assert_eq!(len, 601_800);
+    assert!(
+        capacity <= len + len / 8,
+        "{capacity} tokens reserved for {len}"
+    );
+}
+
+#[test]
+fn the_arena_never_reserves_past_the_token_limit() {
+    // Twice the tokens the limit allows: the scanner refuses the input, and until it does the
+    // arena holds no more than the limit.
+    let limits = Limits::default().with_max_events(50_000);
+    let input = "- a\n".repeat(50_000);
+    let mut scanner = crate::scanner::Scanner::new(&input, limits).expect("scanner");
+    let Err(error) = read_lines(&mut scanner) else {
+        panic!("the input is over the token limit");
+    };
+    assert_eq!(
+        error.limit().map(crate::limits::LimitExceeded::kind),
+        Some(crate::limits::LimitKind::Events)
+    );
+    let most = 50_000;
+    for tokens in [1_024, 8_192, 16_384, 40_000, 50_000] {
+        let capacity = super::prefix_token_capacity(tokens, tokens * 2, input.len(), 50_000, most)
+            .expect("an estimate");
+        assert!(capacity <= most, "{capacity} tokens reserved at {tokens}");
+    }
 }
 
 #[test]
@@ -955,6 +1045,39 @@ fn root_flow_collections_count_their_entries() {
         .position(|token| matches!(token.kind, TokenKind::FlowMappingStart))
         .expect("mapping start");
     assert_eq!(flow_entry_count(&lines.tokens, mapping, ends[&mapping]), 2);
+}
+
+#[test]
+fn separators_alone_count_no_flow_entry() {
+    for (input, entries) in [
+        ("[]\n", 0),
+        ("[1]\n", 1),
+        ("[1, 2,]\n", 2),
+        ("[[], {}]\n", 2),
+        ("{a: 1, b: 2}\n", 2),
+    ] {
+        let mut scanner = crate::scanner::Scanner::new(input, Limits::default()).expect("scanner");
+        let lines = read_lines(&mut scanner).expect("lines");
+        let ends = flow_ends(&lines.tokens);
+        assert_eq!(
+            flow_entry_count(&lines.tokens, 0, ends[&0]),
+            entries,
+            "{input:?}"
+        );
+    }
+    // A run of separators is not a run of entries, whatever the parser then says of it.
+    let indicator = |kind| Token {
+        kind,
+        span: Span::empty(0),
+    };
+    let commas = [
+        indicator(TokenKind::FlowSequenceStart),
+        indicator(TokenKind::FlowEntry),
+        indicator(TokenKind::FlowEntry),
+        indicator(TokenKind::FlowEntry),
+        indicator(TokenKind::FlowSequenceEnd),
+    ];
+    assert_eq!(flow_entry_count(&commas, 0, 4), 0);
 }
 
 #[test]

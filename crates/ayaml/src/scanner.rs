@@ -315,6 +315,11 @@ impl<'a> Scanner<'a> {
         &self.line_index
     }
 
+    /// The most tokens a reader can keep: the scanner refuses the token after this many.
+    pub(crate) fn max_tokens(&self) -> usize {
+        self.limits.max_events
+    }
+
     /// Return the next token, or `None` after the stream end has been emitted.
     #[allow(
         clippy::too_many_lines,
@@ -672,14 +677,15 @@ impl<'a> Scanner<'a> {
         }
         // A scalar's size is the larger of its text and its value: `\L` and
         // `\P` take 2 bytes of text and 3 of value.
+        // A scalar whose value is empty still has its text to count.
         let scalar_value = match &kind {
-            TokenKind::PlainScalar => end - start,
-            TokenKind::Scalar(scalar) => scalar.value.len(),
-            _ => 0,
+            TokenKind::PlainScalar => Some(end - start),
+            TokenKind::Scalar(scalar) => Some(scalar.value.len()),
+            _ => None,
         };
-        if scalar_value > 0 {
+        if let Some(value) = scalar_value {
             self.limits
-                .check_scalar_bytes((end - start).max(scalar_value))
+                .check_scalar_bytes((end - start).max(value))
                 .map_err(|error| self.limit_at(start, error))?;
         }
         self.last_token_end = end;

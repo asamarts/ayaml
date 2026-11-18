@@ -83,9 +83,11 @@ const TOKEN_ARENA_WIDE_CHUNK: usize = 16 * 1024;
 const TOKEN_ARENA_SMALL_CHUNK: usize = 64;
 const TOKEN_ARENA_MID_CHUNK: usize = 256;
 
-fn push_token<'a>(tokens: &mut Vec<Token<'a>>, token: Token<'a>, chunk: usize) {
+fn push_token<'a>(tokens: &mut Vec<Token<'a>>, token: Token<'a>, chunk: usize, most: usize) {
     if tokens.len() == tokens.capacity() {
-        tokens.reserve_exact(arena_growth(tokens.len(), chunk));
+        // The scanner refuses the token after `most`, so no arena holds more than that.
+        let room = most.saturating_sub(tokens.len()).max(1);
+        tokens.reserve_exact(arena_growth(tokens.len(), chunk).min(room));
     }
     tokens.push(token);
 }
@@ -121,31 +123,65 @@ struct Lines<'a> {
 /// as tokens arrive. Ordinary lines are dense enough that one estimate from the input length
 /// avoids several arena copies; long-line inputs skip it, so a large scalar does not reserve an
 /// arena it will not use.
-fn mid_input_token_capacity(input_len: usize, line_count: usize) -> Option<usize> {
+fn mid_input_token_capacity(input_len: usize, line_count: usize, most: usize) -> Option<usize> {
     if (4097..=32768).contains(&input_len) && line_count > 0 && input_len / line_count <= 80 {
-        Some(input_len / 10)
+        Some((input_len / 10).min(most))
     } else {
         None
     }
 }
 
-/// Tokens to reserve after scanning a prefix, or `None` before enough tokens show the density.
-/// The estimate assumes the rest of the input has the prefix's token density, capped at half the
-/// input length and at eight tokens per line. A comment-only prefix never reaches the threshold,
-/// and a large scalar keeps its one token instead of reserving an arena it will not use.
+/// How far one reservation may run ahead of the tokens already scanned. An estimate comes from
+/// the input read so far, and the rest of the input may hold far fewer tokens, so a reservation
+/// stays within this multiple of the tokens that exist. A document that keeps its density takes
+/// a few reservations, each from a later and better estimate.
+const TOKEN_ARENA_AHEAD: usize = 8;
+
+/// The least a full arena grows by once estimates have begun: a sixteenth of its tokens, or a
+/// chunk. An estimate that expects few more tokens can be wrong, and growing by less would copy
+/// the arena once for every few tokens.
+const fn least_arena_growth(len: usize, chunk: usize) -> usize {
+    let sixteenth = len / 16;
+    if sixteenth > chunk { sixteenth } else { chunk }
+}
+
+/// Tokens to hold after scanning a prefix, or `None` before enough tokens show the density.
+/// The estimate assumes the rest of the input has the prefix's token density. It is capped at
+/// half the input length, at eight tokens per line, at `most`, the tokens the limits let a reader
+/// keep, and at [`TOKEN_ARENA_AHEAD`] times the tokens already scanned. A comment-only prefix
+/// never reaches the threshold, and a large scalar keeps its one token instead of reserving an
+/// arena it will not use.
 fn prefix_token_capacity(
     tokens: usize,
     consumed: usize,
     input_len: usize,
     line_count: usize,
+    most: usize,
 ) -> Option<usize> {
     const THRESHOLD: usize = 1_024;
     if tokens < THRESHOLD || consumed == 0 {
         return None;
     }
+    // A sixty-fourth more than the density gives: an estimate that falls a few tokens short
+    // costs another growth step, which is larger than this margin.
     let estimate = tokens.saturating_mul(input_len) / consumed;
-    let cap = (input_len / 2).min(line_count.saturating_mul(8));
+    let estimate = estimate.saturating_add(estimate / 64);
+    let cap = (input_len / 2)
+        .min(line_count.saturating_mul(8))
+        .min(most)
+        .min(tokens.saturating_mul(TOKEN_ARENA_AHEAD));
     Some(estimate.min(cap).max(tokens))
+}
+
+/// When [`read_lines`] sizes the token arena from the density of the input scanned so far.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Estimating {
+    /// The arena was reserved from the input length, and grows by chunks after that.
+    Never,
+    /// No estimate yet: the first comes once enough tokens show the density.
+    AtThreshold,
+    /// An estimate was made, and the next comes when its reservation is full.
+    WhenFull,
 }
 
 /// Group scanner tokens into logical lines as they arrive.
@@ -173,12 +209,17 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
     };
     let mut lines = Vec::new();
     let mut tokens = Vec::new();
-    let mut estimated = false;
     let line_count = scanner.line_index().line_count();
-    if let Some(capacity) = mid_input_token_capacity(input_len, line_count) {
-        tokens.reserve_exact(capacity);
-        estimated = true;
-    }
+    let most = scanner.max_tokens();
+    // A mid-sized input reserves once from its length. A larger one estimates from the tokens
+    // scanned so far: first at the threshold, then again each time the arena fills.
+    let mut estimating = match mid_input_token_capacity(input_len, line_count, most) {
+        Some(capacity) => {
+            tokens.reserve_exact(capacity);
+            Estimating::Never
+        }
+        None => Estimating::AtThreshold,
+    };
     let mut line_start = 0;
     let mut stream_start = None;
     let mut stream_end = None;
@@ -206,12 +247,32 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
                     matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
                 });
                 let consumed = token.span.end();
-                push_token(&mut tokens, token, chunk);
-                if !estimated
-                    && let Some(capacity) =
-                        prefix_token_capacity(tokens.len(), consumed, input_len, line_count)
+                // A full arena that has had an estimate grows to a new one, made from every
+                // token scanned so far and this one. It grows only when a token needs the room,
+                // so an estimate that was exact reserves nothing after the last token.
+                if estimating == Estimating::WhenFull
+                    && tokens.len() == tokens.capacity()
+                    && let Some(capacity) = prefix_token_capacity(
+                        tokens.len() + 1,
+                        consumed,
+                        input_len,
+                        line_count,
+                        most,
+                    )
                 {
-                    estimated = true;
+                    let room = most.saturating_sub(tokens.len()).max(1);
+                    let growth = capacity
+                        .saturating_sub(tokens.len())
+                        .max(least_arena_growth(tokens.len(), chunk))
+                        .min(room);
+                    tokens.reserve_exact(growth);
+                }
+                push_token(&mut tokens, token, chunk, most);
+                if estimating == Estimating::AtThreshold
+                    && let Some(capacity) =
+                        prefix_token_capacity(tokens.len(), consumed, input_len, line_count, most)
+                {
+                    estimating = Estimating::WhenFull;
                     if capacity > tokens.capacity() {
                         tokens.reserve_exact(capacity - tokens.len());
                     }
@@ -630,23 +691,30 @@ fn flow_ends(tokens: &[Token<'_>]) -> HashMap<usize, usize> {
     ends
 }
 
-/// The number of top-level entries between a flow collection's opening and closing tokens.
+/// The number of top-level entries between a flow collection's opening and closing tokens. An
+/// entry counts once it has content, so separators alone reserve nothing.
 fn flow_entry_count(tokens: &[Token<'_>], open: usize, close: usize) -> usize {
     let mut depth = 0_usize;
-    let mut commas = 0_usize;
+    let mut entries = 0_usize;
     let mut content = false;
     for token in &tokens[open + 1..close] {
         match token.kind {
-            TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart => depth += 1,
+            TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart => {
+                content |= depth == 0;
+                depth += 1;
+            }
             TokenKind::FlowSequenceEnd | TokenKind::FlowMappingEnd => {
                 depth = depth.saturating_sub(1);
             }
-            TokenKind::FlowEntry if depth == 0 => commas += 1,
+            TokenKind::FlowEntry if depth == 0 => {
+                entries += usize::from(content);
+                content = false;
+            }
             _ if depth == 0 => content = true,
             _ => {}
         }
     }
-    if content || commas > 0 { commas + 1 } else { 0 }
+    entries + usize::from(content)
 }
 
 /// Parse one document's lines for the pull cursor. Its events count on from the `counted` events
@@ -964,7 +1032,7 @@ impl<'a> Parser<'a> {
     /// The number of top-level entries in the flow collection that opens at `tokens.start + start`,
     /// or `None` when the collection is malformed or not flow.
     fn flow_entries(&self, tokens: Run, start: usize) -> Option<usize> {
-        let open = tokens.start + start;
+        let open = self.lines[tokens.line].start + tokens.start + start;
         let close = *self.flow_ends.get(&open)?;
         Some(flow_entry_count(&self.token_arena, open, close))
     }

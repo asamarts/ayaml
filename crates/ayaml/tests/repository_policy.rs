@@ -184,3 +184,21 @@ fn allocation_budgets_include_total_bytes() {
     }
     assert!(rows > 0, "no allocation workloads found");
 }
+
+/// CI runs `tools/test_ci_checks.py` as a script, and `unittest.main()` exits when it returns, so
+/// a test class defined after that call never runs. The call must be the last thing in the file.
+#[test]
+fn the_ci_check_tests_all_run() {
+    let Some(root) = repository_root() else {
+        return;
+    };
+    let tests = read(&root, "tools/test_ci_checks.py");
+    let (_, after) = tests
+        .split_once("if __name__ == \"__main__\":")
+        .expect("the file runs its tests when it is a script");
+    assert_eq!(
+        after.trim(),
+        "unittest.main()",
+        "nothing may follow the call that runs the tests"
+    );
+}

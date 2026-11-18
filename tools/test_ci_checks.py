@@ -1333,9 +1333,6 @@ class InstructionsBase(unittest.TestCase):
         self.assertEqual(check_instructions.base_revision("abc123"), "abc123")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 class ScannerDependencyPolicy(unittest.TestCase):
     def scanner(self, source: str) -> str | None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1369,3 +1366,6 @@ class ScannerDependencyPolicy(unittest.TestCase):
         self.assertIsNotNone(problem)
         self.assertIn("missing", problem)
 
+
+if __name__ == "__main__":
+    unittest.main()
