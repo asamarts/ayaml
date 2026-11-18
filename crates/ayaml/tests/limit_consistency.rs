@@ -178,6 +178,9 @@ struct Case {
     /// Event readers don't copy an alias's target, so an alias-budget limit doesn't apply to
     /// them.
     events: bool,
+    /// The case is asked after each of these lengths of comment lines. One whose least value
+    /// depends on the input's length is asked of its own input alone.
+    comments: &'static [usize],
 }
 
 const fn case(
@@ -195,7 +198,29 @@ const fn case(
         several: false,
         decreasing: false,
         events: true,
+        comments: &COMMENT_BYTES,
     }
+}
+
+/// A case whose least value depends on how long the input is.
+const fn by_length(case: Case) -> Case {
+    Case {
+        comments: &[0],
+        ..case
+    }
+}
+
+/// Comment lines before a case's input, in bytes. A typed reader takes one of three paths by the
+/// input's length, at most 4 KiB, at most 8 KiB, and above, and a comment adds no event, token,
+/// or node, so each case has the same least value on each path.
+const COMMENT_BYTES: [usize; 3] = [0, 4_200, 8_300];
+
+/// `input` after at least `bytes` bytes of comment lines.
+fn after_comments(input: &str, bytes: usize) -> String {
+    const LINE: &str = "# a comment line that holds no token\n";
+    let mut text = LINE.repeat(bytes.div_ceil(LINE.len()));
+    text.push_str(input);
+    text
 }
 
 /// A case whose input holds more than one document.
@@ -390,6 +415,24 @@ fn cases() -> Vec<Case> {
         case("\"a\\tb\"\n", LimitKind::ScalarBytes, scalar_bytes, 6),
         // `|`, its line break, and `  abc` with its line break.
         case("|\n  abc\n", LimitKind::ScalarBytes, scalar_bytes, 8),
+        // A scalar with no value still has its text: two quotes.
+        case("\"\"\n", LimitKind::ScalarBytes, scalar_bytes, 2),
+        case("''\n", LimitKind::ScalarBytes, scalar_bytes, 2),
+        // The quotes, and three escaped line breaks of two bytes each, which add no value.
+        case(
+            "\"\\\n\\\n\\\n\"\n",
+            LimitKind::ScalarBytes,
+            scalar_bytes,
+            8,
+        ),
+        // `|`, its line break, and three blank lines, which a clipped scalar leaves out of its
+        // value.
+        case(
+            "a: |\n\n\n\nb: c\n",
+            LimitKind::ScalarBytes,
+            scalar_bytes,
+            5,
+        ),
         // An alias is charged 256 for each node it copies, and the text: here the tagged node,
         // `!t`, the scalar, and `abc`.
         Case {
@@ -462,12 +505,12 @@ fn cases() -> Vec<Case> {
         ))),
         // The input is 14 bytes and the alias copies a 256-byte node. With no fixed allowance,
         // 19 bytes per input byte is the least that reaches it.
-        values_only(case(
+        by_length(values_only(case(
             "a: &x 1\nb: *x\n",
             LimitKind::AliasExpansion,
             alias_per_byte,
             19,
-        )),
+        ))),
         // Each alias is one dereference, wherever its target is.
         Case {
             least_events: 0,
@@ -504,7 +547,7 @@ fn cases() -> Vec<Case> {
         // `!` stands for itself, once for each use.
         case("- !t a\n- !t b\n", LimitKind::TagExpansion, tag_bytes, 2),
         // Five bytes.
-        case("a: 1\n", LimitKind::InputBytes, input_bytes, 5),
+        by_length(case("a: 1\n", LimitKind::InputBytes, input_bytes, 5)),
     ]
 }
 
@@ -512,7 +555,22 @@ fn cases() -> Vec<Case> {
 fn every_reader_gives_the_same_answer_at_the_same_limits() {
     let readers = readers();
     let mut failures = Vec::new();
-    for case in cases() {
+    let cases = cases();
+    let asked = cases
+        .iter()
+        .flat_map(|case| case.comments.iter().map(move |bytes| (case, *bytes)));
+    for (case, comment_bytes) in asked {
+        let input = after_comments(case.input, comment_bytes);
+        let input = input.as_str();
+        let shown = if comment_bytes == 0 {
+            format!("{:?}", case.input)
+        } else {
+            format!(
+                "{:?} after {} bytes of comments",
+                case.input,
+                input.len() - case.input.len()
+            )
+        };
         let mut places: Vec<(usize, &str, Option<Span>)> = Vec::new();
         for reader in readers
             .iter()
@@ -523,29 +581,29 @@ fn every_reader_gives_the_same_answer_at_the_same_limits() {
             } else {
                 case.least_events
             };
-            let accepts = |value| (reader.read)(case.input, &(case.set)(Limits::default(), value));
+            let accepts = |value| (reader.read)(input, &(case.set)(Limits::default(), value));
             if case.decreasing {
                 // At and below the bound accept; values above it refuse with this limit.
                 for value in [boundary.saturating_sub(1), boundary] {
                     if let Err(error) = accepts(value) {
                         failures.push(format!(
-                            "{:?} {:?}: {} refused {value}: {error}",
-                            case.input, case.kind, reader.name
+                            "{} {:?}: {} refused {value}: {error}",
+                            shown, case.kind, reader.name
                         ));
                     }
                 }
                 for value in [boundary + 1, boundary + 2] {
                     match accepts(value) {
                         Ok(()) => failures.push(format!(
-                            "{:?} {:?}: {} accepted {value}",
-                            case.input, case.kind, reader.name
+                            "{} {:?}: {} accepted {value}",
+                            shown, case.kind, reader.name
                         )),
                         Err(error) => {
                             let kind = error.limit().map(ayaml::LimitExceeded::kind);
                             if error.kind() != ErrorKind::Limit || kind != Some(case.kind) {
                                 failures.push(format!(
-                                    "{:?} {:?}: {} refused {value} with {error}",
-                                    case.input, case.kind, reader.name
+                                    "{} {:?}: {} refused {value} with {error}",
+                                    shown, case.kind, reader.name
                                 ));
                             }
                             places.push((value, reader.name, error.span()));
@@ -557,29 +615,38 @@ fn every_reader_gives_the_same_answer_at_the_same_limits() {
             for value in [boundary, boundary + 1] {
                 if let Err(error) = accepts(value) {
                     failures.push(format!(
-                        "{:?} {:?}: {} refused {value}: {error}",
-                        case.input, case.kind, reader.name
+                        "{} {:?}: {} refused {value}: {error}",
+                        shown, case.kind, reader.name
                     ));
                 }
             }
             if boundary == 0 {
                 continue;
             }
-            // Every value below one less refuses the input for the same limit, wherever.
-            for value in 0..boundary - 1 {
+            // Every value below one less refuses the input for the same limit, wherever. After
+            // comments, where the plain input has already been asked every value, two are asked.
+            let below: Vec<usize> = if comment_bytes == 0 {
+                (0..boundary - 1).collect()
+            } else {
+                let mut below = vec![0, (boundary - 1) / 2];
+                below.dedup();
+                below.retain(|value| *value < boundary - 1);
+                below
+            };
+            for value in below {
                 match accepts(value) {
                     Err(error)
                         if error.limit().map(ayaml::LimitExceeded::kind) == Some(case.kind) => {}
                     other => failures.push(format!(
-                        "{:?} {:?}: {} at {value}: {other:?}",
-                        case.input, case.kind, reader.name
+                        "{} {:?}: {} at {value}: {other:?}",
+                        shown, case.kind, reader.name
                     )),
                 }
             }
             match accepts(boundary - 1) {
                 Ok(()) => failures.push(format!(
-                    "{:?} {:?}: {} accepted {}",
-                    case.input,
+                    "{} {:?}: {} accepted {}",
+                    shown,
                     case.kind,
                     reader.name,
                     boundary - 1
@@ -588,8 +655,8 @@ fn every_reader_gives_the_same_answer_at_the_same_limits() {
                     let kind = error.limit().map(ayaml::LimitExceeded::kind);
                     if error.kind() != ErrorKind::Limit || kind != Some(case.kind) {
                         failures.push(format!(
-                            "{:?} {:?}: {} refused {} with {error}",
-                            case.input,
+                            "{} {:?}: {} refused {} with {error}",
+                            shown,
                             case.kind,
                             reader.name,
                             boundary - 1
@@ -607,8 +674,8 @@ fn every_reader_gives_the_same_answer_at_the_same_limits() {
                 .expect("itself");
             if span != expected {
                 failures.push(format!(
-                    "{:?} {:?}: {name} refused at {span:?}, {first} at {expected:?}",
-                    case.input, case.kind
+                    "{} {:?}: {name} refused at {span:?}, {first} at {expected:?}",
+                    shown, case.kind
                 ));
             }
         }

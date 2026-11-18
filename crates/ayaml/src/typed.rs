@@ -29,7 +29,7 @@ use crate::limits::{AliasBudget, Limits};
 use crate::number::Number;
 use crate::parser::{self, EventChunks, EventConsumer};
 use crate::resolver::{float_from_text, plain_resolves_to_string, resolve_scalar};
-use crate::span::Span;
+use crate::span::{Position, Span};
 use crate::tag::Tag;
 use crate::value::{Value, key_text_full, push_quoted_key};
 
@@ -260,9 +260,13 @@ fn parse_document<'de>(
     limits: &Limits,
     options: NodeOptions,
 ) -> Result<Node<'de>, Error> {
-    limits
-        .check_input(input.len())
-        .map_err(|error| Error::from(error).with_span(Span::empty(0)))?;
+    // The location is set here: finding it from the span would index the lines of an input
+    // that is over the limit, which is the work the limit exists to refuse.
+    limits.check_input(input.len()).map_err(|error| {
+        Error::from(error)
+            .with_span(Span::empty(0))
+            .with_location(Position::new(1, 1))
+    })?;
     if input.len() <= CHUNKED_INPUT_THRESHOLD {
         let events = parser::parse_document_events(input, limits, options.compat_flow)?;
         build(
@@ -520,7 +524,8 @@ impl<'de> EventConsumer<'de> for Builder<'de> {
     }
 
     fn reserve_collection(&mut self, entries: usize) {
-        self.pending_capacity = Some(entries);
+        // A collection with more entries than the limit is refused, so it needs no more room.
+        self.pending_capacity = Some(entries.min(self.limits.max_collection_entries));
     }
 
     fn finish(&mut self) -> Result<(), Error> {

@@ -1790,9 +1790,9 @@ fn a_block_scalar_holds_memory_in_proportion_to_its_input() {
     }
 }
 
-/// The scanner keeps a logical line's tokens in one arena, 104 bytes each, and counts every token
-/// it keeps against `max_events`. A flow collection is one logical line, so a long one holds memory in
-/// proportion to its tokens, and the arena wastes at most a sixteenth of itself as it grows.
+/// The scanner keeps a logical line's tokens in one arena, 32 bytes each on a 64-bit target, and
+/// counts every token it keeps against `max_events`. A flow collection is one logical line, so a
+/// long one holds memory in proportion to its tokens, and the arena is sized to them.
 #[test]
 fn tokens_hold_memory_in_proportion_to_their_number() {
     measure_in_children("flow sequence");
@@ -1802,6 +1802,95 @@ fn tokens_hold_memory_in_proportion_to_their_number() {
 #[test]
 fn an_error_at_the_end_holds_one_index_of_lines() {
     measure_in_children("unclosed flow sequence");
+}
+
+/// An input over `max_input_bytes` is refused before any of it is read, on every entry point:
+/// the error is at the input's start, and placing it there takes no index of the input's lines.
+/// A line break costs an index 8 bytes, so indexing this input would hold 8 times its size.
+#[test]
+fn an_input_over_the_limit_is_refused_before_it_is_read() {
+    in_child!(|| {
+        let input = "\n".repeat(ayaml::MAX_INPUT_BYTES + 1);
+        let mut results = Vec::new();
+        let mut read = || {
+            results = entry_points(&input);
+            results.push(("parse_events", ok(ayaml::parse_events(&input))));
+            results.push(("SpannedTree::parse", ok(ayaml::SpannedTree::parse(&input))));
+        };
+        let growth = if MEASURES_MEMORY {
+            Some(peak_growth(&mut read))
+        } else {
+            read();
+            None
+        };
+        for (name, result) in results {
+            let error = result.expect_err(name);
+            assert_eq!(
+                error.limit().map(LimitExceeded::kind),
+                Some(LimitKind::InputBytes),
+                "{name}: {error}"
+            );
+            assert_eq!(
+                error.location().map(|at| (at.line(), at.column())),
+                Some((1, 1)),
+                "{name}: {error}"
+            );
+        }
+        if let Some(growth) = growth {
+            println!("an input over the limit: {growth} bytes at the peak");
+            assert!(
+                growth <= 1 << 20,
+                "refusing an input over the limit held {growth} bytes"
+            );
+        }
+    });
+}
+
+/// How much address space this process took during `read`, beyond what it had when `read`
+/// started, in bytes. Memory that is reserved and never written counts here, and not in the
+/// peak that [`peak_growth`] measures. Linux only.
+fn address_space_growth(read: impl FnOnce()) -> u64 {
+    let before = proc_self_number("status", "VmSize:").expect("VmSize in /proc/self/status");
+    read();
+    let peak = proc_self_number("status", "VmPeak:").expect("VmPeak in /proc/self/status");
+    peak.saturating_sub(before) * 1024
+}
+
+/// Lines of `- a` in an input of the largest size the default limits read: two tokens a line,
+/// sixteen times the tokens `max_events` allows.
+const DENSE_LINES: usize = ayaml::MAX_INPUT_BYTES / 4;
+
+/// The most address space a reader may take for each byte of an input it refuses for its tokens.
+/// It holds the index of line starts, 8 bytes a line, and no more tokens than the limit allows,
+/// which comes to about 4 bytes for each byte of this input. When the token arena was reserved
+/// from the input's density alone, it took 16 bytes for each byte of input.
+const MOST_REFUSED_PER_BYTE: u64 = 8;
+
+/// A reader reserves room for no more tokens than `max_events` allows, however many the input's
+/// density promises: the scanner refuses the input at the limit, so the room would stay unused.
+#[test]
+fn a_refused_dense_input_reserves_no_tokens_past_the_limit() {
+    in_child!(|| {
+        if !MEASURES_MEMORY {
+            println!("not measured, since only Linux reports a process's address space");
+            return;
+        }
+        let input = "- a\n".repeat(DENSE_LINES);
+        for (reader, read) in measured_readers() {
+            let mut refused = false;
+            let growth = address_space_growth(|| refused = !read(&input));
+            assert!(
+                refused,
+                "{reader}: the input is over the default max_events"
+            );
+            let ratio = growth as f64 / input.len() as f64;
+            println!("{reader}: {growth} bytes of address space, {ratio:.2} times the input");
+            assert!(
+                growth <= MOST_REFUSED_PER_BYTE * input.len() as u64,
+                "{reader}: {growth} bytes of address space for a refused input"
+            );
+        }
+    });
 }
 
 /// A mapping key nested `depth` levels deep, with a wide mapping at the bottom.

@@ -28,7 +28,7 @@ mode; that mode has its own `ayaml::compat` entry points.
 ### Count profile for the input limit
 
 The default count limits are a lower profile than `max_input_bytes`: they bound the tokens
-an eager read keeps to about 100 MB. A dense but valid document can therefore reach
+an eager read keeps to about 32 MB. A dense but valid document can therefore reach
 `max_events`, `max_collection_entries`, `max_anchors`, or `max_alias_dereferences` before it
 reaches the 32 MiB input limit. This is intentional for hostile input.
 
@@ -152,11 +152,14 @@ that document's tokens. Every other reader holds the tokens of the whole stream.
 - The index takes 8 bytes for each CR or LF in the input, so input of blank lines, a
   byte each, costs 8 times its size there. That is 8 bytes a line, or under 16 where
   lines end in CRLF. An error at the end of the input is placed without a second index.
-- A token takes about 100 bytes, and every token a read keeps counts against `max_events`,
-  so at the default limit a read holds about 100 MB of tokens at most. The arena that holds
-  them grows by a chunk of up to 8,192 tokens, or by a sixteenth of itself once that
-  is more. Its copying stays linear in the tokens, and its spare capacity is at most a
-  chunk or a sixteenth of it, whichever is larger.
+- A token takes 32 bytes on a 64-bit target, and every token a read keeps counts against
+  `max_events`, so at the default limit a read holds about 32 MB of tokens at most. The arena
+  that holds them reserves room for no more tokens than that limit allows, whatever the input
+  promises. Past its first chunk it is sized from the density of the input scanned so far:
+  one reservation is at most eight times the tokens already scanned, and when it fills the
+  next is made from a later estimate. An arena whose estimate fell short grows by a sixteenth
+  of itself, or by a chunk of up to 16,384 tokens when that is more. So its copying stays
+  linear in the tokens, and its capacity stays within eight times the tokens it holds.
 - A block scalar is built as it is read. At its peak a read of one takes about 5 times
   its input in resident memory for short lines, and about 10 times for blank lines,
   where the index costs most. Counting the capacity it reserves without touching, a
