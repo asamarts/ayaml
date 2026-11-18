@@ -295,6 +295,10 @@ impl<'a> EventChunks<'a> {
 pub(crate) trait EventConsumer<'a> {
     fn event(&mut self, event: Event<'a>) -> Result<(), Error>;
 
+    /// Reserve room for a collection's entries before its start event. Sinks that don't build
+    /// collections ignore this.
+    fn reserve_collection(&mut self, _entries: usize) {}
+
     fn finish(&mut self) -> Result<(), Error>;
 }
 
@@ -306,6 +310,12 @@ enum EventSink<'a> {
 }
 
 impl<'a> EventSink<'a> {
+    fn reserve_collection(&mut self, entries: usize) {
+        if let Self::Consumer(consumer) = self {
+            consumer.reserve_collection(entries);
+        }
+    }
+
     fn event(&mut self, event: Event<'a>) -> Result<(), Error> {
         match self {
             Self::Events(events) => {
@@ -620,6 +630,25 @@ fn flow_ends(tokens: &[Token<'_>]) -> HashMap<usize, usize> {
     ends
 }
 
+/// The number of top-level entries between a flow collection's opening and closing tokens.
+fn flow_entry_count(tokens: &[Token<'_>], open: usize, close: usize) -> usize {
+    let mut depth = 0_usize;
+    let mut commas = 0_usize;
+    let mut content = false;
+    for token in &tokens[open + 1..close] {
+        match token.kind {
+            TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart => depth += 1,
+            TokenKind::FlowSequenceEnd | TokenKind::FlowMappingEnd => {
+                depth = depth.saturating_sub(1);
+            }
+            TokenKind::FlowEntry if depth == 0 => commas += 1,
+            _ if depth == 0 => content = true,
+            _ => {}
+        }
+    }
+    if content || commas > 0 { commas + 1 } else { 0 }
+}
+
 /// Parse one document's lines for the pull cursor. Its events count on from the `counted` events
 /// before them, and the count after them comes back with them. `end` is where the lines stop.
 fn parse_lines<'a>(
@@ -930,6 +959,14 @@ impl<'a> Parser<'a> {
         self.positions
             .marker(self.input, offset)
             .unwrap_or_default()
+    }
+
+    /// The number of top-level entries in the flow collection that opens at `tokens.start + start`,
+    /// or `None` when the collection is malformed or not flow.
+    fn flow_entries(&self, tokens: Run, start: usize) -> Option<usize> {
+        let open = tokens.start + start;
+        let close = *self.flow_ends.get(&open)?;
+        Some(flow_entry_count(&self.token_arena, open, close))
     }
 
     fn parse_stream(&mut self) -> Result<(), Error> {

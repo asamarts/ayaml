@@ -18,6 +18,11 @@ impl<'a> Parser<'a> {
         self.limits
             .check_depth(depth + 1)
             .map_err(|error| self.limit_at(start_span, error))?;
+        if depth == 0
+            && let Some(entries) = self.flow_entries(tokens, start)
+        {
+            self.sink.reserve_collection(entries);
+        }
         self.emit(Event::SequenceStart {
             tag,
             anchor,
@@ -276,6 +281,11 @@ impl<'a> Parser<'a> {
         self.limits
             .check_depth(depth + 1)
             .map_err(|error| self.limit_at(start_span, error))?;
+        if depth == 0
+            && let Some(entries) = self.flow_entries(tokens, start)
+        {
+            self.sink.reserve_collection(entries);
+        }
         self.emit(Event::MappingStart {
             tag,
             anchor,

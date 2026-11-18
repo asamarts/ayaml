@@ -4,8 +4,8 @@
 )]
 
 use super::{
-    TOKEN_ARENA_CHUNK, TOKEN_ARENA_MID_CHUNK, TOKEN_ARENA_SMALL_CHUNK, arena_growth, parse_events,
-    push_token,
+    TOKEN_ARENA_CHUNK, TOKEN_ARENA_MID_CHUNK, TOKEN_ARENA_SMALL_CHUNK, arena_growth, flow_ends,
+    flow_entry_count, parse_events, push_token, read_lines,
 };
 use crate::error::ErrorKind;
 use crate::event::Event;
@@ -935,6 +935,26 @@ fn prefix_token_estimate_uses_the_scanned_density_with_a_cap() {
 #[test]
 fn a_token_stays_small() {
     assert!(size_of::<Token<'_>>() <= 32, "{}", size_of::<Token<'_>>());
+}
+
+#[test]
+fn root_flow_collections_count_their_entries() {
+    let input = "[1, 2, {a: 3, b: [4, 5]}]\n";
+    let mut scanner = crate::scanner::Scanner::new(input, Limits::default()).expect("scanner");
+    let lines = read_lines(&mut scanner).expect("lines");
+    let ends = flow_ends(&lines.tokens);
+    let open = lines
+        .tokens
+        .iter()
+        .position(|token| matches!(token.kind, TokenKind::FlowSequenceStart))
+        .expect("sequence start");
+    assert_eq!(flow_entry_count(&lines.tokens, open, ends[&open]), 3);
+    let mapping = lines
+        .tokens
+        .iter()
+        .position(|token| matches!(token.kind, TokenKind::FlowMappingStart))
+        .expect("mapping start");
+    assert_eq!(flow_entry_count(&lines.tokens, mapping, ends[&mapping]), 2);
 }
 
 #[test]
