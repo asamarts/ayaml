@@ -715,8 +715,8 @@ lowers its measurement. The gate script no longer passes over a budget file that
 
 **Decision.** AY-104 keeps its scope: an untyped decode builds its value as the events arrive,
 without a complete typed node tree in between. That is the work that brings the ninth shape of
-#178, a megabyte block sequence of short words, from 1.28 times the issue's reference to within
-1.2 times.
+issue #178, a megabyte block sequence of short words, from 1.28 times the issue's reference to
+within 1.2 times.
 
 **Alternatives.** A narrower change, estimated at a day: line records of 12 bytes in place of 24,
 and room reserved for a root block collection from its line count. It was estimated to bring that
@@ -731,4 +731,3 @@ narrower change trims one shape and leaves little room under the target.
 **Consequences.** #178 stays open until AY-104 lands, and by D90 the 0.2.0 release waits for it.
 The narrower change is not planned. The budgets in `tools/json-alloc-corpus.tsv` are lowered in
 the change that closes AY-104.
-
