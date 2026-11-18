@@ -75,10 +75,11 @@ the separation before a comment, line break, or flow indicator stays outside it.
 `SpannedTree` builds a read-only tree from the same events and answers path lookups with a
 node's byte span, its entry span, and the original scalar text. Aliases, merge keys,
 duplicate keys, and multi-document streams return `None` rather than guessing. An entry span is
-the bytes whose removal removes that entry and nothing else. A block entry that begins its own
-line has one, which runs through the entry's last line break. A flow entry has none, and nor
-does any other entry that shares a line or defines an anchor (D92). A value that the source
-doesn't write stands right after its key's `:`.
+the bytes whose removal removes that entry and changes nothing else. A block entry that begins
+its own line can have one, which runs through the entry's last line break. A flow entry has
+none, and nor does a block entry whose removal the lines around it would make inexact; D92 lists
+the conditions. A value that the source doesn't write after its key's `:` has an empty span
+right after that `:`.
 
 Errors have a stable `ErrorKind`, an optional span and location, a message, and
 an optional source. Resource-limit errors additionally expose a structured

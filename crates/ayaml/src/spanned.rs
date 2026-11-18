@@ -28,9 +28,10 @@ pub struct SpannedTree<'a> {
 pub struct SpannedNode<'a> {
     span: Span,
     entry_span: Option<Span>,
-    /// Where the node's last character ends. A block collection's is its last entry's, which
-    /// its span can pass.
-    content_end: usize,
+    /// Where the node's last character ends, when its span says. A block collection's is its
+    /// last entry's, which its span can pass. A scalar with no text has none: the parser places
+    /// it at the token after it, which can be lines away.
+    content_end: Option<usize>,
     /// The node, or a node inside it, defines an anchor.
     anchored: bool,
     kind: Kind<'a>,
@@ -128,8 +129,8 @@ impl<'a> SpannedTree<'a> {
         self.lookup(path).map(SpannedNode::span)
     }
 
-    /// The span that removes the entry at `path` and nothing else, or `None` when no span does.
-    /// See [`SpannedNode::entry_span`] for which entries have one.
+    /// The span that removes the entry at `path` and changes nothing else, or `None` when no
+    /// span is known to. See [`SpannedNode::entry_span`] for which entries have one.
     #[must_use]
     pub fn entry_span_at(&self, path: &[PathSegment]) -> Option<Span> {
         self.lookup(path).and_then(SpannedNode::entry_span)
@@ -157,23 +158,35 @@ impl SpannedNode<'_> {
         self.span
     }
 
-    /// The span that removes this node's entry from its parent, when deleting those bytes
-    /// removes that entry and leaves the rest of the document as it was.
+    /// The span that removes this node's entry from its parent, when deleting those bytes is
+    /// known to leave a document that reads as before without that entry, and with nothing
+    /// else changed.
     ///
-    /// A block mapping's entry and a block sequence's item have one when they begin their own
-    /// line and nothing follows them on their last line but a comment. The span runs from the
-    /// start of that line through the entry's last line break, so it takes the entry's
+    /// A block mapping's entry and a block sequence's item can have one. The span runs from the
+    /// start of the entry's first line through its last line break, so it takes the entry's
     /// indentation, a value on later lines, a block scalar, and a comment after the value. A
     /// byte-order mark before the first entry stays outside it.
     ///
-    /// The other entries have none, since no span of theirs is exact: an entry of a flow
-    /// collection, whose separator belongs to its neighbor as much as to it; the first key of a
-    /// mapping that begins on a sequence's `-` line; an entry with an explicit `?`, or with a
-    /// tag or an anchor before its key; an item with no value; and an entry that defines an
-    /// anchor, which an alias elsewhere may name.
+    /// `None` is conservative: it means that no span is known to be exact. These have none:
     ///
-    /// Removing a block collection's only entry leaves it with none, and it then reads as an
-    /// empty value, not as an empty collection.
+    /// - an entry of a flow collection, whose separator belongs to its neighbor as much as to
+    ///   it;
+    /// - an entry that doesn't begin its own line, such as the first key of a mapping on a
+    ///   sequence's `-` line, and one with more than a comment after it on its last line;
+    /// - a mapping entry with an explicit `?`, with a tag or an anchor before its key, or with
+    ///   a key that has no text;
+    /// - an item with no value, an item whose value begins on a later line, and an entry that
+    ///   ends in such an item or in a value that a tag stands for;
+    /// - an entry that defines an anchor, or stands inside a collection that has one: an alias
+    ///   reads what it names;
+    /// - the only entry of its collection, which would be no collection without it;
+    /// - an entry before a line that begins with `:`, which would give its value to a key
+    ///   before the entry;
+    /// - an entry after a block scalar, unless content follows the entry directly: the scalar
+    ///   would take the blank and comment lines after it.
+    ///
+    /// The lines around an entry decide most of these, so the same entry can have a span in one
+    /// document and none in another.
     #[must_use]
     pub const fn entry_span(&self) -> Option<Span> {
         self.entry_span
@@ -277,6 +290,7 @@ fn build<'a>(
         documents: Vec::new(),
         stack: Vec::new(),
         root: None,
+        after_block_scalar: false,
     };
     for event in events {
         builder.event(event?)?;
@@ -291,6 +305,9 @@ struct Builder<'a> {
     documents: Vec<SpannedNode<'a>>,
     stack: Vec<Frame<'a>>,
     root: Option<SpannedNode<'a>>,
+    /// The last scalar or alias that the source writes was a block scalar. One takes the blank
+    /// and more indented lines after it as its own, until other content ends it.
+    after_block_scalar: bool,
 }
 
 struct Frame<'a> {
@@ -298,6 +315,8 @@ struct Frame<'a> {
     style: crate::event::CollectionStyle,
     /// The collection has an anchor of its own.
     anchored: bool,
+    /// What [`Builder::after_block_scalar`] was when the collection began.
+    after_block_scalar: bool,
     kind: FrameKind<'a>,
 }
 
@@ -305,8 +324,9 @@ enum FrameKind<'a> {
     Sequence(Vec<SpannedNode<'a>>),
     Mapping {
         entries: Vec<Entry<'a>>,
-        /// The key that waits for its value. Boxed, so a sequence's frame isn't as large.
-        key: Option<Box<SpannedNode<'a>>>,
+        /// The key that waits for its value, and what [`Builder::after_block_scalar`] was
+        /// when the key began. Boxed, so a sequence's frame isn't as large.
+        key: Option<Box<(SpannedNode<'a>, bool)>>,
         seen: HashMap<Value, usize>,
     },
 }
@@ -329,10 +349,16 @@ impl<'a> Builder<'a> {
                 anchor,
                 span,
             } => {
+                let before = self.after_block_scalar;
+                // A scalar with no text isn't written, so it ends no block scalar before it.
+                if !span.is_empty() {
+                    self.after_block_scalar =
+                        matches!(style, ScalarStyle::Literal | ScalarStyle::Folded);
+                }
                 let node = SpannedNode {
                     span,
                     entry_span: None,
-                    content_end: span.end(),
+                    content_end: (!span.is_empty()).then(|| span.end()),
                     anchored: anchor.is_some(),
                     kind: Kind::Scalar {
                         value,
@@ -341,17 +367,18 @@ impl<'a> Builder<'a> {
                         tag,
                     },
                 };
-                self.add(node);
+                self.add(node, before);
             }
             Event::Alias { span, .. } => {
+                let before = std::mem::replace(&mut self.after_block_scalar, false);
                 let node = SpannedNode {
                     span,
                     entry_span: None,
-                    content_end: span.end(),
+                    content_end: Some(span.end()),
                     anchored: false,
                     kind: Kind::Alias,
                 };
-                self.add(node);
+                self.add(node, before);
             }
             Event::SequenceStart {
                 span,
@@ -363,6 +390,7 @@ impl<'a> Builder<'a> {
                     open: span,
                     style,
                     anchored: anchor.is_some(),
+                    after_block_scalar: self.after_block_scalar,
                     kind: FrameKind::Sequence(Vec::new()),
                 });
             }
@@ -374,17 +402,26 @@ impl<'a> Builder<'a> {
                     return Err(Error::new(ErrorKind::Parser, "sequence end for a mapping"));
                 };
                 let flow = frame.style == crate::event::CollectionStyle::Flow;
+                let mut items = items;
+                // Without its only item a collection is no collection: what is left of it reads
+                // as an empty value, under whatever tag stood before it.
+                if let [only] = items.as_mut_slice() {
+                    only.entry_span = None;
+                }
                 let node = SpannedNode {
                     span: Span::new(frame.open.start(), span.end()),
                     entry_span: None,
                     content_end: match items.last() {
                         Some(last) if !flow => last.content_end,
-                        _ => span.end(),
+                        _ => Some(span.end()),
                     },
                     anchored: frame.anchored || items.iter().any(|item| item.anchored),
                     kind: Kind::Sequence(items),
                 };
-                self.add(node);
+                if flow {
+                    self.after_block_scalar = false;
+                }
+                self.add(node, frame.after_block_scalar);
             }
             Event::MappingStart {
                 span,
@@ -396,6 +433,7 @@ impl<'a> Builder<'a> {
                     open: span,
                     style,
                     anchored: anchor.is_some(),
+                    after_block_scalar: self.after_block_scalar,
                     kind: FrameKind::Mapping {
                         entries: Vec::new(),
                         key: None,
@@ -411,12 +449,16 @@ impl<'a> Builder<'a> {
                     return Err(Error::new(ErrorKind::Parser, "mapping end for a sequence"));
                 };
                 let flow = frame.style == crate::event::CollectionStyle::Flow;
+                let mut entries = entries;
+                if let [only] = entries.as_mut_slice() {
+                    only.value.entry_span = None;
+                }
                 let node = SpannedNode {
                     span: Span::new(frame.open.start(), span.end()),
                     entry_span: None,
                     content_end: match entries.last() {
                         Some(last) if !flow => last.value.content_end,
-                        _ => span.end(),
+                        _ => Some(span.end()),
                     },
                     anchored: frame.anchored
                         || entries
@@ -424,13 +466,21 @@ impl<'a> Builder<'a> {
                             .any(|entry| entry.key.anchored || entry.value.anchored),
                     kind: Kind::Mapping(entries),
                 };
-                self.add(node);
+                if flow {
+                    self.after_block_scalar = false;
+                }
+                self.add(node, frame.after_block_scalar);
             }
         }
         Ok(())
     }
 
-    fn add(&mut self, mut node: SpannedNode<'a>) {
+    /// Add a finished node to the collection that is open. `after_block_scalar` says whether
+    /// the last thing the source wrote before the node was a block scalar.
+    fn add(&mut self, mut node: SpannedNode<'a>, after_block_scalar: bool) {
+        // An alias to a collection reads the entries inside it, so removing one of them changes
+        // what the alias stands for.
+        let aliased = self.stack.iter().any(|frame| frame.anchored);
         let Some(frame) = self.stack.last_mut() else {
             self.root = Some(node);
             return;
@@ -443,32 +493,39 @@ impl<'a> Builder<'a> {
                     Lead::Item,
                     node.span.start(),
                     node.content_end,
-                    node.anchored,
+                    aliased || node.anchored,
+                    after_block_scalar,
                 );
                 items.push(node);
             }
             FrameKind::Mapping { entries, key, seen } => {
-                let Some(key_node) = key.take() else {
+                let Some(waiting) = key.take() else {
                     node.entry_span = None;
-                    *key = Some(Box::new(node));
+                    *key = Some(Box::new((node, after_block_scalar)));
                     return;
                 };
-                let mut key_node = *key_node;
+                let (mut key_node, after_block_scalar) = *waiting;
                 key_node.entry_span = None;
-                if node.is_missing_value() {
+                if node.is_missing_value()
+                    && let Some(key_end) = key_node.content_end
+                    && let Some(at) =
+                        missing_value_place(self.input, key_node.span.start(), key_end, frame.style)
+                {
                     // The parser places a value that isn't there at the next token. It stands
-                    // after its key, where a value would be written.
-                    let at = after_key(self.input, key_node.content_end);
+                    // after its key's `:`, where a value would be written.
                     node.span = Span::empty(at);
-                    node.content_end = at;
+                    node.content_end = Some(at);
                 }
                 let span = block_entry_span(
                     self.input,
                     frame.style,
-                    Lead::Key,
+                    Lead::Key {
+                        end: key_node.content_end,
+                    },
                     key_node.span.start(),
                     node.content_end,
-                    key_node.anchored || node.anchored,
+                    aliased || key_node.anchored || node.anchored,
+                    after_block_scalar,
                 );
                 let key_value = key_node.resolved_value();
                 let mut ambiguous = is_merge_key(&key_node);
@@ -526,26 +583,33 @@ fn is_merge_key(node: &SpannedNode<'_>) -> bool {
 /// What stands before a block entry on its first line.
 #[derive(Clone, Copy)]
 enum Lead {
-    /// A mapping's key: indentation alone.
-    Key,
+    /// A mapping's key, which ends at `end`: indentation alone before it, and the key and its
+    /// `:` on that one line. A key that follows a `?`, on that line or an earlier one, has its
+    /// `:` on a later line or has none. A key with no text has no known end, whether a `?`
+    /// came before it or not.
+    Key { end: Option<usize> },
     /// A sequence's item: indentation, its `-`, and spaces.
     Item,
 }
 
 /// The span whose removal removes one block entry and nothing else, or `None` when the entry
 /// has no such span (see [`SpannedNode::entry_span`]). The entry begins at `first`, its last
-/// character ends at `content_end`, and `anchored` says whether it defines an anchor.
+/// character ends at `content_end`, when that is known, `anchored` says whether it defines an
+/// anchor or stands inside a collection that has one, and `after_block_scalar` whether the last
+/// thing written before it is a block scalar.
 fn block_entry_span(
     input: &str,
     style: crate::event::CollectionStyle,
     lead: Lead,
     first: usize,
-    content_end: usize,
+    content_end: Option<usize>,
     anchored: bool,
+    after_block_scalar: bool,
 ) -> Option<Span> {
     if style == crate::event::CollectionStyle::Flow || anchored {
         return None;
     }
+    let content_end = content_end?;
     let mut start = line_start(input, first);
     // A byte-order mark opens the input, not the first entry.
     if start == 0 && input.starts_with('\u{feff}') {
@@ -553,7 +617,13 @@ fn block_entry_span(
     }
     let before = input.get(start..first)?;
     let begins_its_line = match lead {
-        Lead::Key => before.bytes().all(|byte| byte == b' '),
+        Lead::Key { end } => {
+            let end = end?;
+            let colon = after_key(input, end);
+            before.bytes().all(|byte| byte == b' ')
+                && colon > end
+                && !input.get(first..colon)?.contains(['\n', '\r'])
+        }
         Lead::Item => before
             .trim_start_matches(' ')
             .strip_prefix('-')
@@ -563,7 +633,42 @@ fn block_entry_span(
         return None;
     }
     let end = entry_end(input, content_end)?;
+    // A line that begins with `:` gives a value to the key before it. With this entry gone,
+    // that could be an explicit key from before the entry.
+    if value_indicator_follows(input, end) {
+        return None;
+    }
+    // A block scalar that is the last thing written before this entry ends where the entry
+    // begins. With the entry gone it would run on through the blank and comment lines that
+    // follow, unless content follows.
+    if after_block_scalar && !content_follows(input, end) {
+        return None;
+    }
     (end > start).then(|| Span::new(start, end))
+}
+
+/// Whether the input ends at `from`, or the line there holds more than blanks or a comment.
+fn content_follows(input: &str, from: usize) -> bool {
+    let rest = input.get(from..).unwrap_or_default();
+    let line = rest.split(['\n', '\r']).next().unwrap_or(rest);
+    let content = line.trim_start_matches([' ', '\t']);
+    rest.is_empty() || !(content.is_empty() || content.starts_with('#'))
+}
+
+/// Whether the first line from `from` on that holds more than blanks or a comment begins with a
+/// `:` indicator.
+fn value_indicator_follows(input: &str, from: usize) -> bool {
+    let rest = input.get(from..).unwrap_or_default();
+    for line in rest.split(['\n', '\r']) {
+        let content = line.trim_start_matches([' ', '\t']);
+        if content.is_empty() || content.starts_with('#') {
+            continue;
+        }
+        return content
+            .strip_prefix(':')
+            .is_some_and(|after| after.is_empty() || after.starts_with([' ', '\t']));
+    }
+    false
 }
 
 /// Where an entry whose last character ends at `content_end` ends: after its line break, or
@@ -581,8 +686,45 @@ fn entry_end(input: &str, content_end: usize) -> Option<usize> {
     (after.is_empty() || comment).then(|| line_end(input, content_end))
 }
 
-/// Where a value that the source doesn't write stands: after the `:` that follows its key on
-/// the key's line, or after the key when none does.
+/// Where a value that the source doesn't write stands, when the source shows that it wrote
+/// none: after the `:` that follows its key on the key's line. `None` when no `:` follows the
+/// key there, as after an explicit key, and when what comes next could be the value: anything
+/// but a comment on the key's line, or a line indented past the key. A tag that names the kind
+/// of a collection stands there with no event to show for it.
+fn missing_value_place(
+    input: &str,
+    key_start: usize,
+    key_end: usize,
+    style: crate::event::CollectionStyle,
+) -> Option<usize> {
+    let at = after_key(input, key_end);
+    if at == key_end {
+        return None;
+    }
+    let flow = style == crate::event::CollectionStyle::Flow;
+    let mut key_column = key_start - line_start(input, key_start);
+    if input.starts_with('\u{feff}') && line_start(input, key_start) == 0 {
+        key_column = key_column.saturating_sub('\u{feff}'.len_utf8());
+    }
+    for (number, line) in input.get(at..)?.split(['\n', '\r']).enumerate() {
+        let content = line.trim_start_matches(' ');
+        let blank = content.trim_start_matches('\t').is_empty();
+        // A comment needs a blank before its `#`, which a line's start is.
+        if blank || content.starts_with('#') || content.trim_start_matches('\t').starts_with('#') {
+            continue;
+        }
+        let ends_the_entry = if flow {
+            content.starts_with([',', '}', ']'])
+        } else {
+            number > 0 && line.len() - content.len() <= key_column
+        };
+        return ends_the_entry.then_some(at);
+    }
+    Some(at)
+}
+
+/// The offset after the `:` that follows a key on the key's line, or the key's end when none
+/// does.
 fn after_key(input: &str, key_end: usize) -> usize {
     let Some(rest) = input.get(key_end..) else {
         return key_end;

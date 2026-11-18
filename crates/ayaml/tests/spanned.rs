@@ -24,10 +24,7 @@ fn scalar_positions_and_encodings_follow_the_source() {
     assert_eq!(tree.scalar_text_at(&path), Some("flow"));
     assert!(tree.span_at(&[PathSegment::key("e")]).is_some());
 
-    let entry = tree
-        .entry_span_at(&[PathSegment::key("a"), PathSegment::key("b")])
-        .expect("entry span");
-    assert_eq!(entry.slice(input), Some("  b: plain\n"));
+    assert_eq!(entry(input, &[key("a"), key("b")]), Some("  b: plain\n"));
 }
 
 #[test]
@@ -49,13 +46,12 @@ fn aliases_merge_keys_duplicates_and_multiple_documents_are_ambiguous() {
 
 #[test]
 fn spans_keep_crlf_bom_and_multibyte_offsets() {
-    let input = "\u{feff}a:\r\n  é: \"x\"\r\n";
+    let input = "\u{feff}a:\r\n  é: \"x\"\r\n  ü: y\r\n";
     let tree = SpannedTree::parse(input).expect("tree");
     let path = [PathSegment::key("a"), PathSegment::key("é")];
     let span = tree.span_at(&path).expect("span");
     assert_eq!(span.slice(input), Some("\"x\""));
-    let entry = tree.entry_span_at(&path).expect("entry");
-    assert_eq!(entry.slice(input), Some("  é: \"x\"\r\n"));
+    assert_eq!(entry(input, &path), Some("  é: \"x\"\r\n"));
 }
 
 #[test]
@@ -83,54 +79,117 @@ fn index(at: usize) -> PathSegment {
     PathSegment::index(at)
 }
 
-/// `value` without the entry at `path`. A block collection left with no entry reads as an empty
-/// value, which is a null.
-fn without(value: &Value, path: &[PathSegment]) -> Value {
-    let (first, rest) = path.split_first().expect("a path to an entry");
+/// The mode a document is read in: the default one, or the one that reads as libyaml does.
+#[derive(Clone, Copy, Debug)]
+enum Mode {
+    Default,
+    #[cfg(feature = "libyaml-compat")]
+    Compat,
+}
+
+impl Mode {
+    fn all() -> Vec<Self> {
+        vec![
+            Self::Default,
+            #[cfg(feature = "libyaml-compat")]
+            Self::Compat,
+        ]
+    }
+
+    fn tree(self, input: &str) -> Result<SpannedTree<'_>, ayaml::Error> {
+        match self {
+            Self::Default => SpannedTree::parse(input),
+            #[cfg(feature = "libyaml-compat")]
+            Self::Compat => SpannedTree::parse_compat(input),
+        }
+    }
+
+    fn value(self, input: &str) -> Result<Value, ayaml::Error> {
+        match self {
+            Self::Default => ayaml::parse_value(input),
+            #[cfg(feature = "libyaml-compat")]
+            Self::Compat => ayaml::compat::from_str(input),
+        }
+    }
+}
+
+/// `value` without the entry at `path`, or `None` if the path leads to no entry, or to the only
+/// entry of its collection, which has no entry span.
+fn without(value: &Value, path: &[PathSegment]) -> Option<Value> {
+    let (first, rest) = path.split_first()?;
     let mut value = value.clone();
     match (&mut value, first) {
+        // A tagged collection's entries are found at the collection's own path.
+        (Value::Tagged(tagged), _) => tagged.value = without(&tagged.value, path)?,
         (Value::Mapping(mapping), PathSegment::Key(name)) => {
             if rest.is_empty() {
-                mapping.shift_remove(name).expect("the entry");
+                mapping.shift_remove(name)?;
+                if mapping.is_empty() {
+                    return None;
+                }
             } else {
-                let inner = mapping.get_mut(name).expect("the entry");
-                *inner = without(inner, rest);
-            }
-            if mapping.is_empty() {
-                return Value::Null;
+                let inner = mapping.get_mut(name)?;
+                *inner = without(inner, rest)?;
             }
         }
         (Value::Sequence(items), PathSegment::Index(at)) => {
             if rest.is_empty() {
+                if *at >= items.len() || items.len() == 1 {
+                    return None;
+                }
                 items.remove(*at);
             } else {
-                items[*at] = without(&items[*at], rest);
-            }
-            if items.is_empty() {
-                return Value::Null;
+                let inner = items.get_mut(*at)?;
+                *inner = without(inner, rest)?;
             }
         }
-        (value, segment) => panic!("{segment:?} does not lead into {value:?}"),
+        _ => return None,
     }
-    value
+    Some(value)
 }
 
-/// The entry span at `path`, as the text it covers. For a span that exists, deleting those bytes
-/// must leave a document that reads as the original without that entry and nothing else changed.
-fn entry<'a>(input: &'a str, path: &[PathSegment]) -> Option<&'a str> {
-    let tree = SpannedTree::parse(input).expect("a tree");
+/// What is wrong with the entry span at `path`, if the tree gives one and anything is: deleting
+/// those bytes must leave a document that reads as the original without that entry, and with
+/// nothing else changed.
+fn inexact(
+    mode: Mode,
+    input: &str,
+    tree: &SpannedTree<'_>,
+    path: &[PathSegment],
+) -> Option<String> {
     let span = tree.entry_span_at(path)?;
+    if span.slice(input).is_none() {
+        return Some(format!("{span:?} is not a slice of the input"));
+    }
     let mut rest = input.to_owned();
     rest.replace_range(span.range(), "");
-    let original = ayaml::parse_value(input).expect("the input reads");
-    let read = ayaml::parse_value(&rest)
-        .unwrap_or_else(|error| panic!("{input:?} without {path:?} is {rest:?}: {error}"));
-    assert_eq!(
-        read,
-        without(&original, path),
-        "{input:?} without {path:?} is {rest:?}"
-    );
-    Some(span.slice(input).expect("a span inside the input"))
+    let original = mode.value(input).ok()?;
+    let Some(expected) = without(&original, path) else {
+        return Some("it removes the only entry of a collection".to_owned());
+    };
+    match mode.value(&rest) {
+        Err(error) => Some(format!("the rest, {rest:?}, does not read: {error}")),
+        Ok(read) if read != expected => Some(format!("the rest, {rest:?}, reads as {read:?}")),
+        Ok(_) => None,
+    }
+}
+
+/// The entry span at `path`, as the text it covers, in every mode. Each span is checked by
+/// deleting it and reading the rest (see `inexact`), and the modes have to agree.
+fn entry<'a>(input: &'a str, path: &[PathSegment]) -> Option<&'a str> {
+    let mut spans = Mode::all().into_iter().map(|mode| {
+        let tree = mode.tree(input).expect("a tree");
+        if let Some(problem) = inexact(mode, input, &tree, path) {
+            panic!("{mode:?} {input:?} at {path:?}: {problem}");
+        }
+        tree.entry_span_at(path)
+            .map(|span| span.slice(input).expect("a span inside the input"))
+    });
+    let first = spans.next().expect("a mode");
+    for other in spans {
+        assert_eq!(other, first, "{input:?} at {path:?}: the modes differ");
+    }
+    first
 }
 
 /// A block entry's span takes the whole entry: the lines of a nested value, a block scalar
@@ -145,10 +204,17 @@ fn a_block_entry_span_removes_the_whole_entry() {
 
     let block = "a: |\n  line1\n  line2\nd: 3\n";
     assert_eq!(entry(block, &[key("a")]), Some("a: |\n  line1\n  line2\n"));
+    // A block scalar's trailing blank lines are its own, whatever it does with them.
+    let keep = "a: |+\n  x\n\nb: 1\n";
+    assert_eq!(entry(keep, &[key("a")]), Some("a: |+\n  x\n\n"));
 
     let items = "a:\n  - 1\n  - 2\nd: 3\n";
     assert_eq!(entry(items, &[key("a")]), Some("a:\n  - 1\n  - 2\n"));
     assert_eq!(entry(items, &[key("a"), index(0)]), Some("  - 1\n"));
+    // A sequence at its key's indentation.
+    let indentless = "a:\n- 1\n- 2\nb: 3\n";
+    assert_eq!(entry(indentless, &[key("a")]), Some("a:\n- 1\n- 2\n"));
+    assert_eq!(entry(indentless, &[key("a"), index(1)]), Some("- 2\n"));
 
     // An item that ends in a block scalar stops at the scalar's end, not at the next item's.
     assert_eq!(entry("- |\n  a\n- b\n", &[index(0)]), Some("- |\n  a\n"));
@@ -156,66 +222,351 @@ fn a_block_entry_span_removes_the_whole_entry() {
     let comment = "a: 1 # note\n\n# about b\nb: 2\n";
     assert_eq!(entry(comment, &[key("a")]), Some("a: 1 # note\n"));
     assert_eq!(entry(comment, &[key("b")]), Some("b: 2\n"));
+    // A comment between a key and its nested value goes with the entry.
+    let inner = "a: # about a\n  b: 1\n  c: 2\nd: 3\n";
+    assert_eq!(
+        entry(inner, &[key("a")]),
+        Some("a: # about a\n  b: 1\n  c: 2\n")
+    );
 
-    // A flow collection is one value, on however many lines.
-    let flow = "a: [1,\n  2]\nx: {k: v}\n";
+    // A flow collection is one value, on however many lines, and so is a scalar on several.
+    let flow = "a: [1,\n  2]\nx: {k: v}\ny: one\n  two\nz: \"one\n  two\"\n";
     assert_eq!(entry(flow, &[key("a")]), Some("a: [1,\n  2]\n"));
     assert_eq!(entry(flow, &[key("x")]), Some("x: {k: v}\n"));
+    assert_eq!(entry(flow, &[key("y")]), Some("y: one\n  two\n"));
+    assert_eq!(entry(flow, &[key("z")]), Some("z: \"one\n  two\"\n"));
 
     let nested_items = "- - a\n  - b\n- c\n";
     assert_eq!(entry(nested_items, &[index(0)]), Some("- - a\n  - b\n"));
     assert_eq!(entry(nested_items, &[index(0), index(1)]), Some("  - b\n"));
+    let compact = "- a: 1\n  b: 2\n- c\n";
+    assert_eq!(entry(compact, &[index(0)]), Some("- a: 1\n  b: 2\n"));
+    assert_eq!(entry(compact, &[index(0), key("b")]), Some("  b: 2\n"));
+
+    // A tagged value, a quoted key, and a key that is a flow collection.
+    let tagged = "a: !t x\n\"b\": 1\n[1, 2]: 3\nc: !t\n  d: 1\n  e: 2\n";
+    assert_eq!(entry(tagged, &[key("a")]), Some("a: !t x\n"));
+    assert_eq!(entry(tagged, &[key("b")]), Some("\"b\": 1\n"));
+    assert_eq!(entry(tagged, &[key("c"), key("d")]), Some("  d: 1\n"));
 
     // The last entry of an input with no final line break.
     assert_eq!(entry("a: 1\nb: 2", &[key("b")]), Some("b: 2"));
-    // A byte-order mark stays with the document, and a CRLF goes with its entry.
+    // A byte-order mark stays with the document, and a CRLF or a lone CR goes with its entry.
     assert_eq!(
         entry("\u{feff}a: 1\r\nb: 2\r\n", &[key("a")]),
         Some("a: 1\r\n")
     );
+    assert_eq!(entry("a: 1\rb: 2\r", &[key("a")]), Some("a: 1\r"));
+    // An entry before a document's end marker.
+    assert_eq!(entry("a: 1\nb: 2\n...\n", &[key("b")]), Some("b: 2\n"));
 }
 
 /// An entry with no span that removes it and nothing else has no entry span.
 #[test]
 fn an_entry_with_no_exact_span_has_none() {
     // A flow entry's separator belongs to its neighbor as much as to it.
-    assert_eq!(entry("x: {a: 1, b: 2}\n", &[key("x"), key("a")]), None);
-    assert_eq!(entry("x: [10, 20]\n", &[key("x"), index(0)]), None);
-    // The first key of a mapping that begins on its item's line shares that line with the `-`.
-    let compact = "- a: 1\n  b: 2\n- c\n";
-    assert_eq!(entry(compact, &[index(0), key("a")]), None);
-    assert_eq!(entry(compact, &[index(0), key("b")]), Some("  b: 2\n"));
-    assert_eq!(entry(compact, &[index(0)]), Some("- a: 1\n  b: 2\n"));
-    // So does the first item of a sequence that begins on its item's line.
-    assert_eq!(entry("- - a\n  - b\n", &[index(0), index(0)]), None);
-    // An explicit key, and a key with a property before it.
-    assert_eq!(entry("? a\n: 1\nb: 2\n", &[key("a")]), None);
-    // An entry that defines an anchor, which an alias may name.
-    assert_eq!(entry("a: &x 1\nb: 2\n", &[key("a")]), None);
-    assert_eq!(entry("a:\n  c: &x 1\nb: 2\n", &[key("a")]), None);
-    // An item with no value.
+    assert_eq!(
+        entry("x: {a: 1, b: 2}\ny: 0\n", &[key("x"), key("a")]),
+        None
+    );
+    assert_eq!(entry("x: [10, 20]\ny: 0\n", &[key("x"), index(0)]), None);
+    // The first key of a mapping that begins on its item's line shares that line with the `-`,
+    // and so does the first item of a sequence that begins there.
+    assert_eq!(entry("- a: 1\n  b: 2\n- c\n", &[index(0), key("a")]), None);
+    assert_eq!(entry("- - a\n  - b\n- c\n", &[index(0), index(0)]), None);
+    // An item with no value, and one whose value begins on the next line.
     assert_eq!(entry("-\n- b\n", &[index(0)]), None);
+    assert_eq!(entry("- a\n- ", &[index(1)]), None);
+    assert_eq!(entry("-\n  a: 1\n- b\n", &[index(0)]), None);
+    // An entry that defines an anchor, which an alias may name, and an entry inside a
+    // collection that has one, which an alias to the collection reads.
+    assert_eq!(entry("a: &x 1\nb: 2\n", &[key("a")]), None);
+    assert_eq!(entry("a:\n  c: &x 1\n  d: 2\nb: 2\n", &[key("a")]), None);
+    assert_eq!(
+        entry(
+            "base: &b\n  x: 1\n  y: 2\nuse: *b\n",
+            &[key("base"), key("x")]
+        ),
+        None
+    );
+    // The only entry of a collection: without it there is no collection.
+    assert_eq!(entry("a:\n  b: 1\nc: 2\n", &[key("a"), key("b")]), None);
+    assert_eq!(entry("a:\n  - 1\nc: 2\n", &[key("a"), index(0)]), None);
+    assert_eq!(entry("a: 1\n", &[key("a")]), None);
+    assert_eq!(
+        entry("k: !!int\n  a: 1\nz: 0\n", &[key("k"), key("a")]),
+        None
+    );
 }
 
-/// A value that the source doesn't write stands right after its key's `:`, and its entry is the
-/// key's line.
+/// A key after a `?`, on that line or a later one, has no entry span, and nor does a key with
+/// a property before it or a key with no text. An entry before a line that begins with `:` has
+/// none either: with the entry gone, that line would give its value to a key before it.
+#[test]
+fn an_explicit_key_has_no_entry_span() {
+    assert_eq!(entry("? a\n: 1\nb: 2\n", &[key("a")]), None);
+    assert_eq!(entry("?\n  a\n: 1\nb: 2\n", &[key("a")]), None);
+    assert_eq!(entry("?\n  a\nb: 1\n", &[key("a")]), None);
+    assert_eq!(
+        entry(
+            "? - a\n  - b\n: v\nc: 1\n",
+            &[PathSegment::Key(list(&["a", "b"]))]
+        ),
+        None
+    );
+    assert_eq!(
+        entry(
+            "?\n- a\n- b\n: v\nc: 1\n",
+            &[PathSegment::Key(list(&["a", "b"]))]
+        ),
+        None
+    );
+    // A key that is a block mapping, which ends in a block scalar, with its `:` below it.
+    let block_key = PathSegment::Key(Value::Mapping(
+        [(Value::from("h"), Value::from(""))].into_iter().collect(),
+    ));
+    assert_eq!(entry("?\n h: >-\n: 1\nb: 2\n", &[block_key]), None);
+    // A tag or an anchor before the key.
+    assert_eq!(entry("!!str a: 1\nb: 2\n", &[key("a")]), None);
+    assert_eq!(entry("&k a: 1\nb: 2\n", &[key("a")]), None);
+    // A key with no text stands at its `:`, with or without a `?` and a tag before it.
+    assert_eq!(entry("a: 1\n: 2\n", &[PathSegment::Key(Value::Null)]), None);
+    // An entry between a `?` key with no value and a line that begins with `:`.
+    assert_eq!(entry("? a\nb: 1\n: c\n", &[key("b")]), None);
+    // An entry that ends in a `?` key whose `:` is on its own line ends on that line, which
+    // nothing here finds, so it has no span.
+    assert_eq!(entry("top:\n  ? a\n  :\nnext: 1\n", &[key("top")]), None);
+    assert_eq!(entry("- ? a\n  :\n- b\n", &[index(0)]), None);
+}
+
+fn list(items: &[&str]) -> Value {
+    Value::Sequence(items.iter().map(|item| Value::from(*item)).collect())
+}
+
+/// The blank and comment lines after an entry stay when it goes. A block scalar before the
+/// entry would take them as its own, so the entry has a span only when content follows it.
+#[test]
+fn an_entry_after_a_block_scalar_needs_content_after_it() {
+    // The next entry follows directly, or the input ends.
+    assert_eq!(
+        entry("a: |\n  x\nb: 1\nc: 2\n", &[key("b")]),
+        Some("b: 1\n")
+    );
+    assert_eq!(entry("a: |\n  x\nb: 1\n", &[key("b")]), Some("b: 1\n"));
+    assert_eq!(entry("- |\n  x\n- b\n- c\n", &[index(1)]), Some("- b\n"));
+    // A blank line that a keeping scalar would keep, a line of blanks that any would, a comment
+    // that would be its text, and a tab that it refuses.
+    assert_eq!(entry("a: |+\n  x\nb: 1\n\nc: 2\n", &[key("b")]), None);
+    assert_eq!(entry("a: |\n  x\nb: 1\n    \nc: 2\n", &[key("b")]), None);
+    assert_eq!(entry("a: |\n  x\nb: 1\n\t# c\nd: 2\n", &[key("b")]), None);
+    assert_eq!(entry("- |+\n  x\n- b\n\n- c\n", &[index(1)]), None);
+    // The scalar is the last thing written before the entry, however deep, and in a key too.
+    let nested = "a:\n  script: |\n    echo hi\n  env:\n    FOO: 1\n    # BAR: 2\nb: 1\n";
+    assert_eq!(entry(nested, &[key("a"), key("env")]), None);
+    assert_eq!(
+        entry(nested, &[key("a"), key("script")]),
+        Some("  script: |\n    echo hi\n")
+    );
+    let in_key = PathSegment::Key(list(&[""]));
+    assert_eq!(entry("?\n - |\no: 'q'\n  \t# c\nz: 1\n", &[key("o")]), None);
+    assert!(entry("?\n - |\no: 'q'\nz: 1\n", &[in_key]).is_none());
+    // Anything else before the entry takes no line after it.
+    assert_eq!(
+        entry("a: x\nb: 1\n\n  # c\nc: 2\n", &[key("b")]),
+        Some("b: 1\n")
+    );
+}
+
+/// A value that the source doesn't write after its key's `:`, on the key's line, has an empty
+/// span right after that `:`, and its entry is the key's line.
 #[test]
 fn a_missing_value_stands_after_its_key() {
     let input = "a:\nb: 1\nc:   # none\nd:";
-    let tree = SpannedTree::parse(input).expect("a tree");
-    for (name, at) in [("a", 2), ("c", 10), ("d", 22)] {
-        let span = tree.span_at(&[key(name)]).expect("a span");
-        assert_eq!((span.start(), span.end()), (at, at), "{name}");
-        assert_eq!(&input[at - 2..at], format!("{name}:"), "{name}");
+    for mode in Mode::all() {
+        let tree = mode.tree(input).expect("a tree");
+        for (name, at) in [("a", 2), ("c", 10), ("d", 22)] {
+            let span = tree.span_at(&[key(name)]).expect("a span");
+            assert_eq!((span.start(), span.end()), (at, at), "{mode:?} {name}");
+            assert_eq!(&input[at - 2..at], format!("{name}:"), "{name}");
+        }
     }
     assert_eq!(entry(input, &[key("a")]), Some("a:\n"));
     assert_eq!(entry(input, &[key("c")]), Some("c:   # none\n"));
     assert_eq!(entry(input, &[key("d")]), Some("d:"));
-    // A flow mapping's key with no value, and one with no `:` either.
+    // A flow mapping's key with a `:` and no value.
     let flow = "{a: , b}\n";
     let tree = SpannedTree::parse(flow).expect("a tree");
     let span = tree.span_at(&[key("a")]).expect("a span");
     assert_eq!((span.start(), span.end()), (3, 3));
-    let span = tree.span_at(&[key("b")]).expect("a span");
-    assert_eq!((span.start(), span.end()), (7, 7));
+}
+
+/// A value stays where the parser places it, at the token after it, when nothing shows where it
+/// would be written: after a key with no `:` on its line, and where something that the events
+/// don't carry stands between the `:` and that token. Its entry then has no span.
+#[test]
+fn a_value_that_is_not_plainly_missing_keeps_its_place() {
+    // An explicit key with its `:` on a line of its own.
+    let explicit = "? a\n:\nb: 1\n";
+    let tree = SpannedTree::parse(explicit).expect("a tree");
+    let span = tree.span_at(&[key("a")]).expect("a span");
+    assert_eq!((span.start(), span.end()), (6, 6));
+    // A tag that names the kind of a collection, which the events drop from a scalar: on the
+    // line after the key, and on the key's line.
+    for dropped in ["z: 0\na:\n  !!map\nb: 1\n", "z: 0\na: !!map\nb: 1\n"] {
+        let tree = SpannedTree::parse(dropped).expect("a tree");
+        let span = tree.span_at(&[key("a")]).expect("a span");
+        assert!(span.start() > 7, "{dropped:?}: {span:?}");
+        assert_eq!(entry(dropped, &[key("a")]), None, "{dropped:?}");
+    }
+    // A list that ends in an item with no value ends at a place that isn't known, so its entry
+    // doesn't take the comment about the entry after it.
+    assert_eq!(
+        entry(
+            "list:\n  - a\n  -\n# settings for b\nb: 1\n",
+            &[key("list")]
+        ),
+        None
+    );
+    assert_eq!(entry("a: !t\n\n# about b\nb: 1\n", &[key("a")]), None);
+}
+
+/// Lines that a document is made of, each at a random indentation. Most documents made this way
+/// don't parse. The ones that do put every kind of entry next to every other, which is where an
+/// entry span goes wrong: what is exact for an entry depends on the lines around it.
+const LINES: &[&str] = &[
+    "a: 1",
+    "b: two",
+    "c:",
+    "d: [1, 2]",
+    "e: {x: 1}",
+    "f: |",
+    "g: |+",
+    "h: >-",
+    "i: &n 3",
+    "j: *n",
+    "k: !t 4",
+    "l: !!map",
+    "m: !!str",
+    "n: \"q\"",
+    "o: 'q'",
+    "p: # c",
+    "- 1",
+    "- two",
+    "-",
+    "- a: 1",
+    "- - 1",
+    "- |",
+    "- &n 5",
+    "- *n",
+    "- [1, 2]",
+    "? a",
+    "?",
+    ": 1",
+    ":",
+    "text",
+    "more text",
+    "# comment",
+    "",
+    "  ",
+    "\t",
+    "\t# c",
+    "!t",
+    "&n",
+    "!!int",
+    "a: 1 # c",
+    "- 1 # c",
+    "a:   ",
+    "\"k\": 1",
+    "[1, 2]: 3",
+    "<<: *n",
+    "a: b: c",
+    "? - 1",
+    "? a: 1",
+    "x: 1\r",
+    "...",
+];
+
+/// The next number of a fixed sequence (xorshift64*), so the documents are the same in every
+/// run.
+fn next(state: &mut u64) -> usize {
+    *state ^= *state >> 12;
+    *state ^= *state << 25;
+    *state ^= *state >> 27;
+    usize::try_from(state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33).expect("31 bits")
+}
+
+fn generated(state: &mut u64) -> String {
+    let lines = 2 + next(state) % 7;
+    let mut text = String::new();
+    for _ in 0..lines {
+        let indent = [0, 0, 0, 2, 2, 4, 1, 3][next(state) % 8];
+        text.push_str(&" ".repeat(indent));
+        text.push_str(LINES[next(state) % LINES.len()]);
+        text.push_str(if next(state).is_multiple_of(16) {
+            "\r\n"
+        } else {
+            "\n"
+        });
+    }
+    if next(state).is_multiple_of(8) {
+        text.pop();
+    }
+    text
+}
+
+/// Every path to an entry of `value`, a tagged collection's at the collection's own path.
+fn paths(value: &Value, here: &mut Vec<PathSegment>, all: &mut Vec<Vec<PathSegment>>) {
+    match value {
+        Value::Tagged(tagged) => paths(&tagged.value, here, all),
+        Value::Mapping(mapping) => {
+            for (name, inner) in mapping {
+                here.push(PathSegment::Key(name.clone()));
+                all.push(here.clone());
+                paths(inner, here, all);
+                here.pop();
+            }
+        }
+        Value::Sequence(items) => {
+            for (at, inner) in items.iter().enumerate() {
+                here.push(PathSegment::index(at));
+                all.push(here.clone());
+                paths(inner, here, all);
+                here.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// On generated documents, every entry span that a tree gives is exact: deleting it leaves a
+/// document that reads as the original without that entry (see `inexact`). The count of spans
+/// keeps the test from passing because the generator stopped making documents that parse.
+#[test]
+fn every_entry_span_of_a_generated_document_is_exact() {
+    for mode in Mode::all() {
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let (mut documents, mut spans) = (0, 0);
+        for _ in 0..60_000 {
+            let input = generated(&mut state);
+            let (Ok(tree), Ok(value)) = (mode.tree(&input), mode.value(&input)) else {
+                continue;
+            };
+            if tree.documents().len() != 1 {
+                continue;
+            }
+            documents += 1;
+            let mut all = Vec::new();
+            paths(&value, &mut Vec::new(), &mut all);
+            for path in all {
+                spans += usize::from(tree.entry_span_at(&path).is_some());
+                if let Some(problem) = inexact(mode, &input, &tree, &path) {
+                    panic!("{mode:?} {input:?} at {path:?}: {problem}");
+                }
+            }
+        }
+        assert!(
+            documents >= 5_000 && spans >= 2_000,
+            "{mode:?}: {spans} entry spans in {documents} documents"
+        );
+    }
 }

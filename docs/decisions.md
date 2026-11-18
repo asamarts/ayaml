@@ -635,27 +635,45 @@ every size, so within a document it reports a syntax error first.
 **Date:** 2026-11-18
 **Status:** Accepted
 
-**Decision.** `SpannedNode::entry_span` returns a span only when deleting those bytes removes
-that entry and leaves the rest of the document reading as it did. A block mapping entry or a block
-sequence item has one when it begins its own line and nothing follows it on its last line but a
-comment. The span runs from the start of that line through the entry's last line break, so it
-takes a nested value, a block scalar, and a trailing comment, and leaves a byte-order mark. Every
-other entry returns `None`: an entry of a flow collection, the first key of a mapping or the
-first item of a sequence that begins on a `-` line, an entry with an explicit `?` or with a
-property before its key, an item with no value, and an entry that defines an anchor. A value that
-the source doesn't write has an empty span right after its key's `:`.
+**Decision.** `SpannedNode::entry_span` returns a span only when deleting those bytes leaves a
+document that reads as the original without that entry, and with nothing else changed. A block
+mapping entry or a block sequence item has one when all of this holds:
+
+- it begins its own line: only indentation before a key, and only indentation, a `-`, and
+  spaces before an item;
+- a key and its `:` are on one line, so no `?` begins the entry on that line or an earlier one,
+  and the key has text;
+- nothing follows the entry on its last line but a comment, and its end is known: an entry that
+  ends in a value the source doesn't write after a `:` on its key's line ends at that `:`, and
+  one that ends in any other scalar with no text has no known end;
+- no line that begins with `:` follows it, which would give its value to a key before the entry;
+- it defines no anchor and stands inside no collection that has one, since an alias reads what
+  it names;
+- it is not the only entry of its collection, which would then be no collection;
+- where a block scalar is the last thing written before it, content follows it directly, since
+  the scalar would otherwise take the blank and comment lines after the entry.
+
+The span runs from the start of the entry's first line through its last line break, so it takes
+a nested value, a block scalar, and a trailing comment, and leaves a byte-order mark. Every other
+entry returns `None`, a flow entry among them. A value that the source doesn't write after its
+key's `:`, on the key's line, has an empty span right after that `:`.
 
 **Alternatives.** Give a span for single-line block entries only: the least code, but a nested
 entry could not be removed through the API. Give flow entries a span that takes one neighboring
 separator: complete, but which comma and which blanks belong to an entry is a rule about edits,
-and it belongs with the edits that are checked by reading their result.
+and it belongs with the edits that are checked by reading their result. Give the only entry of a
+collection a span and say that the collection then reads as an empty value: what it reads as
+depends on a tag before it, and under `!!int` it doesn't read at all.
 
 **Why.** The first version computed a block entry's span from its key alone, so a nested entry's
-span was its key line, and a flow entry's was its key. A caller that deleted such a span broke
-the document or changed another entry. A span that is absent sends the caller to another way of
-editing; a span that is wrong corrupts a file.
+span was its key line, and a flow entry's was its key. The second gave whole block entries a
+span, and deleting about 3% of them still changed something else: a key under a `?` on the line
+before, an entry inside an anchored collection, an entry before a line that begins with `:`, and
+an entry after a block scalar. What is exact for an entry depends on the lines around it. A span
+that is absent sends the caller to another way of editing; a span that is wrong corrupts a file.
 
-**Consequences.** Each span the tests name is checked by deleting it and reading the rest. Removing
-a block collection's only entry leaves a collection with none, which reads as an empty value, so
-a caller that wants an empty collection writes one. Flow entries, and entries that share a line,
-wait for the edit crate's verified edits (AY-050).
+**Consequences.** `None` is conservative: it means that no span is known to be exact, not that
+none exists. The rule is tested by what it promises: on generated documents that put every kind
+of entry next to every other, each span a tree gives is deleted and the rest read, in both modes.
+Flow entries, only entries, and entries that share a line wait for the edit crate's verified
+edits (AY-050).
