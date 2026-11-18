@@ -13,6 +13,9 @@ parsing to another parser.
 No third-party YAML parser, scanner, composer, or native YAML library is in the
 normal dependency graph.
 
+The fuzz workspace, which isn't published, also uses `serde_json`, at the version the tests use:
+its allocation counter decodes into a JSON tree to budget what a consumer of JSON allocates.
+
 ## Unsafe code policy
 
 - The crates in this workspace forbid `unsafe` code. Only the fuzz workspace, which

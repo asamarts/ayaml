@@ -12,7 +12,8 @@ AY-087 — #133, #137, #140; AY-088 — #138; AY-089 — #139; AY-090 — #141;
 AY-083 — #124; AY-082 — #123; AY-045; AY-091 — #165; AY-092 — #160, #161, #162;
 AY-093 — #164; AY-070; AY-057; AY-084 — #125; AY-049 — #128; AY-096 — #163;
 AY-098, AY-100, AY-101, AY-102, and AY-103 (part of #127 and #178); AY-085 — #126;
-Issue #127 closed by the streaming and compact-token work. AY-104 is the next planned #178 step.
+Issue #127 closed by the streaming and compact-token work. AY-105 through AY-112 fixed what
+that work let slip, and its audit.
 
 ## Diagnostics
 
@@ -20,9 +21,11 @@ The diagnostics queue is empty.
 
 ## API and performance
 
-1. **#178.** Remaining short-scalar peak heap. Compact scalar tokens, typed nodes, and root
-   flow reservations (AY-101 through AY-103) cut the measured shapes by more than a third; the
-   remaining gap needs composition without the intermediate typed node tree, tracked by AY-104.
+1. **#178.** Short-scalar peak heap. Measured as the issue measures it, eight of its nine shapes
+   are within 1.2 times its reference, at 0.61 to 1.06 times, and `tools/json-alloc-corpus.tsv`
+   budgets all nine (AY-113). The ninth, a megabyte block sequence of short words, is at 1.28
+   times. AY-104, composition without the intermediate typed node tree, is the planned work for
+   it.
 
 ## Dependencies
 

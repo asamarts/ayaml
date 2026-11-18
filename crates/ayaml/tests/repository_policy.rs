@@ -161,6 +161,48 @@ fn the_repository_lint_policy_is_the_one_the_plan_requires() {
     assert!(local.contains("alint 0.22.0"));
 }
 
+/// The nine document shapes of issue #178 each have a peak, an allocation count, and a total
+/// in the budgets of the untyped decode, and the gate script reads that file.
+#[test]
+fn allocation_budgets_cover_the_json_decode() {
+    let Some(root) = repository_root() else {
+        return;
+    };
+    let budgets = read(&root, "tools/json-alloc-corpus.tsv");
+    let mut shapes = Vec::new();
+    for line in budgets.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let columns: Vec<_> = line.split('\t').collect();
+        assert_eq!(columns.len(), 4, "bad allocation row: {line}");
+        for column in &columns[1..] {
+            let budget: u64 = column
+                .parse()
+                .unwrap_or_else(|error| panic!("{line}: {error}"));
+            assert!(budget > 0, "{line}: a budget of nothing");
+        }
+        shapes.push(columns[0]);
+    }
+    assert_eq!(
+        shapes,
+        [
+            "@service-37kb",
+            "@service-1mb",
+            "@service-4mb",
+            "@block-map-1mb",
+            "@flow-map-1mb",
+            "@flow-ints-1mb",
+            "@flow-ones-1mb",
+            "@block-seq-1mb",
+            "@block-words-1mb",
+        ]
+    );
+    let script = read(&root, "tools/check_alloc_corpus.sh");
+    assert!(script.contains("check_json_file tools/json-alloc-corpus.tsv"));
+    assert!(script.contains("check_file tools/typed-alloc-corpus.tsv typed"));
+}
+
 /// Every allocation workload budgets total bytes as well as peak bytes and allocation counts.
 #[test]
 fn allocation_budgets_include_total_bytes() {
