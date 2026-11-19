@@ -1404,6 +1404,60 @@ fn a_stream_start_run_of_marks_is_not_content() {
     }
 }
 
+/// A run of marks at the start of the stream reads as one mark does, whatever follows it. A
+/// comment right after the run starts the line. Where a document marker follows the run, the
+/// compatibility reader takes the marker as text one column in, as it does after one mark, so
+/// the lines under it are indented as they are there. Each row is what follows the marks.
+#[test]
+fn a_stream_start_run_of_marks_reads_as_one_mark_does() {
+    for rest in [
+        "# c\na: 1\n",
+        "#\n",
+        " # c\na: 1\n",
+        "... g:\n\n 0",
+        "... g:\n\n  0",
+        "... :\r:\t\r\r",
+        "... 0\n }t: ",
+        "--- {1: dg=: two",
+        "--- a\n",
+        "--- a:\n b\n",
+        "---\na: 1\n",
+        "...\n",
+        "a: 1\n",
+        "- a\n- b\n",
+    ] {
+        let one = readings(&format!("\u{feff}{rest}"));
+        for marks in [2, 3] {
+            let input = format!("{}{rest}", "\u{feff}".repeat(marks));
+            for ((mode, read), (_, expected)) in readings(&input).into_iter().zip(one.clone()) {
+                assert_eq!(read, expected, "{input:?} in {mode}");
+            }
+        }
+    }
+    let expected = ayaml::parse_value("a: 1\n").expect("mapping");
+    for (mode, read) in readings("\u{feff}\u{feff}# c\na: 1\n") {
+        assert_eq!(
+            read,
+            Ok(expected.clone()),
+            "a comment after two marks in {mode}"
+        );
+    }
+    // With the marker as text one column in, a line indented by one space is no deeper than it.
+    #[cfg(feature = "libyaml-compat")]
+    for input in ["\u{feff}... g:\n\n 0", "\u{feff}\u{feff}... g:\n\n 0"] {
+        let error = ayaml::compat::from_str::<ayaml::Value>(input).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("a mapping line is missing a `:` at line 3 column 2"),
+            "{input:?}: {error}"
+        );
+        let deeper = input.replace("\n 0", "\n  0");
+        let value = ayaml::compat::from_str::<ayaml::Value>(&deeper).expect("a deeper value");
+        assert_eq!(value["... g"], ayaml::Value::from(0_u64), "{deeper:?}");
+    }
+}
+
 /// The compatibility scanner and the line reader end an anchor name at the same `:` before a
 /// flow indicator. Issue #139.
 #[cfg(feature = "libyaml-compat")]
