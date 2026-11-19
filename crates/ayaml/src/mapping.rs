@@ -103,6 +103,12 @@ impl Mapping {
         self.map.shrink_to_fit();
     }
 
+    /// How many entries the mapping has room for.
+    #[cfg(test)]
+    pub(crate) fn capacity(&self) -> usize {
+        self.map.capacity()
+    }
+
     /// Number of entries.
     #[must_use]
     pub fn len(&self) -> usize {

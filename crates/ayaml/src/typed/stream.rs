@@ -832,6 +832,7 @@ impl<'de> MapAccess<'de> for MappingAccess<'de, '_> {
 mod tests {
     use serde::de::{Deserialize, IgnoredAny};
 
+    use super::super::NodeKind;
     use super::{DocumentEvents, NodeOptions, Stream};
     use crate::limits::Limits;
 
@@ -873,6 +874,23 @@ mod tests {
         ] {
             assert_eq!(tokens::<IgnoredAny>(input), (0, 0), "{input:?}");
         }
+        // The tree of a root flow collection is built with room for the entries that the
+        // parser counted, and no more.
+        let input = "&a [1, 2, 3, 4, 5]\n";
+        let limits = Limits::default();
+        let events = DocumentEvents::new(input, &limits, false).expect("a scanned input");
+        let mut stream = Stream::new(events, input.len(), &limits, NodeOptions::default());
+        stream
+            .document(|document| {
+                let Some(NodeKind::Sequence(items)) =
+                    document.stream.builder.root.as_ref().map(|node| &node.kind)
+                else {
+                    panic!("the root is built before its target reads");
+                };
+                assert_eq!((items.len(), items.capacity()), (5, 5));
+                IgnoredAny::deserialize(document)
+            })
+            .expect("a value");
         for input in ["[1, 2, 3]\n", "- 1\n- 2\n", "k: [1, 2]\n", "k: &a [1, 2]\n"] {
             let (before, after) = tokens::<IgnoredAny>(input);
             assert!(before > 0 && after > 0, "{input:?}: {before}, {after}");
