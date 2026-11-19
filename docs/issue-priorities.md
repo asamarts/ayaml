@@ -21,6 +21,11 @@ The diagnostics queue is empty.
 
 ## API and performance
 
+Global tags in the compatibility reader (#191): a libyaml-based reader drops a tag that isn't
+local, and the compatibility reader keeps it, so it refuses documents that such a reader
+decodes. The default is to stay; AY-122 adds an opt-in to the compatibility API and a seed entry
+point to the default reader. It adds to the API, so it follows 0.2.0.
+
 No open performance issues. #178, short-scalar peak heap: measured as the issue measures it,
 its nine shapes peak at 0.52 to 0.96 times its reference, within the 1.2 times it asks for, and
 `tools/json-alloc-corpus.tsv` budgets all nine (AY-113). AY-104 brought the last of them there,

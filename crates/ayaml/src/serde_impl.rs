@@ -774,7 +774,7 @@ impl<'de> SeqAccess<'de> for ValueSeqAccess {
 }
 
 struct ValueMapAccess {
-    iter: indexmap::map::IntoIter<Value, Value>,
+    iter: crate::mapping::IntoIter,
     /// The text of the key just read, for a path, if it is a string.
     key: Option<String>,
     /// The key just read, if it is another scalar. Its text is written only for a path. A key

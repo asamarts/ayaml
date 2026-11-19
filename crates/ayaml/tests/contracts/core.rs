@@ -729,3 +729,152 @@ fn a_span_that_ends_before_it_starts_is_empty() {
     assert_eq!(Span::new(usize::MAX, 0).len(), 0);
     assert_eq!(Span::new(3, 5).len(), 2);
 }
+
+/// A mapping iterates through types of this crate, so no type of the map behind it is part of
+/// the API. Each keeps what the iterator inside it gives: the entries in insertion order from
+/// either end, their exact number, an end that stays an end, and a printed form.
+#[test]
+fn a_mapping_iterates_through_its_own_types() {
+    use ayaml::mapping::{IntoIter, Iter, IterMut};
+
+    let mut mapping = Mapping::new();
+    for (name, number) in [("a", 1_u64), ("b", 2), ("c", 3)] {
+        mapping.insert(Value::from(name), Value::from(number));
+    }
+    let names = |entries: Vec<(&Value, &Value)>| -> Vec<String> {
+        entries
+            .into_iter()
+            .map(|(key, _)| key.as_str().expect("a string key").to_owned())
+            .collect()
+    };
+
+    let mut by_reference: Iter<'_> = (&mapping).into_iter();
+    assert_eq!(by_reference.len(), 3);
+    assert_eq!(by_reference.size_hint(), (3, Some(3)));
+    let last = by_reference.next_back().expect("the last entry");
+    assert_eq!(last, (&Value::from("c"), &Value::from(3_u64)));
+    let copy = by_reference.clone();
+    assert_eq!(names(copy.collect()), ["a", "b"]);
+    assert_eq!(names(by_reference.clone().rev().collect()), ["b", "a"]);
+    assert!(format!("{by_reference:?}").contains("\"a\""));
+    assert_eq!(
+        by_reference.nth(1).map(|(key, _)| key),
+        Some(&Value::from("b"))
+    );
+    assert_eq!(by_reference.next(), None);
+    assert_eq!(by_reference.next(), None);
+    assert_eq!(by_reference.len(), 0);
+    assert_eq!((&mapping).into_iter().count(), 3);
+    assert_eq!(
+        (&mapping).into_iter().last().map(|(key, _)| key),
+        Some(&Value::from("c"))
+    );
+
+    let by_mutable_reference: IterMut<'_> = (&mut mapping).into_iter();
+    assert_eq!(by_mutable_reference.len(), 3);
+    assert!(format!("{by_mutable_reference:?}").contains("\"b\""));
+    for (_, value) in by_mutable_reference.rev().take(1) {
+        *value = Value::Null;
+    }
+    assert_eq!(mapping.get("c"), Some(&Value::Null));
+    assert_eq!(mapping.get("a"), Some(&Value::from(1_u64)));
+
+    let mut by_value: IntoIter = mapping.into_iter();
+    assert_eq!(by_value.len(), 3);
+    assert!(format!("{by_value:?}").contains("\"a\""));
+    assert_eq!(by_value.next_back(), Some((Value::from("c"), Value::Null)));
+    assert_eq!(
+        by_value.next(),
+        Some((Value::from("a"), Value::from(1_u64)))
+    );
+    assert_eq!(by_value.len(), 1);
+    assert_eq!(
+        by_value.nth_back(0),
+        Some((Value::from("b"), Value::from(2_u64)))
+    );
+    assert_eq!(by_value.next(), None);
+    assert_eq!(by_value.next_back(), None);
+}
+
+/// The iterator types have the standard traits that the types they replace had: the two that
+/// don't lend a value mutably can be cloned, and each can be made empty. A caller that kept one
+/// in a type of its own, and derived those traits for it, still can.
+#[test]
+fn a_mapping_s_iterators_keep_the_traits_of_the_ones_they_replace() {
+    use std::fmt::Debug;
+    use std::iter::FusedIterator;
+
+    use ayaml::mapping::{IntoIter, Iter, IterMut};
+
+    fn an_iterator<T>()
+    where
+        T: DoubleEndedIterator + ExactSizeIterator + FusedIterator + Debug + Default,
+    {
+    }
+    fn cloned<T: Clone>() {}
+    fn sent<T: Send + Sync>() {}
+    an_iterator::<Iter<'_>>();
+    an_iterator::<IterMut<'_>>();
+    an_iterator::<IntoIter>();
+    cloned::<Iter<'_>>();
+    cloned::<IntoIter>();
+    sent::<Iter<'_>>();
+    sent::<IterMut<'_>>();
+    sent::<IntoIter>();
+
+    #[derive(Clone, Debug, Default)]
+    struct Kept(<Mapping as IntoIterator>::IntoIter);
+
+    let mut mapping = Mapping::new();
+    for (name, number) in [("a", 1_u64), ("b", 2), ("c", 3)] {
+        mapping.insert(Value::from(name), Value::from(number));
+    }
+    let mut kept = Kept(mapping.into_iter());
+    assert_eq!(kept.0.next(), Some((Value::from("a"), Value::from(1_u64))));
+    // A clone goes on from where the original stands, and leaves it there.
+    let rest: Vec<_> = kept.clone().0.collect();
+    assert_eq!(
+        rest,
+        [
+            (Value::from("b"), Value::from(2_u64)),
+            (Value::from("c"), Value::from(3_u64)),
+        ]
+    );
+    assert_eq!(kept.0.len(), 2);
+    assert_eq!(Kept::default().0.len(), 0);
+    assert_eq!(Iter::default().next(), None);
+    assert_eq!(IterMut::default().len(), 0);
+}
+
+/// The named methods give the same entries, in the same order, as the iterator types do.
+#[test]
+fn a_mapping_s_methods_and_its_iterators_agree() {
+    let mut mapping = Mapping::new();
+    for (name, number) in [("a", 1_u64), ("b", 2), ("c", 3)] {
+        mapping.insert(Value::from(name), Value::from(number));
+    }
+    let by_method: Vec<_> = mapping.iter().collect();
+    let by_type: Vec<_> = (&mapping).into_iter().collect();
+    assert_eq!(by_method, by_type);
+    let keys: Vec<_> = mapping.keys().collect();
+    let values: Vec<_> = mapping.values().collect();
+    assert_eq!(
+        keys,
+        by_type.iter().map(|entry| entry.0).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        values,
+        by_type.iter().map(|entry| entry.1).collect::<Vec<_>>()
+    );
+    let mut copy = mapping.clone();
+    for value in copy.values_mut() {
+        *value = Value::Null;
+    }
+    for (_, value) in &mut mapping {
+        *value = Value::Null;
+    }
+    assert_eq!(copy, mapping);
+    let owned: Vec<_> = mapping.clone().into_iter().collect();
+    assert_eq!(owned.len(), 3);
+    assert!(owned.iter().all(|(_, value)| value.is_null()));
+}

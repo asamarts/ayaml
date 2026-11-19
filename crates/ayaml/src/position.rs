@@ -11,8 +11,9 @@ use std::sync::Arc;
 
 use crate::span::{Position, Span};
 
-/// The unit that a [`LineIndex`] column counts.
+/// The unit that a [`LineIndex`] column counts. A later release may add a unit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ColumnEncoding {
     /// UTF-8 bytes.
     Utf8,

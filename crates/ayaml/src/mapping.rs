@@ -1,13 +1,14 @@
-//! An insertion-ordered YAML mapping backed by `indexmap`.
+//! An insertion-ordered YAML mapping.
 //!
-//! The `IntoIterator` implementations currently expose `indexmap`'s iterator
-//! types through their associated `IntoIter` type. Replacing those with
-//! ayaml-owned newtypes would change a public associated type, which is a
-//! `SemVer` break for the 0.1.x line; it is planned for the next minor release
-//! instead.
+//! The mapping is backed by `indexmap`, and no type of that crate is part of this one's API:
+//! a mapping iterates through [`Iter`], [`IterMut`], and [`IntoIter`]. Through 0.1.x the
+//! `IntoIterator` implementations named `indexmap`'s own iterator types, which made that
+//! crate's major version part of this one's.
 
 use std::collections::hash_map::DefaultHasher;
+use std::fmt;
 use std::hash::{BuildHasher, Hash, Hasher, RandomState};
+use std::iter::FusedIterator;
 use std::ops::Index as OpsIndex;
 use std::sync::OnceLock;
 
@@ -265,8 +266,8 @@ impl<'a> Entry<'a> {
     }
 }
 
-impl std::fmt::Debug for Mapping {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Mapping {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("Mapping ")?;
         formatter.debug_map().entries(self.map.iter()).finish()
     }
@@ -462,31 +463,115 @@ impl Extend<(Value, Value)> for Mapping {
     }
 }
 
+/// An iterator over a mapping's entries in insertion order, by reference. `&Mapping` gives one.
+#[derive(Clone, Default)]
+pub struct Iter<'a> {
+    inner: indexmap::map::Iter<'a, Value, Value>,
+}
+
+/// An iterator over a mapping's entries in insertion order, with each value mutable.
+/// `&mut Mapping` gives one.
+#[derive(Default)]
+pub struct IterMut<'a> {
+    inner: indexmap::map::IterMut<'a, Value, Value>,
+}
+
+/// An iterator that takes a mapping's entries in insertion order. `Mapping` gives one.
+#[derive(Clone, Default)]
+pub struct IntoIter {
+    inner: indexmap::map::IntoIter<Value, Value>,
+}
+
+/// Give a mapping iterator what the iterator inside it has: both ends, an exact length, an end
+/// that stays an end, and the entries it has left to print. Each can also be made empty, with
+/// `Default`, and the two that don't lend a value mutably can be cloned.
+macro_rules! mapping_iterator {
+    ($name:ident $(<$lifetime:lifetime>)?, $item:ty) => {
+        impl$(<$lifetime>)? Iterator for $name$(<$lifetime>)? {
+            type Item = $item;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                self.inner.next()
+            }
+
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                self.inner.size_hint()
+            }
+
+            fn count(self) -> usize {
+                self.inner.len()
+            }
+
+            fn nth(&mut self, n: usize) -> Option<Self::Item> {
+                self.inner.nth(n)
+            }
+
+            fn last(mut self) -> Option<Self::Item> {
+                self.inner.next_back()
+            }
+        }
+
+        impl$(<$lifetime>)? DoubleEndedIterator for $name$(<$lifetime>)? {
+            fn next_back(&mut self) -> Option<Self::Item> {
+                self.inner.next_back()
+            }
+
+            fn nth_back(&mut self, n: usize) -> Option<Self::Item> {
+                self.inner.nth_back(n)
+            }
+        }
+
+        impl$(<$lifetime>)? ExactSizeIterator for $name$(<$lifetime>)? {
+            fn len(&self) -> usize {
+                self.inner.len()
+            }
+        }
+
+        impl$(<$lifetime>)? FusedIterator for $name$(<$lifetime>)? {}
+
+        impl$(<$lifetime>)? fmt::Debug for $name$(<$lifetime>)? {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                fmt::Debug::fmt(&self.inner, formatter)
+            }
+        }
+    };
+}
+
+mapping_iterator!(Iter<'a>, (&'a Value, &'a Value));
+mapping_iterator!(IterMut<'a>, (&'a Value, &'a mut Value));
+mapping_iterator!(IntoIter, (Value, Value));
+
 impl IntoIterator for Mapping {
     type Item = (Value, Value);
-    type IntoIter = indexmap::map::IntoIter<Value, Value>;
+    type IntoIter = IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.map.into_iter()
+        IntoIter {
+            inner: self.map.into_iter(),
+        }
     }
 }
 
 impl<'a> IntoIterator for &'a Mapping {
     type Item = (&'a Value, &'a Value);
-    type IntoIter = indexmap::map::Iter<'a, Value, Value>;
+    type IntoIter = Iter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.map.iter()
+        Iter {
+            inner: self.map.iter(),
+        }
     }
 }
 
 impl<'a> IntoIterator for &'a mut Mapping {
     type Item = (&'a Value, &'a mut Value);
-    type IntoIter = indexmap::map::IterMut<'a, Value, Value>;
+    type IntoIter = IterMut<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.hash.take();
-        self.map.iter_mut()
+        IterMut {
+            inner: self.map.iter_mut(),
+        }
     }
 }
 
