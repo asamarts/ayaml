@@ -3,6 +3,6 @@
 emit	tiny	8	D82: before its first line, the writer looks through the value for tags that need a %TAG directive, about 75 instructions a document
 emit	flow-depth-64	21	D82: the look for tags that need a %TAG directive costs about 60 instructions a collection, and this input is 64 nested collections around one scalar
 typed	tiny	8	AY-096: the chunked event feed adds a branch per event to keep large typed documents below their peak target
-typed	short-sequence	7	AY-104: a typed read builds its value from events it takes from the parser one by one, and keeps no tree of the document; that costs about 160 instructions an item here, and a decode of short scalars peaks a quarter to a half lower
+typed	short-sequence	7	AY-104: a typed read builds its value from events it takes from the parser one by one, and keeps no tree of the document; that costs about 160 instructions an item here, and an untyped decode of short scalars peaks 15% to 32% lower
 typed	mapping-1000	7	AY-104: as for the short sequence, about 400 instructions an entry, part of them for a map that is no longer told its size
 typed	aliases-1000	7	AY-104: as for the short sequence; each alias is still read from the anchored tree

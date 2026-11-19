@@ -26,7 +26,7 @@ use crate::error::{Code, Error, ErrorKind};
 use crate::event::{Anchor, Event, ScalarStyle};
 use crate::limits::{AliasBudget, Limits};
 use crate::number::Number;
-use crate::parser::{self, EventChunks, EventConsumer};
+use crate::parser::{self, EventConsumer};
 use crate::resolver::{float_from_text, plain_resolves_to_string, resolve_scalar};
 use crate::span::{Position, Span};
 use crate::tag::Tag;
@@ -251,8 +251,10 @@ pub(crate) fn from_str_visitor<'de, V: Visitor<'de>>(
 }
 
 /// Decode one document with a seed. A small input is built as a tree and read from it, which
-/// costs it the least; a larger one is read from its events, so that no tree of it is kept
-/// beside its tokens and its value (see `stream`). Both give the same value or error. A build
+/// costs a document of a few bytes the least; a larger one is read from its events, so that no
+/// tree of it is kept beside its tokens and its value (see `stream`). Both give the same value
+/// or error. What a target can see of the difference is that a collection read from events
+/// tells it no size, and that it has read the start of a document that is then refused. A build
 /// with `--cfg ayaml_typed_from_events` reads every input from its events, which is how the
 /// tests run on that reader at every size.
 pub(crate) fn from_str_seed_with_options<'de, T: DeserializeSeed<'de>>(
@@ -261,7 +263,7 @@ pub(crate) fn from_str_seed_with_options<'de, T: DeserializeSeed<'de>>(
     options: NodeOptions,
     seed: T,
 ) -> Result<T::Value, Error> {
-    if input.len() <= CHUNKED_INPUT_THRESHOLD && !cfg!(ayaml_typed_from_events) {
+    if input.len() <= SMALL_INPUT_BYTES && !cfg!(ayaml_typed_from_events) {
         return from_str_by_tree(input, limits, options, seed);
     }
     stream::read(input, limits, options, seed)
@@ -318,9 +320,7 @@ pub(crate) fn from_events_seed<'de, T: DeserializeSeed<'de>>(
 /// Inputs above this size are read from their events, and built as a tree only to report an
 /// error. Smaller reads build the tree with the eager builder, whose lower per-event overhead
 /// matters more to them than the tree's size or the spare capacity of one small vector.
-const CHUNKED_INPUT_THRESHOLD: usize = 4 * 1024;
-/// Inputs above this size stream events into the builder instead of keeping a document's events.
-const STREAMING_INPUT_THRESHOLD: usize = 8 * 1024;
+const SMALL_INPUT_BYTES: usize = 4 * 1024;
 
 /// Parse one document and build its node tree.
 fn parse_document<'de>(
@@ -335,30 +335,19 @@ fn parse_document<'de>(
             .with_span(Span::empty(0))
             .with_location(Position::new(1, 1))
     })?;
-    if input.len() > STREAMING_INPUT_THRESHOLD {
+    // A larger input is built as its events arrive, which is the answer for every size.
+    if input.len() > SMALL_INPUT_BYTES {
         return parse_streaming(input, limits, options);
     }
-    let built = if input.len() <= CHUNKED_INPUT_THRESHOLD {
-        parser::parse_document_events(input, limits, options.compat_flow).map(|events| {
-            build(
-                events,
-                input.len(),
-                limits,
-                options,
-                &mut AliasBudget::default(),
-            )
-        })
-    } else {
-        parser::parse_document_event_chunks(input, limits, options.compat_flow).map(|chunks| {
-            build_chunks(
-                chunks,
-                input.len(),
-                limits,
-                options,
-                &mut AliasBudget::default(),
-            )
-        })
-    };
+    let built = parser::parse_document_events(input, limits, options.compat_flow).map(|events| {
+        build(
+            events,
+            input.len(),
+            limits,
+            options,
+            &mut AliasBudget::default(),
+        )
+    });
     match built {
         Ok(built) => built,
         // A small input is parsed whole and then built, so a syntax error would come before an
@@ -389,34 +378,6 @@ fn parse_streaming<'de>(
     })
 }
 
-/// The event source the builder reads.
-enum EventFeed<'de> {
-    Collected(std::vec::IntoIter<Event<'de>>),
-    Chunks {
-        chunks: std::vec::IntoIter<Vec<Event<'de>>>,
-        current: std::vec::IntoIter<Event<'de>>,
-    },
-}
-
-impl<'de> EventFeed<'de> {
-    fn next(&mut self) -> Result<Option<Event<'de>>, Error> {
-        loop {
-            match self {
-                Self::Collected(events) => return Ok(events.next()),
-                Self::Chunks { chunks, current } => {
-                    if let Some(event) = current.next() {
-                        return Ok(Some(event));
-                    }
-                    let Some(chunk) = chunks.next() else {
-                        return Ok(None);
-                    };
-                    *current = chunk.into_iter();
-                }
-            }
-        }
-    }
-}
-
 fn build<'de>(
     events: Vec<Event<'de>>,
     input_len: usize,
@@ -424,43 +385,8 @@ fn build<'de>(
     options: NodeOptions,
     budget: &mut AliasBudget,
 ) -> Result<Node<'de>, Error> {
-    build_feed(
-        EventFeed::Collected(events.into_iter()),
-        input_len,
-        limits,
-        options,
-        budget,
-    )
-}
-
-fn build_chunks<'de>(
-    chunks: EventChunks<'de>,
-    input_len: usize,
-    limits: &Limits,
-    options: NodeOptions,
-    budget: &mut AliasBudget,
-) -> Result<Node<'de>, Error> {
-    build_feed(
-        EventFeed::Chunks {
-            chunks: chunks.into_chunks().into_iter(),
-            current: Vec::new().into_iter(),
-        },
-        input_len,
-        limits,
-        options,
-        budget,
-    )
-}
-
-fn build_feed<'de>(
-    events: EventFeed<'de>,
-    input_len: usize,
-    limits: &Limits,
-    options: NodeOptions,
-    budget: &mut AliasBudget,
-) -> Result<Node<'de>, Error> {
     let mut builder = Builder {
-        events: Some(events),
+        events: Some(events.into_iter()),
         limits: limits.clone(),
         input_len,
         anchors: Anchors::new(),
@@ -480,7 +406,8 @@ fn build_feed<'de>(
 }
 
 struct Builder<'de> {
-    events: Option<EventFeed<'de>>,
+    /// A document's events, where they were collected before the builder was made.
+    events: Option<std::vec::IntoIter<Event<'de>>>,
     limits: Limits,
     input_len: usize,
     anchors: Anchors<Anchored<'de>>,
@@ -546,7 +473,9 @@ struct Built<'de> {
 #[derive(Clone, Debug)]
 enum SeenKey<'de> {
     Scalar(Cow<'de, str>),
-    Node(Node<'de>),
+    /// Boxed: nearly every key is a scalar, and a node here would make each slot of the set
+    /// as large as a node, more than three times a scalar key's.
+    Node(Box<Node<'de>>),
 }
 
 impl PartialEq for SeenKey<'_> {
@@ -576,7 +505,7 @@ impl<'de> SeenKey<'de> {
             Self::Scalar(text)
         } else {
             node.cached_hash();
-            Self::Node(node.clone())
+            Self::Node(Box::new(node.clone()))
         }
     }
 }
@@ -631,7 +560,7 @@ impl<'de> EventConsumer<'de> for Builder<'de> {
 impl<'de> Builder<'de> {
     fn build(&mut self) -> Result<Node<'de>, Error> {
         let mut document = None;
-        while let Some(event) = self.next_event()? {
+        while let Some(event) = self.next_event() {
             match event {
                 Event::StreamStart { .. } | Event::Directive { .. } => {}
                 Event::StreamEnd { .. } => break,
@@ -649,7 +578,7 @@ impl<'de> Builder<'de> {
                     self.root = None;
                     self.in_document = true;
                     loop {
-                        let Some(event) = self.next_event()? else {
+                        let Some(event) = self.next_event() else {
                             return Err(self.error_at(
                                 Span::empty(self.input_len),
                                 "unexpected end of event stream",
@@ -671,7 +600,7 @@ impl<'de> Builder<'de> {
                         }
                         self.push_node(event)?;
                         if self.root.is_some() {
-                            match self.next_event()? {
+                            match self.next_event() {
                                 Some(Event::DocumentEnd { .. }) => {
                                     let node = self
                                         .root
@@ -704,11 +633,8 @@ impl<'de> Builder<'de> {
         Ok(document.unwrap_or_else(|| Node::null(Span::empty(self.input_len))))
     }
 
-    fn next_event(&mut self) -> Result<Option<Event<'de>>, Error> {
-        match self.events.as_mut() {
-            Some(events) => events.next(),
-            None => Ok(None),
-        }
+    fn next_event(&mut self) -> Option<Event<'de>> {
+        self.events.as_mut().and_then(Iterator::next)
     }
 
     fn push(&mut self, event: Event<'de>) -> Result<(), Error> {

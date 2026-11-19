@@ -97,6 +97,18 @@ impl Mapping {
         }
     }
 
+    /// Give back the room that the entries don't need. A mapping that grew as its entries
+    /// arrived can hold room for nearly twice as many.
+    pub fn shrink_to_fit(&mut self) {
+        self.map.shrink_to_fit();
+    }
+
+    /// How many entries the mapping has room for.
+    #[cfg(test)]
+    pub(crate) fn capacity(&self) -> usize {
+        self.map.capacity()
+    }
+
     /// Number of entries.
     #[must_use]
     pub fn len(&self) -> usize {

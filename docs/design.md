@@ -19,8 +19,9 @@ UTF-8 input
 
 Each layer has a narrow responsibility:
 
-- The **scanner** validates UTF-8 and YAML lexical structure, produces tokens,
-  and tracks byte offsets and one-based line/column positions.
+- The **scanner** validates UTF-8 and YAML lexical structure and produces tokens
+  with byte offsets. It builds the index of line starts that gives an error, or a
+  caller, a one-based line and column on request (D89).
 - The **parser** turns tokens into stream, document, collection, scalar, tag,
   anchor, alias, and directive events. Collections use explicit stacks, so
   hostile nesting consumes heap rather than the native call stack. Event readers
@@ -36,7 +37,9 @@ Each layer has a narrow responsibility:
   of the document: a scalar is read and dropped, and a collection is read entry
   by entry. It builds a tree only of what is read whole or again: a node with an
   anchor, a collection that keeps its tag, a mapping key, and what an enum
-  reads. A smaller read, and the `Deserializer`, build the document's tree and
+  reads. A target can tell the two readers apart in two ways only: a collection
+  read from events tells it no size, and it has read the start of a document
+  that is then refused (D95). A smaller read, and the `Deserializer`, build the document's tree and
   read from that, and every read reports the error that the tree gives (D95).
   An error below the document's root also names the
   path to what failed, as in `tasks[0].limits.cpu`. The path is built only as an
@@ -88,8 +91,8 @@ none, and nor does a block entry whose removal the lines around it would make in
 the conditions. A value that the source doesn't write after its key's `:` has an empty span
 right after that `:`.
 
-Errors have a stable `ErrorKind`, an optional span and location, a message, and
-an optional source. Resource-limit errors additionally expose a structured
+Errors have an `ErrorKind` that names the layer that refused the input, an optional
+span and location, a message, and an optional source. Resource-limit errors additionally expose a structured
 `LimitExceeded` value through `Error::limit()`. Human-readable `Display` output
 includes the location when one is known without duplicating a location already
 present in the message.

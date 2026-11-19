@@ -945,9 +945,10 @@ impl<'a> Scanner<'a> {
         }
         let previous = self.input[..self.pos].chars().next_back();
         // A BOM at the start of a line leaves the comment at the start of
-        // the line too (YAML 1.2.2 example 5.1).
+        // the line too (YAML 1.2.2 example 5.1). The stream-start run of marks
+        // is skipped as one, so a comment right after it starts the line as well.
         let after_line_start_bom = previous == Some('\u{feff}')
-            && (self.pos == self.after_line_bom || {
+            && (self.pos == self.after_line_bom || self.pos == self.initial_bom_end || {
                 let bom = self.pos - '\u{feff}'.len_utf8();
                 bom == 0 || self.input[..bom].ends_with(['\n', '\r'])
             });

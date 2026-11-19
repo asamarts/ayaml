@@ -172,7 +172,7 @@ impl<'de> Deserialize<'de> for Nothing {
 
 /// Fails before it reads anything, so its error is placed by whatever handed it the node. It
 /// holds a byte, so that a map of them is no set.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Refusing(u8);
 
 impl<'de> Deserialize<'de> for Refusing {
@@ -687,4 +687,261 @@ fn what_a_target_does_not_read_is_still_checked() {
         from_str_by_events::<Vec<Nothing>>("- {k: 1}\n- [2]\n- 3\n", &limits, false).unwrap(),
         [Nothing(0), Nothing(0), Nothing(0)]
     );
+}
+
+/// What both readers give for `input` in each mode, which has to be the same: the value as it
+/// prints, or the error with its kind, span, and text. The default mode's is returned.
+fn both<'de, T: Deserialize<'de> + Debug>(input: &'de str) -> String {
+    let limits = Limits::default();
+    let mut texts = Vec::new();
+    for compat in [false, true] {
+        let text = |read: Result<T, ayaml::Error>| match read {
+            Ok(value) => format!("{value:?}"),
+            Err(error) => format!("{error:?} {error}"),
+        };
+        let tree = text(from_str_by_tree::<T>(input, &limits, compat));
+        let events = text(from_str_by_events::<T>(input, &limits, compat));
+        assert_eq!(tree, events, "compat {compat}, {input:?}");
+        texts.push(tree);
+    }
+    texts.swap_remove(0)
+}
+
+/// Reads a mapping's first entry and no more.
+#[derive(Debug)]
+struct FirstEntry(
+    #[allow(dead_code, reason = "printed, to compare the readers")] Option<(String, IgnoredAny)>,
+);
+
+impl<'de> Deserialize<'de> for FirstEntry {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Read;
+        impl<'de> Visitor<'de> for Read {
+            type Value = FirstEntry;
+
+            fn expecting(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a mapping")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<FirstEntry, A::Error> {
+                Ok(FirstEntry(access.next_entry()?))
+            }
+        }
+        deserializer.deserialize_map(Read)
+    }
+}
+
+/// A mapping's visitor that leaves entries behind is refused, and told how many entries the
+/// mapping has: the ones it asked for and the ones it left.
+#[test]
+fn a_mapping_visitor_that_stops_early_is_told_the_mapping_s_length() {
+    let text = both::<FirstEntry>("a: 1\nb: 2\nc: 3\n");
+    assert!(
+        text.contains("invalid length 3, expected fewer elements in the map"),
+        "{text}"
+    );
+    let text = both::<BTreeMap<String, FirstEntry>>("k: {a: 1, b: 2}\n");
+    assert!(
+        text.contains("invalid length 2, expected fewer elements in the map"),
+        "{text}"
+    );
+}
+
+/// Asks a mapping for keys until it is told the end, whatever errors it is given, and gives up
+/// after a hundred of those. It reads no value.
+struct AskingKeys;
+
+impl<'de> Deserialize<'de> for AskingKeys {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Read;
+        impl<'de> Visitor<'de> for Read {
+            type Value = AskingKeys;
+
+            fn expecting(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a mapping")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<AskingKeys, A::Error> {
+                let mut refusals = 0;
+                while refusals < 100 {
+                    match access.next_key::<String>() {
+                        Ok(Some(_)) => {}
+                        Ok(None) => break,
+                        Err(_) => refusals += 1,
+                    }
+                }
+                REFUSALS.set(refusals);
+                Ok(AskingKeys)
+            }
+        }
+        deserializer.deserialize_map(Read)
+    }
+}
+
+/// After a fault a mapping tells a visitor that asks on for keys that it has ended, as a
+/// sequence tells one that asks on for items.
+#[test]
+fn a_mapping_visitor_that_asks_on_after_a_fault_is_told_the_end() {
+    let limits = Limits::default();
+    for input in [
+        "a: 1\nb: *missing\nc: 3\nd: 4\n",
+        "a: 1\nb: {k: 1, k: 2}\nc: 3\n",
+    ] {
+        REFUSALS.set(usize::MAX);
+        let error = from_str_by_events::<AskingKeys>(input, &limits, false)
+            .err()
+            .unwrap_or_else(|| panic!("{input:?} has a fault"));
+        assert_ne!(error.kind(), ayaml::ErrorKind::Serde, "{input:?}: {error}");
+        assert_eq!(REFUSALS.get(), 1, "{input:?}");
+    }
+}
+
+/// A key or a value whose type fails before it reads anything is placed at that key or value,
+/// with the path to it.
+#[test]
+fn an_entry_that_is_refused_unread_is_placed_at_its_key_or_value() {
+    let text = both::<BTreeMap<Refusing, i64>>("{a: 1}\n");
+    assert!(text.contains("line 1 column 2"), "{text}");
+    let text = both::<BTreeMap<String, Refusing>>("a: 1\nb: 2\n");
+    assert!(text.contains("a: refused at line 1 column 4"), "{text}");
+    let text = both::<Vec<BTreeMap<String, Refusing>>>("- {a: 1}\n");
+    assert!(text.contains("[0].a: refused at line 1 column 7"), "{text}");
+}
+
+/// Asks a mapping for a value before any key, and keeps what it is told.
+#[derive(Debug)]
+struct EarlyValue(#[allow(dead_code, reason = "printed, to compare the readers")] String);
+
+impl<'de> Deserialize<'de> for EarlyValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Read;
+        impl<'de> Visitor<'de> for Read {
+            type Value = EarlyValue;
+
+            fn expecting(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a mapping")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<EarlyValue, A::Error> {
+                let said = match access.next_value::<IgnoredAny>() {
+                    Ok(IgnoredAny) => "a value".to_owned(),
+                    Err(error) => error.to_string(),
+                };
+                while access.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(EarlyValue(said))
+            }
+        }
+        deserializer.deserialize_map(Read)
+    }
+}
+
+/// Both readers say the same to a value that is asked for before a key.
+#[test]
+fn a_value_asked_for_before_a_key_is_refused_in_the_same_words() {
+    let text = both::<EarlyValue>("a: 1\n");
+    assert!(text.contains("map value requested before key"), "{text}");
+}
+
+/// What a collection says of its size before its first entry is read, after one entry, and how
+/// many entries it gave.
+#[derive(Debug, PartialEq)]
+struct Hinted {
+    before: Option<usize>,
+    after_one: Option<usize>,
+    entries: usize,
+}
+
+impl<'de> Deserialize<'de> for Hinted {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Read;
+        impl<'de> Visitor<'de> for Read {
+            type Value = Hinted;
+
+            fn expecting(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a collection")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut access: A) -> Result<Hinted, A::Error> {
+                let before = access.size_hint();
+                let mut entries = usize::from(access.next_element::<IgnoredAny>()?.is_some());
+                let after_one = access.size_hint();
+                while access.next_element::<IgnoredAny>()?.is_some() {
+                    entries += 1;
+                }
+                Ok(Hinted {
+                    before,
+                    after_one,
+                    entries,
+                })
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Hinted, A::Error> {
+                let before = access.size_hint();
+                let first = access.next_entry::<IgnoredAny, IgnoredAny>()?;
+                let mut entries = usize::from(first.is_some());
+                let after_one = access.size_hint();
+                while access.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {
+                    entries += 1;
+                }
+                Ok(Hinted {
+                    before,
+                    after_one,
+                    entries,
+                })
+            }
+        }
+        deserializer.deserialize_any(Read)
+    }
+}
+
+/// A collection that is read from its events knows how many entries it has only at its end,
+/// so it tells its visitor no size. The root is the exception where it is a flow collection,
+/// whose entries the parser counts before it reads them: a target that reserves room from the
+/// size it is told reserves it once for the collection that is most of such a document. A
+/// collection that is built whole, as a tree, tells its size as the tree reader does.
+#[test]
+fn a_root_flow_collection_tells_its_visitor_how_many_entries_it_has() {
+    let limits = Limits::default();
+    let known = |before, after_one, entries| Hinted {
+        before: Some(before),
+        after_one: Some(after_one),
+        entries,
+    };
+    let unknown = |entries| Hinted {
+        before: None,
+        after_one: None,
+        entries,
+    };
+    for compat in [false, true] {
+        let read = |input: &str| {
+            from_str_by_events::<Hinted>(input, &limits, compat)
+                .unwrap_or_else(|error| panic!("{input:?}: {error}"))
+        };
+        assert_eq!(read("[1, 2, 3]\n"), known(3, 2, 3), "compat {compat}");
+        assert_eq!(read("[1, [2, 3], {a: 4},\n 5]\n"), known(4, 3, 4));
+        assert_eq!(read("{a: 1, b: [2, 3]}\n"), known(2, 1, 2));
+        assert_eq!(read("[]\n"), known(0, 0, 0));
+        assert_eq!(read("--- [1, 2]\n"), known(2, 1, 2));
+        // An anchor has the root built whole, and the tree knows its size, in any style.
+        assert_eq!(read("&a [1, 2, 3]\n"), known(3, 2, 3));
+        assert_eq!(read("&a {a: 1, b: 2}\n"), known(2, 1, 2));
+        assert_eq!(read("&a\n- 1\n- 2\n"), known(2, 1, 2));
+        // A block collection's entries are not counted before they are read.
+        assert_eq!(read("- 1\n- 2\n- 3\n"), unknown(3));
+        assert_eq!(read("a: 1\nb: 2\n"), unknown(2));
+        // Nor are those of a flow collection inside the root.
+        let inner = from_str_by_events::<Vec<Hinted>>("- [1, 2, 3]\n- {a: 1}\n", &limits, compat)
+            .expect("two collections");
+        assert_eq!(inner, [unknown(3), unknown(1)]);
+        let inner = from_str_by_events::<Vec<Hinted>>("[[1, 2, 3], {a: 1}]\n", &limits, compat)
+            .expect("two collections");
+        assert_eq!(inner, [unknown(3), unknown(1)]);
+    }
+    // The public reader reads an input of more than 4 KiB this way, and the size is right
+    // for one that is long.
+    let long = format!("[{}]\n", "17, ".repeat(2_000));
+    let hinted: Hinted = ayaml::from_str(&long).expect("a long sequence");
+    assert_eq!(hinted, known(2_000, 1_999, 2_000));
+    let numbers: Vec<u8> = ayaml::from_str(&long).expect("a long sequence");
+    assert_eq!((numbers.len(), numbers.capacity()), (2_000, 2_000));
 }

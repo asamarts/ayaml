@@ -241,6 +241,23 @@ fn short_scalar_shape(name: &str) -> Option<String> {
             let mut numbers = Numbers(0xB10C_5E90_0F57);
             megabyte_of(|out, _| writeln!(out, "- {}", numbers.word()).expect("write"))
         }
+        // Shapes that a reader of events can't read entry by entry, and one that is all
+        // directives: a root with an anchor is built whole, an anchored node is kept for the
+        // aliases that may follow it, and a directive is an event with no node.
+        "@anchored-flow-ones-1mb" => format!("&a [1{}]\n", ",1".repeat((MEGABYTE - 3) / 2)),
+        "@anchored-block-words-1mb" => {
+            let mut numbers = Numbers(0xB10C_5E90_0F57);
+            String::from("&a\n")
+                + &megabyte_of(|out, _| writeln!(out, "- {}", numbers.word()).expect("write"))
+        }
+        "@anchored-maps-50000" => {
+            let mut out = String::new();
+            for i in 0..50_000 {
+                writeln!(out, "- &a{i} {{x: {i}, y: w}}").expect("write");
+            }
+            out
+        }
+        "@directives-100k" => "%A\n".repeat(100_000) + "--- x\n",
         _ => return None,
     })
 }

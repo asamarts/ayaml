@@ -162,7 +162,8 @@ fn the_repository_lint_policy_is_the_one_the_plan_requires() {
 }
 
 /// The nine document shapes of issue #178 each have a peak, an allocation count, and a total
-/// in the budgets of the untyped decode, and the gate script reads that file.
+/// in the budgets of the untyped decode, and the gate script reads that file. So do the shapes
+/// that a reader of events builds as trees, and the one that is all directives.
 #[test]
 fn allocation_budgets_cover_the_json_decode() {
     let Some(root) = repository_root() else {
@@ -196,27 +197,35 @@ fn allocation_budgets_cover_the_json_decode() {
             "@flow-ones-1mb",
             "@block-seq-1mb",
             "@block-words-1mb",
+            "@anchored-flow-ones-1mb",
+            "@anchored-block-words-1mb",
+            "@anchored-maps-50000",
+            "@directives-100k",
         ]
     );
 }
 
-/// The gate checks each of its three budget files, with no condition that could pass one over,
-/// and CI runs the gate. A call that is commented out, or that stands inside an `if`, is not a
-/// line of its own.
+/// The gate checks each of its three budget files, and CI runs the gate with no argument and
+/// under no condition. What the gate does with the files is tested by running it, in the
+/// `AllocationGate` tests of `tools/test_ci_checks.py`; this pins what those can't see, the
+/// files it reads by default and the step that runs it.
 #[test]
 fn the_allocation_gate_checks_every_budget_file() {
     let Some(root) = repository_root() else {
         return;
     };
     let script = read(&root, "tools/check_alloc_corpus.sh");
-    for call in [
+    for line in [
+        "manifest=\"${1:-tools/alloc-corpus.tsv}\"",
+        "typed_manifest=\"${2:-tools/typed-alloc-corpus.tsv}\"",
+        "json_manifest=\"${3:-tools/json-alloc-corpus.tsv}\"",
         "check_file \"$manifest\" value",
-        "check_file tools/typed-alloc-corpus.tsv typed",
-        "check_json_file tools/json-alloc-corpus.tsv",
+        "check_file \"$typed_manifest\" typed",
+        "check_json_file \"$json_manifest\"",
     ] {
         assert!(
-            script.lines().any(|line| line == call),
-            "the gate has to run `{call}` on a line of its own"
+            script.lines().any(|found| found == line),
+            "the gate has to hold `{line}` on a line of its own"
         );
     }
     let typed = read(&root, "tools/typed-alloc-corpus.tsv");
@@ -226,12 +235,30 @@ fn the_allocation_gate_checks_every_budget_file() {
             .any(|line| !line.is_empty() && !line.starts_with('#')),
         "the typed path has no budget"
     );
-    let workflow = read(&root, ".github/workflows/ci.yml");
-    assert!(
-        workflow
-            .lines()
-            .any(|line| line.trim() == "run: tools/check_alloc_corpus.sh"),
-        "CI has to run the allocation gate"
+    let workflow = parse_value(&read(&root, ".github/workflows/ci.yml")).expect("ci.yml parses");
+    let jobs = workflow["jobs"].as_mapping().expect("the workflow's jobs");
+    let mut found = 0;
+    for (name, job) in jobs {
+        let steps = job["steps"].as_sequence().expect("a job's steps");
+        for step in steps {
+            if step["run"].as_str().map(str::trim) != Some("tools/check_alloc_corpus.sh") {
+                continue;
+            }
+            found += 1;
+            for owner in [step, job] {
+                let owner = owner.as_mapping().expect("a mapping");
+                for key in ["if", "continue-on-error"] {
+                    assert!(
+                        !owner.contains_key(key),
+                        "{name:?}: the allocation gate runs under `{key}`"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        found, 1,
+        "CI has to run the allocation gate, once and with no argument"
     );
 }
 
@@ -281,4 +308,72 @@ fn the_ci_check_tests_all_run() {
         1,
         "one call runs the tests"
     );
+}
+
+/// Every place that repeats the workspace version states the one in `Cargo.toml`, so a release
+/// that sets one and misses another fails here: the README's current release and install lines,
+/// the compatibility guide's install line, and the exact requirement of each crate that pins
+/// the library.
+#[test]
+fn every_place_that_repeats_the_version_agrees_with_the_workspace() {
+    let Some(root) = repository_root() else {
+        return;
+    };
+    let manifest: Value = {
+        let text = read(&root, "Cargo.toml");
+        let line = text
+            .lines()
+            .find(|line| line.starts_with("version = "))
+            .expect("the workspace version");
+        parse_value(&format!("{{{}}}", line.replacen(" = ", ": ", 1))).expect("a version")
+    };
+    let version = manifest["version"].as_str().expect("a version string");
+    assert_eq!(version.split('.').count(), 3, "{version}");
+
+    let readme = read(&root, "README.md");
+    assert!(
+        readme.contains(&format!("The current release is `{version}`.")),
+        "README.md names another current release than {version}"
+    );
+    let install = format!("ayaml = \"{version}\"");
+    assert_eq!(readme.matches(&install).count(), 2, "README.md: {install}");
+    assert_eq!(
+        readme.matches("ayaml = \"").count(),
+        2,
+        "README.md has another install line"
+    );
+
+    let guide = read(&root, "docs/compatibility.md");
+    let install = format!("ayaml = {{ version = \"{version}\", features = [\"libyaml-compat\"] }}");
+    assert!(guide.contains(&install), "docs/compatibility.md: {install}");
+    assert_eq!(
+        guide.matches("ayaml = {").count(),
+        1,
+        "docs/compatibility.md"
+    );
+
+    for name in [
+        "crates/ayaml-bench/Cargo.toml",
+        "crates/ayaml-conformance/Cargo.toml",
+        "fuzz/Cargo.toml",
+    ] {
+        let text = read(&root, name);
+        let pins: Vec<&str> = text
+            .lines()
+            .filter(|line| line.starts_with("ayaml = {"))
+            .collect();
+        assert_eq!(pins.len(), 1, "{name}: {pins:?}");
+        assert!(
+            pins[0].contains(&format!("version = \"={version}\"")),
+            "{name}: {}",
+            pins[0]
+        );
+    }
+    for name in ["Cargo.lock", "fuzz/Cargo.lock"] {
+        let text = read(&root, name);
+        assert!(
+            text.contains(&format!("name = \"ayaml\"\nversion = \"{version}\"\n")),
+            "{name} holds another version of ayaml than {version}"
+        );
+    }
 }

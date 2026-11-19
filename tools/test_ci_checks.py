@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -1368,25 +1369,89 @@ class ScannerDependencyPolicy(unittest.TestCase):
 
 
 class AllocationGate(unittest.TestCase):
-    """A budget file with no row would pass by checking nothing, so the gate refuses it."""
+    """A budget file with no row would pass by checking nothing, so the gate refuses it.
 
-    def gate(self, manifest: str) -> subprocess.CompletedProcess[str]:
+    The gate runs here with a `cargo` that records how it was called and measures nothing, so
+    each test sees which rows of which file the gate checked.
+    """
+
+    VALUE = "# path\tbudgets\nv1\t1\t2\t3\t4\t5\t6\t7\t8\t9\nv2\t1\t2\t3\t4\t5\t6\t7\t8\t9\n"
+    TYPED = "t1\t1\t2\t3\t4\t5\t6\t7\t8\t9\n"
+    # No newline ends the last row, which the gate still has to read.
+    JSON = "# path\tjson_peak\tjson_allocs\tjson_total\nj1\t1\t2\t3\n\nj2\t1\t2\t3"
+
+    def gate(self, value: str, typed: str, json: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
         script = Path(__file__).resolve().parent / "check_alloc_corpus.sh"
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "budgets.tsv"
-            path.write_text(manifest, encoding="utf-8")
-            # The value path's file is read first, so a refusal comes before anything is built.
-            return subprocess.run([script, path], capture_output=True, text=True, timeout=60)
+            root = Path(directory)
+            paths = []
+            for name, text in (("value.tsv", value), ("typed.tsv", typed), ("json.tsv", json)):
+                paths.append(root / name)
+                paths[-1].write_text(text, encoding="utf-8")
+            calls = root / "calls"
+            calls.write_text("", encoding="utf-8")
+            stub = root / "bin" / "cargo"
+            stub.parent.mkdir()
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                'mode=value; [[ -n "${AYAML_TYPED:-}" ]] && mode=typed; [[ -n "${AYAML_JSON:-}" ]] && mode=json\n'
+                'while [[ "$1" != "--" ]]; do shift; done\n'
+                f'echo "$mode $2 $(($# - 2))" >>{shlex.quote(str(calls))}\n',
+                encoding="utf-8",
+            )
+            stub.chmod(0o755)
+            environment = dict(os.environ, PATH=f"{stub.parent}{os.pathsep}{os.environ['PATH']}")
+            environment.pop("AYAML_TYPED", None)
+            environment.pop("AYAML_JSON", None)
+            completed = subprocess.run(
+                [script, *paths], capture_output=True, text=True, timeout=60, env=environment
+            )
+            return completed, calls.read_text(encoding="utf-8").splitlines()
 
-    def test_an_empty_budget_file_fails(self) -> None:
-        completed = self.gate("")
-        self.assertEqual(completed.returncode, 1, completed.stderr)
-        self.assertIn("no budgets found", completed.stderr)
+    def test_every_row_of_every_file_is_checked(self) -> None:
+        completed, calls = self.gate(self.VALUE, self.TYPED, self.JSON)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            calls,
+            ["value v1 9", "value v2 9", "typed t1 9", "json j1 3", "json j2 3"],
+        )
+        self.assertIn("checked 5 allocation budgets", completed.stdout)
 
-    def test_a_budget_file_of_comments_fails(self) -> None:
-        completed = self.gate("# path\tparse_peak\n\n# nothing is budgeted\n")
-        self.assertEqual(completed.returncode, 1, completed.stderr)
-        self.assertIn("no budgets found", completed.stderr)
+    def test_a_file_with_no_row_fails_whichever_it_is(self) -> None:
+        empty = ("", "# path\tparse_peak\n\n# nothing is budgeted\n")
+        for text in empty:
+            for missing in range(3):
+                files = [self.VALUE, self.TYPED, self.JSON]
+                files[missing] = text
+                with self.subTest(missing=missing, text=text):
+                    completed, calls = self.gate(*files)
+                    self.assertEqual(completed.returncode, 1, completed.stderr)
+                    self.assertIn("no budgets found in", completed.stderr)
+                    self.assertIn(("value.tsv", "typed.tsv", "json.tsv")[missing], completed.stderr)
+                    # The files before it were checked, and none after it.
+                    self.assertEqual(len(calls), (0, 2, 3)[missing], calls)
+
+    def test_a_failed_measurement_fails_the_gate(self) -> None:
+        script = Path(__file__).resolve().parent / "check_alloc_corpus.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, text in (("value.tsv", self.VALUE), ("typed.tsv", self.TYPED), ("json.tsv", self.JSON)):
+                (root / name).write_text(text, encoding="utf-8")
+            stub = root / "bin" / "cargo"
+            stub.parent.mkdir()
+            # Over budget only for the JSON decode, the last file.
+            stub.write_text('#!/usr/bin/env bash\n[[ -z "${AYAML_JSON:-}" ]]\n', encoding="utf-8")
+            stub.chmod(0o755)
+            environment = dict(os.environ, PATH=f"{stub.parent}{os.pathsep}{os.environ['PATH']}")
+            completed = subprocess.run(
+                [script, root / "value.tsv", root / "typed.tsv", root / "json.tsv"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=environment,
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout)
+            self.assertNotIn("checked", completed.stdout)
 
 
 if __name__ == "__main__":

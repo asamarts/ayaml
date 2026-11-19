@@ -69,6 +69,19 @@ pub(crate) fn starts_with_document_marker(text: &str) -> bool {
             .is_none_or(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r'))
 }
 
+/// Where the first line's columns start in compat. A stream-start run of marks takes up no column,
+/// as when libyaml detects the encoding itself, unless a document marker follows it. The scanner
+/// reads that marker as text, as when the encoding was set beforehand, so the rest of the line
+/// reads that way too: the run counts as the one column a single mark would.
+fn compat_content_start(input: &str) -> usize {
+    let marks = input.len() - input.trim_start_matches('\u{feff}').len();
+    if marks > 0 && starts_with_document_marker(&input[marks..]) {
+        marks - '\u{feff}'.len_utf8()
+    } else {
+        marks
+    }
+}
+
 /// At most how many lines `bytes` holds: one more than its CR and LF bytes. That is its line count
 /// when no CR is followed by an LF. Otherwise it counts each CRLF twice, which stays under twice the
 /// line count, since every CRLF ends a line, and under one more than the bytes. NEL, LS, and PS are
@@ -176,12 +189,8 @@ impl LineIndex {
     ) -> Result<(Self, Vec<usize>), usize> {
         let mut quoted_only = Vec::new();
         let (starts, ascii) = scan_line_starts::<true>(input, &mut quoted_only)?;
-        let content_start = if count_line_boms
-            && input
-                .strip_prefix('\u{feff}')
-                .is_some_and(starts_with_document_marker)
-        {
-            0
+        let content_start = if count_line_boms {
+            compat_content_start(input)
         } else {
             input.len() - input.trim_start_matches('\u{feff}').len()
         };
@@ -200,24 +209,14 @@ impl LineIndex {
     }
 
     /// Build an index for compat, where a later line's BOM takes up a column, as libyaml reads it.
-    /// The first line's takes up none, as when libyaml detects the encoding itself, unless a
-    /// document marker follows it. The scanner reads that marker as text, as when the encoding was
-    /// set beforehand, so the rest of the line reads that way too.
+    /// The first line's marks take up none, unless a document marker follows them
+    /// ([`compat_content_start`]).
     #[must_use]
     pub(crate) fn counting_line_boms(input: &str) -> Self {
-        let index = Self::new(input);
-        let content_start = if input
-            .strip_prefix('\u{feff}')
-            .is_some_and(starts_with_document_marker)
-        {
-            0
-        } else {
-            index.content_start
-        };
         Self {
             skip_line_boms: false,
-            content_start,
-            ..index
+            content_start: compat_content_start(input),
+            ..Self::new(input)
         }
     }
 
@@ -333,7 +332,8 @@ impl LineIndex {
         Some(Span::new(start, end))
     }
 
-    /// Byte offset of the line containing `index`.
+    /// Byte offset of the line containing `index`. An index past the end of the input is on the
+    /// last line: this one method doesn't check its argument against the input.
     #[must_use]
     pub fn line_start(&self, index: usize) -> usize {
         match self.starts.binary_search(&index) {
@@ -551,6 +551,42 @@ mod tests {
         let checked_compat = LineIndex::new_checked(input, true).unwrap().0;
         assert_eq!(normal.marker(input, 3).unwrap().column(), 1);
         assert_eq!(compat.marker(input, 3).unwrap().column(), 2);
+        // A run of marks before a marker is the one column that a single mark is, and no column
+        // where no marker follows it.
+        for marks in [2, 3] {
+            let start = marks * '\u{feff}'.len_utf8();
+            let run = "\u{feff}".repeat(marks);
+            let input = format!("{run}---\nx\n");
+            for index in [
+                LineIndex::counting_line_boms(&input),
+                LineIndex::new_checked(&input, true).unwrap().0,
+            ] {
+                assert_eq!(
+                    index.marker(&input, start).unwrap().column(),
+                    2,
+                    "{input:?}"
+                );
+                assert_eq!(
+                    index.marker(&input, start + 4).unwrap().column(),
+                    1,
+                    "{input:?}"
+                );
+            }
+            assert_eq!(
+                LineIndex::new(&input)
+                    .marker(&input, start)
+                    .unwrap()
+                    .column(),
+                1
+            );
+            let input = format!("{run}a\n");
+            let index = LineIndex::counting_line_boms(&input);
+            assert_eq!(
+                index.marker(&input, start).unwrap().column(),
+                1,
+                "{input:?}"
+            );
+        }
         for at in (0..=input.len()).filter(|&at| input.is_char_boundary(at)) {
             assert_eq!(
                 compat.marker(input, at),

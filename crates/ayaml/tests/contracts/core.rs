@@ -711,3 +711,21 @@ fn compat_lazy_events_match_eager_and_yield_errors() {
         "the later error is an item"
     );
 }
+
+/// A span whose end is before its start is empty, as a `Range` built that way is, and asking
+/// for its length doesn't overflow.
+#[test]
+fn a_span_that_ends_before_it_starts_is_empty() {
+    #[allow(
+        clippy::reversed_empty_ranges,
+        reason = "the reversed range is the case under test"
+    )]
+    let span = Span::from(5..3);
+    assert_eq!(span.len(), 0);
+    assert!(span.is_empty());
+    assert_eq!((span.start(), span.end()), (5, 3));
+    assert!(!span.contains(4));
+    assert_eq!(span.slice("abcdefgh"), None);
+    assert_eq!(Span::new(usize::MAX, 0).len(), 0);
+    assert_eq!(Span::new(3, 5).len(), 2);
+}

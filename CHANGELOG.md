@@ -8,33 +8,68 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- `Span` now holds byte offsets and converts to `Range<usize>`. `Marker` remains deprecated for
-  migration, but spans no longer store it; use the public
-  `LineIndex`, `Position`, and `ColumnEncoding` to obtain UTF-8, scalar, or UTF-16 columns.
-  `Error::location()` still returns a one-based line and column, and a manually built error can
-  attach one with `Error::with_location`. The event size falls from 176 to 144 bytes, a span from
-  48 to 16, and an error from 112 to 104 on 64-bit targets. An error about a stream that holds no
-  document is now placed at the end of the input, where its value would stand; 0.1.3 gave it
-  that byte offset with line 1, column 1.
+The breaking changes come first, each with what a caller has to change.
+
+- **Breaking: a span is two byte offsets.** `Span::start()` and `Span::end()` return `usize`,
+  where they returned a `Marker`, and `Span::new` and `Span::empty` take offsets. A span
+  converts to and from `Range<usize>`. For a line and column, build a `LineIndex` for the input
+  and ask it for a `Position` in a `ColumnEncoding`: `ColumnEncoding::Scalar` gives the columns
+  that a `Marker` held in 0.1.3, and UTF-8 and UTF-16 columns are there too. `Marker` remains,
+  deprecated, for code that keeps one; nothing returns or takes one. `Location` is now another
+  name for `Position`, and prints as one.
+- **Breaking: an error built by hand has no location until it is given one.**
+  `Error::location()` still returns a one-based line and column for every error that a reader
+  returns. `Error::with_span` no longer implies one, and clears one that was set before it:
+  set the span, and then the location with the new `Error::with_location`. Without a location
+  an error prints no `at line L column C`.
+- **Breaking: `compat::parse_events_with_limits` returns a lazy `EventStream`**, as
+  `ayaml::parse_events_with_limits` does, where it returned a `Vec<Event>`. The new
+  `compat::parse_events` returns the same. A caller that wants the vector calls the new
+  `compat::parse_events_eager_with_limits`, or collects the stream. The stream reports a
+  problem when its events come to it, so an input with two problems can report the one that
+  stands first where the vector reports a scanner's problem first, wherever it stands.
+- The event size falls from 176 to 144 bytes, a span from 48 to 16, and an error from 112 to 104
+  on 64-bit targets.
+- An error about a stream that holds no document is now placed at the end of the input, where
+  its value would stand; 0.1.3 gave it that byte offset with line 1, column 1.
+- In compatibility mode a byte-order mark past the start of the input counts as a column of its
+  line, as libyaml counts it, and `LineIndex` counts as default mode does. So there an error's
+  `location()` can differ from the position that a `LineIndex` gives for its span.
 - A reader of one document into a type, such as `from_str`, now reports the first problem in the
   document at every input size, as `parse_value` does: any that the scanner finds, and then the
   first that parsing or building meets. With a duplicate key and a later flow collection that
   never closes it reports the duplicate key, where 0.1.3 reported the syntax error. The
   `Deserializer` still reads a document's events before it builds from them, so there the syntax
   error comes first.
+- A reader of one document into a type reads an input of more than 4 KiB from the parser's
+  events (see Performance), which a target can notice in two ways. Its `Deserialize`, or a
+  seed, may have read the start of a document that the reader then refuses, where 0.1.3 refused
+  a document before the target saw any of it: the error is the same, but a seed that writes to
+  its caller's data as it reads has written. And a collection tells its visitor no size, since
+  its entries are counted only at its end; a root flow collection still does. `Value` and
+  `Mapping` give back the room that growing without a size leaves spare.
+- Three of the fixes below refuse documents that 0.1.3 read: a bare variant name for a variant
+  that holds a sequence or a mapping, a quoted scalar's continuation line that starts with a
+  tab, and a block scalar header after node properties that is not indented past its parent.
 
 ### Added
 
 - `SpannedTree` and `SpannedNode` provide path lookup, value and entry byte spans, source scalar
-  text, and conservative ambiguity handling for aliases, merge keys, duplicate keys, and multiple
-  documents. An entry span is given only where deleting it removes that entry and changes
+  text, and conservative ambiguity handling for aliases, merge keys, duplicate keys, a mapping
+  with an alias among its keys, and multiple documents. With the `libyaml-compat` feature,
+  `SpannedTree::parse_compat` and its `_with_limits` form read as the compatibility reader
+  does. An entry span is given only where deleting it removes that entry and changes
   nothing else: for a block mapping entry or block sequence item that begins its own line,
   through its last line break, with any nested value, block scalar, and trailing comment. A flow
   entry has none, and nor does an entry that shares its first line, has an explicit `?`, defines
   an anchor or stands inside a collection that has one, or is the only entry of its collection.
   A value that the source doesn't write has an empty span right after its key's `:`.
-- `compat::parse_events` and `compat::parse_events_with_limits` return the same lazy
-  `EventStream` as default mode; `compat::parse_events_eager_with_limits` keeps the eager vector.
+- `LineIndex`, `Position`, `PositionError`, and `ColumnEncoding` give lines and columns for byte
+  offsets, in UTF-8 bytes, Unicode scalar values, or UTF-16 code units. `Error::with_location`
+  sets an error's.
+- `compat::parse_events` reads a lazy `EventStream`, and `compat::parse_events_eager_with_limits`
+  the vector that `compat::parse_events_with_limits` returned (see Changed).
+- `Mapping::shrink_to_fit` gives back the room that a mapping's entries don't need.
 - `Limits::for_max_input()` lifts the four count limits for a valid document within
   `MAX_INPUT_BYTES`, while the default profile stays memory-bounded.
 
@@ -51,13 +86,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A compatibility indentation mistake now names the collection whose indentation it breaks,
   instead of reporting the line as unexpected content after the document.
 - A short quoted continuation with no closing quote now reports the opening quote.
-- Serde `invalid_type` errors now name the actual unexpected value for string and enum targets.
+- Serde `invalid_type` errors now name the actual unexpected value for string, enum, and struct
+  targets.
 - A compact block sequence that crosses `max_depth` is now refused while scanning, rather than
   after the whole input has been read.
 - Compatibility flow implicit-key lookahead skips nested collections in one step instead of
   rescanning their content at every enclosing level.
 - A plain scalar's event span and raw text now end at its last non-whitespace character, leaving
-  comments, line breaks, and flow separators outside the scalar.
+  comments, line breaks, and flow separators outside the scalar. The spans that ended where it
+  did end there too: a collection's end, a document's start and end, and an error's. The blanks
+  after a plain scalar no longer count toward `max_scalar_bytes`.
 - A comment after a flow `?` in compatibility mode now ends at the same physical line ending as
   every other comment; NEL, LS, and PS remain content.
 - A quoted scalar's continuation line that starts with a tab is now rejected even when spaces
@@ -66,9 +104,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   by a flow indicator, matching the scanner and the continuation indentation check.
 - After a leading byte order mark, a compatibility error keeps its line and column, a quoted
   scalar's continuation check still applies, and a second stream-start mark is skipped instead
-  of read as content.
+  of read as content. A run of marks reads as one mark does: a comment may follow it, and a
+  document marker after it is text one column in, as after one mark.
 - A block scalar header after node properties on their own line is now rejected when it is not
-  indented past its parent, in both modes and after an anchor or a tag.
+  indented past its parent, in both modes and after an anchor or a tag. The error is the
+  scanner's, with `ErrorKind::Scanner`, and comes before a later problem in the document.
 - A top-level block scalar with indented empty lines now ends before a document marker, leaving
   an empty scalar and continuing the stream after the marker.
 
@@ -80,24 +120,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   falls by up to 68%: by 34% on the short sequence, 35% on short explicit pairs, and 32% on the
   short map, while a large scalar's stays at its size. The gate now budgets total bytes per
   read as well as peak bytes and allocation counts, at the new measurements.
-- What lowers them: the token arena is sized from the density of the input scanned so far,
-  where it doubled, and short-line inputs get a wider first chunk. Scalar tokens keep their raw
+- What lowers them: the token arena is sized from the density of the input scanned so far, and
+  short-line inputs get a wider first chunk. Scalar tokens keep their raw
   text as a span and box only the values that need decoding; typed nodes box tags, keep scalar
   text as a source slice, and cache hashes in one atomic word. Where a tree of the document is
   built, a root flow collection reserves its entry count before its items are built, so a wide
-  flow collection avoids a final vector copy.
+  flow collection avoids a final vector copy. With duplicate keys refused, the set of an open
+  mapping's keys takes 24 bytes a key.
 - A reader of one document into a type, such as `from_str`, builds its value from the parser's
   events when the input is more than 4 KiB, and keeps no tree of the document beside its tokens
   and its value. It reads a scalar and drops it, reads a collection entry by entry, and builds a
   tree only of what is read whole or again: a node with an anchor, a collection that keeps its
-  tag, a mapping key, and what an enum reads. The value and the error are those of a read that
-  builds the tree first, which a refused input is read a second time to report.
+  tag, a mapping key, and what an enum reads. A root that is built whole is read with the tokens
+  freed. The value and the error are those of a read that builds the tree first, which a
+  refused input is read a second time to report.
 - An untyped decode into a JSON tree through the compatibility reader, which is how issue #178
   measures, now peaks at 0.52 to 0.96 times the reference that the issue gives for its nine
   shapes: at 24.2 MB on a 1.1 MB service description, 96.9 MB on a 4.4 MB one, and 17.4 MB on a
-  megabyte block sequence of short words, which was the last shape over the issue's target. A
-  20 KB configuration fixture decoded into `Value` peaks at about 218 KB and allocates about
-  363 KB in total.
+  megabyte block sequence of short words. A 20 KB configuration fixture decoded into `Value`
+  peaks at about 175 KB and keeps about 98 KB.
 - Mappings and typed mapping keys cache their structural hash, so a mapping nested inside a
   mapping key is hashed once per level instead of once for every outer level and entry.
 

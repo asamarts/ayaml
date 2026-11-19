@@ -42,15 +42,15 @@ fn aliases_are_reference_nodes_not_expanded_copies() {
 }
 
 #[test]
-fn a_medium_document_uses_the_chunked_event_feed() {
+fn a_medium_document_is_built_as_its_events_arrive() {
     use std::fmt::Write as _;
 
     let mut input = String::from("values:\n");
     for index in 0..500 {
         writeln!(input, "- value-{index}").expect("write");
     }
-    assert!(input.len() > CHUNKED_INPUT_THRESHOLD);
-    assert!(input.len() <= STREAMING_INPUT_THRESHOLD);
+    assert!(input.len() > SMALL_INPUT_BYTES);
+    assert!(input.len() <= 2 * SMALL_INPUT_BYTES);
 
     let limits = Limits::for_max_input();
     let node = parse_document(&input, &limits, NodeOptions::default()).expect("node");
@@ -75,7 +75,7 @@ fn a_larger_document_streams_events_into_the_builder() {
     for _ in 0..6_000 {
         input.push_str("- *base\n");
     }
-    assert!(input.len() > STREAMING_INPUT_THRESHOLD);
+    assert!(input.len() > 2 * SMALL_INPUT_BYTES);
 
     let limits = Limits::for_max_input();
     let node = parse_document(&input, &limits, NodeOptions::default()).expect("node");
@@ -108,7 +108,7 @@ fn a_large_stream_reports_trailing_documents() {
         writeln!(input, "- {index}").expect("write");
     }
     input.push_str("---\nother: 1\n");
-    assert!(input.len() > STREAMING_INPUT_THRESHOLD);
+    assert!(input.len() > 2 * SMALL_INPUT_BYTES);
 
     let limits = Limits::for_max_input();
     let error = parse_document(&input, &limits, NodeOptions::default()).expect_err("error");
@@ -174,4 +174,60 @@ fn the_room_reserved_for_a_root_collection_is_not_reserved_for_its_items() {
         panic!("an empty sequence in the sequence");
     };
     assert_eq!(inner.capacity(), 0);
+}
+
+/// With duplicate keys refused, every key of an open mapping has a slot in a set. Nearly every
+/// key is a scalar, so a slot is as large as a scalar's text and no larger: a node in it, for
+/// the rare key that is a collection, would more than triple the set.
+#[test]
+fn a_seen_key_is_no_larger_than_a_scalar_s_text() {
+    assert_eq!(size_of::<SeenKey<'_>>(), size_of::<Cow<'_, str>>());
+    assert!(size_of::<Node<'_>>() > 3 * size_of::<SeenKey<'_>>());
+}
+
+/// A collection that is read from events isn't told its size, so a `Value` or a `Mapping` grows
+/// as the entries arrive, and gives back the room it doesn't need when the collection ends. It
+/// keeps what a value keeps that a tree told each size.
+#[test]
+fn a_value_read_from_events_keeps_no_spare_room() {
+    use std::marker::PhantomData;
+
+    use crate::value::Value;
+
+    let limits = Limits::default();
+    let options = NodeOptions::default();
+    let input = "m: {a: 1, b: 2, c: 3, d: 4, e: 5}\ns: [1, 2, 3, 4, 5]\nt:\n- 1\n- 2\n- 3\n";
+    let value =
+        stream::read(input, &limits, options, PhantomData::<Value>).expect("a value from events");
+    let Value::Mapping(root) = &value else {
+        panic!("a mapping: {value:?}");
+    };
+    assert_eq!((root.len(), root.capacity()), (3, 3));
+    let Some(Value::Mapping(inner)) = root.get("m") else {
+        panic!("a mapping at m");
+    };
+    assert_eq!((inner.len(), inner.capacity()), (5, 5));
+    for (name, length) in [("s", 5), ("t", 3)] {
+        let Some(Value::Sequence(items)) = root.get(name) else {
+            panic!("a sequence at {name}");
+        };
+        assert_eq!((items.len(), items.capacity()), (length, length), "{name}");
+    }
+    let mapping = stream::read(
+        "a: 1\nb: 2\nc: 3\nd: 4\ne: 5\n",
+        &limits,
+        options,
+        PhantomData::<crate::Mapping>,
+    )
+    .expect("a mapping from events");
+    assert_eq!((mapping.len(), mapping.capacity()), (5, 5));
+    // A mapping that grows without being told has room to spare until it gives it back.
+    let mut grown = crate::Mapping::new();
+    for number in 0..5_u64 {
+        grown.insert(Value::from(number), Value::Null);
+    }
+    assert!(grown.capacity() > 5, "{}", grown.capacity());
+    grown.shrink_to_fit();
+    assert_eq!(grown.capacity(), 5);
+    assert_eq!(grown.len(), 5);
 }

@@ -2,8 +2,8 @@
 
 A release is published by [`.github/workflows/release.yml`](.github/workflows/release.yml)
 when a maintainer pushes a `vMAJOR.MINOR.PATCH` tag, and no one publishes from a workstation.
-0.1.0 and 0.1.1 were published by hand, before this workflow, and the crates.io API tokens that
-could publish them still exist until step 3 of the one-time setup revokes them.
+0.1.0 and 0.1.1 were published by hand, before this workflow. Since step 3 of the one-time
+setup, no crates.io API token can publish the crate.
 
 ## What the workflow binds together
 
@@ -68,10 +68,15 @@ These are done in the web interfaces by an owner. Each is recorded here once don
 
 ## Cutting a release
 
-1. In a pull request, set the workspace version in `Cargo.toml`, rename the changelog's
-   `## [Unreleased]` section to `## [X.Y.Z] — YYYY-MM-DD`, and refresh `Cargo.lock`. CI is
-   the gate, as for any change. Change `RELEASE_TOOLCHAIN` only in this pull request, never
-   between a tag and its rerun.
+1. In a pull request, set the workspace version in `Cargo.toml` and in each place that repeats
+   it: the current release and the two install lines in `README.md`, the install line in
+   `docs/compatibility.md`, and the exact `ayaml` requirement in
+   `crates/ayaml-bench/Cargo.toml`, `crates/ayaml-conformance/Cargo.toml`, and
+   `fuzz/Cargo.toml`. A policy test fails while one of them disagrees. Rename the
+   `## [Unreleased]` section to `## [X.Y.Z] — YYYY-MM-DD` in `CHANGELOG.md` and in its copy
+   under `crates/ayaml`, and refresh `Cargo.lock` and `fuzz/Cargo.lock`. For a minor release,
+   say in `SECURITY.md` which versions get fixes. CI is the gate, as for any change. Change
+   `RELEASE_TOOLCHAIN` only in this pull request, never between a tag and its rerun.
 2. After the squash merge, tag the merge commit on `main` and push the tag:
 
    ```sh

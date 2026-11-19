@@ -210,9 +210,9 @@ const fn by_length(case: Case) -> Case {
     }
 }
 
-/// Comment lines before a case's input, in bytes. A typed reader takes one of three paths by the
-/// input's length, at most 4 KiB, at most 8 KiB, and above, and a comment adds no event, token,
-/// or node, so each case has the same least value on each path.
+/// Comment lines before a case's input, in bytes. A typed reader takes one of two paths by the
+/// input's length, at most 4 KiB and above, and a comment adds no event, token, or node, so
+/// each case has the same least value on each path. The third length is one more above 4 KiB.
 const COMMENT_BYTES: [usize; 3] = [0, 4_200, 8_300];
 
 /// `input` after at least `bytes` bytes of comment lines.

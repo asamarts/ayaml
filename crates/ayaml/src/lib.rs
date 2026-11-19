@@ -262,6 +262,11 @@ pub mod compat {
     /// Deserialize one document with a caller-supplied seed under the
     /// compatibility policies.
     ///
+    /// An input of more than 4 KiB is read into the seed as it is parsed, as
+    /// [`from_str`](crate::from_str) says. A seed that writes to its caller's data as it reads
+    /// may have written the start of a document that is then refused, so on an error what it
+    /// wrote is to be dropped.
+    ///
     /// # Errors
     ///
     /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
@@ -273,7 +278,8 @@ pub mod compat {
     }
 
     /// Deserialize one document with a caller-supplied seed and explicit limits
-    /// under the compatibility policies.
+    /// under the compatibility policies. What [`from_str_seed`] says of a document that is
+    /// refused holds here.
     ///
     /// # Errors
     ///
@@ -822,10 +828,15 @@ pub fn parse_documents_with_limits(input: &str, limits: &Limits) -> Result<Vec<V
 
 /// Deserialize one YAML document into a typed Serde value.
 ///
-/// This uses the span-carrying typed node path: empty documents can decode
-/// into defaulted structs, duplicate keys are reported at their first
-/// occurrence, and alias limits are enforced. Trailing documents are
-/// rejected. Use `ayaml::compat` for libyaml-compatible decoding.
+/// An empty document can decode into a defaulted struct. A duplicate key is an error, placed
+/// at the key that repeats an earlier one, and the alias limits are enforced. Trailing
+/// documents are rejected. An error names the span of the YAML node it is about. Use
+/// `ayaml::compat` for libyaml-compatible decoding.
+///
+/// An input of more than 4 KiB is read into the target as it is parsed. The value and the
+/// error are what they would be otherwise, but the target's `Deserialize` may have run on the
+/// start of a document that is then refused, and a collection other than a root flow
+/// collection tells its visitor no size.
 ///
 /// # Errors
 ///
@@ -836,10 +847,10 @@ pub fn from_str<T: serde::de::DeserializeOwned>(input: &str) -> Result<T, Error>
 
 /// Deserialize one YAML document while borrowing simple strings from `input`.
 ///
-/// Unlike [`from_str`], this path does not compose an owned [`Value`] first.
-/// Plain, single-quoted, and unescaped double-quoted scalar strings can be
-/// returned as `&str` or `Cow::Borrowed`, and typed errors retain the span of
-/// the failing YAML node. Complex/folded strings remain owned.
+/// It reads as [`from_str`] does, and its target may borrow from `input`: a plain,
+/// single-quoted, or unescaped double-quoted scalar string on one line can be returned as
+/// `&str` or `Cow::Borrowed`. A string that decoding changes, such as a folded or escaped one,
+/// is owned, so only a `Cow` or a `String` can hold it.
 ///
 /// ```
 /// #[derive(serde::Deserialize)]

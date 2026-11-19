@@ -13,7 +13,13 @@
 //! the document before anything about the target, wherever each stands, and this reader meets
 //! them in document order. So after an error the document is built as a tree (`parse_document`),
 //! and that tree's error, if it has one, is the answer. Only a document that builds reports the
-//! error found here, which is then the target's. A refused input pays for the second read.
+//! error found here, which is then the target's. A refused input pays for the second read, and
+//! its target has read what stands before the fault by then: the tree reader refuses a
+//! document before its target sees any of it.
+//!
+//! A root that is built whole is the whole document as a tree. It is built before the target
+//! reads, the stream is read to its end, and the tokens are freed, so the target's value is
+//! built beside the tree alone, as the tree reader builds it.
 
 use std::collections::HashSet;
 
@@ -27,7 +33,7 @@ use super::{
 use crate::error::{Code, Error, ErrorKind};
 use crate::event::Event;
 use crate::limits::Limits;
-use crate::parser::DocumentEvents;
+use crate::parser::{DocumentEvents, EventConsumer};
 use crate::span::{Position, Span};
 
 /// Read one document into what `seed` makes of it.
@@ -47,14 +53,7 @@ pub(super) fn read<'de, T: DeserializeSeed<'de>>(
     // The scanner reads the whole input before the first event, here and for the tree, so its
     // error is the same one and needs no second read.
     let events = DocumentEvents::new(input, limits, options.compat_flow).map_err(located)?;
-    let mut stream = Stream {
-        events,
-        builder: Builder::streaming(input.len(), limits, options, None),
-        open: Vec::new(),
-        ahead: Ahead::Unknown,
-        due: false,
-        fault: None,
-    };
+    let mut stream = Stream::new(events, input.len(), limits, options);
     let result = stream.document(|document| seed.deserialize(document));
     let fault = stream.fault.take();
     // The tokens are freed before a tree is built.
@@ -87,6 +86,9 @@ pub(super) struct Stream<'de> {
     ahead: Ahead,
     /// Whether the node that a seed was given is still unread. A seed may read nothing.
     due: bool,
+    /// Whether the stream has been read past the document's end, which a root that is built
+    /// whole is before its target reads it.
+    ended: bool,
     /// The first fault found in the document itself, as opposed to a value that doesn't suit
     /// its target. Nothing is read after it, and the read fails whatever the target returns.
     fault: Option<Error>,
@@ -148,6 +150,23 @@ enum Open<'de> {
 }
 
 impl<'de> Stream<'de> {
+    fn new(
+        events: DocumentEvents<'de>,
+        input_len: usize,
+        limits: &Limits,
+        options: NodeOptions,
+    ) -> Self {
+        Self {
+            events,
+            builder: Builder::streaming(input_len, limits, options, None),
+            open: Vec::new(),
+            ahead: Ahead::Unknown,
+            due: false,
+            ended: false,
+            fault: None,
+        }
+    }
+
     fn document<R>(
         &mut self,
         target: impl for<'s> FnOnce(StreamDeserializer<'de, 's>) -> Result<R, Error>,
@@ -162,19 +181,48 @@ impl<'de> Stream<'de> {
                     let end = Span::empty(self.builder.input_len);
                     self.builder.root = Some(Node::null(end));
                     self.ahead = Ahead::Whole(end);
+                    self.ended = true;
                     return target(StreamDeserializer { stream: self });
                 }
                 Some(event) => return Err(misplaced(&event)),
             }
         }
+        if let Ahead::Whole(span) = self.ahead()? {
+            self.build_root()?;
+            self.ahead = Ahead::Whole(span);
+        }
         let value = self.read_with_target(target)?;
+        self.end()?;
+        Ok(value)
+    }
+
+    /// Build the root as a tree, read the stream to its end, and free the tokens. The root is
+    /// then all that is left of the document, and its target reads it beside nothing else.
+    #[cold]
+    fn build_root(&mut self) -> Result<(), Error> {
+        if !self.ended
+            && let Some(entries) = self.events.root_entries()
+        {
+            self.builder.reserve_collection(entries);
+        }
+        self.build()?;
+        self.end()?;
+        self.events.release();
+        Ok(())
+    }
+
+    /// Read from the root's end to the stream's, where a second document is refused.
+    fn end(&mut self) -> Result<(), Error> {
+        if std::mem::replace(&mut self.ended, true) {
+            return Ok(());
+        }
         match self.pull()? {
             Event::DocumentEnd { .. } => {}
             event => return Err(misplaced(&event)),
         }
         loop {
             match self.events.next_event()? {
-                Some(Event::StreamEnd { .. }) | None => return Ok(value),
+                Some(Event::StreamEnd { .. }) | None => return Ok(()),
                 Some(Event::Directive { .. }) => {}
                 Some(Event::DocumentStart { span, .. }) => {
                     return Err(Error::new(
@@ -557,6 +605,23 @@ impl<'de> Stream<'de> {
     fn gives(&self, level: usize) -> bool {
         self.fault.is_none() && self.open.len() > level
     }
+
+    /// How many entries the collection that was opened as number `level` has left, where that is
+    /// known before they are read: for a root flow collection, whose entries the parser counts.
+    /// Any other collection's are known only at its end, where none are left.
+    fn left(&self, level: usize) -> Option<usize> {
+        if self.fault.is_some() {
+            return None;
+        }
+        if self.open.len() <= level {
+            return Some(0);
+        }
+        if level != 0 || self.open.len() != 1 {
+            return None;
+        }
+        let (Open::Sequence { read } | Open::Mapping { read, .. }) = self.open.first()?;
+        Some(self.events.root_entries()?.saturating_sub(*read))
+    }
 }
 
 /// An event where a node or a document's boundary has to stand. The parser doesn't emit one;
@@ -667,7 +732,11 @@ impl<'de> Deserializer<'de> for StreamDeserializer<'de, '_> {
         variants: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        self.stream.build()?;
+        if self.stream.open.is_empty() {
+            self.stream.build_root()?;
+        } else {
+            self.stream.build()?;
+        }
         self.stream
             .read_built(|node| node.deserialize_enum(name, variants, visitor))
     }
@@ -697,6 +766,10 @@ impl<'de> SeqAccess<'de> for SequenceAccess<'de, '_> {
             .read_with(seed)
             .map(Some)
             .map_err(|error| with_span(error, span).inside_index(index))
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        self.stream.left(self.level)
     }
 }
 
@@ -748,5 +821,91 @@ impl<'de> MapAccess<'de> for MappingAccess<'de, '_> {
             .map_err(|error| inside_key(with_span(error, span), &key));
         self.stream.entered(&key)?;
         value
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        self.stream.left(self.level)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde::de::{Deserialize, IgnoredAny};
+
+    use super::super::NodeKind;
+    use super::{DocumentEvents, NodeOptions, Stream};
+    use crate::limits::Limits;
+
+    /// The tokens that are held when the target begins to read `input`, and those held once it
+    /// has read it into a `T`.
+    fn tokens<'de, T: Deserialize<'de>>(input: &'de str) -> (usize, usize) {
+        let limits = Limits::default();
+        let events = DocumentEvents::new(input, &limits, false).expect("a scanned input");
+        let mut stream = Stream::new(events, input.len(), &limits, NodeOptions::default());
+        let mut before = usize::MAX;
+        stream
+            .document(|document| {
+                before = document.stream.events.tokens();
+                T::deserialize(document)
+            })
+            .unwrap_or_else(|error| panic!("{input:?}: {error}"));
+        (before, stream.events.tokens())
+    }
+
+    /// A root that is built whole is the document as a tree, so its target reads it with the
+    /// tokens freed, as it reads the tree that the tree reader builds. A root that is read
+    /// entry by entry needs them to its end.
+    #[test]
+    fn a_root_that_is_built_whole_is_read_after_the_tokens_are_freed() {
+        #[derive(serde::Deserialize)]
+        enum Kind {
+            #[allow(dead_code, reason = "read, to see what is held meanwhile")]
+            V(Vec<u8>),
+            #[allow(dead_code, reason = "read, to see what is held meanwhile")]
+            W { a: u8 },
+        }
+
+        for input in [
+            "&a [1, 2, 3]\n",
+            "&a\n- 1\n- 2\n",
+            "!t [1, 2]\n",
+            "&a {k: [1, 2]}\n",
+            "text\n",
+        ] {
+            assert_eq!(tokens::<IgnoredAny>(input), (0, 0), "{input:?}");
+        }
+        // The tree of a root flow collection is built with room for the entries that the
+        // parser counted, and no more.
+        let input = "&a [1, 2, 3, 4, 5]\n";
+        let limits = Limits::default();
+        let events = DocumentEvents::new(input, &limits, false).expect("a scanned input");
+        let mut stream = Stream::new(events, input.len(), &limits, NodeOptions::default());
+        stream
+            .document(|document| {
+                // A node with an anchor is shared with the aliases that may follow it.
+                let root = document.stream.builder.root.as_ref();
+                let Some(NodeKind::Alias(shared)) = root.map(|node| &node.kind) else {
+                    panic!("the root is built before its target reads");
+                };
+                let NodeKind::Sequence(items) = &shared.kind else {
+                    panic!("a sequence");
+                };
+                assert_eq!((items.len(), items.capacity()), (5, 5));
+                IgnoredAny::deserialize(document)
+            })
+            .expect("a value");
+        for input in ["[1, 2, 3]\n", "- 1\n- 2\n", "k: [1, 2]\n", "k: &a [1, 2]\n"] {
+            let (before, after) = tokens::<IgnoredAny>(input);
+            assert!(before > 0 && after > 0, "{input:?}: {before}, {after}");
+        }
+        // An enum reads its node whole, which the stream learns when the target asks. At the
+        // root that is the document, and the tokens are freed before the variant is read.
+        for input in ["V: [1, 2, 3]\n", "W:\n  a: 1\n", "V:\n- 1\n"] {
+            let (before, after) = tokens::<Kind>(input);
+            assert!(before > 0, "{input:?}: {before}");
+            assert_eq!(after, 0, "{input:?}");
+        }
+        let (_, after) = tokens::<Vec<Kind>>("- V: [1]\n- W: {a: 2}\n");
+        assert!(after > 0, "an enum inside the root: {after}");
     }
 }

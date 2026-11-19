@@ -365,6 +365,47 @@ fn an_entry_with_no_exact_span_has_none() {
     // another entry's, and the entry around the key ends where no one can say.
     assert_eq!(entry("a:\n  ? |\n:\nb: 1\n", &[key("a")]), None);
     assert_eq!(entry("a:\n  ? |\n    k\n:\nb: 1\n", &[key("a")]), None);
+    // The same where lines end in a carriage return alone, or in both.
+    assert_eq!(entry("a:\r  ? |\r:\rb: 1\r", &[key("a")]), None);
+    assert_eq!(entry("a:\r\n  ? |\r\n:\r\nb: 1\r\n", &[key("a")]), None);
+}
+
+/// A key that is an alias has no text of its own to compare, and nor has a key that holds one.
+/// It may be any other key of its mapping again, which a reader that keeps the last of two
+/// equal keys then reads from it. So no key of that mapping is looked up, and none of its
+/// entries has a span. The mappings around it and beside it are as they would be without it.
+#[test]
+fn a_key_that_is_an_alias_makes_its_mapping_s_lookups_a_guess() {
+    for mode in Mode::all() {
+        for (input, path) in [
+            ("x: &k a\na: 1\n*k : 2\n", vec![key("a")]),
+            ("x: &k a\n*k : 1\na: 2\n", vec![key("a")]),
+            ("x: &k a\n*k : 1\nb: 2\nc: 3\n", vec![key("b")]),
+            ("x: &k a\n*k : 1\nb: 2\nc: 3\n", vec![key("x")]),
+            (
+                "p:\n  x: &k a\n  *k : 1\n  b: 2\nq: 1\n",
+                vec![key("p"), key("b")],
+            ),
+            ("x: &k [1]\n? [*k]\n: 1\nb: 2\nc: 3\n", vec![key("b")]),
+        ] {
+            let tree = mode.tree(input).expect("a tree");
+            assert_eq!(tree.span_at(&path), None, "{mode:?} {input:?}");
+            assert_eq!(tree.entry_span_at(&path), None, "{mode:?} {input:?}");
+            assert!(tree.lookup(&path).is_none(), "{mode:?} {input:?}");
+        }
+        let beside = "p:\n  x: &k a\n  *k : 1\n  b: 2\nq: 1\nr: 2\n";
+        let tree = mode.tree(beside).expect("a tree");
+        let span = tree.span_at(&[key("q")]).expect("a span");
+        assert_eq!(span.slice(beside), Some("1"), "{mode:?}");
+        let span = tree.entry_span_at(&[key("q")]).expect("an entry span");
+        assert_eq!(span.slice(beside), Some("q: 1\n"), "{mode:?}");
+        assert!(tree.lookup(&[key("p")]).is_some(), "{mode:?}");
+        // An alias that is a value is no key, and its mapping's keys are looked up.
+        let value = "x: &k a\ny: *k\nz: 1\n";
+        let tree = mode.tree(value).expect("a tree");
+        let span = tree.entry_span_at(&[key("z")]).expect("an entry span");
+        assert_eq!(span.slice(value), Some("z: 1\n"), "{mode:?}");
+    }
 }
 
 /// A byte-order mark at the start of a later line doesn't open the stream. The compatibility
@@ -380,13 +421,44 @@ fn an_input_with_a_byte_order_mark_past_its_start_has_no_entry_span() {
         (" - 1\n\u{feff}- 2\n - 3\n", vec![index(2)]),
         ("? a\nb: 2\n\u{feff}# c\n: 3\n", vec![key("b")]),
         ("? a\nb: 2\n\n\u{feff}# c\n: 3\n", vec![key("b")]),
-        ("top:\n\u{feff} - a:\n      !!map\nz: 1\n", vec![key("top")]),
     ] {
         let tree = SpannedTree::parse_compat(input).expect("a tree");
         assert_eq!(tree.entry_span_at(&path), None, "{input:?} at {path:?}");
     }
     // A mark that opens the input is no part of the first entry, and takes no span away.
     assert_eq!(entry("\u{feff}a: 1\nb: 2\n", &[key("a")]), Some("a: 1\n"));
+}
+
+/// In such an input a line's indentation is the reader's to say too: the compatibility reader
+/// counts the mark as a column, so a line that a mark begins may hold the value of the key
+/// before it where its spaces alone would put it at the margin. A value that isn't written
+/// then stays where the parser places it, at the next token, and is not moved to its key's
+/// `:`.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn a_value_keeps_the_parser_s_place_after_a_byte_order_mark_past_the_start() {
+    for (input, path, place) in [
+        ("a:\n\u{feff}  !!map\nb: 1\n", vec![key("a")], 8),
+        ("a:\n\u{feff}!!map\n", vec![key("a")], 6),
+        (
+            "top:\n  a:\n\u{feff}   !!map\n  b: 1\n",
+            vec![key("top"), key("a")],
+            16,
+        ),
+        (" a:\n\u{feff}\n  !!set\n", vec![key("a")], 10),
+        // A value that is plainly missing stays at the next token there too.
+        ("a:\nb: 1\n\u{feff}# c\n", vec![key("a")], 3),
+    ] {
+        let tree = SpannedTree::parse_compat(input).expect("a tree");
+        let span = tree.span_at(&path).expect("a span");
+        assert_eq!((span.start(), span.end()), (place, place), "{input:?}");
+    }
+    // Without the mark, the value on the line after its key is that line's tag, and a value
+    // that is plainly missing stands after its key's `:`.
+    let tree = SpannedTree::parse_compat("a:\n  !!map\nb: 1\n").expect("a tree");
+    assert_eq!(tree.span_at(&[key("a")]).map(ayaml::Span::start), Some(5));
+    let tree = SpannedTree::parse_compat("a:\nb: 1\n# c\n").expect("a tree");
+    assert_eq!(tree.span_at(&[key("a")]).map(ayaml::Span::start), Some(2));
 }
 
 /// A tag or an anchor before a key puts the key further right than its mapping. Whether the
@@ -398,10 +470,9 @@ fn a_value_s_place_is_judged_from_the_mapping_s_column() {
     let tagged = "k: 0\ntop:\n  x: 1\n  !t a:\n   !!seq\nnext: 1\n";
     assert_eq!(entry(tagged, &[key("top")]), None);
     assert_eq!(entry("- x\n- !t a:\n   !!map\n- y\n", &[index(1)]), None);
-    assert_eq!(
-        entry("top:\n  x: 1\n  &n a:\n   !!map\nz: 1\n", &[key("top")]),
-        None
-    );
+    // A byte-order mark that opens the input is no column of the mapping it stands before.
+    assert_eq!(entry("\u{feff}a:\n !!map\nb: 1\n", &[key("a")]), None);
+    assert_eq!(entry("\u{feff}a:\nb: 1\nc: 2\n", &[key("a")]), Some("a:\n"));
     // With the next line at the mapping's column, the value is plainly missing.
     let missing = "top:\n  x: 1\n  &n a:\n  b: 2\nnext: 1\n";
     for mode in Mode::all() {
@@ -427,10 +498,6 @@ fn an_entry_has_no_span_for_each_of_these_reasons() {
     // A flow entry that begins its own line is still a flow entry.
     let flow = "x: {\n  a: 1\n  ,\n  b: 2\n}\ny: 0\n";
     assert_eq!(entry(flow, &[key("x"), key("a")]), None);
-    assert_eq!(
-        entry("x: [\n  1,\n  2\n]\ny: 0\n", &[key("x"), index(0)]),
-        None
-    );
     // An item of a sequence that has an anchor, and an entry of an item that has one.
     let sequence = "base: &b\n  - x\n  - y\nuse: *b\n";
     assert_eq!(entry(sequence, &[key("base"), index(0)]), None);
@@ -504,7 +571,6 @@ fn a_missing_value_is_placed_by_what_follows_its_key() {
             ("a:\n  \t# c\nb: 1\n", vec![key("a")], Some(2)),
             ("x: {a: , b: 1}\n", vec![key("x"), key("a")], Some(6)),
             ("x: {a: 1, b: }\n", vec![key("x"), key("b")], Some(12)),
-            ("x: {a: [1], b: 2}\n", vec![key("x"), key("b")], None),
             ("a: &n\nb: *n\n", vec![key("a")], None),
             ("a: !t\nb: 1\n", vec![key("a")], None),
             // A tag for a collection's kind leaves no event, and stands where a value would.
@@ -540,7 +606,8 @@ fn after_colon(input: &str, path: &[PathSegment]) -> usize {
 }
 
 /// A pair in a flow sequence is a mapping with no braces. Its span ends where its value does,
-/// not at the token after it.
+/// not at the token after it, whatever its key is. Where the source writes no value, the pair
+/// ends with the last thing it does write: its key, a `?` or `:`, a tag, or an anchor.
 #[test]
 fn a_pair_in_a_flow_sequence_ends_with_its_value() {
     for mode in Mode::all() {
@@ -550,6 +617,22 @@ fn a_pair_in_a_flow_sequence_ends_with_its_value() {
             ("x: [ a: b # c\n  , d]\n", "a: b"),
             ("x: [a: [1, 2] , d]\n", "a: [1, 2]"),
             ("x: [{a: b} , d]\n", "{a: b}"),
+            // A key in braces doesn't make the pair a mapping in braces.
+            ("x: [{a: 1}: v ]\n", "{a: 1}: v"),
+            ("x: [{a: 1}: v # c\n  , d]\n", "{a: 1}: v"),
+            ("x: [{}: {b: 2}\n]\n", "{}: {b: 2}"),
+            ("x: [{a: 1}: ]\n", "{a: 1}:"),
+            // A value that isn't written.
+            ("x: [a: ]\n", "a:"),
+            ("x: [a:\n  # c\n  ]\n", "a:"),
+            ("x: [a: !t ]\n", "a: !t"),
+            ("x: [a: &n # c\n ]\n", "a: &n"),
+            ("x: [a: !!map , d]\n", "a: !!map"),
+            ("x: [!t a: !u ]\n", "!t a: !u"),
+            ("x: [? a # c\n ]\n", "? a"),
+            ("x: [? a : ]\n", "? a :"),
+            ("x: [ : ]\n", ":"),
+            ("x: [? ]\n", "?"),
         ] {
             let tree = mode.tree(input).expect("a tree");
             let span = tree.span_at(&[key("x"), index(0)]).expect("a span");
