@@ -207,6 +207,12 @@ impl<'a> Parser<'a> {
                 };
                 self.emit(event)?;
                 state.current_index = next_index;
+                // A reader that takes the events one at a time gets its turn here, so that
+                // they don't all wait for it at once.
+                if self.sink.is_full() {
+                    stack.push(Cont::Sequence(state));
+                    return Ok(Step::Return(next_index));
+                }
                 continue;
             }
             let (indent, depth) = (state.indent, state.depth);
@@ -433,6 +439,10 @@ impl<'a> Parser<'a> {
                             span: value_span,
                         })?;
                         state.current_index = current_index + 1;
+                        if self.sink.is_full() {
+                            stack.push(Cont::MappingEntry(state));
+                            return Ok(Step::Return(current_index + 1));
+                        }
                         continue;
                     }
                 }

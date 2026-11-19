@@ -2,9 +2,30 @@
 #![forbid(unsafe_code)]
 
 //! The borrowed (typed) path must compose the same `Value` as the composed
-//! path, tags included, one document at a time and as a stream.
+//! path, tags included, one document at a time and as a stream. A typed read builds its value
+//! from the parser's events, and must give what a read that builds a tree first gives.
 
 use libfuzzer_sys::fuzz_target;
+
+/// Both typed readers give the same value, or the same error at the same place.
+macro_rules! same_by_tree_and_by_events {
+    ($target:ty, $input:expr, $compat:expr) => {{
+        let limits = ayaml::Limits::default();
+        let tree = ayaml::internals::from_str_by_tree::<$target>($input, &limits, $compat);
+        let events = ayaml::internals::from_str_by_events::<$target>($input, &limits, $compat);
+        // What is printed is compared: a NaN is not equal to itself.
+        let (tree, events) = match (tree, events) {
+            (Ok(tree), Ok(events)) => (format!("{tree:?}"), format!("{events:?}")),
+            (Err(tree), Err(events)) => {
+                (format!("{tree:?} {tree}"), format!("{events:?} {events}"))
+            }
+            (tree, events) => {
+                panic!("by tree {tree:?}, by events {events:?}, input={:?}", $input)
+            }
+        };
+        assert_eq!(tree, events, "compat={} input={:?}", $compat, $input);
+    }};
+}
 
 fuzz_target!(|data: &[u8]| {
     let Ok(input) = std::str::from_utf8(data) else {
@@ -21,6 +42,11 @@ fuzz_target!(|data: &[u8]| {
         (composed, borrowed) => {
             panic!("composed {composed:?}, borrowed {borrowed:?}, input={input:?}");
         }
+    }
+
+    for compat in [false, true] {
+        same_by_tree_and_by_events!(ayaml::Value, input, compat);
+        same_by_tree_and_by_events!(serde_json::Value, input, compat);
     }
 
     let limits = ayaml::Limits::default().with_max_documents(4);

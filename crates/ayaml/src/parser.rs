@@ -19,8 +19,11 @@ use crate::span::{Position, Span};
 use crate::tag::Tag;
 use crate::value::Value;
 
+pub(crate) use pull::DocumentEvents;
+
 mod flow;
 mod grammar;
+mod pull;
 #[cfg(test)]
 mod tests;
 
@@ -371,9 +374,28 @@ enum EventSink<'a> {
     Chunks(EventChunks<'a>),
     Streaming(Box<StreamingComposer<'a>>),
     Consumer(Box<dyn EventConsumer<'a> + 'a>),
+    /// Events that wait for a reader to take them (see [`DocumentEvents`]).
+    Queue(VecDeque<Event<'a>>),
 }
 
 impl<'a> EventSink<'a> {
+    /// The events a queue holds before the grammar stops for its reader. A step of the grammar
+    /// emits a few events, but a run of scalar entries is read in one step.
+    const QUEUE_ROOM: usize = 16;
+
+    /// Whether a reader should take the waiting events before more are emitted.
+    fn is_full(&self) -> bool {
+        matches!(self, Self::Queue(events) if events.len() >= Self::QUEUE_ROOM)
+    }
+
+    /// The events that wait for a reader, if this sink keeps them for one.
+    fn waiting(&mut self) -> Option<&mut VecDeque<Event<'a>>> {
+        match self {
+            Self::Queue(events) => Some(events),
+            _ => None,
+        }
+    }
+
     fn reserve_collection(&mut self, entries: usize) {
         if let Self::Consumer(consumer) = self {
             consumer.reserve_collection(entries);
@@ -397,6 +419,10 @@ impl<'a> EventSink<'a> {
             }
             Self::Streaming(composer) => composer.event(event),
             Self::Consumer(consumer) => consumer.event(event),
+            Self::Queue(events) => {
+                events.push_back(event);
+                Ok(())
+            }
         }
     }
 }
@@ -752,7 +778,10 @@ fn parse_lines<'a>(
     parser.parse_stream()?;
     match parser.sink {
         EventSink::Events(events) => Ok((events, parser.emitted)),
-        EventSink::Chunks(_) | EventSink::Streaming(_) | EventSink::Consumer(_) => {
+        EventSink::Chunks(_)
+        | EventSink::Streaming(_)
+        | EventSink::Consumer(_)
+        | EventSink::Queue(_) => {
             unreachable!("event sink kind changed during parsing")
         }
     }
@@ -840,7 +869,10 @@ pub(crate) fn parse_document_event_chunks<'a>(
     })?;
     match parser.sink {
         EventSink::Chunks(events) => Ok(events),
-        EventSink::Events(_) | EventSink::Streaming(_) | EventSink::Consumer(_) => {
+        EventSink::Events(_)
+        | EventSink::Streaming(_)
+        | EventSink::Consumer(_)
+        | EventSink::Queue(_) => {
             unreachable!("event sink kind changed during parsing")
         }
     }
@@ -887,7 +919,10 @@ pub(crate) fn parse_document_with_consumer<'a>(
     })?;
     match parser.sink {
         EventSink::Consumer(mut consumer) => consumer.finish(),
-        EventSink::Events(_) | EventSink::Chunks(_) | EventSink::Streaming(_) => {
+        EventSink::Events(_)
+        | EventSink::Chunks(_)
+        | EventSink::Streaming(_)
+        | EventSink::Queue(_) => {
             unreachable!("event sink kind changed during parsing")
         }
     }
@@ -937,7 +972,10 @@ fn parse_events_with_compat<'a>(
     })?;
     match parser.sink {
         EventSink::Events(events) => Ok(events),
-        EventSink::Chunks(_) | EventSink::Streaming(_) | EventSink::Consumer(_) => {
+        EventSink::Chunks(_)
+        | EventSink::Streaming(_)
+        | EventSink::Consumer(_)
+        | EventSink::Queue(_) => {
             unreachable!("event sink kind changed during parsing")
         }
     }
@@ -986,7 +1024,10 @@ pub(crate) fn parse_documents(
         EventSink::Streaming(composer) => composer
             .finish()
             .map_err(|error| error.with_location_from(&positions, input)),
-        EventSink::Events(_) | EventSink::Chunks(_) | EventSink::Consumer(_) => {
+        EventSink::Events(_)
+        | EventSink::Chunks(_)
+        | EventSink::Consumer(_)
+        | EventSink::Queue(_) => {
             unreachable!("event sink kind changed during parsing")
         }
     }
@@ -1045,220 +1086,246 @@ impl<'a> Parser<'a> {
         Some(flow_entry_count(&self.token_arena, open, close))
     }
 
+    /// Read every document of the stream.
     fn parse_stream(&mut self) -> Result<(), Error> {
         let mut index = 0;
         while index < self.lines.len() {
-            let mut saw_directive = false;
-            while let Some(TokenKind::Directive(directive)) =
-                self.line_first(index).map(|token| &token.kind)
-            {
-                let Some(span) = self.line_first(index).map(|token| token.span) else {
-                    break;
-                };
-                let event = Event::Directive {
-                    name: directive.name.clone(),
-                    value: directive.value.clone(),
-                    span,
-                };
-                self.emit(event)?;
-                saw_directive = true;
-                index += 1;
-            }
-            if index >= self.lines.len() {
-                if saw_directive {
-                    return Err(self.error(self.empty_span(index), "directive without a document"));
+            index = match self.open_document(index)? {
+                Opening::End => return Ok(()),
+                Opening::NoDocument(next) => next,
+                Opening::Root { call, index, block } => {
+                    let index = match call {
+                        Some(call) => self.run(call)?,
+                        None => index,
+                    };
+                    self.close_document(index, block)?
                 }
+            };
+        }
+        Ok(())
+    }
+
+    /// Read from line `index` to a document's root: its directives and its start. The root is
+    /// the call that reads it, or none where the document is empty and its null is emitted here.
+    fn open_document(&mut self, mut index: usize) -> Result<Opening<'a>, Error> {
+        let mut saw_directive = false;
+        while let Some(TokenKind::Directive(directive)) =
+            self.line_first(index).map(|token| &token.kind)
+        {
+            let Some(span) = self.line_first(index).map(|token| token.span) else {
                 break;
+            };
+            let event = Event::Directive {
+                name: directive.name.clone(),
+                value: directive.value.clone(),
+                span,
+            };
+            self.emit(event)?;
+            saw_directive = true;
+            index += 1;
+        }
+        if index >= self.lines.len() {
+            if saw_directive {
+                return Err(self.error(self.empty_span(index), "directive without a document"));
             }
-            if saw_directive
-                && !self.line_starts_with(index, |kind| {
-                    matches!(kind, TokenKind::DocumentStart { .. })
-                })
-            {
-                return Err(self.error(
-                    self.line_first(index)
-                        .map_or_else(|| self.empty_span(index), |token| token.span),
-                    "directive must be followed by a document start",
-                ));
-            }
-
-            // A `...` with no open document ends nothing: the stream grammar
-            // allows any number of document suffixes between documents, so a
-            // `...`-only stream has zero documents.
-            if !saw_directive
-                && self.lines[index].len() == 1
-                && self.line_starts_with(index, |kind| matches!(kind, TokenKind::DocumentEnd))
-            {
-                index += 1;
-                continue;
-            }
-
-            let mut explicit_start = false;
-            let mut document_start_span = self
-                .line_first(index)
-                .map_or_else(|| self.empty_span(index), |token| token.span);
-            if self.line_starts_with(index, |kind| {
+            return Ok(Opening::End);
+        }
+        if saw_directive
+            && !self.line_starts_with(index, |kind| {
                 matches!(kind, TokenKind::DocumentStart { .. })
-            }) {
-                explicit_start = true;
-                document_start_span = self
-                    .take_line_first_span(index)
-                    .unwrap_or(document_start_span);
-                if self.lines[index].is_empty() {
-                    index += 1;
-                } else {
-                    let line = self.line_run(index);
-                    let (_, _, rest_start) = self.properties(line)?;
-                    if rest_start > 0 && is_mapping_line(self.tokens(line.from(rest_start))) {
-                        return Err(self.error(
-                            self.token(line, 0).span,
-                            "a document-start property cannot precede a same-line block mapping key",
-                        ));
-                    }
-                    // A block collection starts after a line break (`s-l+block-collection`), so
-                    // `--- a: b` and `--- - a` are errors, as in libyaml.
-                    let tokens = self.tokens(line);
-                    if rest_start == 0
-                        && (matches!(tokens[0].kind, TokenKind::BlockEntry)
-                            || is_mapping_line(tokens))
-                    {
-                        return Err(self.error(
-                            tokens[0].span,
-                            "a block collection cannot start on a `---` line",
-                        ));
-                    }
+            })
+        {
+            return Err(self.error(
+                self.line_first(index)
+                    .map_or_else(|| self.empty_span(index), |token| token.span),
+                "directive must be followed by a document start",
+            ));
+        }
+
+        // A `...` with no open document ends nothing: the stream grammar
+        // allows any number of document suffixes between documents, so a
+        // `...`-only stream has zero documents.
+        if !saw_directive
+            && self.lines[index].len() == 1
+            && self.line_starts_with(index, |kind| matches!(kind, TokenKind::DocumentEnd))
+        {
+            return Ok(Opening::NoDocument(index + 1));
+        }
+
+        let mut explicit_start = false;
+        let mut document_start_span = self
+            .line_first(index)
+            .map_or_else(|| self.empty_span(index), |token| token.span);
+        if self.line_starts_with(index, |kind| {
+            matches!(kind, TokenKind::DocumentStart { .. })
+        }) {
+            explicit_start = true;
+            document_start_span = self
+                .take_line_first_span(index)
+                .unwrap_or(document_start_span);
+            if self.lines[index].is_empty() {
+                index += 1;
+            } else {
+                let line = self.line_run(index);
+                let (_, _, rest_start) = self.properties(line)?;
+                if rest_start > 0 && is_mapping_line(self.tokens(line.from(rest_start))) {
+                    return Err(self.error(
+                        self.token(line, 0).span,
+                        "a document-start property cannot precede a same-line block mapping key",
+                    ));
+                }
+                // A block collection starts after a line break (`s-l+block-collection`), so
+                // `--- a: b` and `--- - a` are errors, as in libyaml.
+                let tokens = self.tokens(line);
+                if rest_start == 0
+                    && (matches!(tokens[0].kind, TokenKind::BlockEntry) || is_mapping_line(tokens))
+                {
+                    return Err(self.error(
+                        tokens[0].span,
+                        "a block collection cannot start on a `---` line",
+                    ));
                 }
             }
+        }
 
-            let mut explicit_end = false;
-            // Whether the root is a block collection, which a line after it that a tab seems to
-            // indent was likely meant to be in.
-            let mut root_block = false;
-            if explicit_start || index < self.lines.len() {
-                self.documents += 1;
-                self.limits
-                    .check_documents(self.documents)
-                    .map_err(|error| self.limit_at(document_start_span, error))?;
-                if self.single_document && self.documents > 1 {
-                    if self.stop_at_second {
-                        self.emit(Event::DocumentStart {
-                            explicit: explicit_start,
-                            span: document_start_span,
-                        })?;
-                        return Ok(());
-                    }
-                    return Err(self
-                        .error(
-                            document_start_span,
-                            "expected a single YAML document, but found trailing documents",
-                        )
-                        .with_code(Code::TrailingDocuments));
-                }
+        // A line that is neither a directive nor a lone `...` starts a document, with a `---`
+        // or without one.
+        self.documents += 1;
+        self.limits
+            .check_documents(self.documents)
+            .map_err(|error| self.limit_at(document_start_span, error))?;
+        if self.single_document && self.documents > 1 {
+            if self.stop_at_second {
                 self.emit(Event::DocumentStart {
                     explicit: explicit_start,
                     span: document_start_span,
                 })?;
-
-                if index < self.lines.len()
-                    && !self.line_starts_with(index, |kind| matches!(kind, TokenKind::DocumentEnd))
-                    && !self.line_starts_with(index, |kind| {
-                        matches!(kind, TokenKind::DocumentStart { .. })
-                    })
-                {
-                    let tokens = self.line_tokens(index);
-                    root_block = tokens.first().is_some_and(|token| {
-                        matches!(
-                            token.kind,
-                            TokenKind::BlockEntry | TokenKind::Key | TokenKind::Value
-                        )
-                    }) || has_value_indicator(tokens);
-                    let root = NodeBounds {
-                        min_indent: 0,
-                        sequence_indent: 0,
-                    };
-                    index = self.run(Call::Node {
-                        index,
-                        indent: self.lines[index].indent,
-                        depth: 0,
-                        tag: None,
-                        anchor: None,
-                        bounds: root,
-                    })?;
-                } else {
-                    let span = self.empty_span(index);
-                    self.emit(self.null_scalar(span))?;
-                }
-
-                let mut document_end_span = self.last_span(index);
-                if index < self.lines.len()
-                    && self.line_starts_with(index, |kind| matches!(kind, TokenKind::DocumentEnd))
-                {
-                    explicit_end = true;
-                    document_end_span = self
-                        .take_line_first_span(index)
-                        .unwrap_or(document_end_span);
-                    if let Some(token) = self.line_first(index) {
-                        return Err(self.error(token.span, "content after document end marker"));
-                    }
-                    index += 1;
-                }
-                self.emit(Event::DocumentEnd {
-                    explicit: explicit_end,
-                    span: document_end_span,
-                })?;
+                return Ok(Opening::End);
             }
-
-            if index < self.lines.len()
-                && !explicit_end
-                && !self.line_starts_with(index, |kind| {
-                    matches!(kind, TokenKind::DocumentStart { .. })
-                })
-                && !self.line_starts_with(index, |kind| matches!(kind, TokenKind::DocumentEnd))
-            {
-                let tokens = self.line_tokens(index);
-                let span = self
-                    .line_first(index)
-                    .map_or_else(|| self.empty_span(index), |token| token.span);
-                let tabbed = root_block && tab_leads_line(self.input, span.start());
-                let fallback = match tokens.first().map(|token| &token.kind) {
-                    Some(kind)
-                        if kind.scalar_style().is_some_and(|style| {
-                            matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
-                        }) =>
-                    {
-                        "a block scalar is not indented past its parent"
-                    }
-                    Some(TokenKind::BlockEntry) => "a block entry is indented less than its parent",
-                    Some(TokenKind::PlainScalar | TokenKind::Scalar(_))
-                        if root_block
-                            && self.lines[index].indent > 0
-                            && previous_line_is_blank(self.input, span.start()) =>
-                    {
-                        "a mapping line is missing a `:`"
-                    }
-                    _ => "unexpected content after document",
-                }
-                .to_owned();
-                let message = if tabbed {
-                    "unexpected content after document".to_owned()
-                } else if self.compat {
-                    self.compat_indentation_message(index).unwrap_or(fallback)
-                } else {
-                    fallback
-                };
-                let error = self.error(span, message);
-                // A node that only a tab seemed to indent under a key or an entry sits at its
-                // line's left edge, so it ends up here.
-                return Err(if tabbed {
-                    error.with_context(
-                        ", indented by a tab, which YAML doesn't count as indentation",
-                    )
-                } else {
-                    error
-                });
-            }
+            return Err(self
+                .error(
+                    document_start_span,
+                    "expected a single YAML document, but found trailing documents",
+                )
+                .with_code(Code::TrailingDocuments));
         }
-        Ok(())
+        self.emit(Event::DocumentStart {
+            explicit: explicit_start,
+            span: document_start_span,
+        })?;
+
+        if index < self.lines.len()
+            && !self.line_starts_with(index, |kind| matches!(kind, TokenKind::DocumentEnd))
+            && !self.line_starts_with(index, |kind| {
+                matches!(kind, TokenKind::DocumentStart { .. })
+            })
+        {
+            let tokens = self.line_tokens(index);
+            // Whether the root is a block collection, which a line after it that a tab seems to
+            // indent was likely meant to be in.
+            let block = tokens.first().is_some_and(|token| {
+                matches!(
+                    token.kind,
+                    TokenKind::BlockEntry | TokenKind::Key | TokenKind::Value
+                )
+            }) || has_value_indicator(tokens);
+            let root = NodeBounds {
+                min_indent: 0,
+                sequence_indent: 0,
+            };
+            Ok(Opening::Root {
+                call: Some(Call::Node {
+                    index,
+                    indent: self.lines[index].indent,
+                    depth: 0,
+                    tag: None,
+                    anchor: None,
+                    bounds: root,
+                }),
+                index,
+                block,
+            })
+        } else {
+            let span = self.empty_span(index);
+            self.emit(self.null_scalar(span))?;
+            Ok(Opening::Root {
+                call: None,
+                index,
+                block: false,
+            })
+        }
+    }
+
+    /// End the document whose root stops before line `index`, and return the line the next one
+    /// starts at. `root_block` says whether the root is a block collection.
+    fn close_document(&mut self, mut index: usize, root_block: bool) -> Result<usize, Error> {
+        let mut explicit_end = false;
+        let mut document_end_span = self.last_span(index);
+        if index < self.lines.len()
+            && self.line_starts_with(index, |kind| matches!(kind, TokenKind::DocumentEnd))
+        {
+            explicit_end = true;
+            document_end_span = self
+                .take_line_first_span(index)
+                .unwrap_or(document_end_span);
+            if let Some(token) = self.line_first(index) {
+                return Err(self.error(token.span, "content after document end marker"));
+            }
+            index += 1;
+        }
+        self.emit(Event::DocumentEnd {
+            explicit: explicit_end,
+            span: document_end_span,
+        })?;
+
+        if index < self.lines.len()
+            && !explicit_end
+            && !self.line_starts_with(index, |kind| {
+                matches!(kind, TokenKind::DocumentStart { .. })
+            })
+            && !self.line_starts_with(index, |kind| matches!(kind, TokenKind::DocumentEnd))
+        {
+            let tokens = self.line_tokens(index);
+            let span = self
+                .line_first(index)
+                .map_or_else(|| self.empty_span(index), |token| token.span);
+            let tabbed = root_block && tab_leads_line(self.input, span.start());
+            let fallback = match tokens.first().map(|token| &token.kind) {
+                Some(kind)
+                    if kind.scalar_style().is_some_and(|style| {
+                        matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
+                    }) =>
+                {
+                    "a block scalar is not indented past its parent"
+                }
+                Some(TokenKind::BlockEntry) => "a block entry is indented less than its parent",
+                Some(TokenKind::PlainScalar | TokenKind::Scalar(_))
+                    if root_block
+                        && self.lines[index].indent > 0
+                        && previous_line_is_blank(self.input, span.start()) =>
+                {
+                    "a mapping line is missing a `:`"
+                }
+                _ => "unexpected content after document",
+            }
+            .to_owned();
+            let message = if tabbed {
+                "unexpected content after document".to_owned()
+            } else if self.compat {
+                self.compat_indentation_message(index).unwrap_or(fallback)
+            } else {
+                fallback
+            };
+            let error = self.error(span, message);
+            // A node that only a tab seemed to indent under a key or an entry sits at its
+            // line's left edge, so it ends up here.
+            return Err(if tabbed {
+                error.with_context(", indented by a tab, which YAML doesn't count as indentation")
+            } else {
+                error
+            });
+        }
+        Ok(index)
     }
 
     /// Parse one node and return the index of the line after it.
@@ -1692,6 +1759,21 @@ struct FlowState {
     index: usize,
     entries: usize,
     depth: usize,
+}
+
+/// What the lines at a document's start lead to.
+enum Opening<'a> {
+    /// The stream has no more to read, or the reader stops at a second document.
+    End,
+    /// A line that opens no document, such as a lone `...`. The stream goes on at this line.
+    NoDocument(usize),
+    /// A document. Its root is read by `call`, or is empty; either way it stops before line
+    /// `index` or the line that the call returns. `block` says whether it is a block collection.
+    Root {
+        call: Option<Call<'a>>,
+        index: usize,
+        block: bool,
+    },
 }
 
 /// A grammar function to run, with its arguments. Each returns a line

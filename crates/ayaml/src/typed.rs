@@ -13,7 +13,6 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -31,7 +30,12 @@ use crate::parser::{self, EventChunks, EventConsumer};
 use crate::resolver::{float_from_text, plain_resolves_to_string, resolve_scalar};
 use crate::span::{Position, Span};
 use crate::tag::Tag;
-use crate::value::{Value, key_text_full, push_quoted_key};
+use crate::value::Value;
+
+mod key_text;
+mod stream;
+
+use key_text::{node_key_text, scalar_key_text};
 
 #[derive(Debug)]
 struct Node<'de> {
@@ -220,10 +224,20 @@ pub(crate) fn from_str_with_options<'de, T: Deserialize<'de>>(
     limits: &Limits,
     options: NodeOptions,
 ) -> Result<T, Error> {
-    let node = parse_document(input, limits, options)
-        .map_err(|error| error.with_input_location(input, options.compat_flow))?;
-    T::deserialize(NodeDeserializer::new(&node))
-        .map_err(|error| error.with_input_location(input, options.compat_flow))
+    from_str_seed_with_options(input, limits, options, std::marker::PhantomData::<T>)
+}
+
+/// A seed that reads any value with a visitor.
+#[cfg(feature = "libyaml-compat")]
+struct Any<V>(V);
+
+#[cfg(feature = "libyaml-compat")]
+impl<'de, V: Visitor<'de>> DeserializeSeed<'de> for Any<V> {
+    type Value = V::Value;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<V::Value, D::Error> {
+        deserializer.deserialize_any(self.0)
+    }
 }
 
 #[cfg(feature = "libyaml-compat")]
@@ -233,15 +247,28 @@ pub(crate) fn from_str_visitor<'de, V: Visitor<'de>>(
     options: NodeOptions,
     visitor: V,
 ) -> Result<V::Value, Error> {
-    let node = parse_document(input, limits, options)
-        .map_err(|error| error.with_input_location(input, options.compat_flow))?;
-    NodeDeserializer::new(&node)
-        .deserialize_any(visitor)
-        .map_err(|error| error.with_input_location(input, options.compat_flow))
+    from_str_seed_with_options(input, limits, options, Any(visitor))
 }
 
-#[cfg(feature = "libyaml-compat")]
+/// Decode one document with a seed. A small input is built as a tree and read from it, which
+/// costs it the least; a larger one is read from its events, so that no tree of it is kept
+/// beside its tokens and its value (see `stream`). Both give the same value or error. A build
+/// with `--cfg ayaml_typed_from_events` reads every input from its events, which is how the
+/// tests run on that reader at every size.
 pub(crate) fn from_str_seed_with_options<'de, T: DeserializeSeed<'de>>(
+    input: &'de str,
+    limits: &Limits,
+    options: NodeOptions,
+    seed: T,
+) -> Result<T::Value, Error> {
+    if input.len() <= CHUNKED_INPUT_THRESHOLD && !cfg!(ayaml_typed_from_events) {
+        return from_str_by_tree(input, limits, options, seed);
+    }
+    stream::read(input, limits, options, seed)
+}
+
+/// Decode one document by building its whole tree first.
+pub(crate) fn from_str_by_tree<'de, T: DeserializeSeed<'de>>(
     input: &'de str,
     limits: &Limits,
     options: NodeOptions,
@@ -251,6 +278,18 @@ pub(crate) fn from_str_seed_with_options<'de, T: DeserializeSeed<'de>>(
         .map_err(|error| error.with_input_location(input, options.compat_flow))?;
     seed.deserialize(NodeDeserializer::new(&node))
         .map_err(|error| error.with_input_location(input, options.compat_flow))
+}
+
+/// Decode one document from its events, whatever its size. The tests compare this with
+/// [`from_str_by_tree`].
+#[cfg(feature = "bench-internals")]
+pub(crate) fn from_str_by_events<'de, T: DeserializeSeed<'de>>(
+    input: &'de str,
+    limits: &Limits,
+    options: NodeOptions,
+    seed: T,
+) -> Result<T::Value, Error> {
+    stream::read(input, limits, options, seed)
 }
 
 /// Decode one document from an already-collected event slice, charging its
@@ -276,8 +315,9 @@ pub(crate) fn from_events_seed<'de, T: DeserializeSeed<'de>>(
     seed.deserialize(NodeDeserializer::new(&node))
 }
 
-/// Inputs above this size keep events in chunks; smaller reads use the eager builder, whose
-/// lower per-event overhead matters more than the spare capacity of one small vector.
+/// Inputs above this size are read from their events, and built as a tree only to report an
+/// error. Smaller reads build the tree with the eager builder, whose lower per-event overhead
+/// matters more to them than the tree's size or the spare capacity of one small vector.
 const CHUNKED_INPUT_THRESHOLD: usize = 4 * 1024;
 /// Inputs above this size stream events into the builder instead of keeping a document's events.
 const STREAMING_INPUT_THRESHOLD: usize = 8 * 1024;
@@ -338,7 +378,7 @@ fn parse_streaming<'de>(
     options: NodeOptions,
 ) -> Result<Node<'de>, Error> {
     let result = Rc::new(RefCell::new(None));
-    let builder = Builder::streaming(input.len(), limits, options, Rc::clone(&result));
+    let builder = Builder::streaming(input.len(), limits, options, Some(Rc::clone(&result)));
     parser::parse_document_with_consumer(input, limits, options.compat_flow, Box::new(builder))?;
     result.borrow_mut().take().ok_or_else(|| {
         Error::new(
@@ -432,6 +472,7 @@ fn build_feed<'de>(
         in_document: false,
         result: None,
         pending_capacity: None,
+        base: 0,
     };
     let result = builder.build();
     *budget = builder.budget;
@@ -451,14 +492,18 @@ struct Builder<'de> {
     in_document: bool,
     result: Option<Rc<RefCell<Option<Node<'de>>>>>,
     pending_capacity: Option<usize>,
+    /// The collections open around what this builder builds, which count toward its depth.
+    /// `stream` reads those itself and builds only the nodes inside them that it keeps whole.
+    base: usize,
 }
 
 impl<'de> Builder<'de> {
+    /// A builder that is fed events. It leaves a document in `result`, if it has one.
     fn streaming(
         input_len: usize,
         limits: &Limits,
         options: NodeOptions,
-        result: Rc<RefCell<Option<Node<'de>>>>,
+        result: Option<Rc<RefCell<Option<Node<'de>>>>>,
     ) -> Self {
         Self {
             events: None,
@@ -471,8 +516,9 @@ impl<'de> Builder<'de> {
             document: None,
             root: None,
             in_document: false,
-            result: Some(result),
+            result,
             pending_capacity: None,
+            base: 0,
         }
     }
 }
@@ -757,14 +803,7 @@ impl<'de> Builder<'de> {
                 anchor,
                 span,
             } => {
-                let mut node = scalar_node(value.as_ref(), &value, &raw, style, tag.as_ref(), span)
-                    .map_err(|error| error.with_span(span))?;
-                if tag
-                    .as_ref()
-                    .is_some_and(|tag| tag.is_core() || tag.is_non_specific())
-                {
-                    forget_string_text(&mut node);
-                }
+                let node = plain_scalar(&value, &raw, style, tag.as_ref(), span)?;
                 let size = estimate_size(&node, self.limits.node_cost_bytes);
                 self.anchored(anchor.as_ref(), node, size, 0, Anchors::define)
             }
@@ -781,7 +820,7 @@ impl<'de> Builder<'de> {
                 // depth.
                 if target.height > 0 {
                     self.limits
-                        .check_depth(self.stack.len() + target.height)
+                        .check_depth(self.base + self.stack.len() + target.height)
                         .map_err(|error| Error::from(error).with_span(span))?;
                 }
                 Built {
@@ -794,7 +833,7 @@ impl<'de> Builder<'de> {
                 tag, anchor, span, ..
             } => {
                 self.limits
-                    .check_depth(self.stack.len() + 1)
+                    .check_depth(self.base + self.stack.len() + 1)
                     .map_err(|error| Error::from(error).with_span(span))?;
                 if let Some(anchor) = &anchor {
                     self.anchors.open(anchor.as_str());
@@ -813,7 +852,7 @@ impl<'de> Builder<'de> {
                 tag, anchor, span, ..
             } => {
                 self.limits
-                    .check_depth(self.stack.len() + 1)
+                    .check_depth(self.base + self.stack.len() + 1)
                     .map_err(|error| Error::from(error).with_span(span))?;
                 if let Some(anchor) = &anchor {
                     self.anchors.open(anchor.as_str());
@@ -946,83 +985,6 @@ impl<'de> Builder<'de> {
     }
 }
 
-/// A human-readable mapping key for typed diagnostics.
-/// The text of a scalar key, whatever its scalar type. Two keys with the same text but different
-/// types, as `1` and `"1"`, are one key to a target whose key type is narrower.
-fn scalar_key_text<'de>(node: &Node<'de>) -> Option<Cow<'de, str>> {
-    let node = resolve(node);
-    match &node.kind {
-        NodeKind::Null => Some(Cow::Borrowed("null")),
-        NodeKind::Bool(value) => Some(Cow::Owned(value.to_string())),
-        NodeKind::Number(value) => Some(Cow::Owned(value.to_string())),
-        NodeKind::String(value) => Some(value.clone()),
-        _ => None,
-    }
-}
-
-fn node_key_text(node: &Node<'_>) -> String {
-    let mut text = String::new();
-    push_node_key_text(resolve(node), &mut text);
-    text
-}
-
-fn push_node_key_text(node: &Node<'_>, output: &mut String) {
-    if key_text_full(output) {
-        return;
-    }
-    match &node.kind {
-        NodeKind::Null => output.push_str("null"),
-        NodeKind::Bool(value) => {
-            let _ = write!(output, "{value}");
-        }
-        NodeKind::Number(value) => {
-            let _ = write!(output, "{value}");
-        }
-        NodeKind::String(value) => push_quoted_key(value, output),
-        NodeKind::Sequence(items) => {
-            output.push('[');
-            for (index, item) in items.iter().enumerate() {
-                if key_text_full(output) {
-                    output.push('…');
-                    return;
-                }
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                push_node_key_text(item, output);
-            }
-            if !key_text_full(output) {
-                output.push(']');
-            }
-        }
-        NodeKind::Mapping(entries) => {
-            output.push('{');
-            for (index, (key, value)) in entries.iter().enumerate() {
-                if key_text_full(output) {
-                    output.push('…');
-                    return;
-                }
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                push_node_key_text(key, output);
-                if !key_text_full(output) {
-                    output.push_str(": ");
-                }
-                push_node_key_text(value, output);
-            }
-            if !key_text_full(output) {
-                output.push('}');
-            }
-        }
-        NodeKind::Tagged(tag, inner) => {
-            let _ = write!(output, "{tag} ");
-            push_node_key_text(inner, output);
-        }
-        NodeKind::Alias(target) => push_node_key_text(target, output),
-    }
-}
-
 /// The node an alias or a shared anchored node refers to.
 fn resolve<'a, 'de>(mut node: &'a Node<'de>) -> &'a Node<'de> {
     while let NodeKind::Alias(target) = &node.kind {
@@ -1069,17 +1031,37 @@ fn tag_cost(node: &Node<'_>, node_cost: usize) -> usize {
     }
 }
 
+/// Whether a collection drops this tag: a core tag there names a node of another kind, or
+/// restates its kind. A custom tag is kept.
+fn collection_drops(tag: &Tag) -> bool {
+    tag.is_core_collection() || tag.is_core_scalar()
+}
+
 fn apply_tag(tag: Option<Tag>, node: Node<'_>) -> Node<'_> {
     match tag {
-        // A core tag on a collection names a node of another kind, or restates its kind, and is
-        // dropped; a custom tag is kept.
-        Some(tag) if tag.is_core_collection() || tag.is_core_scalar() => node,
+        Some(tag) if collection_drops(&tag) => node,
         Some(tag) => {
             let span = node.span;
             Node::new(NodeKind::Tagged(Box::new(tag), Box::new(node)), span)
         }
         None => node,
     }
+}
+
+/// The node of a scalar event, before any anchor on it is recorded.
+fn plain_scalar<'de>(
+    value: &Cow<'de, str>,
+    raw: &Cow<'de, str>,
+    style: ScalarStyle,
+    tag: Option<&Tag>,
+    span: Span,
+) -> Result<Node<'de>, Error> {
+    let mut node = scalar_node(value.as_ref(), value, raw, style, tag, span)
+        .map_err(|error| error.with_span(span))?;
+    if tag.is_some_and(|tag| tag.is_core() || tag.is_non_specific()) {
+        forget_string_text(&mut node);
+    }
+    Ok(node)
 }
 
 /// Build a scalar node without materializing a `Value` when the scalar stays a string.

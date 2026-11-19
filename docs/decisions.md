@@ -742,3 +742,45 @@ narrower change trims one shape and leaves little room under the target.
 **Consequences.** #178 stays open until AY-104 lands, and by D90 the 0.2.0 release waits for it.
 The narrower change is not planned. The budgets in `tools/json-alloc-corpus.tsv` are lowered in
 the change that closes AY-104.
+
+## D95 — A typed read builds its value from events, and reports what a tree of the document reports
+
+**Date:** 2026-11-18
+**Status:** Accepted
+
+**Decision.** A reader of one document into a type reads an input of more than 4 KiB from the
+parser's events, which it takes as its target asks for values. A scalar is one node that the
+target reads and drops, and a collection is read entry by entry. A tree is built only of a node
+that is read whole or again: a node with an anchor and what an alias refers to, a collection that
+keeps its tag, a mapping key, and what an enum reads. The checks that the tree's builder makes are
+made as the events pass: depth, duplicate keys, anchors and the alias budget, and a single
+document.
+
+Such a read's own error is not always the one to report. After any error the document is built as
+a tree, and that tree's error, if it has one, is the answer. Only a document that builds reports
+the error that was found in reading it, which is then the target's. An input of at most 4 KiB, and
+the `Deserializer`, build the tree and read from it as before.
+
+**Alternatives.** Report the first error in document order, of either kind: one read, but a value
+that doesn't suit its target would then hide a duplicate key or a syntax error after it, which
+every release has reported first and D91 keeps first. Read every input from events: one path, but
+about 700 more instructions for a document of a few bytes, whose tree costs nothing to hold. Tell
+a target the size of each collection by looking ahead at its lines: a target could then reserve
+its room as it can with a tree, at the cost of a second pass over the lines of every nested
+collection.
+
+**Why.** D94 asked for it: the tree was the largest thing live at the peak of an untyped decode.
+Serde's targets ask for values, so the parser had to give its events on demand, and its grammar
+already ran on an explicit stack that can stop between two steps. Reading scalars and whole nodes
+through the tree's own deserializer keeps one statement of how each target reads each node. Over
+the 76,861 files of the fuzz corpus the two readers gave the same value or the same error in
+14.4 million reads into 47 targets, and in 3.1 million into targets whose visitors take an error
+and go on, read nothing, or leave values behind.
+
+**Consequences.** A refused input of more than 4 KiB is read twice, unless the scanner refuses
+it, which reads the whole input before any event. A collection that is read from events tells
+its target no size. A typed read of many short entries executes about 4% more instructions than
+one that builds the tree, which the instruction gate accepts for its three such workloads. The
+tree reader stays: it reads small inputs and anchored nodes, and it words every error. The tests
+read documents both ways and compare, the `borrowed` fuzz target does the same, and a build with
+`--cfg ayaml_typed_from_events` runs the whole suite on events at every size.

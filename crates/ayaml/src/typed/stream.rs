@@ -1,0 +1,752 @@
+//! Typed decoding from the parser's events, with no tree of the document.
+//!
+//! [`read`] gives the target a deserializer over one document's events. A scalar is built as
+//! one node, read as the tree reader reads it, and dropped. A collection is read entry by entry
+//! as its events arrive, so its entries are never all held at once. Only a node that is read as
+//! a whole, or that a later read may need again, is built as a tree: a node with an anchor, what
+//! an alias refers to, a collection that keeps its tag, a mapping key, and what an enum reads.
+//!
+//! What the tree's builder checks is checked here as the events pass: the nesting depth,
+//! duplicate keys, anchors and the alias budget, and that there is one document.
+//!
+//! This reader's error is not always the one to report. The tree reader says what is wrong with
+//! the document before anything about the target, wherever each stands, and this reader meets
+//! them in document order. So after an error the document is built as a tree (`parse_document`),
+//! and that tree's error, if it has one, is the answer. Only a document that builds reports the
+//! error found here, which is then the target's. A refused input pays for the second read.
+
+use std::collections::HashSet;
+
+use serde::Deserializer;
+use serde::de::{Deserialize, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+
+use super::{
+    Builder, Node, NodeDeserializer, NodeOptions, SeenKey, check_consumed, collection_drops,
+    inside_key, node_key_text, parse_document, plain_scalar, with_span,
+};
+use crate::error::{Code, Error, ErrorKind};
+use crate::event::Event;
+use crate::limits::Limits;
+use crate::parser::DocumentEvents;
+use crate::span::{Position, Span};
+
+/// Read one document into what `seed` makes of it.
+pub(super) fn read<'de, T: DeserializeSeed<'de>>(
+    input: &'de str,
+    limits: &Limits,
+    options: NodeOptions,
+    seed: T,
+) -> Result<T::Value, Error> {
+    let located = |error: Error| error.with_input_location(input, options.compat_flow);
+    // An input over the limit is refused here as `parse_document` refuses it, before any work.
+    limits.check_input(input.len()).map_err(|error| {
+        Error::from(error)
+            .with_span(Span::empty(0))
+            .with_location(Position::new(1, 1))
+    })?;
+    // The scanner reads the whole input before the first event, here and for the tree, so its
+    // error is the same one and needs no second read.
+    let events = DocumentEvents::new(input, limits, options.compat_flow).map_err(located)?;
+    let mut stream = Stream {
+        events,
+        builder: Builder::streaming(input.len(), limits, options, None),
+        open: Vec::new(),
+        ahead: Ahead::Unknown,
+        due: false,
+        fault: None,
+    };
+    let result = stream.document(|document| seed.deserialize(document));
+    let fault = stream.fault.take();
+    // The tokens are freed before a tree is built.
+    drop(stream);
+    let error = match (result, fault) {
+        (Ok(value), None) => return Ok(value),
+        // A fault in the document stands, whatever the target made of the error it was given.
+        (_, Some(fault)) => fault,
+        (Err(error), None) => error,
+    };
+    Err(located(
+        parse_document(input, limits, options)
+            .err()
+            .unwrap_or(error),
+    ))
+}
+
+/// A document's events, and what reading them has to keep.
+///
+/// The builder's root is the one node that is built and not yet read. It is empty between
+/// reads, but for a stream with no document, whose null is put there before the target reads.
+pub(super) struct Stream<'de> {
+    events: DocumentEvents<'de>,
+    /// Builds each node that is kept whole, and holds the document's anchors and alias budget.
+    builder: Builder<'de>,
+    /// The collections that are open here and read entry by entry, the innermost last. The
+    /// builder doesn't see them, and counts them as its base depth.
+    open: Vec<Open<'de>>,
+    /// What the event that waits is, once a read has looked at it.
+    ahead: Ahead,
+    /// Whether the node that a seed was given is still unread. A seed may read nothing.
+    due: bool,
+    /// The first fault found in the document itself, as opposed to a value that doesn't suit
+    /// its target. Nothing is read after it, and the read fails whatever the target returns.
+    fault: Option<Error>,
+}
+
+/// What a read takes from the stream.
+enum Taken {
+    /// A node built whole, which waits as the builder's root.
+    Built,
+    /// A sequence, open and at its first item.
+    Sequence(Span),
+    /// A mapping, open and at its first key.
+    Mapping(Span),
+}
+
+/// What the next event starts or ends, found once for the reads that ask.
+#[derive(Clone, Copy)]
+enum Ahead {
+    /// The next event hasn't been looked at.
+    Unknown,
+    /// A node that is built whole: a scalar, an alias, or a collection with an anchor or with
+    /// a tag that it keeps.
+    Whole(Span),
+    /// A sequence that is read entry by entry: one with no anchor, which no alias reads again,
+    /// and with no tag that it keeps, which would make it one tagged value.
+    Sequence(Span),
+    /// A mapping that is read entry by entry.
+    Mapping(Span),
+    /// The end of a sequence or of a mapping.
+    End { sequence: bool, span: Span },
+}
+
+impl Ahead {
+    fn span(self) -> Span {
+        match self {
+            Self::Unknown => Span::empty(0),
+            Self::Whole(span)
+            | Self::Sequence(span)
+            | Self::Mapping(span)
+            | Self::End { span, .. } => span,
+        }
+    }
+}
+
+/// A collection that is read entry by entry.
+enum Open<'de> {
+    Sequence {
+        /// The items that a visitor has asked for.
+        read: usize,
+    },
+    Mapping {
+        /// The keys of the entries read so far, where a duplicate is refused.
+        seen: HashSet<SeenKey<'de>>,
+        /// The key whose value is still to be read.
+        key: Option<Node<'de>>,
+        /// The entries whose keys a visitor has asked for.
+        read: usize,
+    },
+}
+
+impl<'de> Stream<'de> {
+    fn document<R>(
+        &mut self,
+        target: impl for<'s> FnOnce(StreamDeserializer<'de, 's>) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        loop {
+            match self.events.next_event()? {
+                Some(Event::StreamStart { .. } | Event::Directive { .. }) => {}
+                Some(Event::DocumentStart { .. }) => break,
+                // A stream with no document reads as an empty one, which the tree gives as a
+                // null that the source doesn't write.
+                Some(Event::StreamEnd { .. }) | None => {
+                    let end = Span::empty(self.builder.input_len);
+                    self.builder.root = Some(Node::null(end));
+                    self.ahead = Ahead::Whole(end);
+                    return target(StreamDeserializer { stream: self });
+                }
+                Some(event) => return Err(misplaced(&event)),
+            }
+        }
+        let value = self.read_with_target(target)?;
+        match self.pull()? {
+            Event::DocumentEnd { .. } => {}
+            event => return Err(misplaced(&event)),
+        }
+        loop {
+            match self.events.next_event()? {
+                Some(Event::StreamEnd { .. }) | None => return Ok(value),
+                Some(Event::Directive { .. }) => {}
+                Some(Event::DocumentStart { span, .. }) => {
+                    return Err(Error::new(
+                        ErrorKind::Parser,
+                        "expected a single YAML document, but found trailing documents",
+                    )
+                    .with_span(span)
+                    .with_code(Code::TrailingDocuments));
+                }
+                Some(event) => return Err(misplaced(&event)),
+            }
+        }
+    }
+
+    /// Give the next node to `target`, and leave the stream after that node whatever the target
+    /// did with it.
+    ///
+    /// A target that reads nothing leaves a node that still has to be checked, as the tree
+    /// reader has checked what its target ignores. A target that fails leaves a node partly
+    /// read. A visitor may take that error and go on to the next entry, which works with a tree,
+    /// so the rest of the node is passed over here.
+    #[inline]
+    fn read_with_target<R>(
+        &mut self,
+        target: impl for<'s> FnOnce(StreamDeserializer<'de, 's>) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        let mark = self.open.len();
+        self.due = true;
+        let result = target(StreamDeserializer { stream: self });
+        if self.due || self.open.len() > mark {
+            self.settle(mark, result.is_ok())?;
+        }
+        result
+    }
+
+    /// Pass over what a target left of its node: all of it, or the collections it opened, down
+    /// to the `mark` that were open before. A fault found on the way fails a read that
+    /// succeeded, and is recorded for one that failed.
+    #[cold]
+    fn settle(&mut self, mark: usize, succeeded: bool) -> Result<(), Error> {
+        if self.fault.is_some() {
+            return Ok(());
+        }
+        let passed = if self.due {
+            self.skip()
+        } else {
+            self.close_to(mark)
+        };
+        if succeeded { passed } else { Ok(()) }
+    }
+
+    #[inline]
+    fn read_with<T: DeserializeSeed<'de>>(&mut self, seed: T) -> Result<T::Value, Error> {
+        self.read_with_target(|node| seed.deserialize(node))
+    }
+
+    /// Read the next node and keep nothing of it. Every check on it is still made.
+    fn skip(&mut self) -> Result<(), Error> {
+        IgnoredAny::deserialize(StreamDeserializer { stream: self }).map(drop)
+    }
+
+    /// Record a fault in the document, and give the error that stands for it. The fault is what
+    /// `read` reports; the error only ends the target's reading.
+    #[cold]
+    fn faulted(&mut self, error: Error) -> Error {
+        self.fault.get_or_insert(error);
+        self.ahead = Ahead::Unknown;
+        unreadable()
+    }
+
+    /// Have the next event wait. After a fault there is none.
+    fn ready(&mut self) -> Result<(), Error> {
+        if self.fault.is_some() {
+            return Err(unreadable());
+        }
+        match self.events.ready() {
+            Ok(()) => Ok(()),
+            Err(error) => Err(self.faulted(error)),
+        }
+    }
+
+    /// Take the next event.
+    fn pull(&mut self) -> Result<Event<'de>, Error> {
+        self.ready()?;
+        self.ahead = Ahead::Unknown;
+        self.events.pop().ok_or_else(unreadable)
+    }
+
+    /// What the next event starts or ends. The event stays where it is.
+    #[inline]
+    fn ahead(&mut self) -> Result<Ahead, Error> {
+        match self.ahead {
+            Ahead::Unknown => self.look(),
+            ahead => Ok(ahead),
+        }
+    }
+
+    fn look(&mut self) -> Result<Ahead, Error> {
+        if self.fault.is_some() || self.events.front().is_none() {
+            self.ready()?;
+        }
+        let ahead = match self.events.front() {
+            Some(Event::SequenceStart {
+                tag,
+                anchor: None,
+                span,
+                ..
+            }) if tag.as_ref().is_none_or(collection_drops) => Ahead::Sequence(*span),
+            Some(Event::MappingStart {
+                tag,
+                anchor: None,
+                span,
+                ..
+            }) if tag.as_ref().is_none_or(collection_drops) => Ahead::Mapping(*span),
+            Some(Event::SequenceEnd { span }) => Ahead::End {
+                sequence: true,
+                span: *span,
+            },
+            Some(Event::MappingEnd { span }) => Ahead::End {
+                sequence: false,
+                span: *span,
+            },
+            Some(event) => Ahead::Whole(event.span()),
+            None => return Err(unreadable()),
+        };
+        self.ahead = ahead;
+        Ok(ahead)
+    }
+
+    /// Take the next node: a collection that is read entry by entry is opened, and any other
+    /// node is built.
+    #[inline]
+    fn take(&mut self) -> Result<Taken, Error> {
+        match self.ahead()? {
+            Ahead::Sequence(span) => self.open(span, true),
+            Ahead::Mapping(span) => self.open(span, false),
+            // An end where a node has to stand is the builder's to refuse.
+            Ahead::Whole(_) | Ahead::End { .. } | Ahead::Unknown => {
+                self.build().map(|()| Taken::Built)
+            }
+        }
+    }
+
+    /// Open the collection whose start waits.
+    fn open(&mut self, span: Span, sequence: bool) -> Result<Taken, Error> {
+        self.due = false;
+        self.pull()?;
+        if let Err(error) = self.builder.limits.check_depth(self.open.len() + 1) {
+            return Err(self.faulted(Error::from(error).with_span(span)));
+        }
+        self.open.push(if sequence {
+            Open::Sequence { read: 0 }
+        } else {
+            Open::Mapping {
+                seen: HashSet::new(),
+                key: None,
+                read: 0,
+            }
+        });
+        Ok(if sequence {
+            Taken::Sequence(span)
+        } else {
+            Taken::Mapping(span)
+        })
+    }
+
+    /// Build the next node as a tree, which then waits as the builder's root.
+    fn build(&mut self) -> Result<(), Error> {
+        self.due = false;
+        self.ahead = Ahead::Unknown;
+        if self.builder.root.is_some() {
+            return Ok(());
+        }
+        if self.fault.is_some() || self.events.front().is_none() {
+            self.ready()?;
+        }
+        // A scalar with no anchor is most of what is read. The builder would make this node of
+        // it and no more, so it is made here, from the event where it waits.
+        if let Some(Event::Scalar {
+            value,
+            raw,
+            style,
+            tag,
+            anchor: None,
+            span,
+        }) = self.events.front()
+        {
+            let node = plain_scalar(value, raw, *style, tag.as_ref(), *span);
+            self.events.discard();
+            return match node {
+                Ok(node) => {
+                    self.builder.root = Some(node);
+                    Ok(())
+                }
+                Err(error) => Err(self.faulted(error)),
+            };
+        }
+        self.builder.base = self.open.len();
+        loop {
+            let event = self.pull()?;
+            if let Err(error) = self.builder.push_node(event) {
+                return Err(self.faulted(error));
+            }
+            if self.builder.stack.is_empty() {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Take the next node, built as a tree.
+    fn whole(&mut self) -> Result<Node<'de>, Error> {
+        self.build()?;
+        self.builder.root.take().ok_or_else(unreadable)
+    }
+
+    /// Read the node that waits as the builder's root, and drop it.
+    #[inline]
+    fn read_built<R>(
+        &mut self,
+        read: impl FnOnce(NodeDeserializer<'de, '_>) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        let result = match &self.builder.root {
+            Some(node) => read(NodeDeserializer::new(node)),
+            None => Err(unreadable()),
+        };
+        self.builder.root = None;
+        result
+    }
+
+    /// The span of the next node, if it is a collection that is read entry by entry.
+    fn streamed(&mut self) -> Result<Option<Span>, Error> {
+        Ok(match self.ahead()? {
+            Ahead::Sequence(span) | Ahead::Mapping(span) => Some(span),
+            _ => None,
+        })
+    }
+
+    /// The span of the next node in the innermost open collection, which stays for the next
+    /// read, or `None` at the collection's end, where it closes.
+    #[inline]
+    fn entry(&mut self) -> Result<Option<Span>, Error> {
+        let within = matches!(self.open.last(), Some(Open::Sequence { .. }));
+        match self.ahead()? {
+            Ahead::End { sequence, .. } if sequence == within => {
+                self.ahead = Ahead::Unknown;
+                self.events.pop();
+                self.open.pop();
+                Ok(None)
+            }
+            ahead => Ok(Some(ahead.span())),
+        }
+    }
+
+    /// Count one more entry that a visitor asked the innermost open collection for, and give
+    /// its position.
+    fn count(&mut self) -> usize {
+        match self.open.last_mut() {
+            Some(Open::Sequence { read } | Open::Mapping { read, .. }) => {
+                *read += 1;
+                *read - 1
+            }
+            None => 0,
+        }
+    }
+
+    /// The key of the innermost open mapping whose value is still to be read.
+    fn key_slot(&mut self) -> Option<&mut Option<Node<'de>>> {
+        match self.open.last_mut() {
+            Some(Open::Mapping { key, .. }) => Some(key),
+            _ => None,
+        }
+    }
+
+    /// The next key of the innermost open mapping, or `None` at the mapping's end, where it
+    /// closes. If a visitor left the value of the entry before it, that value is passed over.
+    fn key(&mut self) -> Result<Option<Node<'de>>, Error> {
+        if let Some(key) = self.key_slot().and_then(Option::take) {
+            self.skip()?;
+            self.entered(&key)?;
+        }
+        if self.entry()?.is_none() {
+            return Ok(None);
+        }
+        self.whole().map(Some)
+    }
+
+    /// Record a complete entry of the innermost open mapping. The tree's builder refuses a
+    /// duplicate key once the entry's value is built, and this does at the same point.
+    fn entered(&mut self, key: &Node<'de>) -> Result<(), Error> {
+        if self.builder.options.allow_duplicates || self.fault.is_some() {
+            return Ok(());
+        }
+        let Some(Open::Mapping { seen, .. }) = self.open.last_mut() else {
+            return Ok(());
+        };
+        if seen.insert(SeenKey::new(key)) {
+            return Ok(());
+        }
+        Err(self.faulted(
+            Error::new(
+                ErrorKind::DuplicateKey,
+                format!("duplicate mapping key: {}", node_key_text(key)),
+            )
+            .with_span(key.span),
+        ))
+    }
+
+    /// Read the innermost open collection to its end, and give how many entries a visitor asked
+    /// it for and how many it left.
+    fn finish(&mut self) -> Result<(usize, usize), Error> {
+        let mut unread = 0;
+        let read = match self.open.last() {
+            Some(Open::Sequence { read }) => {
+                let read = *read;
+                while self.entry()?.is_some() {
+                    self.skip()?;
+                    unread += 1;
+                }
+                read
+            }
+            Some(Open::Mapping { read, .. }) => {
+                let read = *read;
+                while let Some(key) = self.key()? {
+                    if let Some(slot) = self.key_slot() {
+                        *slot = Some(key);
+                    }
+                    unread += 1;
+                }
+                read
+            }
+            None => 0,
+        };
+        Ok((read, unread))
+    }
+
+    /// Close every collection that was opened since `mark` collections were open.
+    fn close_to(&mut self, mark: usize) -> Result<(), Error> {
+        while self.open.len() > mark {
+            self.finish()?;
+        }
+        Ok(())
+    }
+
+    /// End the collection that a visitor has read as it liked, which was opened as number
+    /// `level`. A visitor that stops early, such as a tuple's, leaves entries behind, which is
+    /// an error once they are checked.
+    fn close(&mut self, level: usize, kind: &str) -> Result<(), Error> {
+        if self.fault.is_some() || self.open.len() <= level {
+            return Ok(());
+        }
+        self.close_to(level + 1)?;
+        let (read, unread) = self.finish()?;
+        check_consumed(unread, read + unread, kind)
+    }
+
+    fn sequence<V: Visitor<'de>>(&mut self, span: Span, visitor: V) -> Result<V::Value, Error> {
+        let level = self.open.len().saturating_sub(1);
+        visitor
+            .visit_seq(SequenceAccess {
+                stream: self,
+                level,
+            })
+            .and_then(|value| self.close(level, "sequence").map(|()| value))
+            .map_err(|error| with_span(error, span))
+    }
+
+    fn mapping<V: Visitor<'de>>(&mut self, span: Span, visitor: V) -> Result<V::Value, Error> {
+        let level = self.open.len().saturating_sub(1);
+        visitor
+            .visit_map(MappingAccess {
+                stream: self,
+                level,
+            })
+            .and_then(|value| self.close(level, "map").map(|()| value))
+            .map_err(|error| with_span(error, span))
+    }
+
+    /// Whether the collection that was opened as number `level` still has entries to give. After
+    /// a fault it has none, so a visitor that reads on past an error comes to an end.
+    fn gives(&self, level: usize) -> bool {
+        self.fault.is_none() && self.open.len() > level
+    }
+}
+
+/// An event where a node or a document's boundary has to stand. The parser doesn't emit one;
+/// the tree's builder refuses it too.
+fn misplaced(event: &Event<'_>) -> Error {
+    Error::new(ErrorKind::Composition, "unexpected event in node position").with_span(event.span())
+}
+
+/// What a target is told once the document is at fault. `read` reports the fault itself.
+fn unreadable() -> Error {
+    Error::new(ErrorKind::Composition, "the document could not be read")
+}
+
+/// A deserializer for the next node of a stream.
+pub(super) struct StreamDeserializer<'de, 's> {
+    stream: &'s mut Stream<'de>,
+}
+
+/// Deserializer methods that read a built node as the tree reader does, and a collection that
+/// is read entry by entry as that reader's `deserialize_any` does: for a sequence or a mapping
+/// with no tag, each of these methods of the tree reader comes to that.
+macro_rules! as_the_tree_reads {
+    ($($method:ident($($argument:ident: $kind:ty),*))*) => {
+        $(
+            fn $method<V: Visitor<'de>>(
+                self,
+                $($argument: $kind,)*
+                visitor: V,
+            ) -> Result<V::Value, Self::Error> {
+                match self.stream.take()? {
+                    Taken::Built => self
+                        .stream
+                        .read_built(|node| node.$method($($argument,)* visitor)),
+                    Taken::Sequence(span) => self.stream.sequence(span, visitor),
+                    Taken::Mapping(span) => self.stream.mapping(span, visitor),
+                }
+            }
+        )*
+    };
+}
+
+impl<'de> Deserializer<'de> for StreamDeserializer<'de, '_> {
+    type Error = Error;
+
+    as_the_tree_reads! {
+        deserialize_any() deserialize_bool() deserialize_i8() deserialize_i16()
+        deserialize_i32() deserialize_i64() deserialize_i128() deserialize_u8()
+        deserialize_u16() deserialize_u32() deserialize_u64() deserialize_u128()
+        deserialize_f32() deserialize_f64() deserialize_char() deserialize_str()
+        deserialize_string() deserialize_bytes() deserialize_byte_buf() deserialize_unit()
+        deserialize_unit_struct(name: &'static str) deserialize_seq()
+        deserialize_tuple(length: usize)
+        deserialize_tuple_struct(name: &'static str, length: usize) deserialize_map()
+        deserialize_identifier() deserialize_ignored_any()
+    }
+
+    fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        // A collection is not a null, so it is some value, read from here.
+        if let Some(span) = self.stream.streamed()? {
+            return visitor
+                .visit_some(self)
+                .map_err(|error| with_span(error, span));
+        }
+        self.stream.build()?;
+        self.stream
+            .read_built(|node| node.deserialize_option(visitor))
+    }
+
+    fn deserialize_newtype_struct<V: Visitor<'de>>(
+        self,
+        name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        if let Some(span) = self.stream.streamed()? {
+            return visitor
+                .visit_newtype_struct(self)
+                .map_err(|error| with_span(error, span));
+        }
+        self.stream.build()?;
+        self.stream
+            .read_built(|node| node.deserialize_newtype_struct(name, visitor))
+    }
+
+    fn deserialize_struct<V: Visitor<'de>>(
+        self,
+        name: &'static str,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        match self.stream.take()? {
+            Taken::Built => self
+                .stream
+                .read_built(|node| node.deserialize_struct(name, fields, visitor)),
+            // A struct reads a mapping and no sequence.
+            Taken::Sequence(span) => Err(with_span(
+                serde::de::Error::invalid_type(serde::de::Unexpected::Seq, &visitor),
+                span,
+            )),
+            Taken::Mapping(span) => self.stream.mapping(span, visitor),
+        }
+    }
+
+    /// An enum reads its node whole: a mapping names a variant only if it has one entry, which
+    /// the tree reader finds out before it reads the variant's value.
+    fn deserialize_enum<V: Visitor<'de>>(
+        self,
+        name: &'static str,
+        variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.stream.build()?;
+        self.stream
+            .read_built(|node| node.deserialize_enum(name, variants, visitor))
+    }
+}
+
+struct SequenceAccess<'de, 's> {
+    stream: &'s mut Stream<'de>,
+    /// Which of the stream's open collections this is.
+    level: usize,
+}
+
+impl<'de> SeqAccess<'de> for SequenceAccess<'de, '_> {
+    type Error = Error;
+
+    fn next_element_seed<T: DeserializeSeed<'de>>(
+        &mut self,
+        seed: T,
+    ) -> Result<Option<T::Value>, Self::Error> {
+        if !self.stream.gives(self.level) {
+            return Ok(None);
+        }
+        let Some(span) = self.stream.entry()? else {
+            return Ok(None);
+        };
+        let index = self.stream.count();
+        self.stream
+            .read_with(seed)
+            .map(Some)
+            .map_err(|error| with_span(error, span).inside_index(index))
+    }
+}
+
+struct MappingAccess<'de, 's> {
+    stream: &'s mut Stream<'de>,
+    /// Which of the stream's open collections this is.
+    level: usize,
+}
+
+impl<'de> MapAccess<'de> for MappingAccess<'de, '_> {
+    type Error = Error;
+
+    fn next_key_seed<K: DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, Self::Error> {
+        if !self.stream.gives(self.level) {
+            return Ok(None);
+        }
+        let Some(key) = self.stream.key()? else {
+            return Ok(None);
+        };
+        self.stream.count();
+        let span = key.span;
+        let read = seed
+            .deserialize(NodeDeserializer::new(&key))
+            .map_err(|error| with_span(error, span));
+        // The key stays with the mapping whether or not it suited the target, so that its
+        // value is read or passed over, and the entry is checked.
+        if let Some(slot) = self.stream.key_slot() {
+            *slot = Some(key);
+        }
+        read.map(Some)
+    }
+
+    fn next_value_seed<V: DeserializeSeed<'de>>(
+        &mut self,
+        seed: V,
+    ) -> Result<V::Value, Self::Error> {
+        let key = self
+            .stream
+            .key_slot()
+            .and_then(Option::take)
+            .ok_or_else(|| Error::new(ErrorKind::Serde, "map value requested before key"))?;
+        let span = self.stream.ahead()?.span();
+        let value = self
+            .stream
+            .read_with(seed)
+            .map_err(|error| inside_key(with_span(error, span), &key));
+        self.stream.entered(&key)?;
+        value
+    }
+}

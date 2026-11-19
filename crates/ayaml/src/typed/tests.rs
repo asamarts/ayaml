@@ -124,7 +124,7 @@ fn a_reserved_collection_stops_at_the_entry_limit() {
         0,
         &limits,
         NodeOptions::default(),
-        Rc::new(RefCell::new(None)),
+        Some(Rc::new(RefCell::new(None))),
     );
     EventConsumer::reserve_collection(&mut builder, 2);
     assert_eq!(builder.pending_capacity, Some(2));

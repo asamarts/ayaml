@@ -2,17 +2,16 @@
 # with AYAML_JSON=1: the nine document shapes of issue #178, measured as the issue measures them.
 # The decode goes through the compatibility reader with the count limits lifted, and a
 # reallocation counts by the bytes it adds.
-# Each budget is about 1.10 times the measured value, rounded up. The first eight shapes peak at
-# no more than 1.06 times the issue's reference, so that room keeps each within its 1.2 times.
-# The last shape peaks at 1.28 times, which is the rest of the issue. Its budget is the measured
-# value and 1%, so it may not grow. Lower a row in the change that lowers its measurement.
+# Each budget is about 1.10 times the measured value, rounded up. The shapes peak at 0.52 to
+# 0.96 times the issue's reference, so that room keeps each within the 1.2 times it asks for.
+# Lower a row in the change that lowers its measurement.
 # path	json_peak	json_allocs	json_total
-@service-37kb	1240000	6070	1630000
-@service-1mb	37100000	181000	46900000
-@service-4mb	149000000	721000	188000000
-@block-map-1mb	38500000	129000	50200000
-@flow-map-1mb	30100000	117000	40800000
-@flow-ints-1mb	22900000	40	32200000
-@flow-ones-1mb	79300000	42	97700000
-@block-seq-1mb	20900000	79600	26400000
-@block-words-1mb	23400000	132000	28200000
+@service-37kb	890000	4960	970000
+@service-1mb	26700000	148000	27200000
+@service-4mb	107000000	589000	109000000
+@block-map-1mb	27200000	129000	27200000
+@flow-map-1mb	24600000	117000	24600000
+@flow-ints-1mb	19600000	34	19600000
+@flow-ones-1mb	53700000	36	53700000
+@block-seq-1mb	14900000	79500	14900000
+@block-words-1mb	19200000	143000	19200000

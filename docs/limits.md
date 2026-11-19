@@ -84,6 +84,12 @@ report different ones, because they don't check in the same order:
   meets. The `Deserializer` reads a document's events before it builds from them, so within a
   document it reports a syntax error before an earlier problem in what the events build, such
   as a duplicate key.
+- A reader of one document into a type reads an input of more than 4 KiB from its events, and
+  reports what is wrong with the document before anything about the target, wherever each
+  stands. To do that it reads a refused input a second time, building the document as the
+  other readers do, unless the scanner refused it, which reads the whole input before either.
+  So a refusal can cost such a reader twice the time of a read, and never more memory than
+  the one read that builds the document.
 
 ## What the limits count
 
@@ -175,6 +181,12 @@ that document's tokens. Every other reader holds the tokens of the whole stream.
   the arena instead. So the copying stays linear in the tokens, and an arena of more than
   8,192 tokens ends within eight times the tokens it holds; a smaller one is trimmed to them.
   `parse_events` and the `Deserializer` keep one document's tokens, in vectors that double.
+- A reader of one document into a type, such as `from_str`, holds no tree of an input of more
+  than 4 KiB beside those: it builds the target's value from the events, and keeps a tree only
+  of what an alias may read again, of a collection that keeps its tag, and of a mapping's keys
+  while that mapping is open. With duplicate keys refused it also holds the keys' text for each
+  open mapping. A read that fails frees its tokens and then builds the document once more to
+  report the error.
 - A block scalar is built as it is read. At its peak a read of one takes about 5 times
   its input in resident memory for short lines, and about 10 times for blank lines,
   where the index costs most. Counting the capacity it reserves without touching, a
