@@ -238,8 +238,9 @@ because no input went over a limit. In compat mode, the readers that build value
 reader does. A depth failure is `ErrorKind::Serde`, with the message `recursion limit
 exceeded` and the span of the collection that went over. Going over `max_documents`
 is `ErrorKind::Parser`, with the message `more than one document in stream` and the
-span of the second document's start. `compat::parse_events_eager_with_limits` doesn't map
-these: it reports `ErrorKind::Limit` with the value and the span.
+span of the second document's start. The compatibility event readers don't map these:
+`compat::parse_events`, its `_with_limits` form, and `compat::parse_events_eager_with_limits`
+report `ErrorKind::Limit` with the value and the span.
 
 Parser, scanner, composer, typed-builder, document-count, and alias-budget
 failures carry a source span when input provides one. Output-emitter limits do

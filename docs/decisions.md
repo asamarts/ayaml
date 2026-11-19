@@ -552,8 +552,10 @@ document can still be refused for those reasons.
 
 **Decision.** `Span` holds two byte offsets and converts to `Range<usize>`. The old `Marker` remains as a deprecated compatibility value type, but
 spans no longer store it. `LineIndex`, `Position`, `PositionError`, and `ColumnEncoding` are public;
-columns can count UTF-8 bytes, Unicode scalar values, or UTF-16 code units. Conversions reject
-out-of-bounds offsets and offsets inside a UTF-8 character instead of clamping them. A leading
+columns can count UTF-8 bytes, Unicode scalar values, or UTF-16 code units. Conversions between
+an offset and a position reject out-of-bounds offsets and offsets inside a UTF-8 character
+instead of clamping them; `LineIndex::line_start` alone takes any index, and gives the last
+line's start for one past the end. A leading
 byte-order mark is included in byte offsets and excluded from columns. `Error::location()` still
 returns a one-based `Position`, filled from the reader's line index when the error reaches a
 boundary.
@@ -610,7 +612,7 @@ release is qualified as 0.1.2 and 0.1.3 were, with the timing comparison D68 ask
 **Decision.** `from_str`, `from_slice`, their borrowed forms, and the compatibility readers of one
 document report the problem that comes first in the document: any that the scanner finds, then
 the first that the parser or the builder meets, then decoding into the target. That is what
-`parse_value` reports. An input of at most 8 KiB is still parsed whole and then built, which is
+`parse_value` reports. An input of at most 4 KiB is still parsed whole and then built, which is
 faster when it succeeds. When that fails, the input is read again the way a larger one is, built
 as it is parsed, and that answer is the one reported.
 
@@ -621,12 +623,12 @@ disagreeing with `parse_value`. Leave both behaviors and document that the answe
 input's size: adding a comment to a document could then change which error it reports, and no
 test could compare the paths.
 
-**Why.** Since #179 an input over 8 KiB is built as it is parsed, so the same document reported a
+**Why.** Since #179 an input over 4 KiB is built as it is parsed, so the same document reported a
 different problem once it grew past that size. One rule for every size makes the three paths
 testable against each other, and agreeing with `parse_value` leaves one order to document.
 
 **Consequences.** A small document with two problems can report a different one than 0.1.3 did,
-which the changelog states. An input of at most 8 KiB that fails while it is scanned or parsed is
+which the changelog states. An input of at most 4 KiB that fails while it is scanned or parsed is
 read twice. One that is accepted, or that fails only while it is built, is read once, as before.
 The `Deserializer` is unchanged: it reads a document's events before it builds from them, at
 every size, so within a document it reports a syntax error first.

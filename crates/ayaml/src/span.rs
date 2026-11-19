@@ -133,10 +133,11 @@ impl Span {
         self.start..self.end
     }
 
-    /// The number of bytes in the span.
+    /// The number of bytes in the span. A span whose end is before its start holds none, as a
+    /// `Range` built that way does.
     #[must_use]
     pub const fn len(self) -> usize {
-        self.end - self.start
+        self.end.saturating_sub(self.start)
     }
 
     /// Whether the span is zero-width.

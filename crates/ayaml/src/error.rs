@@ -132,7 +132,9 @@ impl Error {
     ///
     /// A span carries byte offsets. [`location`](Self::location) is filled in when the error
     /// crosses a reader that has the input's [`LineIndex`](crate::LineIndex); a manually built
-    /// error has no location until [`with_location`](Self::with_location) supplies one.
+    /// error has no location until [`with_location`](Self::with_location) supplies one. This
+    /// clears a location that was set before, which was the earlier span's, so set the location
+    /// after the span.
     #[must_use]
     pub fn with_span(mut self, span: Span) -> Self {
         self.span = Some(span);

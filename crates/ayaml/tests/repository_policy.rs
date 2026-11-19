@@ -282,3 +282,71 @@ fn the_ci_check_tests_all_run() {
         "one call runs the tests"
     );
 }
+
+/// Every place that repeats the workspace version states the one in `Cargo.toml`, so a release
+/// that sets one and misses another fails here: the README's current release and install lines,
+/// the compatibility guide's install line, and the exact requirement of each crate that pins
+/// the library.
+#[test]
+fn every_place_that_repeats_the_version_agrees_with_the_workspace() {
+    let Some(root) = repository_root() else {
+        return;
+    };
+    let manifest: Value = {
+        let text = read(&root, "Cargo.toml");
+        let line = text
+            .lines()
+            .find(|line| line.starts_with("version = "))
+            .expect("the workspace version");
+        ayaml::parse_value(&format!("{{{}}}", line.replacen(" = ", ": ", 1))).expect("a version")
+    };
+    let version = manifest["version"].as_str().expect("a version string");
+    assert_eq!(version.split('.').count(), 3, "{version}");
+
+    let readme = read(&root, "README.md");
+    assert!(
+        readme.contains(&format!("The current release is `{version}`.")),
+        "README.md names another current release than {version}"
+    );
+    let install = format!("ayaml = \"{version}\"");
+    assert_eq!(readme.matches(&install).count(), 2, "README.md: {install}");
+    assert_eq!(
+        readme.matches("ayaml = \"").count(),
+        2,
+        "README.md has another install line"
+    );
+
+    let guide = read(&root, "docs/compatibility.md");
+    let install = format!("ayaml = {{ version = \"{version}\", features = [\"libyaml-compat\"] }}");
+    assert!(guide.contains(&install), "docs/compatibility.md: {install}");
+    assert_eq!(
+        guide.matches("ayaml = {").count(),
+        1,
+        "docs/compatibility.md"
+    );
+
+    for name in [
+        "crates/ayaml-bench/Cargo.toml",
+        "crates/ayaml-conformance/Cargo.toml",
+        "fuzz/Cargo.toml",
+    ] {
+        let text = read(&root, name);
+        let pins: Vec<&str> = text
+            .lines()
+            .filter(|line| line.starts_with("ayaml = {"))
+            .collect();
+        assert_eq!(pins.len(), 1, "{name}: {pins:?}");
+        assert!(
+            pins[0].contains(&format!("version = \"={version}\"")),
+            "{name}: {}",
+            pins[0]
+        );
+    }
+    for name in ["Cargo.lock", "fuzz/Cargo.lock"] {
+        let text = read(&root, name);
+        assert!(
+            text.contains(&format!("name = \"ayaml\"\nversion = \"{version}\"\n")),
+            "{name} holds another version of ayaml than {version}"
+        );
+    }
+}

@@ -8,7 +8,7 @@ unsafe Rust or a native YAML dependency. One scanner and grammar back the
 spanned event stream, the generic value model, typed Serde decoding, and the
 emitter, so every surface observes the same syntax and resolution rules.
 
-The current patch release is `0.1.3`. The crate is UTF-8 only, has an MSRV of
+The current release is `0.1.3`. The crate is UTF-8 only, has an MSRV of
 Rust 1.88, and is dual-licensed under MIT or Apache-2.0.
 
 ## Highlights
@@ -171,7 +171,7 @@ budget formula.
 
 | Feature | Default | Purpose |
 | --- | --- | --- |
-| `libyaml-compat` | no | Adds the additive `ayaml::compat` decoding module. |
+| `libyaml-compat` | no | Adds the additive `ayaml::compat` decoding module, and `SpannedTree::parse_compat` with its `_with_limits` form. |
 | `bench-internals` | no | Unstable hooks for ayaml's benchmark and conformance harnesses; outside SemVer. |
 
 ## Documentation

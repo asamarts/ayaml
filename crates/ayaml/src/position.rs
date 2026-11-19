@@ -332,7 +332,8 @@ impl LineIndex {
         Some(Span::new(start, end))
     }
 
-    /// Byte offset of the line containing `index`.
+    /// Byte offset of the line containing `index`. An index past the end of the input is on the
+    /// last line: this one method doesn't check its argument against the input.
     #[must_use]
     pub fn line_start(&self, index: usize) -> usize {
         match self.starts.binary_search(&index) {
