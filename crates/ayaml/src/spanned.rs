@@ -114,7 +114,10 @@ impl<'a> SpannedTree<'a> {
     }
 
     /// Look up a node by a path. A multi-document stream has no unambiguous root, so this returns
-    /// `None` unless it holds exactly one document.
+    /// `None` unless it holds exactly one document. A lookup that would have to guess returns
+    /// `None` too: a key that the mapping holds twice, a merge key, and any key of a mapping
+    /// that has an alias among its keys, or a key that holds one, since that key may be any
+    /// other key of the mapping again.
     #[must_use]
     pub fn lookup(&self, path: &[PathSegment]) -> Option<&SpannedNode<'a>> {
         let [document] = self.documents.as_slice() else {
@@ -154,13 +157,15 @@ impl<'a> SpannedTree<'a> {
 impl SpannedNode<'_> {
     /// The node's byte span: a scalar as the source spells it, and a collection from its first
     /// byte to its last. A pair in a flow sequence, as in `[a: b]`, is a mapping with no braces,
-    /// and ends where its value does.
+    /// and ends where its value does, or where the last thing it writes does if it writes no
+    /// value: its key, a `?` or `:`, a tag, or an anchor.
     ///
     /// A scalar that the source doesn't write has an empty span. A value that is plainly
     /// missing after its key's `:` stands right after that `:`. Any other stands where the
     /// parser places it, at the next token, which can lie past the end of the collection it is
-    /// in: an item with nothing after its `-`, the value of a key with a `?`, and a value that
-    /// only a tag or an anchor stands for.
+    /// in: an item with nothing after its `-`, the value of a key with a `?`, a value that
+    /// only a tag or an anchor stands for, and every such value of an input that holds a
+    /// byte-order mark past its first character.
     #[must_use]
     pub const fn span(&self) -> Span {
         self.span
