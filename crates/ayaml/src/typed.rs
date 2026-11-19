@@ -1165,9 +1165,16 @@ fn borrowed_or_owned<'de>(
 
 /// The size estimate of a scalar's node: its cost plus its text. Collections
 /// and aliases are summed bottom-up by the builder instead.
+///
+/// A null, a boolean, or a number keeps its text beside what it resolves to, and a string
+/// target copies that text at every alias to it. So such a node costs its text where that is
+/// the larger, which only a number spelled at great length is: any other costs a node, as it
+/// does where a value is composed.
 fn estimate_size(node: &Node<'_>, node_cost: usize) -> usize {
     match &node.kind {
-        NodeKind::Null | NodeKind::Bool(_) | NodeKind::Number(_) => node_cost,
+        NodeKind::Null | NodeKind::Bool(_) | NodeKind::Number(_) => {
+            node_cost.max(node.text.as_str().map_or(0, str::len))
+        }
         NodeKind::String(text) => node_cost.saturating_add(text.len()),
         NodeKind::Sequence(items) => items.iter().fold(node_cost, |size, item| {
             size.saturating_add(estimate_size(item, node_cost))

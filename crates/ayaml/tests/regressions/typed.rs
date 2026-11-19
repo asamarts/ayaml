@@ -1101,6 +1101,55 @@ fn a_custom_tag_keeps_the_text_a_float_target_reads() {
     }
 }
 
+/// An alias is charged for what a target may copy of its node. A string target copies a
+/// number's text, so an alias to a number that is spelled at length is charged for that text, as
+/// an alias to a string of the same length is, whatever style or tag spells the number.
+#[test]
+fn an_alias_to_a_number_is_charged_for_its_text() {
+    use ayaml::{LimitExceeded, LimitKind, Limits};
+
+    const ALIASES: usize = 400;
+    let zeros = "0".repeat(64 << 10);
+    // Without the charge, the aliases would copy 25 MiB under a budget of one.
+    let limits = Limits::default().with_max_alias_expansion_bytes(1 << 20);
+    for number in [
+        format!("1.{zeros}"),
+        format!("!!int {zeros}1"),
+        format!("!!int \"{zeros}1\""),
+        format!("!!int \"{zeros}\\x31\""),
+        format!("x{zeros}"),
+    ] {
+        let input = format!("- &a {number}\n{}", "- *a\n".repeat(ALIASES));
+        let cursor = ayaml::Deserializer::from_str_with_limits(&input, &limits)
+            .and_then(|mut cursor| cursor.next_borrowed::<Vec<String>>().map(drop));
+        let readers = [
+            (
+                "from_str_borrowed",
+                ayaml::from_str_borrowed_with_limits::<Vec<String>>(&input, &limits).map(drop),
+            ),
+            (
+                "from_str_borrowed into Value",
+                ayaml::from_str_borrowed_with_limits::<Vec<ayaml::Value>>(&input, &limits)
+                    .map(drop),
+            ),
+            ("Deserializer::next_borrowed", cursor),
+        ];
+        for (reader, result) in readers {
+            let error = result.expect_err(reader);
+            assert_eq!(
+                error.limit().map(LimitExceeded::kind),
+                Some(LimitKind::AliasExpansion),
+                "{reader}, a number of {} bytes: {error}",
+                number.len()
+            );
+        }
+    }
+    // A number of ordinary length costs a node, so as many aliases to one are read.
+    let input = format!("- &a 1.5\n{}", "- *a\n".repeat(ALIASES));
+    let read = ayaml::from_str_borrowed_with_limits::<Vec<String>>(&input, &limits);
+    assert_eq!(read.expect("aliases to a short number").len(), ALIASES + 1);
+}
+
 /// A key names a field by its text, never by its number: an integer key is not the field at that
 /// index, whatever style and escapes spell it.
 #[test]

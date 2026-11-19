@@ -142,7 +142,9 @@ as `Value::Tagged` does, is a node of its own, and its text counts too: an alias
 `!t abc` is charged two nodes, the 2 bytes of `!t`, and the 3 of `abc`. A core tag that
 only restates the value, as `!!str` and `!!seq` do, adds nothing. A composed node takes
 about 100 bytes of memory, so the default of 256 covers it with room, and a smaller cost
-lets aliases copy more memory than the budget says.
+lets aliases copy more memory than the budget says. A typed read keeps the text of a null, a
+boolean, and a number, which a string target reads, so there an alias to one is charged its
+text where that is longer than a node's cost. Only a number spelled at great length is.
 Against a 2 MiB budget, nested aliases of empty nodes built by `parse_value` held
 about 0.4 times the budget at the default cost, 1.2 times at 64, 2.7 times at 16, and
 65 times at 1, the least accepted cost, before the budget stopped them. At the default
