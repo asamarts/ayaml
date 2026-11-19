@@ -181,11 +181,8 @@ fn the_room_reserved_for_a_root_collection_is_not_reserved_for_its_items() {
 /// the rare key that is a collection, would more than triple the set.
 #[test]
 fn a_seen_key_is_no_larger_than_a_scalar_s_text() {
-    assert_eq!(
-        std::mem::size_of::<SeenKey<'_>>(),
-        std::mem::size_of::<std::borrow::Cow<'_, str>>()
-    );
-    assert!(std::mem::size_of::<Node<'_>>() > 3 * std::mem::size_of::<SeenKey<'_>>());
+    assert_eq!(size_of::<SeenKey<'_>>(), size_of::<Cow<'_, str>>());
+    assert!(size_of::<Node<'_>>() > 3 * size_of::<SeenKey<'_>>());
 }
 
 /// A collection that is read from events isn't told its size, so a `Value` or a `Mapping` grows

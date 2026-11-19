@@ -1944,23 +1944,35 @@ fn best_times(read: &dyn Fn(&str), short: &str, long: &str) -> (Duration, Durati
     (short_time, long_time)
 }
 
-/// A key nested in keys is hashed once at each level, not once for every level and entry.
+/// A key nested in keys is hashed once at each level, not once for every level and entry. The
+/// bound allows a fixed 20 ms, which an optimized build would stay within even hashing a
+/// thousand entries at every level, so there the key is wider.
 #[test]
 fn nested_key_hashing_does_not_multiply_by_depth() {
-    let short = nested_mapping_key(1, 1_000);
-    let long = nested_mapping_key(100, 1_000);
-    let check = |name: &str, read: &dyn Fn(&str)| {
-        let (short_time, long_time) = best_times(read, &short, &long);
+    let width = if cfg!(debug_assertions) {
+        1_000
+    } else {
+        20_000
+    };
+    let short = nested_mapping_key(1, width);
+    let long = nested_mapping_key(100, width);
+    let check = |name: &str, read: &dyn Fn(&str) -> bool| {
+        // A read that is refused takes no time at all, and would pass any bound.
+        assert!(read(&short) && read(&long), "{name}: a key is refused");
+        let timed = |input: &str| {
+            read(input);
+        };
+        let (short_time, long_time) = best_times(&timed, &short, &long);
         assert!(
             long_time < short_time * 4 + Duration::from_millis(20),
             "{name}: depth 100 took {long_time:?}, depth 1 took {short_time:?}"
         );
     };
-    check("parse_value", &|input| drop(ayaml::parse_value(input)));
-    check("from_str", &|input| drop(ayaml::from_str::<Value>(input)));
+    check("parse_value", &|input| ayaml::parse_value(input).is_ok());
+    check("from_str", &|input| ayaml::from_str::<Value>(input).is_ok());
     #[cfg(feature = "libyaml-compat")]
     check("compat", &|input| {
-        drop(ayaml::compat::from_str::<Value>(input));
+        ayaml::compat::from_str::<Value>(input).is_ok()
     });
 }
 
