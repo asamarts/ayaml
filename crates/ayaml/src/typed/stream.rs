@@ -882,10 +882,13 @@ mod tests {
         let mut stream = Stream::new(events, input.len(), &limits, NodeOptions::default());
         stream
             .document(|document| {
-                let Some(NodeKind::Sequence(items)) =
-                    document.stream.builder.root.as_ref().map(|node| &node.kind)
-                else {
+                // A node with an anchor is shared with the aliases that may follow it.
+                let root = document.stream.builder.root.as_ref();
+                let Some(NodeKind::Alias(shared)) = root.map(|node| &node.kind) else {
                     panic!("the root is built before its target reads");
+                };
+                let NodeKind::Sequence(items) = &shared.kind else {
+                    panic!("a sequence");
                 };
                 assert_eq!((items.len(), items.capacity()), (5, 5));
                 IgnoredAny::deserialize(document)
