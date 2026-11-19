@@ -298,7 +298,7 @@ fn every_place_that_repeats_the_version_agrees_with_the_workspace() {
             .lines()
             .find(|line| line.starts_with("version = "))
             .expect("the workspace version");
-        ayaml::parse_value(&format!("{{{}}}", line.replacen(" = ", ": ", 1))).expect("a version")
+        parse_value(&format!("{{{}}}", line.replacen(" = ", ": ", 1))).expect("a version")
     };
     let version = manifest["version"].as_str().expect("a version string");
     assert_eq!(version.split('.').count(), 3, "{version}");

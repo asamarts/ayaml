@@ -320,44 +320,6 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
     })
 }
 
-/// Events in fixed-size chunks, so a typed read does not retain a vector's spare capacity.
-#[derive(Debug)]
-pub(crate) struct EventChunks<'a> {
-    chunks: Vec<Vec<Event<'a>>>,
-    current: Vec<Event<'a>>,
-    chunk_size: usize,
-}
-
-impl<'a> EventChunks<'a> {
-    const MAX_CHUNK: usize = 8_192;
-
-    fn with_chunk_size(chunk_size: usize) -> Self {
-        let chunk_size = chunk_size.clamp(16, Self::MAX_CHUNK);
-        Self {
-            chunks: Vec::new(),
-            current: Vec::with_capacity(chunk_size),
-            chunk_size,
-        }
-    }
-
-    fn push(&mut self, event: Event<'a>) {
-        if self.current.len() == self.chunk_size {
-            self.chunks.push(std::mem::replace(
-                &mut self.current,
-                Vec::with_capacity(self.chunk_size),
-            ));
-        }
-        self.current.push(event);
-    }
-
-    pub(crate) fn into_chunks(mut self) -> Vec<Vec<Event<'a>>> {
-        if !self.current.is_empty() {
-            self.chunks.push(self.current);
-        }
-        self.chunks
-    }
-}
-
 /// A consumer that receives events as the parser produces them.
 pub(crate) trait EventConsumer<'a> {
     fn event(&mut self, event: Event<'a>) -> Result<(), Error>;
@@ -371,34 +333,41 @@ pub(crate) trait EventConsumer<'a> {
 
 enum EventSink<'a> {
     Events(Vec<Event<'a>>),
-    Chunks(EventChunks<'a>),
     Streaming(Box<StreamingComposer<'a>>),
     Consumer(Box<dyn EventConsumer<'a> + 'a>),
-    /// Events that wait for a reader to take them (see [`DocumentEvents`]).
-    Queue(VecDeque<Event<'a>>),
+    /// Events that wait for a reader to take them (see [`DocumentEvents`]), and how many
+    /// entries the root holds, where the grammar counts them before it reads them.
+    Queue {
+        events: VecDeque<Event<'a>>,
+        root_entries: Option<usize>,
+    },
 }
 
 impl<'a> EventSink<'a> {
     /// The events a queue holds before the grammar stops for its reader. A step of the grammar
-    /// emits a few events, but a run of scalar entries is read in one step.
+    /// emits a few events, and a run of scalar entries or of directives stops when this many
+    /// wait.
     const QUEUE_ROOM: usize = 16;
 
     /// Whether a reader should take the waiting events before more are emitted.
     fn is_full(&self) -> bool {
-        matches!(self, Self::Queue(events) if events.len() >= Self::QUEUE_ROOM)
+        matches!(self, Self::Queue { events, .. } if events.len() >= Self::QUEUE_ROOM)
     }
 
     /// The events that wait for a reader, if this sink keeps them for one.
     fn waiting(&mut self) -> Option<&mut VecDeque<Event<'a>>> {
         match self {
-            Self::Queue(events) => Some(events),
+            Self::Queue { events, .. } => Some(events),
             _ => None,
         }
     }
 
+    /// Say how many entries the root flow collection holds, before its start event.
     fn reserve_collection(&mut self, entries: usize) {
-        if let Self::Consumer(consumer) = self {
-            consumer.reserve_collection(entries);
+        match self {
+            Self::Consumer(consumer) => consumer.reserve_collection(entries),
+            Self::Queue { root_entries, .. } => *root_entries = Some(entries),
+            Self::Events(_) | Self::Streaming(_) => {}
         }
     }
 
@@ -413,13 +382,9 @@ impl<'a> EventSink<'a> {
                 events.push(event);
                 Ok(())
             }
-            Self::Chunks(events) => {
-                events.push(event);
-                Ok(())
-            }
             Self::Streaming(composer) => composer.event(event),
             Self::Consumer(consumer) => consumer.event(event),
-            Self::Queue(events) => {
+            Self::Queue { events, .. } => {
                 events.push_back(event);
                 Ok(())
             }
@@ -778,10 +743,7 @@ fn parse_lines<'a>(
     parser.parse_stream()?;
     match parser.sink {
         EventSink::Events(events) => Ok((events, parser.emitted)),
-        EventSink::Chunks(_)
-        | EventSink::Streaming(_)
-        | EventSink::Consumer(_)
-        | EventSink::Queue(_) => {
+        EventSink::Streaming(_) | EventSink::Consumer(_) | EventSink::Queue { .. } => {
             unreachable!("event sink kind changed during parsing")
         }
     }
@@ -828,56 +790,6 @@ pub(crate) fn parse_document_events<'a>(
     parse_events_with_compat(input, limits, compat_flow, true, true)
 }
 
-pub(crate) fn parse_document_event_chunks<'a>(
-    input: &'a str,
-    limits: &Limits,
-    compat_flow: bool,
-) -> Result<EventChunks<'a>, Error> {
-    let mut scanner = Scanner::with_compat(input, limits.clone(), compat_flow)?;
-    let Lines {
-        lines,
-        tokens,
-        stream_start,
-        stream_end,
-        positions,
-        ..
-    } = read_lines(&mut scanner)?;
-    let chunk_size = event_capacity(&lines, &tokens).saturating_add(2);
-    let flow_ends = flow_ends(&tokens);
-    let end = stream_end.map_or(input.len(), Span::start);
-    let mut parser = Parser {
-        lines,
-        token_arena: tokens,
-        flow_ends,
-        sink: EventSink::Chunks(EventChunks::with_chunk_size(chunk_size)),
-        limits: limits.clone(),
-        input,
-        positions,
-        compat: compat_flow,
-        documents: 0,
-        emitted: 0,
-        single_document: true,
-        stop_at_second: true,
-        end,
-    };
-    parser.emit(Event::StreamStart {
-        span: stream_start.unwrap_or_else(|| Span::empty(0)),
-    })?;
-    parser.parse_stream()?;
-    parser.emit(Event::StreamEnd {
-        span: stream_end.unwrap_or_else(|| Span::empty(input.len())),
-    })?;
-    match parser.sink {
-        EventSink::Chunks(events) => Ok(events),
-        EventSink::Events(_)
-        | EventSink::Streaming(_)
-        | EventSink::Consumer(_)
-        | EventSink::Queue(_) => {
-            unreachable!("event sink kind changed during parsing")
-        }
-    }
-}
-
 pub(crate) fn parse_document_with_consumer<'a>(
     input: &'a str,
     limits: &Limits,
@@ -919,10 +831,7 @@ pub(crate) fn parse_document_with_consumer<'a>(
     })?;
     match parser.sink {
         EventSink::Consumer(mut consumer) => consumer.finish(),
-        EventSink::Events(_)
-        | EventSink::Chunks(_)
-        | EventSink::Streaming(_)
-        | EventSink::Queue(_) => {
+        EventSink::Events(_) | EventSink::Streaming(_) | EventSink::Queue { .. } => {
             unreachable!("event sink kind changed during parsing")
         }
     }
@@ -972,10 +881,7 @@ fn parse_events_with_compat<'a>(
     })?;
     match parser.sink {
         EventSink::Events(events) => Ok(events),
-        EventSink::Chunks(_)
-        | EventSink::Streaming(_)
-        | EventSink::Consumer(_)
-        | EventSink::Queue(_) => {
+        EventSink::Streaming(_) | EventSink::Consumer(_) | EventSink::Queue { .. } => {
             unreachable!("event sink kind changed during parsing")
         }
     }
@@ -1024,10 +930,7 @@ pub(crate) fn parse_documents(
         EventSink::Streaming(composer) => composer
             .finish()
             .map_err(|error| error.with_location_from(&positions, input)),
-        EventSink::Events(_)
-        | EventSink::Chunks(_)
-        | EventSink::Consumer(_)
-        | EventSink::Queue(_) => {
+        EventSink::Events(_) | EventSink::Consumer(_) | EventSink::Queue { .. } => {
             unreachable!("event sink kind changed during parsing")
         }
     }
@@ -1089,10 +992,14 @@ impl<'a> Parser<'a> {
     /// Read every document of the stream.
     fn parse_stream(&mut self) -> Result<(), Error> {
         let mut index = 0;
+        let mut directives = false;
         while index < self.lines.len() {
-            index = match self.open_document(index)? {
+            let opening = self.open_document(index, directives)?;
+            // Only a sink that keeps events for a reader stops among the directives.
+            directives = matches!(opening, Opening::Directives(_));
+            index = match opening {
                 Opening::End => return Ok(()),
-                Opening::NoDocument(next) => next,
+                Opening::NoDocument(next) | Opening::Directives(next) => next,
                 Opening::Root { call, index, block } => {
                     let index = match call {
                         Some(call) => self.run(call)?,
@@ -1107,8 +1014,14 @@ impl<'a> Parser<'a> {
 
     /// Read from line `index` to a document's root: its directives and its start. The root is
     /// the call that reads it, or none where the document is empty and its null is emitted here.
-    fn open_document(&mut self, mut index: usize) -> Result<Opening<'a>, Error> {
-        let mut saw_directive = false;
+    /// `saw_directive` says that the lines before `index` were this document's directives: a
+    /// reader that takes events as it needs them is handed a few directives at a time, and
+    /// comes back here for the rest.
+    fn open_document(
+        &mut self,
+        mut index: usize,
+        mut saw_directive: bool,
+    ) -> Result<Opening<'a>, Error> {
         while let Some(TokenKind::Directive(directive)) =
             self.line_first(index).map(|token| &token.kind)
         {
@@ -1123,6 +1036,9 @@ impl<'a> Parser<'a> {
             self.emit(event)?;
             saw_directive = true;
             index += 1;
+            if self.sink.is_full() {
+                return Ok(Opening::Directives(index));
+            }
         }
         if index >= self.lines.len() {
             if saw_directive {
@@ -1767,6 +1683,8 @@ enum Opening<'a> {
     End,
     /// A line that opens no document, such as a lone `...`. The stream goes on at this line.
     NoDocument(usize),
+    /// Directives of a document, with more of them or its start still to read from this line.
+    Directives(usize),
     /// A document. Its root is read by `call`, or is empty; either way it stops before line
     /// `index` or the line that the call returns. `block` says whether it is a block collection.
     Root {

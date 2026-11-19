@@ -879,30 +879,6 @@ fn empty_flow_mapping_value_is_null() {
 }
 
 #[test]
-fn chunked_document_events_match_the_collected_stream() {
-    use std::fmt::Write as _;
-
-    let mut input = String::new();
-    for index in 0..20_000 {
-        writeln!(input, "- {index}").expect("write");
-    }
-    let limits = Limits::for_max_input();
-    let collected = parse_document_events(&input, &limits, false).expect("collected events");
-    let chunks =
-        super::parse_document_event_chunks(&input, &limits, false).expect("chunked events");
-    let chunk_count = chunks.chunks.len() + usize::from(!chunks.current.is_empty());
-    assert!(
-        chunk_count > 1,
-        "the fixture should span more than one chunk: {chunk_count} chunks, {} events, {} in the current chunk, chunk size {}",
-        collected.len(),
-        chunks.current.len(),
-        chunks.chunk_size
-    );
-    let flattened: Vec<Event<'_>> = chunks.into_chunks().into_iter().flatten().collect();
-    assert_eq!(collected, flattened);
-}
-
-#[test]
 fn mid_size_inputs_reserve_a_token_arena_from_their_length() {
     let most = usize::MAX;
     assert_eq!(
@@ -1273,6 +1249,17 @@ fn generated(state: &mut u64) -> String {
 fn events_on_demand_are_the_events_that_are_collected() {
     let mut state = 0x9E37_79B9_7F4A_7C15_u64;
     let mut documents = vec![String::new(), "a\n".to_owned(), "- 1\n".repeat(500)];
+    // Runs of directives around the number of events that wait, where the grammar stops among
+    // them: before a document, before none, before a line that starts none, and after one.
+    for run in [1, 15, 16, 17, 31, 32, 33, 100] {
+        let directives = "%A b\n".repeat(run);
+        for after in ["--- a\n", "---\n- a\n", "", "a\n", "...\n", "# c\n"] {
+            documents.push(format!("{directives}{after}"));
+            documents.push(format!("a\n...\n{directives}{after}"));
+        }
+        documents.push(format!("%YAML 1.2\n{directives}--- a\n"));
+        documents.push(format!("{directives}%YAML 1.2\n%YAML 1.2\n--- a\n"));
+    }
     documents.extend((0..3_000).map(|_| generated(&mut state)));
     let limits = [Limits::default(), Limits::default().with_max_events(12)];
     let (mut read, mut refused) = (0, 0);
@@ -1307,9 +1294,9 @@ fn events_on_demand_are_the_events_that_are_collected() {
     );
 }
 
-/// The grammar reads a run of scalar entries in one step. It stops for a reader that takes its
-/// events one at a time, so that a document of a hundred thousand entries has a few of its
-/// events waiting at any moment and not all of them.
+/// The grammar reads a run of scalar entries, or of directives, in one step. It stops for a
+/// reader that takes its events one at a time, so that a document of a hundred thousand entries
+/// or directives has a few of its events waiting at any moment and not all of them.
 #[test]
 fn few_events_wait_for_a_reader_that_takes_them_one_at_a_time() {
     let limits = Limits::for_max_input();
@@ -1318,6 +1305,7 @@ fn few_events_wait_for_a_reader_that_takes_them_one_at_a_time() {
         "? a\n: b\n".repeat(50_000),
         "k: v\n".repeat(50_000),
         format!("[{}]\n", "1, ".repeat(100_000)),
+        format!("{}--- a\n", "%A b\n".repeat(100_001)),
     ] {
         let (events, most) = events_on_demand(&document, &limits, false).expect("events");
         assert!(events.len() > 100_000, "{} events", events.len());

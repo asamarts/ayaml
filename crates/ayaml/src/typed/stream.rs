@@ -13,7 +13,13 @@
 //! the document before anything about the target, wherever each stands, and this reader meets
 //! them in document order. So after an error the document is built as a tree (`parse_document`),
 //! and that tree's error, if it has one, is the answer. Only a document that builds reports the
-//! error found here, which is then the target's. A refused input pays for the second read.
+//! error found here, which is then the target's. A refused input pays for the second read, and
+//! its target has read what stands before the fault by then: the tree reader refuses a
+//! document before its target sees any of it.
+//!
+//! A root that is built whole is the whole document as a tree. It is built before the target
+//! reads, the stream is read to its end, and the tokens are freed, so the target's value is
+//! built beside the tree alone, as the tree reader builds it.
 
 use std::collections::HashSet;
 
@@ -27,7 +33,7 @@ use super::{
 use crate::error::{Code, Error, ErrorKind};
 use crate::event::Event;
 use crate::limits::Limits;
-use crate::parser::DocumentEvents;
+use crate::parser::{DocumentEvents, EventConsumer};
 use crate::span::{Position, Span};
 
 /// Read one document into what `seed` makes of it.
@@ -53,6 +59,7 @@ pub(super) fn read<'de, T: DeserializeSeed<'de>>(
         open: Vec::new(),
         ahead: Ahead::Unknown,
         due: false,
+        ended: false,
         fault: None,
     };
     let result = stream.document(|document| seed.deserialize(document));
@@ -87,6 +94,9 @@ pub(super) struct Stream<'de> {
     ahead: Ahead,
     /// Whether the node that a seed was given is still unread. A seed may read nothing.
     due: bool,
+    /// Whether the stream has been read past the document's end, which a root that is built
+    /// whole is before its target reads it.
+    ended: bool,
     /// The first fault found in the document itself, as opposed to a value that doesn't suit
     /// its target. Nothing is read after it, and the read fails whatever the target returns.
     fault: Option<Error>,
@@ -162,19 +172,48 @@ impl<'de> Stream<'de> {
                     let end = Span::empty(self.builder.input_len);
                     self.builder.root = Some(Node::null(end));
                     self.ahead = Ahead::Whole(end);
+                    self.ended = true;
                     return target(StreamDeserializer { stream: self });
                 }
                 Some(event) => return Err(misplaced(&event)),
             }
         }
+        if let Ahead::Whole(span) = self.ahead()? {
+            self.build_root()?;
+            self.ahead = Ahead::Whole(span);
+        }
         let value = self.read_with_target(target)?;
+        self.end()?;
+        Ok(value)
+    }
+
+    /// Build the root as a tree, read the stream to its end, and free the tokens. The root is
+    /// then all that is left of the document, and its target reads it beside nothing else.
+    #[cold]
+    fn build_root(&mut self) -> Result<(), Error> {
+        if !self.ended
+            && let Some(entries) = self.events.root_entries()
+        {
+            self.builder.reserve_collection(entries);
+        }
+        self.build()?;
+        self.end()?;
+        self.events.release();
+        Ok(())
+    }
+
+    /// Read from the root's end to the stream's, where a second document is refused.
+    fn end(&mut self) -> Result<(), Error> {
+        if std::mem::replace(&mut self.ended, true) {
+            return Ok(());
+        }
         match self.pull()? {
             Event::DocumentEnd { .. } => {}
             event => return Err(misplaced(&event)),
         }
         loop {
             match self.events.next_event()? {
-                Some(Event::StreamEnd { .. }) | None => return Ok(value),
+                Some(Event::StreamEnd { .. }) | None => return Ok(()),
                 Some(Event::Directive { .. }) => {}
                 Some(Event::DocumentStart { span, .. }) => {
                     return Err(Error::new(
@@ -557,6 +596,17 @@ impl<'de> Stream<'de> {
     fn gives(&self, level: usize) -> bool {
         self.fault.is_none() && self.open.len() > level
     }
+
+    /// How many entries the collection that was opened as number `level` has left, where that is
+    /// known before they are read: for a root flow collection, whose entries the parser counts.
+    /// Any other collection's are known only at its end.
+    fn left(&self, level: usize) -> Option<usize> {
+        if level != 0 || self.open.len() != 1 || self.fault.is_some() {
+            return None;
+        }
+        let (Open::Sequence { read } | Open::Mapping { read, .. }) = self.open.first()?;
+        Some(self.events.root_entries()?.saturating_sub(*read))
+    }
 }
 
 /// An event where a node or a document's boundary has to stand. The parser doesn't emit one;
@@ -667,7 +717,11 @@ impl<'de> Deserializer<'de> for StreamDeserializer<'de, '_> {
         variants: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        self.stream.build()?;
+        if self.stream.open.is_empty() {
+            self.stream.build_root()?;
+        } else {
+            self.stream.build()?;
+        }
         self.stream
             .read_built(|node| node.deserialize_enum(name, variants, visitor))
     }
@@ -697,6 +751,10 @@ impl<'de> SeqAccess<'de> for SequenceAccess<'de, '_> {
             .read_with(seed)
             .map(Some)
             .map_err(|error| with_span(error, span).inside_index(index))
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        self.stream.left(self.level)
     }
 }
 
@@ -748,5 +806,9 @@ impl<'de> MapAccess<'de> for MappingAccess<'de, '_> {
             .map_err(|error| inside_key(with_span(error, span), &key));
         self.stream.entered(&key)?;
         value
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        self.stream.left(self.level)
     }
 }

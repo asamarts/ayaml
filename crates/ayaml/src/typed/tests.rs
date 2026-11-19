@@ -42,15 +42,15 @@ fn aliases_are_reference_nodes_not_expanded_copies() {
 }
 
 #[test]
-fn a_medium_document_uses_the_chunked_event_feed() {
+fn a_medium_document_is_built_as_its_events_arrive() {
     use std::fmt::Write as _;
 
     let mut input = String::from("values:\n");
     for index in 0..500 {
         writeln!(input, "- value-{index}").expect("write");
     }
-    assert!(input.len() > CHUNKED_INPUT_THRESHOLD);
-    assert!(input.len() <= STREAMING_INPUT_THRESHOLD);
+    assert!(input.len() > SMALL_INPUT_BYTES);
+    assert!(input.len() <= 2 * SMALL_INPUT_BYTES);
 
     let limits = Limits::for_max_input();
     let node = parse_document(&input, &limits, NodeOptions::default()).expect("node");
@@ -75,7 +75,7 @@ fn a_larger_document_streams_events_into_the_builder() {
     for _ in 0..6_000 {
         input.push_str("- *base\n");
     }
-    assert!(input.len() > STREAMING_INPUT_THRESHOLD);
+    assert!(input.len() > 2 * SMALL_INPUT_BYTES);
 
     let limits = Limits::for_max_input();
     let node = parse_document(&input, &limits, NodeOptions::default()).expect("node");
@@ -108,7 +108,7 @@ fn a_large_stream_reports_trailing_documents() {
         writeln!(input, "- {index}").expect("write");
     }
     input.push_str("---\nother: 1\n");
-    assert!(input.len() > STREAMING_INPUT_THRESHOLD);
+    assert!(input.len() > 2 * SMALL_INPUT_BYTES);
 
     let limits = Limits::for_max_input();
     let error = parse_document(&input, &limits, NodeOptions::default()).expect_err("error");

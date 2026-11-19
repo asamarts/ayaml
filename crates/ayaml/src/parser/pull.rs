@@ -3,14 +3,16 @@
 //! The grammar already runs on an explicit stack (see `Parser::run`), so it can stop between
 //! two steps and go on later. A reader that builds its value from the events takes each one as
 //! it needs it, and no vector of events, and no tree made from them, stands between the tokens
-//! and the value.
+//! and the value. A step that emits a run of events, of scalar entries or of directives, stops
+//! within the run, so the events that wait stay a few however long the run is.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use super::{Cont, EventSink, Lines, Opening, Parser, Step, flow_ends, read_lines};
 use crate::error::{Error, ErrorKind};
 use crate::event::Event;
 use crate::limits::Limits;
+use crate::position::LineIndex;
 use crate::scanner::Scanner;
 use crate::span::Span;
 
@@ -36,6 +38,8 @@ enum State {
     Start,
     /// Between documents, at this line.
     Between(usize),
+    /// After some of a document's directives, at this line.
+    Directives(usize),
     /// In a document's root, about to take the step that waits. `block` says whether the root
     /// is a block collection.
     Root { block: bool },
@@ -62,7 +66,10 @@ impl<'a> DocumentEvents<'a> {
                 lines,
                 token_arena: tokens,
                 flow_ends,
-                sink: EventSink::Queue(VecDeque::with_capacity(2 * EventSink::QUEUE_ROOM)),
+                sink: EventSink::Queue {
+                    events: VecDeque::with_capacity(2 * EventSink::QUEUE_ROOM),
+                    root_entries: None,
+                },
                 limits: limits.clone(),
                 input,
                 positions,
@@ -130,9 +137,37 @@ impl<'a> DocumentEvents<'a> {
     /// The event that waits, which stays where it is.
     pub(crate) fn front(&self) -> Option<&Event<'a>> {
         match &self.parser.sink {
-            EventSink::Queue(events) => events.front(),
+            EventSink::Queue { events, .. } => events.front(),
             _ => None,
         }
+    }
+
+    /// How many entries the root holds, once its start event waits or has been taken. Only a
+    /// flow collection's are counted before they are read.
+    pub(crate) fn root_entries(&self) -> Option<usize> {
+        match &self.parser.sink {
+            EventSink::Queue { root_entries, .. } => *root_entries,
+            _ => None,
+        }
+    }
+
+    /// Free the tokens and what was read with them, once every event has been taken. A reader
+    /// that has built its document as a tree reads the tree without them, as a reader does that
+    /// builds the tree before anything else.
+    pub(crate) fn release(&mut self) {
+        if matches!(self.state, State::Finished) && self.front().is_none() {
+            self.parser.lines = Vec::new();
+            self.parser.token_arena = Vec::new();
+            self.parser.flow_ends = HashMap::new();
+            self.parser.positions = LineIndex::new("");
+            self.stack = Vec::new();
+        }
+    }
+
+    /// How many tokens are held.
+    #[cfg(test)]
+    pub(crate) fn tokens(&self) -> usize {
+        self.parser.token_arena.len()
     }
 
     /// Run the grammar until enough events wait or the stream is over.
@@ -152,30 +187,39 @@ impl<'a> DocumentEvents<'a> {
                     State::Between(0)
                 }
                 State::Between(index) if index < self.parser.lines.len() => {
-                    match self.parser.open_document(index)? {
-                        Opening::End => self.end()?,
-                        Opening::NoDocument(next) => State::Between(next),
-                        Opening::Root {
-                            call: Some(call),
-                            block,
-                            ..
-                        } => {
-                            self.step = Some(Step::Call(call));
-                            State::Root { block }
-                        }
-                        Opening::Root {
-                            call: None,
-                            index,
-                            block,
-                        } => State::Between(self.parser.close_document(index, block)?),
-                    }
+                    self.open(index, false)?
                 }
                 State::Between(_) => self.end()?,
+                // Past the last line too: directives with no document after them are an error.
+                State::Directives(index) => self.open(index, true)?,
                 State::Root { block } => self.root(block)?,
                 State::Finished => return Ok(()),
             };
         }
         Ok(())
+    }
+
+    /// Read a document's directives and its start from line `index`, as `Parser::parse_stream`
+    /// does.
+    fn open(&mut self, index: usize, directives: bool) -> Result<State, Error> {
+        Ok(match self.parser.open_document(index, directives)? {
+            Opening::End => self.end()?,
+            Opening::NoDocument(next) => State::Between(next),
+            Opening::Directives(next) => State::Directives(next),
+            Opening::Root {
+                call: Some(call),
+                block,
+                ..
+            } => {
+                self.step = Some(Step::Call(call));
+                State::Root { block }
+            }
+            Opening::Root {
+                call: None,
+                index,
+                block,
+            } => State::Between(self.parser.close_document(index, block)?),
+        })
     }
 
     /// Run a root's steps, as `Parser::run` does, until enough events wait or the root ends.
