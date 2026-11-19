@@ -459,6 +459,52 @@ pub mod internals {
         limits.validate()?;
         crate::composer::compose_documents(events, input_len, limits)
     }
+
+    /// Decode one document into a typed value by building its whole tree first, as a typed read
+    /// of a small input does. `compat` reads with the compatibility scanner and keeps duplicate
+    /// keys, as `compat::from_str` does, but reports errors as default mode words them. The
+    /// tests compare this reader with [`from_str_by_events`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+    pub fn from_str_by_tree<'de, T: serde::Deserialize<'de>>(
+        input: &'de str,
+        limits: &Limits,
+        compat: bool,
+    ) -> Result<T, Error> {
+        crate::typed::from_str_by_tree(
+            input,
+            limits,
+            crate::typed::NodeOptions {
+                allow_duplicates: compat,
+                compat_flow: compat,
+            },
+            std::marker::PhantomData::<T>,
+        )
+    }
+
+    /// Decode one document into a typed value from the parser's events, as a typed read of a
+    /// larger input does, whatever this input's size. `compat` is as for [`from_str_by_tree`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+    pub fn from_str_by_events<'de, T: serde::Deserialize<'de>>(
+        input: &'de str,
+        limits: &Limits,
+        compat: bool,
+    ) -> Result<T, Error> {
+        crate::typed::from_str_by_events(
+            input,
+            limits,
+            crate::typed::NodeOptions {
+                allow_duplicates: compat,
+                compat_flow: compat,
+            },
+            std::marker::PhantomData::<T>,
+        )
+    }
 }
 
 /// A pull traversal over spanned parser events.

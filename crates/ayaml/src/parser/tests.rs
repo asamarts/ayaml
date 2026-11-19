@@ -4,10 +4,11 @@
 )]
 
 use super::{
-    TOKEN_ARENA_CHUNK, TOKEN_ARENA_MID_CHUNK, TOKEN_ARENA_SMALL_CHUNK, arena_growth, flow_ends,
-    flow_entry_count, parse_events, push_token, read_lines,
+    DocumentEvents, EventSink, TOKEN_ARENA_CHUNK, TOKEN_ARENA_MID_CHUNK, TOKEN_ARENA_SMALL_CHUNK,
+    arena_growth, flow_ends, flow_entry_count, parse_document_events, parse_events, push_token,
+    read_lines,
 };
-use crate::error::ErrorKind;
+use crate::error::{Error, ErrorKind};
 use crate::event::Event;
 use crate::limits::Limits;
 use crate::scanner::{Token, TokenKind};
@@ -886,7 +887,7 @@ fn chunked_document_events_match_the_collected_stream() {
         writeln!(input, "- {index}").expect("write");
     }
     let limits = Limits::for_max_input();
-    let collected = super::parse_document_events(&input, &limits, false).expect("collected events");
+    let collected = parse_document_events(&input, &limits, false).expect("collected events");
     let chunks =
         super::parse_document_event_chunks(&input, &limits, false).expect("chunked events");
     let chunk_count = chunks.chunks.len() + usize::from(!chunks.current.is_empty());
@@ -1098,7 +1099,7 @@ fn the_arena_never_reserves_past_the_token_limit() {
 struct Reserved(std::rc::Rc<std::cell::RefCell<Vec<usize>>>);
 
 impl<'a> super::EventConsumer<'a> for Reserved {
-    fn event(&mut self, _event: Event<'a>) -> Result<(), crate::error::Error> {
+    fn event(&mut self, _event: Event<'a>) -> Result<(), Error> {
         Ok(())
     }
 
@@ -1106,7 +1107,7 @@ impl<'a> super::EventConsumer<'a> for Reserved {
         self.0.borrow_mut().push(entries);
     }
 
-    fn finish(&mut self) -> Result<(), crate::error::Error> {
+    fn finish(&mut self) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -1204,4 +1205,122 @@ fn event_capacity_reserves_from_the_token_count() {
         indent: 0,
     }];
     assert_eq!(super::event_capacity(&lines, &tokens), 1_000 * 4 / 5 + 200);
+}
+
+/// One document's events, taken one at a time, and the most that waited for the reader at once.
+fn events_on_demand<'a>(
+    input: &'a str,
+    limits: &Limits,
+    compat: bool,
+) -> Result<(Vec<Event<'a>>, usize), Error> {
+    let mut source = DocumentEvents::new(input, limits, compat)?;
+    let (mut events, mut most) = (Vec::new(), 0);
+    while let Some(event) = source.next_event()? {
+        events.push(event);
+        most = most.max(source.waiting());
+    }
+    Ok((events, most))
+}
+
+/// A few lines from this pool, at any indentation, make documents of every form, most of
+/// them with a fault somewhere.
+const POOL: &[&str] = &[
+    "a: 1",
+    "b:",
+    "c: [1, {x: 2}]",
+    "d: |",
+    "e: &n 3",
+    "f: *n",
+    "g: !t 4",
+    "- 1",
+    "-",
+    "- - 2",
+    "- a: 1",
+    "- [1, 2",
+    "? k",
+    ": v",
+    "text",
+    "---",
+    "...",
+    "%YAML 1.2",
+    "# c",
+    "",
+    "{a: 1, b}",
+    "[x, y]: z",
+    "\"q\\x41\"",
+    "- !!int '5'",
+];
+
+fn generated(state: &mut u64) -> String {
+    let mut next = || {
+        *state ^= *state >> 12;
+        *state ^= *state << 25;
+        *state ^= *state >> 27;
+        usize::try_from(state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33).expect("31 bits")
+    };
+    let mut text = String::new();
+    for _ in 0..=next() % 8 {
+        text.push_str(&" ".repeat([0, 0, 0, 2, 2, 4, 1][next() % 7]));
+        text.push_str(POOL[next() % POOL.len()]);
+        text.push('\n');
+    }
+    text
+}
+
+/// A reader that takes a document's events as it needs them gets the events that a reader of
+/// the whole document collects, or the same error where the document has one.
+#[test]
+fn events_on_demand_are_the_events_that_are_collected() {
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut documents = vec![String::new(), "a\n".to_owned(), "- 1\n".repeat(500)];
+    documents.extend((0..3_000).map(|_| generated(&mut state)));
+    let limits = [Limits::default(), Limits::default().with_max_events(12)];
+    let (mut read, mut refused) = (0, 0);
+    for document in &documents {
+        for compat in [false, true] {
+            for limits in &limits {
+                let collected = parse_document_events(document, limits, compat);
+                let on_demand = events_on_demand(document, limits, compat);
+                match (collected, on_demand) {
+                    (Ok(collected), Ok((on_demand, _))) => {
+                        assert_eq!(collected, on_demand, "{document:?}");
+                        read += 1;
+                    }
+                    (Err(collected), Err(on_demand)) => {
+                        assert_eq!(
+                            format!("{collected:?}"),
+                            format!("{on_demand:?}"),
+                            "{document:?}"
+                        );
+                        refused += 1;
+                    }
+                    (collected, on_demand) => {
+                        panic!("{document:?}: collected {collected:?}, on demand {on_demand:?}")
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        read > 1_000 && refused > 1_000,
+        "{read} read, {refused} refused"
+    );
+}
+
+/// The grammar reads a run of scalar entries in one step. It stops for a reader that takes its
+/// events one at a time, so that a document of a hundred thousand entries has a few of its
+/// events waiting at any moment and not all of them.
+#[test]
+fn few_events_wait_for_a_reader_that_takes_them_one_at_a_time() {
+    let limits = Limits::for_max_input();
+    for document in [
+        "- a\n".repeat(100_000),
+        "? a\n: b\n".repeat(50_000),
+        "k: v\n".repeat(50_000),
+        format!("[{}]\n", "1, ".repeat(100_000)),
+    ] {
+        let (events, most) = events_on_demand(&document, &limits, false).expect("events");
+        assert!(events.len() > 100_000, "{} events", events.len());
+        assert!(most <= 2 * EventSink::QUEUE_ROOM, "{most} events waited");
+    }
 }

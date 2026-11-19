@@ -259,6 +259,8 @@ quality() {
   step "production library panic profile ($tc)" cargo "+$tc" clippy -p ayaml --lib --locked --all-features -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
   test_step "test ($tc)" cargo "+$tc" test --workspace --locked --all-features
   test_step "test default features ($tc)" cargo "+$tc" test -p ayaml --locked
+  # A typed read builds a tree of a small input; this build reads every input from its events.
+  test_step "test typed reads from events ($tc)" env RUSTFLAGS="--cfg ayaml_typed_from_events" CARGO_TARGET_DIR="$ROOT/target/typed-from-events" cargo "+$tc" test -p ayaml --locked --all-features
   # The depth cap is measured in both profiles.
   test_step "adversarial release ($tc)" cargo "+$tc" test -p ayaml --locked --release --all-features --test adversarial
   step "doc ($tc)" env RUSTDOCFLAGS="-D warnings" cargo "+$tc" doc --workspace --locked --no-deps --all-features
@@ -269,6 +271,7 @@ quality() {
   # Mirrors: cargo clippy -p ayaml --lib --locked --all-features -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
   # Mirrors: cargo test --workspace --locked --all-features
   # Mirrors: cargo test -p ayaml --locked
+  # Mirrors: cargo test -p ayaml --locked --all-features
   # Mirrors: cargo test -p ayaml --locked --release --all-features --test adversarial
   # Mirrors: cargo doc --workspace --locked --no-deps --all-features
 }

@@ -83,13 +83,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - What lowers them: the token arena is sized from the density of the input scanned so far,
   where it doubled, and short-line inputs get a wider first chunk. Scalar tokens keep their raw
   text as a span and box only the values that need decoding; typed nodes box tags, keep scalar
-  text as a source slice, and cache hashes in one atomic word. Typed reads over 8 KiB stream
-  events into the builder. Root flow collections reserve their entry count before their items
-  are built, so a wide flow collection avoids a final vector copy.
+  text as a source slice, and cache hashes in one atomic word. Where a tree of the document is
+  built, a root flow collection reserves its entry count before its items are built, so a wide
+  flow collection avoids a final vector copy.
+- A reader of one document into a type, such as `from_str`, builds its value from the parser's
+  events when the input is more than 4 KiB, and keeps no tree of the document beside its tokens
+  and its value. It reads a scalar and drops it, reads a collection entry by entry, and builds a
+  tree only of what is read whole or again: a node with an anchor, a collection that keeps its
+  tag, a mapping key, and what an enum reads. The value and the error are those of a read that
+  builds the tree first, which a refused input is read a second time to report.
 - An untyped decode into a JSON tree through the compatibility reader, which is how issue #178
-  measures, peaks at 33.7 MB on a 1.1 MB service description and at 134.8 MB on a 4.4 MB one,
-  0.81 times the reference that the issue gives for each. A 20 KB configuration fixture decoded
-  into `Value` peaks at about 250 KB and allocates about 470 KB in total.
+  measures, now peaks at 0.52 to 0.96 times the reference that the issue gives for its nine
+  shapes: at 24.2 MB on a 1.1 MB service description, 96.9 MB on a 4.4 MB one, and 17.4 MB on a
+  megabyte block sequence of short words, which was the last shape over the issue's target. A
+  20 KB configuration fixture decoded into `Value` peaks at about 218 KB and allocates about
+  363 KB in total.
 - Mappings and typed mapping keys cache their structural hash, so a mapping nested inside a
   mapping key is hashed once per level instead of once for every outer level and entry.
 

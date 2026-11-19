@@ -13,7 +13,8 @@ cargo +nightly fuzz run borrowed --target x86_64-unknown-linux-gnu
 parses events, renders them, and reparses the rendered YAML; it also round-trips
 a composed `Value`. `borrowed` compares the borrowed typed path with the owned
 composition path, and the streamed borrowed path with the composed document list,
-including whether each accepts the input.
+including whether each accepts the input. It also reads each input into a type twice, from
+its events and from a tree of the document, which have to give the same value or error.
 
 Fuzzing is intentionally not part of the default workspace test gate because it
 requires nightly sanitizer support. Run it with an appropriate time budget and

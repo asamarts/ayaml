@@ -21,16 +21,11 @@ The diagnostics queue is empty.
 
 ## API and performance
 
-1. **#178.** Short-scalar peak heap. Measured as the issue measures it, eight of its nine shapes
-   are within 1.2 times its reference, at 0.61 to 1.06 times, and `tools/json-alloc-corpus.tsv`
-   budgets all nine (AY-113). The ninth, a megabyte block sequence of short words, is at 1.28
-   times. AY-104, composition without the intermediate typed node tree, is the planned work for
-   it.
+No open performance issues. #178, short-scalar peak heap: measured as the issue measures it,
+its nine shapes peak at 0.52 to 0.96 times its reference, within the 1.2 times it asks for, and
+`tools/json-alloc-corpus.tsv` budgets all nine (AY-113). AY-104 brought the last of them there,
+by reading a typed value from the parser's events without a tree of the document in between.
 
 ## Dependencies
 
-```text
-#178 (short-scalar peak heap)
-```
-
-The correctness queue is empty. The 0.2.0 release waits for #178 (D94); no other task does.
+No open issue waits for another. The correctness queue is empty.

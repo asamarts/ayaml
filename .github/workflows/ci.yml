@@ -42,6 +42,13 @@ jobs:
         run: cargo test --workspace --locked --all-features
       - name: Test with default features
         run: cargo test -p ayaml --locked
+      # A typed read builds a tree of a small input and reads a larger one from its events.
+      # This build reads every input from its events, so the tests of small inputs run there too.
+      - name: Test typed reads from events at every size
+        env:
+          RUSTFLAGS: --cfg ayaml_typed_from_events
+          CARGO_TARGET_DIR: target/typed-from-events
+        run: cargo test -p ayaml --locked --all-features
       - name: Adversarial tests in a release build
         run: cargo test -p ayaml --locked --release --all-features --test adversarial
       - name: Documentation
