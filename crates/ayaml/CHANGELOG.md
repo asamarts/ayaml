@@ -171,6 +171,13 @@ The breaking changes come first, each with what a caller has to change.
 - A top-level block scalar with indented empty lines now ends before a document marker, leaving
   an empty scalar and continuing the stream after the marker.
 
+### Security
+
+- An alias to a number is charged for the number's text where a typed read keeps it. A typed
+  read into strings copies a number's spelling at every alias to it, and the alias budget
+  counted one node for each, so a number spelled at great length was copied past the budget.
+  It affects 0.1.0 to 0.1.3, where a target reads aliased numbers as strings.
+
 ### Performance
 
 - Parsing holds and allocates less. Against 0.1.3, the workloads of the allocation gate
