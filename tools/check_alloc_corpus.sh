@@ -2,11 +2,12 @@
 # Check every allocation budget: the value path's, the typed path's, and those of an untyped
 # decode into a JSON tree.
 #
-# usage: tools/check_alloc_corpus.sh [MANIFEST]
+# usage: tools/check_alloc_corpus.sh [MANIFEST [TYPED [JSON]]]
 #
-# MANIFEST is the value path's budgets, tools/alloc-corpus.tsv unless given. The typed path's are
-# in tools/typed-alloc-corpus.tsv, and those of an untyped decode into a JSON tree in
-# tools/json-alloc-corpus.tsv. Each of the three files has to hold a budget.
+# MANIFEST is the value path's budgets, tools/alloc-corpus.tsv unless given. TYPED is the typed
+# path's, tools/typed-alloc-corpus.tsv, and JSON those of an untyped decode into a JSON tree,
+# tools/json-alloc-corpus.tsv. Each of the three files has to hold a budget. CI gives no
+# argument; the gate's own tests give all three.
 #
 # The counts come from a counting allocator, so they don't depend on host load. A
 # failure means a code change allocates more than its budget: either fix that, or
@@ -15,6 +16,8 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 manifest="${1:-tools/alloc-corpus.tsv}"
+typed_manifest="${2:-tools/typed-alloc-corpus.tsv}"
+json_manifest="${3:-tools/json-alloc-corpus.tsv}"
 
 checked=0
 
@@ -63,6 +66,6 @@ check_json_file() {
 }
 
 check_file "$manifest" value
-check_file tools/typed-alloc-corpus.tsv typed
-check_json_file tools/json-alloc-corpus.tsv
+check_file "$typed_manifest" typed
+check_json_file "$json_manifest"
 echo "checked $checked allocation budgets"

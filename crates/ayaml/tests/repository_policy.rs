@@ -200,23 +200,27 @@ fn allocation_budgets_cover_the_json_decode() {
     );
 }
 
-/// The gate checks each of its three budget files, with no condition that could pass one over,
-/// and CI runs the gate. A call that is commented out, or that stands inside an `if`, is not a
-/// line of its own.
+/// The gate checks each of its three budget files, and CI runs the gate with no argument and
+/// under no condition. What the gate does with the files is tested by running it, in the
+/// `AllocationGate` tests of `tools/test_ci_checks.py`; this pins what those can't see, the
+/// files it reads by default and the step that runs it.
 #[test]
 fn the_allocation_gate_checks_every_budget_file() {
     let Some(root) = repository_root() else {
         return;
     };
     let script = read(&root, "tools/check_alloc_corpus.sh");
-    for call in [
+    for line in [
+        "manifest=\"${1:-tools/alloc-corpus.tsv}\"",
+        "typed_manifest=\"${2:-tools/typed-alloc-corpus.tsv}\"",
+        "json_manifest=\"${3:-tools/json-alloc-corpus.tsv}\"",
         "check_file \"$manifest\" value",
-        "check_file tools/typed-alloc-corpus.tsv typed",
-        "check_json_file tools/json-alloc-corpus.tsv",
+        "check_file \"$typed_manifest\" typed",
+        "check_json_file \"$json_manifest\"",
     ] {
         assert!(
-            script.lines().any(|line| line == call),
-            "the gate has to run `{call}` on a line of its own"
+            script.lines().any(|found| found == line),
+            "the gate has to hold `{line}` on a line of its own"
         );
     }
     let typed = read(&root, "tools/typed-alloc-corpus.tsv");
@@ -226,12 +230,30 @@ fn the_allocation_gate_checks_every_budget_file() {
             .any(|line| !line.is_empty() && !line.starts_with('#')),
         "the typed path has no budget"
     );
-    let workflow = read(&root, ".github/workflows/ci.yml");
-    assert!(
-        workflow
-            .lines()
-            .any(|line| line.trim() == "run: tools/check_alloc_corpus.sh"),
-        "CI has to run the allocation gate"
+    let workflow = parse_value(&read(&root, ".github/workflows/ci.yml")).expect("ci.yml parses");
+    let jobs = workflow["jobs"].as_mapping().expect("the workflow's jobs");
+    let mut found = 0;
+    for (name, job) in jobs {
+        let steps = job["steps"].as_sequence().expect("a job's steps");
+        for step in steps {
+            if step["run"].as_str().map(str::trim) != Some("tools/check_alloc_corpus.sh") {
+                continue;
+            }
+            found += 1;
+            for owner in [step, job] {
+                let owner = owner.as_mapping().expect("a mapping");
+                for key in ["if", "continue-on-error"] {
+                    assert!(
+                        !owner.contains_key(key),
+                        "{name:?}: the allocation gate runs under `{key}`"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        found, 1,
+        "CI has to run the allocation gate, once and with no argument"
     );
 }
 
