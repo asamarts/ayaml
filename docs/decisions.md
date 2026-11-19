@@ -555,7 +555,8 @@ spans no longer store it. `LineIndex`, `Position`, `PositionError`, and `ColumnE
 columns can count UTF-8 bytes, Unicode scalar values, or UTF-16 code units. Conversions between
 an offset and a position reject out-of-bounds offsets and offsets inside a UTF-8 character
 instead of clamping them; `LineIndex::line_start` alone takes any index, and gives the last
-line's start for one past the end. A leading
+line's start for one past the end. `ColumnEncoding` and `PositionError` are non-exhaustive, so
+either can gain a variant without a break. A leading
 byte-order mark is included in byte offsets and excluded from columns. `Error::location()` still
 returns a one-based `Position`, filled from the reader's line index when the error reaches a
 boundary.

@@ -945,3 +945,17 @@ fn a_root_flow_collection_tells_its_visitor_how_many_entries_it_has() {
     let numbers: Vec<u8> = ayaml::from_str(&long).expect("a long sequence");
     assert_eq!((numbers.len(), numbers.capacity()), (2_000, 2_000));
 }
+
+/// A build with `--cfg ayaml_typed_from_events` reads a small input from its events too, which
+/// is how CI runs the whole suite on that reader. A block sequence tells its visitor its size
+/// only where it is read from a tree, so what it tells shows which reader read it.
+#[test]
+fn the_build_that_reads_every_input_from_its_events_does() {
+    let hinted: Hinted = ayaml::from_str("- 1\n- 2\n- 3\n").expect("a sequence");
+    assert_eq!(hinted.entries, 3);
+    assert_eq!(
+        hinted.before.is_none(),
+        cfg!(ayaml_typed_from_events),
+        "{hinted:?}"
+    );
+}

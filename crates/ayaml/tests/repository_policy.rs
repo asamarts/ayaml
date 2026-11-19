@@ -377,3 +377,82 @@ fn every_place_that_repeats_the_version_agrees_with_the_workspace() {
         );
     }
 }
+
+/// Every Rust source file under `directory`.
+fn sources(directory: &Path, found: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(directory).expect("a source directory") {
+        let path = entry.expect("a directory entry").path();
+        if path.is_dir() {
+            sources(&path, found);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            found.push(path);
+        }
+    }
+}
+
+/// No type of the map behind `Mapping` is part of the crate's API, so that crate's major version
+/// is none of this one's business: no public item, associated type, or trait implementation
+/// names it. The crate's own fields and private code may.
+#[test]
+fn the_api_names_no_type_of_the_map_behind_a_mapping() {
+    let mut files = Vec::new();
+    sources(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    assert!(files.len() > 20, "{} source files", files.len());
+    for file in files {
+        let text = std::fs::read_to_string(&file).expect("a source file");
+        for (number, line) in text.lines().enumerate() {
+            let code = line.trim_start();
+            let public = code.starts_with("pub ")
+                || code.starts_with("type ")
+                || code.starts_with("impl ")
+                || code.starts_with("impl<");
+            assert!(
+                !(public && (code.contains("indexmap") || code.contains("IndexMap"))),
+                "{}:{}: {code}",
+                file.display(),
+                number + 1
+            );
+        }
+    }
+}
+
+/// CI runs the whole suite once more with every typed read made from events, in a build that
+/// the flag below makes, under no condition. Without that step the tests of small inputs would
+/// run on the tree reader alone.
+#[test]
+fn ci_runs_the_suite_with_every_typed_read_from_events() {
+    let Some(root) = repository_root() else {
+        return;
+    };
+    let workflow = parse_value(&read(&root, ".github/workflows/ci.yml")).expect("ci.yml parses");
+    let jobs = workflow["jobs"].as_mapping().expect("the workflow's jobs");
+    let mut found = 0;
+    for (name, job) in jobs {
+        for step in job["steps"].as_sequence().expect("a job's steps") {
+            if step["env"]["RUSTFLAGS"].as_str() != Some("--cfg ayaml_typed_from_events") {
+                continue;
+            }
+            found += 1;
+            assert_eq!(
+                step["run"].as_str().map(str::trim),
+                Some("cargo test -p ayaml --locked --all-features"),
+                "{name:?}"
+            );
+            for owner in [step, job] {
+                let owner = owner.as_mapping().expect("a mapping");
+                assert!(
+                    !owner.contains_key("if"),
+                    "{name:?}: the step runs under a condition"
+                );
+                assert!(!owner.contains_key("continue-on-error"), "{name:?}");
+            }
+        }
+    }
+    assert!(
+        found >= 1,
+        "no step tests typed reads from events at every size"
+    );
+}

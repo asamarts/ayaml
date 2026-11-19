@@ -28,6 +28,15 @@ The breaking changes come first, each with what a caller has to change.
   `compat::parse_events_eager_with_limits`, or collects the stream. The stream reports a
   problem when its events come to it, so an input with two problems can report the one that
   stands first where the vector reports a scanner's problem first, wherever it stands.
+- **Breaking: a mapping iterates through this crate's own types.** `Mapping`, `&Mapping`, and
+  `&mut Mapping` give `mapping::IntoIter`, `mapping::Iter`, and `mapping::IterMut`, where their
+  `IntoIterator` implementations named `indexmap`'s iterator types. The entries, their order,
+  and iteration from both ends with a known length are as they were, and the new types have
+  the standard traits of the old ones, `Clone` and `Default` among them. A caller that named
+  the old types names these, and one that called a method only the old types have, such as
+  `as_slice`, collects the entries or uses the standard iterator methods. `indexmap`'s version
+  is no longer part of this crate's API; the requirement is now 2.6, the first release whose
+  owning iterator is `Clone`.
 - The event size falls from 176 to 144 bytes, a span from 48 to 16, and an error from 112 to 104
   on 64-bit targets.
 - An error about a stream that holds no document is now placed at the end of the input, where
@@ -66,7 +75,8 @@ The breaking changes come first, each with what a caller has to change.
   A value that the source doesn't write has an empty span right after its key's `:`.
 - `LineIndex`, `Position`, `PositionError`, and `ColumnEncoding` give lines and columns for byte
   offsets, in UTF-8 bytes, Unicode scalar values, or UTF-16 code units. `Error::with_location`
-  sets an error's.
+  sets an error's. `ColumnEncoding` and `PositionError` are non-exhaustive, so a later release
+  can add a unit or a reason without a break.
 - `compat::parse_events` reads a lazy `EventStream`, and `compat::parse_events_eager_with_limits`
   the vector that `compat::parse_events_with_limits` returned (see Changed).
 - `Mapping::shrink_to_fit` gives back the room that a mapping's entries don't need.
