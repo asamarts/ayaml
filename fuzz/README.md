@@ -23,7 +23,7 @@ record any crash before changing behavior.
 `tools/check_alloc_corpus.sh`, which runs on stable and checks three sets of budgets:
 `tools/alloc-corpus.tsv` for the value path, `tools/typed-alloc-corpus.tsv` for typed decoding,
 and `tools/json-alloc-corpus.tsv` for an untyped decode into a JSON tree. The last is why this
-workspace depends on `serde_json`, which nothing that is published does:
+workspace depends on `serde_json`, which the published crate uses in its tests alone:
 
 ```sh
 tools/check_alloc_corpus.sh

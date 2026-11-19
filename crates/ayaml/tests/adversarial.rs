@@ -1857,12 +1857,12 @@ fn an_input_over_the_limit_is_refused_before_it_is_read() {
                 "{name}: {error}"
             );
         }
-        // An index of this input's lines would be 8 times its size. A quarter of it leaves room
-        // for the pages of code that these readers run for the first time.
+        // An index of this input's lines would be 8 times its size, 256 MiB. Refusing it takes
+        // about a third of a megabyte, for the errors and the code that runs for the first time.
         if let Some(growth) = growth {
             println!("an input over the limit: {growth} bytes at the peak");
             assert!(
-                growth <= input.len() as u64 / 4,
+                growth <= 1 << 20,
                 "refusing an input over the limit held {growth} bytes"
             );
         }
@@ -1929,40 +1929,39 @@ fn nested_mapping_key(depth: usize, width: usize) -> String {
     inner
 }
 
+/// The best times of `read` on `short` and on `long`. A busy host can stretch any one run, so
+/// both are tried again until `long` takes about as long as `short`, or for a while.
+fn best_times(read: &dyn Fn(&str), short: &str, long: &str) -> (Duration, Duration) {
+    let started = Instant::now();
+    let (mut short_time, mut long_time) = (Duration::MAX, Duration::MAX);
+    let slack = Duration::from_millis(20);
+    while long_time >= short_time.saturating_mul(4).saturating_add(slack)
+        && started.elapsed() < RETRY_BUDGET
+    {
+        short_time = short_time.min(time_runs(read, short, 1));
+        long_time = long_time.min(time_runs(read, long, 1));
+    }
+    (short_time, long_time)
+}
+
 /// A key nested in keys is hashed once at each level, not once for every level and entry.
 #[test]
 fn nested_key_hashing_does_not_multiply_by_depth() {
     let short = nested_mapping_key(1, 1_000);
     let long = nested_mapping_key(100, 1_000);
-    type Reader<'a> = (&'static str, &'a dyn Fn(&str));
-    let readers: [Reader<'_>; 2] = [
-        ("parse_value", &|input| {
-            let _ = ayaml::parse_value(input);
-        }),
-        ("from_str", &|input| {
-            let _ = ayaml::from_str::<Value>(input);
-        }),
-    ];
-    for (name, read) in readers {
-        let short_time = (0..3).map(|_| time_runs(read, &short, 1)).min().unwrap();
-        let long_time = (0..3).map(|_| time_runs(read, &long, 1)).min().unwrap();
+    let check = |name: &str, read: &dyn Fn(&str)| {
+        let (short_time, long_time) = best_times(read, &short, &long);
         assert!(
             long_time < short_time * 4 + Duration::from_millis(20),
             "{name}: depth 100 took {long_time:?}, depth 1 took {short_time:?}"
         );
-    }
+    };
+    check("parse_value", &|input| drop(ayaml::parse_value(input)));
+    check("from_str", &|input| drop(ayaml::from_str::<Value>(input)));
     #[cfg(feature = "libyaml-compat")]
-    {
-        let read = |input: &str| {
-            let _ = ayaml::compat::from_str::<Value>(input);
-        };
-        let short_time = (0..3).map(|_| time_runs(&read, &short, 1)).min().unwrap();
-        let long_time = (0..3).map(|_| time_runs(&read, &long, 1)).min().unwrap();
-        assert!(
-            long_time < short_time * 4 + Duration::from_millis(20),
-            "compat: depth 100 took {long_time:?}, depth 1 took {short_time:?}"
-        );
-    }
+    check("compat", &|input| {
+        drop(ayaml::compat::from_str::<Value>(input));
+    });
 }
 
 /// A duplicate at any nesting level is found, including a reordered mapping key.

@@ -492,7 +492,8 @@ empty source value still supplies an empty collection or a struct's defaults to 
 readers. A string target under `from_value` reads only a string or tagged string, not a number,
 boolean, null, or collection. A bare enum variant is named only by a string scalar or a tag; a
 null, boolean, or number scalar names no variant, even when a variant is renamed to its spelling,
-and a bare variant name does not fill a data-carrying variant. A mapping names a variant only
+and a bare variant name holds nothing: it fills no variant that holds a sequence, a mapping, a
+struct, or a scalar. A mapping names a variant only
 through its one string key. Readers store a tag in a canonical full-name split, so `handle()` and
 `suffix()` do not depend on which reader produced the tag.
 
@@ -645,8 +646,12 @@ mapping entry or a block sequence item has one when all of this holds:
   and the key has text;
 - nothing follows the entry on its last line but a comment, and its end is known: an entry that
   ends in a value the source doesn't write after a `:` on its key's line ends at that `:`, and
-  one that ends in any other scalar with no text has no known end;
+  one that ends in any other scalar with no text has no known end. A key that is a block scalar
+  ends with its last line, so a `:` on the line after it is not on its line;
 - no line that begins with `:` follows it, which would give its value to a key before the entry;
+- the input holds no byte-order mark past its first character, since what such a mark means
+  depends on the lines before it: the compatibility reader counts one toward its line's
+  indentation unless it opens the input;
 - it defines no anchor and stands inside no collection that has one, since an alias reads what
   it names;
 - it is not the only entry of its collection, which would then be no collection;
@@ -656,7 +661,13 @@ mapping entry or a block sequence item has one when all of this holds:
 The span runs from the start of the entry's first line through its last line break, so it takes
 a nested value, a block scalar, and a trailing comment, and leaves a byte-order mark. Every other
 entry returns `None`, a flow entry among them. A value that the source doesn't write after its
-key's `:`, on the key's line, has an empty span right after that `:`.
+key's `:`, on the key's line, has an empty span right after that `:`; whether the next line could
+hold it is judged from the mapping's column, not the key's, which a tag before the key moves.
+
+The span answers for what the document reads as. A limit that a document keeps within only by
+its length, as the alias allowance grows with the input, can be passed once the document is
+shorter, and merge keys that are applied afterwards can bring back a merged entry that the
+removed one overrode.
 
 **Alternatives.** Give a span for single-line block entries only: the least code, but a nested
 entry could not be removed through the API. Give flow entries a span that takes one neighboring
@@ -690,14 +701,14 @@ counted by the bytes it adds. The counter in the fuzz workspace generates the ni
 decodes them that way, and `tools/json-alloc-corpus.tsv` holds a peak, an allocation count, and a
 total for each. The fuzz workspace takes `serde_json` for the tree, at the version the tests use.
 A budget is about 1.10 times the measured value, and a shape that is over the issue's target has
-its measured value for a budget.
+a budget about 1% over its measured value, so that it may not grow.
 
 **Alternatives.** Decode into a JSON-like tree written in the counter: no dependency, but its
 sizes would be close to the issue's and not equal, so a regression near the target could be
 misjudged. Budget nothing here and leave the measure to whoever filed the issue: a regression is
 then found after it merges.
 
-**Why.** The gate's typed row decoded into ayaml's own `Value`, a larger tree than the issue's.
+**Why.** The gate's typed row decoded into ayaml's own `Value`, another tree than the issue's.
 Figures from that row were set beside the issue's reference in the plan and in the issue's thread,
 and they overstated the gap: by the issue's measure eight of the nine shapes were within its
 target while the plan still called for a three-day rewrite to reach it. A figure can only be

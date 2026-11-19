@@ -12,8 +12,8 @@ AY-087 — #133, #137, #140; AY-088 — #138; AY-089 — #139; AY-090 — #141;
 AY-083 — #124; AY-082 — #123; AY-045; AY-091 — #165; AY-092 — #160, #161, #162;
 AY-093 — #164; AY-070; AY-057; AY-084 — #125; AY-049 — #128; AY-096 — #163;
 AY-098, AY-100, AY-101, AY-102, and AY-103 (part of #127 and #178); AY-085 — #126;
-Issue #127 closed by the streaming and compact-token work. AY-105 through AY-112 fixed what
-that work let slip, and its audit.
+Issue #127 closed by the streaming and compact-token work. AY-105 through AY-113 fixed what
+audits found after it.
 
 ## Diagnostics
 
@@ -33,4 +33,4 @@ The diagnostics queue is empty.
 #178 (short-scalar peak heap)
 ```
 
-The correctness queue is empty. #178 is independent of the remaining plan work.
+The correctness queue is empty. The 0.2.0 release waits for #178 (D94); no other task does.

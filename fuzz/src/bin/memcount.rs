@@ -1,8 +1,10 @@
-//! Allocation budgets for the value path.
+//! Allocation budgets for the value path, the typed path, and an untyped decode into a JSON
+//! tree.
 //!
 //! This counts live and peak allocated bytes and the allocation count while
 //! parsing, emitting, and serializing one input, and fails when a count passes a
-//! budget given on the command line. It lives here, outside the parser crate's
+//! budget given on the command line. With `AYAML_TYPED` set, the parse is a typed decode into
+//! `Value`. It lives here, outside the parser crate's
 //! `forbid(unsafe_code)` graph, because a counting allocator needs `unsafe`.
 //!
 //! Usage: `memcount PATH|@NAME [PARSE_PEAK EMIT_PEAK PARSE_ALLOCS EMIT_ALLOCS

@@ -13,7 +13,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `LineIndex`, `Position`, and `ColumnEncoding` to obtain UTF-8, scalar, or UTF-16 columns.
   `Error::location()` still returns a one-based line and column, and a manually built error can
   attach one with `Error::with_location`. The event size falls from 176 to 144 bytes, a span from
-  48 to 16, and an error from 112 to 104 on 64-bit targets.
+  48 to 16, and an error from 112 to 104 on 64-bit targets. An error about a stream that holds no
+  document is now placed at the end of the input, where its value would stand; 0.1.3 gave it
+  that byte offset with line 1, column 1.
 - A reader of one document into a type, such as `from_str`, now reports the first problem in the
   document at every input size, as `parse_value` does: any that the scanner finds, and then the
   first that parsing or building meets. With a duplicate key and a later flow collection that
@@ -72,20 +74,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Performance
 
-- The token arena doubles after its first chunk, and short-line inputs get a wider first chunk;
-  the allocation gate now budgets total bytes per read as well as peak bytes and allocation
-  counts. Large-scalar parsing allocates about 53% fewer bytes in total, the generated short map
-  about 38% fewer, and the short explicit-pair workload about 31% fewer. Peak heap falls about
-  13% on the short-sequence workload and 19% on short explicit pairs, and the affected budgets
-  are tightened. Typed reads over 8 KiB stream events into the builder, and the token arena
-  estimates its size from the scanned prefix. Scalar tokens keep their raw text as a span and
-  box only the values that need decoding; typed nodes box tags, keep scalar text as a source
-  slice, and cache hashes in one atomic word. Root flow collections reserve their entry count
-  before their items are built, so a wide flow collection avoids a final vector copy. The 1 MB
-  nested document peaks at about 29.7 MB; the 11 MB one peaks at about 297 MB and allocates
-  about 420 MB in total, against the 376 MB peak and roughly 673 MB total of the libyaml
-  reference. A 20 KB configuration fixture peaks at about 250 KB and allocates about 470 KB in
-  total.
+- Parsing holds and allocates less. Against 0.1.3, the workloads of the allocation gate
+  allocate 25% to 73% fewer bytes in total while they parse: 32% fewer for a large scalar, 68%
+  fewer for the generated short map, and 73% fewer for short explicit pairs. Their peak heap
+  falls by up to 68%: by 34% on the short sequence, 35% on short explicit pairs, and 32% on the
+  short map, while a large scalar's stays at its size. The gate now budgets total bytes per
+  read as well as peak bytes and allocation counts, at the new measurements.
+- What lowers them: the token arena is sized from the density of the input scanned so far,
+  where it doubled, and short-line inputs get a wider first chunk. Scalar tokens keep their raw
+  text as a span and box only the values that need decoding; typed nodes box tags, keep scalar
+  text as a source slice, and cache hashes in one atomic word. Typed reads over 8 KiB stream
+  events into the builder. Root flow collections reserve their entry count before their items
+  are built, so a wide flow collection avoids a final vector copy.
+- An untyped decode into a JSON tree through the compatibility reader, which is how issue #178
+  measures, peaks at 33.7 MB on a 1.1 MB service description and at 134.8 MB on a 4.4 MB one,
+  0.81 times the reference that the issue gives for each. A 20 KB configuration fixture decoded
+  into `Value` peaks at about 250 KB and allocates about 470 KB in total.
 - Mappings and typed mapping keys cache their structural hash, so a mapping nested inside a
   mapping key is hashed once per level instead of once for every outer level and entry.
 
