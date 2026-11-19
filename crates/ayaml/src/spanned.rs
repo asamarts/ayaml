@@ -353,6 +353,9 @@ enum FrameKind<'a> {
         /// when the key began. Boxed, so a sequence's frame isn't as large.
         key: Option<Box<(SpannedNode<'a>, bool)>>,
         seen: HashMap<Value, usize>,
+        /// A key here has no value of its own to compare: an alias, or a collection that holds
+        /// one. It may be any other key of the mapping again, so a lookup would have to guess.
+        guess: bool,
     },
 }
 
@@ -463,6 +466,7 @@ impl<'a> Builder<'a> {
                         entries: Vec::new(),
                         key: None,
                         seen: HashMap::new(),
+                        guess: false,
                     },
                 });
             }
@@ -470,7 +474,7 @@ impl<'a> Builder<'a> {
                 let Some(frame) = self.stack.pop() else {
                     return Err(Error::new(ErrorKind::Parser, "unexpected mapping end"));
                 };
-                let FrameKind::Mapping { entries, .. } = frame.kind else {
+                let FrameKind::Mapping { entries, guess, .. } = frame.kind else {
                     return Err(Error::new(ErrorKind::Parser, "mapping end for a sequence"));
                 };
                 let flow = frame.style == crate::event::CollectionStyle::Flow;
@@ -478,16 +482,22 @@ impl<'a> Builder<'a> {
                 if let [only] = entries.as_mut_slice() {
                     only.value.entry_span = None;
                 }
+                if guess {
+                    for entry in &mut entries {
+                        entry.ambiguous = true;
+                        entry.value.entry_span = None;
+                    }
+                }
                 // A pair in a flow sequence, as in `[a: b]`, is a mapping with no braces. Its
-                // end event stands at the token after it, past blanks and a comment, so the
-                // mapping ends where its value does.
+                // end event stands at the token after it, past blanks and a comment, where a
+                // mapping with braces has its `}`. The pair ends where what it writes does.
                 let braced = self
                     .input
-                    .get(frame.open.start()..)
-                    .is_some_and(|text| text.starts_with('{'));
+                    .get(span.start()..)
+                    .is_some_and(|text| text.starts_with('}'));
                 let end = match entries.last() {
                     Some(last) if flow && !braced => {
-                        last.value.content_end.unwrap_or_else(|| span.end())
+                        pair_end(self.input, frame.open.start(), last, span.start())
                     }
                     _ => span.end(),
                 };
@@ -518,7 +528,8 @@ impl<'a> Builder<'a> {
     fn add(&mut self, mut node: SpannedNode<'a>, after_block_scalar: bool) {
         // An alias to a collection reads the entries inside it, so removing one of them changes
         // what the alias stands for.
-        let aliased = self.marked || self.stack.iter().any(|frame| frame.anchored);
+        let marked = self.marked;
+        let aliased = marked || self.stack.iter().any(|frame| frame.anchored);
         let Some(frame) = self.stack.last_mut() else {
             self.root = Some(node);
             return;
@@ -536,7 +547,12 @@ impl<'a> Builder<'a> {
                 );
                 items.push(node);
             }
-            FrameKind::Mapping { entries, key, seen } => {
+            FrameKind::Mapping {
+                entries,
+                key,
+                seen,
+                guess,
+            } => {
                 let Some(waiting) = key.take() else {
                     node.entry_span = None;
                     *key = Some(Box::new((node, after_block_scalar)));
@@ -544,7 +560,10 @@ impl<'a> Builder<'a> {
                 };
                 let (mut key_node, after_block_scalar) = *waiting;
                 key_node.entry_span = None;
+                // In an input with a byte-order mark past its start, what a line's indentation
+                // is depends on the reader, so the value stays where the parser places it.
                 if node.is_missing_value()
+                    && !marked
                     && let Some(key_end) = key_node.content_end
                     && let Some(at) =
                         missing_value_place(self.input, frame.open.start(), key_end, frame.style)
@@ -566,6 +585,7 @@ impl<'a> Builder<'a> {
                     after_block_scalar,
                 );
                 let key_value = key_node.resolved_value();
+                *guess |= key_value.is_none();
                 let mut ambiguous = is_merge_key(&key_node);
                 if let Some(value) = &key_value
                     && let Some(previous) = seen.get(value)
@@ -605,6 +625,35 @@ impl SpannedNode<'_> {
                 } if raw.is_empty()
             )
     }
+}
+
+/// Where a pair with no braces ends, which starts at `start` and has the token after it at
+/// `next`: with its value, where the source writes one. Where it doesn't, the pair ends with the
+/// last thing written before `next`: its key, a `?` or `:`, a tag, or an anchor. Blanks, line
+/// breaks, and comments after that are not the pair's.
+fn pair_end(input: &str, start: usize, entry: &Entry<'_>, next: usize) -> usize {
+    if let Some(end) = entry.value.content_end {
+        return end;
+    }
+    let from = entry.key.content_end.unwrap_or(start).min(next);
+    let bytes = input.as_bytes();
+    let blank = |at: usize| matches!(bytes.get(at), Some(b' ' | b'\t' | b'\n' | b'\r'));
+    let (mut end, mut at) = (from, from);
+    while at < next {
+        if blank(at) {
+            at += 1;
+        } else if bytes[at] == b'#' && at > from && blank(at - 1) {
+            while at < next && !matches!(bytes[at], b'\n' | b'\r') {
+                at += 1;
+            }
+        } else {
+            while at < next && !blank(at) {
+                at += 1;
+            }
+            end = at;
+        }
+    }
+    end
 }
 
 fn is_merge_key(node: &SpannedNode<'_>) -> bool {

@@ -1260,6 +1260,17 @@ fn events_on_demand_are_the_events_that_are_collected() {
         documents.push(format!("%YAML 1.2\n{directives}--- a\n"));
         documents.push(format!("{directives}%YAML 1.2\n%YAML 1.2\n--- a\n"));
     }
+    // Runs of entries long enough that the grammar stops in the middle of one for its reader,
+    // and goes on from the line where it stopped.
+    documents.extend([
+        "- a\n".repeat(200),
+        "? a\n: b\n".repeat(200),
+        "? a\n".repeat(200),
+        "k: v\n".repeat(200),
+        format!("top:\n{}", "  ? a\n  : b\n".repeat(200)),
+        format!("top:\n{}", "  - a\n".repeat(200)),
+        format!("- x\n{}- y\n", "- ? a\n  : b\n  ? c\n  : d\n".repeat(60)),
+    ]);
     documents.extend((0..3_000).map(|_| generated(&mut state)));
     let limits = [Limits::default(), Limits::default().with_max_events(12)];
     let (mut read, mut refused) = (0, 0);

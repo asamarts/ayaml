@@ -599,9 +599,15 @@ impl<'de> Stream<'de> {
 
     /// How many entries the collection that was opened as number `level` has left, where that is
     /// known before they are read: for a root flow collection, whose entries the parser counts.
-    /// Any other collection's are known only at its end.
+    /// Any other collection's are known only at its end, where none are left.
     fn left(&self, level: usize) -> Option<usize> {
-        if level != 0 || self.open.len() != 1 || self.fault.is_some() {
+        if self.fault.is_some() {
+            return None;
+        }
+        if self.open.len() <= level {
+            return Some(0);
+        }
+        if level != 0 || self.open.len() != 1 {
             return None;
         }
         let (Open::Sequence { read } | Open::Mapping { read, .. }) = self.open.first()?;
