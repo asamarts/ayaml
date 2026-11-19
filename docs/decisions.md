@@ -554,12 +554,12 @@ document can still be refused for those reasons.
 spans no longer store it. `LineIndex`, `Position`, `PositionError`, and `ColumnEncoding` are public;
 columns can count UTF-8 bytes, Unicode scalar values, or UTF-16 code units. Conversions between
 an offset and a position reject out-of-bounds offsets and offsets inside a UTF-8 character
-instead of clamping them; `LineIndex::line_start` alone takes any index, and gives the last
-line's start for one past the end. `ColumnEncoding` and `PositionError` are non-exhaustive, so
+instead of clamping them. `ColumnEncoding` and `PositionError` are non-exhaustive, so
 either can gain a variant without a break. A leading
 byte-order mark is included in byte offsets and excluded from columns. `Error::location()` still
-returns a one-based `Position`, filled from the reader's line index when the error reaches a
-boundary.
+returns a one-based location, filled from the reader's line index when the error reaches a
+boundary. D96 later gave the public index the format contract's names and its zero-based
+positions, before any release had the index.
 
 **Alternatives.** Keep eager markers in every span: that is 48 bytes per span and a line/column
 calculation on the scanner's hot path. Derive locations only when formatting an error: an error
@@ -802,3 +802,105 @@ that builds the tree, which the instruction gate accepts for its three such work
 reads small inputs and anchored nodes, and it words every error. The tests read documents both
 ways and compare, the `borrowed` fuzz target does the same, and a build with
 `--cfg ayaml_typed_from_events` runs the whole suite on events at every size.
+
+## D96 — The positions layer is the format contract's, by its names, its rules, and its vectors
+
+**Date:** 2026-11-19
+**Status:** Accepted
+
+**Decision.** `LineIndex`, `Position`, `PositionError`, and `ColumnEncoding` follow the format
+contract that ayaml shares with adotenv. `LineIndex::new(input)` borrows the input.
+`to_position(offset, encoding)` returns a zero-based `Position`, `to_offset(position, encoding)`
+converts back, and `line_count` counts the lines. `PositionError` has four reasons, with the names
+that the vectors and adotenv give them: `OutOfBounds`, `InvalidUtf8Boundary`, `SplitSurrogate`, and
+`InsideCrLf`. `Location` is its own type again, one-based, for display: it is what
+`Error::location()` returns, and `Location::from(position)` gives it for a position. The contract's
+vectors are vendored under `tests/vectors/`, a test runs the index against every position case, and
+CI fails when a vendored file no longer has the digest recorded for it.
+
+Three answers changed to the vectors'. A UTF-8 byte column needs no character boundary, so an
+offset inside a multi-byte character has one. An offset between a CR and its LF is an error. And an
+offset inside a byte-order mark that the columns leave out shares the first visible column, the one
+case where `to_position` gives a position for an offset that isn't its own.
+
+The index has the contract's default form only: one byte-order mark that opens the input is in the
+offsets and out of the columns, as in an editor. Every other mark is a character of its line and a
+column, a second mark at the start and a mark that begins a later line among them. The vectors also
+give the byte-relative form of the three sources that open with a mark, which an index may offer
+and this one doesn't.
+
+**Alternatives.** Keep D89's shape, `position(input, offset, encoding)` returning a one-based
+position, and list the differences as stated exceptions: no work now, but the contract's names
+would mean other numbers here, and conforming later would take another breaking release for
+everyone who had adopted the index. Match the names and keep one-based positions: the same call
+would then return different numbers in the two crates, which is worse than a different name. Offer
+both forms of a leading mark, as adotenv does with `without_bom`: nine more vector answers would
+run, for a form that the contract calls the old default and that no ayaml reader uses. Leave out of
+the columns every mark that the default readers leave out, a run at the start and a mark that
+begins a later line, so that an error's location is always the index's position: the first version
+of this change did, and on such lines it gave other columns than adotenv's index and than an
+editor, which the 30 vectors don't reach and a comparison with adotenv's own code on 200,000 texts
+did.
+
+**Why.** The index was new and unreleased, so its names and numbers could still change at no cost
+to anyone. The contract checks conformance by data and not by a shared type, so the vectors decide
+what an answer is, and where they are silent the contract's words and adotenv's answers do. A
+machine position counts from zero in every editor protocol the index is for, and a person's from
+one, which is why the two are two types.
+
+**Consequences.** `LineIndex::position` and `LineIndex::line_start` are gone before any release had
+them. The readers keep an index of their own, which doesn't hold the input and remembers where it
+last looked, so their cost is unchanged. A conversion finds its line by binary search; a column in
+scalar values or UTF-16 code units then reads the line up to the offset, so it costs more on a long
+line, as adotenv's does. A reader's error stands where the index puts the start of its span,
+counted from one, on every line that begins with no mark. On a line that begins with one the
+readers count in their own ways: a default reader leaves out every mark that begins a line, and a
+compatibility reader the whole run that opens the input, of which it counts one where a document
+marker follows, as libyaml does. A test holds every reader to that rule on every short text.
+`Location::from` adds one to a line and a column and stops at the largest number, where a count
+can't go. `docs/interface.md` says what ayaml offers at each layer of the contract.
+
+## D97 — A writer refuses what no reader of the crate loads, from 0.2.0 on
+
+**Date:** 2026-11-19
+**Status:** Accepted
+
+**Decision.** The event writers refuse an alias that has no node with its anchor earlier in its
+document, a `%YAML` or `%TAG` directive that the scanner reads in neither of its modes, and a
+second `%YAML` directive or a second `%TAG` directive for one handle in a document. The value
+writers count an empty collection as a level of depth, and refuse a `!!int`, `!!float`, `!!bool`,
+or `!!null` tag on a scalar that the tag's rule doesn't take, such as `!!int` on the string `x`.
+Each returned success before and wrote text that every reader of the crate refuses. Nothing that a
+reader loads is newly refused. The change ships in 0.2.0 with the other changes that a caller can
+notice, and not in a patch release after it.
+
+**Alternatives.** Ship it in 0.2.x as a fix, which is what it is: 0.2.0 would have gone out sooner,
+but a patch release would then have turned successes into errors. Leave the writers permissive and
+document that they write what they are given: the crate would keep producing documents that its own
+readers refuse. Check an alias in the event readers too, so that reading and writing agree: an
+event stream is the document's syntax, where a dangling alias is well formed, and tools that only
+move events about would lose such documents. Refuse every core tag on a payload of another kind,
+such as `!!str` on a number or `!!seq` on a scalar: the first version of this change did, but a
+reader loads each of those, as the value that the tag makes of the text or with the tag dropped,
+and 0.1.3 wrote them, so that would have refused more than what no reader loads.
+
+**Why.** A caller should find out that its output can't be loaded when it writes it, not when
+someone reads it. What a directive may say is the scanner's rule: the writer has the scanner read
+the one directive line, so the two can't drift apart. It asks the default mode and then the
+compatibility mode, which takes a little more, such as a `%TAG` prefix that starts with a flow
+indicator: events that the compatibility reader gave are written back, as text that it reads. What
+a document may hold once is the parser's rule, which the writer counts for itself and the tests
+hold to the parser by reading back what is written. A reader resolves a scalar beneath one of the
+four tags by that tag's rule, in any style, so the writer asks that rule about the text it is about
+to write.
+
+**Consequences.** The event writers hold the names of the anchors of the document they are writing,
+at most `max_anchors` of them, so that an alias can be checked, and `to_writer_events_with_limits`
+lets a caller raise that limit as the other event writers do. Events that were read from a document
+with a dangling alias can't be written back; the event readers still read such a document. The
+event writers check what no reader loads and not what a stream means: an alias inside the node it
+names, a tag that doesn't suit its node, and a key that a mapping has twice are written as they are
+given. A tag is refused before the first line of its document, by the scan that finds the tags that
+need a directive, so a writer that is handed the output has none of that document. A tag that is
+written on a scalar that fits it still reads back as what the tag makes of the text: `!!int` on the
+string `1` reads back as the number, as it did.

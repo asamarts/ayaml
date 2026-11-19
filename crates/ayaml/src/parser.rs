@@ -13,9 +13,9 @@ use crate::composer::StreamingComposer;
 use crate::error::{Code, Error, ErrorKind};
 use crate::event::{Anchor, CollectionStyle, Event, ScalarStyle};
 use crate::limits::Limits;
-use crate::position::LineIndex;
+use crate::position::LineStarts;
 use crate::scanner::{Scanner, Token, TokenKind};
-use crate::span::{Position, Span};
+use crate::span::{Location, Span};
 use crate::tag::Tag;
 use crate::value::Value;
 
@@ -44,7 +44,7 @@ impl Line {
         start: usize,
         end: usize,
         input: &str,
-        positions: &LineIndex,
+        positions: &LineStarts,
     ) -> Self {
         let indent = tokens.get(start).map_or(0, |token| {
             let offset = token.span.start();
@@ -112,7 +112,7 @@ struct Lines<'a> {
     tokens: Vec<Token<'a>>,
     stream_start: Option<Span>,
     stream_end: Option<Span>,
-    positions: LineIndex,
+    positions: LineStarts,
     /// How many times the token arena was reallocated, which the tests bound.
     #[cfg(test)]
     growths: usize,
@@ -400,7 +400,7 @@ struct Parser<'a> {
     sink: EventSink<'a>,
     limits: Limits,
     input: &'a str,
-    positions: LineIndex,
+    positions: LineStarts,
     /// Word a malformed flow collection's error as libyaml does, and count positions as compat's
     /// scanner does.
     compat: bool,
@@ -429,7 +429,7 @@ pub(crate) struct EventCursor<'a> {
     scanner: Scanner<'a>,
     limits: Limits,
     input: &'a str,
-    positions: LineIndex,
+    positions: LineStarts,
     pending_line: Option<Vec<Token<'a>>>,
     queue: VecDeque<Event<'a>>,
     stream_started: bool,
@@ -975,7 +975,7 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    fn at(&self, offset: usize) -> Position {
+    fn at(&self, offset: usize) -> Location {
         self.positions
             .marker(self.input, offset)
             .unwrap_or_default()
@@ -1558,7 +1558,7 @@ const MAX_IMPLICIT_KEY_CHARS: usize = 1024;
 
 /// Whether an implicit key starting at `key` and ending before the `:` at
 /// `colon`, on the same line, is short enough.
-fn implicit_key_fits(key: Position, colon: Position) -> bool {
+fn implicit_key_fits(key: Location, colon: Location) -> bool {
     colon.column().saturating_sub(key.column()) <= MAX_IMPLICIT_KEY_CHARS
 }
 

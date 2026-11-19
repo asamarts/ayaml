@@ -64,7 +64,9 @@ takes limits is asked at that value, one above, and every value below. It covers
 `alias_bytes_per_input_byte`. The entry-count limit is checked at each place that counts
 entries: block and flow mappings, block and flow sequences, explicit keys, and the short-block
 fast paths. `max_output_bytes` applies to emitters rather than readers, and the same file checks
-it on every emitter that takes limits. A limit that cannot apply is stated as such: an event
+it on every emitter that takes limits. The event writers also hold to `max_anchors`, for the
+names of one document's anchors, and every writer to `max_depth`; no limit on what is read
+applies to a writer. A limit that cannot apply is stated as such: an event
 reader does not copy an alias's target, so the alias-budget limits are asked only of readers that
 build values.
 
@@ -119,7 +121,8 @@ is. An event reader sees the alias alone: `a: &x [[1]]` then `b: [*x]` is 3 deep
 where values are built.
 
 `max_anchors` counts every anchor in the stream, across its documents, although an alias sees only
-the anchors of its own document. So do `max_events`, `max_alias_dereferences`, and
+the anchors of its own document. The event writers count the names of one document's anchors
+against it, a name that is defined again once, since they hold those names to check each alias. So do `max_events`, `max_alias_dereferences`, and
 `max_tag_expansion_bytes`, and a reader of several documents charges all their aliases to one
 alias budget. `max_documents` and `max_collection_entries` count what their names say.
 

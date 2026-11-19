@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://asamarts.github.io/adotenv/schema/diff-report.v1.json",
+  "title": "adotenv diff report version 1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["version", "baseline", "files"],
+  "properties": {
+    "version": {"const": 1},
+    "baseline": {"type": "string"},
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["path", "ok", "differences"],
+        "properties": {
+          "path": {"type": "string"},
+          "ok": {"const": true},
+          "differences": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["key", "kind", "left", "right"],
+              "properties": {
+                "key": {"type": "string"},
+                "kind": {
+                  "enum": ["only-left", "only-right", "state", "value", "export"]
+                },
+                "left": {
+                  "type": ["object", "null"],
+                  "additionalProperties": true,
+                  "required": ["state", "value", "exported"],
+                  "properties": {
+                    "state": {"enum": ["bare", "empty", "value"]},
+                    "value": {"type": ["string", "null"]},
+                    "exported": {"type": "boolean"}
+                  }
+                },
+                "right": {
+                  "type": ["object", "null"],
+                  "additionalProperties": true,
+                  "required": ["state", "value", "exported"],
+                  "properties": {
+                    "state": {"enum": ["bare", "empty", "value"]},
+                    "value": {"type": ["string", "null"]},
+                    "exported": {"type": "boolean"}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

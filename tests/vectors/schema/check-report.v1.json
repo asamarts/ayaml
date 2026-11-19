@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://asamarts.github.io/adotenv/schema/check-report.v1.json",
+  "title": "adotenv check report version 1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["version", "files"],
+  "properties": {
+    "version": {"const": 1},
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["path", "ok", "diagnostics"],
+        "properties": {
+          "path": {"type": "string"},
+          "ok": {"type": "boolean"},
+          "error": {"type": "string"},
+          "diagnostics": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": [
+                "line",
+                "severity",
+                "code",
+                "message",
+                "span",
+                "secondary_span"
+              ],
+              "properties": {
+                "line": {"type": "integer", "minimum": 1},
+                "severity": {"enum": ["error", "warning", "info"]},
+                "code": {"type": "string"},
+                "message": {"type": "string"},
+                "span": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "required": ["start", "end"],
+                  "properties": {
+                    "start": {"type": "integer", "minimum": 0},
+                    "end": {"type": "integer", "minimum": 0}
+                  }
+                },
+                "secondary_span": {
+                  "type": ["object", "null"],
+                  "additionalProperties": true,
+                  "required": ["start", "end"],
+                  "properties": {
+                    "start": {"type": "integer", "minimum": 0},
+                    "end": {"type": "integer", "minimum": 0}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

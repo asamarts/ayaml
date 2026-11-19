@@ -1,15 +1,19 @@
-//! Byte-offset to line/column mapping for scanner positions.
+//! Byte-offset to line/column mapping: the readers' own index, and the public [`LineIndex`].
 //!
-//! The scanner builds one index per input. It understands LF, CR, CRLF, and a
+//! The scanner builds one [`LineStarts`] per input. It understands LF, CR, CRLF, and a
 //! UTF-8 BOM at the start of a line; in default mode the BOM takes up no column,
 //! while compatibility mode counts one on a later line. NEL (U+0085), LS
 //! (U+2028), and PS (U+2029) are content in YAML 1.2, not line breaks.
+//!
+//! [`LineIndex`] is the same mapping for a caller, in the names and rules that the format
+//! contract gives the positions layer: `to_position`, `to_offset`, and `line_count`, with
+//! zero-based positions.
 
 use std::cell::Cell;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::span::{Position, Span};
+use crate::span::{Location, Position, Span};
 
 /// The unit that a [`LineIndex`] column counts. A later release may add a unit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -23,30 +27,40 @@ pub enum ColumnEncoding {
     Utf16,
 }
 
-/// A byte offset that cannot be turned into a [`Position`].
+/// Why a byte offset or a position cannot be converted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PositionError {
-    /// The offset is past the end of the input.
+    /// The offset is past the end of the input, the line does not exist, or the column is past
+    /// the end of its line.
     OutOfBounds,
-    /// The offset is not on a UTF-8 character boundary.
-    NotCharBoundary,
+    /// The offset is inside a UTF-8 character. A column in Unicode scalar values or in UTF-16
+    /// code units can only describe an offset at a character boundary.
+    InvalidUtf8Boundary,
+    /// The UTF-16 column falls between the two code units of a surrogate pair, inside a
+    /// character such as an emoji.
+    SplitSurrogate,
+    /// The offset is between the CR and the LF of one CRLF line ending.
+    InsideCrLf,
 }
 
 impl fmt::Display for PositionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::OutOfBounds => "byte offset is past the end of the input",
-            Self::NotCharBoundary => "byte offset is not on a UTF-8 character boundary",
+            Self::OutOfBounds => "source position is out of bounds",
+            Self::InvalidUtf8Boundary => "byte offset is not on a UTF-8 character boundary",
+            Self::SplitSurrogate => "UTF-16 column splits a surrogate pair",
+            Self::InsideCrLf => "byte offset lies inside a CRLF line ending",
         })
     }
 }
 
 impl std::error::Error for PositionError {}
 
-/// A line-start index over a UTF-8 input.
+/// The readers' line-start index over a UTF-8 input. It doesn't hold the input, since a reader
+/// has it, and it remembers where it last looked, since a reader asks in order.
 #[derive(Clone, Debug)]
-pub struct LineIndex {
+pub(crate) struct LineStarts {
     starts: Arc<Vec<usize>>,
     content_start: usize,
     /// Whether a BOM at the start of a later line takes up no column, as one on the first line
@@ -160,10 +174,10 @@ fn scan_line_starts<const CHECK: bool>(
     Ok((starts, ascii))
 }
 
-impl LineIndex {
+impl LineStarts {
     /// Build an index for `input`.
     #[must_use]
-    pub fn new(input: &str) -> Self {
+    pub(crate) fn new(input: &str) -> Self {
         let mut quoted_only = Vec::new();
         let Ok((starts, ascii)) = scan_line_starts::<false>(input, &mut quoted_only) else {
             unreachable!("an unchecked scan cannot fail");
@@ -274,28 +288,22 @@ impl LineIndex {
         start
     }
 
-    /// Return the one-based line and column at `index`.
+    /// Return the one-based line and column at `index`, as a reader places an error.
     ///
     /// `encoding` selects whether a column counts UTF-8 bytes, Unicode scalar values, or UTF-16
     /// code units. A leading byte order mark is excluded from the column and included in the byte
-    /// offset. An offset outside the input or inside a UTF-8 character is an error rather than a
-    /// clamped position.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PositionError::OutOfBounds`] past the end of `input`, or
-    /// [`PositionError::NotCharBoundary`] inside a UTF-8 character.
-    pub fn position(
+    /// offset. An offset outside the input or inside a UTF-8 character is an error.
+    pub(crate) fn location(
         &self,
         input: &str,
         index: usize,
         encoding: ColumnEncoding,
-    ) -> Result<Position, PositionError> {
+    ) -> Result<Location, PositionError> {
         if index > self.len {
             return Err(PositionError::OutOfBounds);
         }
         if !self.ascii && !input.is_char_boundary(index) {
-            return Err(PositionError::NotCharBoundary);
+            return Err(PositionError::InvalidUtf8Boundary);
         }
         let mut line = self.last_line.get();
         if index < self.starts[line] {
@@ -309,7 +317,7 @@ impl LineIndex {
             }
         }
         self.last_line.set(line);
-        Ok(Position::new(
+        Ok(Location::new(
             line + 1,
             self.column(input, line, index, encoding),
         ))
@@ -317,8 +325,8 @@ impl LineIndex {
 
     /// Return the scalar position at `index`.
     #[must_use]
-    pub(crate) fn marker(&self, input: &str, index: usize) -> Option<Position> {
-        self.position(input, index, ColumnEncoding::Scalar).ok()
+    pub(crate) fn marker(&self, input: &str, index: usize) -> Option<Location> {
+        self.location(input, index, ColumnEncoding::Scalar).ok()
     }
 
     /// Return a byte span for `start..end`.
@@ -334,9 +342,9 @@ impl LineIndex {
     }
 
     /// Byte offset of the line containing `index`. An index past the end of the input is on the
-    /// last line: this one method doesn't check its argument against the input.
+    /// last line.
     #[must_use]
-    pub fn line_start(&self, index: usize) -> usize {
+    pub(crate) fn line_start(&self, index: usize) -> usize {
         match self.starts.binary_search(&index) {
             Ok(line) => self.starts[line],
             Err(next) => self.starts[next.saturating_sub(1)],
@@ -345,15 +353,265 @@ impl LineIndex {
 
     /// The number of lines, including a final empty line after a break.
     #[must_use]
-    pub fn line_count(&self) -> usize {
+    pub(crate) fn line_count(&self) -> usize {
         self.starts.len()
     }
 }
 
+/// A line index over one input, for converting between byte offsets and positions.
+///
+/// Lines end at LF, at CRLF, and at a CR alone. NEL (U+0085), LS (U+2028), and PS (U+2029) are
+/// content, as YAML 1.2 has them. A [`Position`] counts lines and columns from zero, and a
+/// column counts what the [`ColumnEncoding`] says: UTF-8 bytes, Unicode scalar values, or UTF-16
+/// code units. Byte offsets count every byte of the input, a leading byte-order mark included.
+///
+/// Columns leave out one byte-order mark that opens the input, as an editor does, and an offset
+/// inside that mark is at column 0 of the first line. Every other mark is a character of its
+/// line, and counts as one column: a second mark at the start, and one that begins a later
+/// line.
+///
+/// A reader places an error where the index puts the start of its span, counted from one:
+/// `e.location()` is
+/// `index.to_position(e.span()?.start(), ColumnEncoding::Scalar).map(Location::from)`. On a
+/// line that begins with a byte-order mark the columns can differ, since the readers count
+/// such marks in their own ways and the index as an editor does:
+///
+/// - a default reader leaves every mark that begins a line out of that line's columns, where
+///   the index leaves out only the one that opens the input;
+/// - a compatibility reader leaves out the whole run of marks that opens the input, and counts
+///   one of them where a document marker follows the run, as libyaml does. A mark that begins
+///   a later line is a column to it, as to the index.
+///
+/// Building the index reads the input once and keeps eight bytes a line. A conversion finds its
+/// line by binary search. A column in UTF-8 bytes is then a subtraction, and one in scalar
+/// values or in UTF-16 code units reads the line up to the offset, so its cost grows with the
+/// length of the line.
+///
+/// ```
+/// use ayaml::{ColumnEncoding, LineIndex, Location, Position};
+///
+/// let input = "a: 1\nname: \u{1f600}!\n";
+/// let index = LineIndex::new(input);
+/// let offset = input.find('!').unwrap();
+///
+/// assert_eq!(index.line_count(), 3);
+/// assert_eq!(index.to_position(offset, ColumnEncoding::Utf8)?, Position::new(1, 10));
+/// assert_eq!(index.to_position(offset, ColumnEncoding::Scalar)?, Position::new(1, 7));
+/// assert_eq!(index.to_position(offset, ColumnEncoding::Utf16)?, Position::new(1, 8));
+/// assert_eq!(index.to_offset(Position::new(1, 8), ColumnEncoding::Utf16)?, offset);
+/// // What a person reads counts from one.
+/// let shown = Location::from(index.to_position(offset, ColumnEncoding::Scalar)?);
+/// assert_eq!((shown.line(), shown.column()), (2, 8));
+/// # Ok::<(), ayaml::PositionError>(())
+/// ```
+#[derive(Clone, Debug)]
+pub struct LineIndex<'a> {
+    input: &'a str,
+    /// The offset at which each line starts. The first is 0.
+    starts: Vec<usize>,
+    /// Where the first line's columns start: after one mark that opens the input.
+    first_column: usize,
+}
+
+impl<'a> LineIndex<'a> {
+    /// Build an index over `input`, borrowing it.
+    #[must_use]
+    pub fn new(input: &'a str) -> Self {
+        let mut quoted_only = Vec::new();
+        let Ok((mut starts, _)) = scan_line_starts::<false>(input, &mut quoted_only) else {
+            unreachable!("an unchecked scan cannot fail");
+        };
+        // The scan reserves for the breaks it may meet, and a CRLF is two of them for one line.
+        starts.shrink_to_fit();
+        Self {
+            input,
+            starts,
+            first_column: if input.starts_with('\u{feff}') {
+                '\u{feff}'.len_utf8()
+            } else {
+                0
+            },
+        }
+    }
+
+    /// The number of lines, counting the empty line after a final line ending: `"a\n"` has
+    /// two, `"a"` has one, and `""` has one.
+    #[must_use]
+    pub fn line_count(&self) -> usize {
+        self.starts.len()
+    }
+
+    /// Where the columns of `line` start: at its first byte, or after the mark that opens the
+    /// input.
+    fn column_start(&self, line: usize) -> usize {
+        if line == 0 {
+            self.first_column
+        } else {
+            self.starts[line]
+        }
+    }
+
+    /// Where the content of `line` ends: at its line ending's first byte, or at the input's end.
+    fn line_end(&self, line: usize) -> usize {
+        let Some(&next) = self.starts.get(line + 1) else {
+            return self.input.len();
+        };
+        let bytes = self.input.as_bytes();
+        if next >= 2 && bytes[next - 1] == b'\n' && bytes[next - 2] == b'\r' {
+            next - 2
+        } else {
+            next - 1
+        }
+    }
+
+    /// Convert a byte offset to a zero-based line and column.
+    ///
+    /// With [`ColumnEncoding::Utf8`] every offset on a line has a column, one inside a
+    /// multi-byte character too. [`ColumnEncoding::Scalar`] and [`ColumnEncoding::Utf16`] need
+    /// the offset at a character boundary. The offset of a line ending's first byte is the
+    /// column after the line's last character, and the offset at the end of the input is a
+    /// position too.
+    ///
+    /// # Errors
+    ///
+    /// - [`PositionError::OutOfBounds`] past the end of the input.
+    /// - [`PositionError::InsideCrLf`] between the CR and the LF of one line ending.
+    /// - [`PositionError::InvalidUtf8Boundary`] inside a character, for a column in scalar
+    ///   values or in UTF-16 code units.
+    pub fn to_position(
+        &self,
+        offset: usize,
+        encoding: ColumnEncoding,
+    ) -> Result<Position, PositionError> {
+        if offset > self.input.len() {
+            return Err(PositionError::OutOfBounds);
+        }
+        // A line starts at 0, so there is always one at or before the offset.
+        let line = self.starts.partition_point(|&start| start <= offset) - 1;
+        if offset > self.line_end(line) {
+            return Err(PositionError::InsideCrLf);
+        }
+        let start = self.column_start(line);
+        if offset <= start {
+            return Ok(Position::new(line, 0));
+        }
+        let column = match encoding {
+            ColumnEncoding::Utf8 => offset - start,
+            ColumnEncoding::Scalar | ColumnEncoding::Utf16 => {
+                if !self.input.is_char_boundary(offset) {
+                    return Err(PositionError::InvalidUtf8Boundary);
+                }
+                let before = &self.input[start..offset];
+                // The standard count of characters reads whole words of bytes at a time.
+                let scalars = before.chars().count();
+                if encoding == ColumnEncoding::Utf16 {
+                    scalars + four_byte_characters(before.as_bytes())
+                } else {
+                    scalars
+                }
+            }
+        };
+        Ok(Position::new(line, column))
+    }
+
+    /// Convert a zero-based line and column to a byte offset.
+    ///
+    /// The column can be at most the end of the line's content: a line ending is not more
+    /// columns. With [`ColumnEncoding::Utf8`] a column can point inside a multi-byte character,
+    /// and that byte's offset is returned. Column 0 of the first line is the byte after the mark
+    /// that opens the input, if one does.
+    ///
+    /// # Errors
+    ///
+    /// - [`PositionError::OutOfBounds`] when the line does not exist or the column is past the
+    ///   end of the line's content.
+    /// - [`PositionError::SplitSurrogate`] when a UTF-16 column falls between the two code
+    ///   units of a surrogate pair.
+    pub fn to_offset(
+        &self,
+        position: Position,
+        encoding: ColumnEncoding,
+    ) -> Result<usize, PositionError> {
+        if position.line >= self.starts.len() {
+            return Err(PositionError::OutOfBounds);
+        }
+        let start = self.column_start(position.line);
+        let end = self.line_end(position.line);
+        let content = &self.input[start..end];
+        if position.column > content.len() {
+            return Err(PositionError::OutOfBounds);
+        }
+        if encoding == ColumnEncoding::Utf8 {
+            return Ok(start + position.column);
+        }
+        let utf16 = encoding == ColumnEncoding::Utf16;
+        let bytes = content.as_bytes();
+        // Whole blocks that end before the column are passed by counting them, without
+        // decoding a character.
+        let (mut at, mut column) = (0, 0);
+        while let Some(block) = bytes.get(at..at + BLOCK) {
+            let counted = characters_begun(block)
+                + if utf16 {
+                    four_byte_characters(block)
+                } else {
+                    0
+                };
+            if column + counted > position.column {
+                break;
+            }
+            column += counted;
+            at += BLOCK;
+        }
+        // A block can end inside a character, which it counted by that character's first byte.
+        while bytes.get(at).is_some_and(|&byte| is_continuation(byte)) {
+            at += 1;
+        }
+        for (offset, character) in content[at..].char_indices() {
+            if column == position.column {
+                return Ok(start + at + offset);
+            }
+            column += if utf16 { character.len_utf16() } else { 1 };
+            if column > position.column {
+                return Err(PositionError::SplitSurrogate);
+            }
+        }
+        if column == position.column {
+            Ok(end)
+        } else {
+            Err(PositionError::OutOfBounds)
+        }
+    }
+}
+
+/// How many bytes `to_offset` counts at a time before it decodes characters.
+const BLOCK: usize = 256;
+
+/// Whether a byte continues a character that an earlier byte began.
+const fn is_continuation(byte: u8) -> bool {
+    byte & 0xC0 == 0x80
+}
+
+/// How many characters begin in `bytes`, which are those of a `str` and may begin or end inside
+/// a character: each byte that continues none begins one. The sum can't overflow, and is
+/// written so that no build checks each step of it.
+fn characters_begun(bytes: &[u8]) -> usize {
+    bytes.iter().fold(0_usize, |count, &byte| {
+        count.wrapping_add(usize::from(!is_continuation(byte)))
+    })
+}
+
+/// How many characters of four bytes begin in `bytes`: each takes two UTF-16 code units, and
+/// begins with a byte of `0xF0` or more.
+fn four_byte_characters(bytes: &[u8]) -> usize {
+    bytes.iter().fold(0_usize, |count, &byte| {
+        count.wrapping_add(usize::from(byte >= 0xF0))
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{LineIndex, lines_at_most};
-    use crate::span::Position;
+    use super::{LineStarts, lines_at_most};
+    use crate::span::Location;
 
     /// The index is allocated once, at its length when no CR is followed by an LF and under twice
     /// it otherwise, on every text of up to five characters from line breaks, ASCII, and the
@@ -364,7 +622,7 @@ mod tests {
         let mut texts = vec![String::new()];
         let mut checked = 0;
         let mut check = |text: &str| {
-            for index in [LineIndex::new(text), LineIndex::counting_line_boms(text)] {
+            for index in [LineStarts::new(text), LineStarts::counting_line_boms(text)] {
                 let (lines, capacity) = (index.line_count(), index.starts.capacity());
                 assert_eq!(capacity, lines_at_most(text.as_bytes()), "{text:?}");
                 if text.contains("\r\n") {
@@ -405,7 +663,7 @@ mod tests {
         let check = |text: &str| {
             for count_line_boms in [false, true] {
                 assert_eq!(
-                    LineIndex::end_marker(text, count_line_boms),
+                    LineStarts::end_marker(text, count_line_boms),
                     text.len(),
                     "{text:?}, {count_line_boms}"
                 );
@@ -441,29 +699,29 @@ mod tests {
     #[test]
     fn ascii_lines_and_columns() {
         let input = "a: 1\nb: 2\n";
-        let index = LineIndex::new(input);
-        assert_eq!(index.marker(input, 0), Some(Position::new(1, 1)));
-        assert_eq!(index.marker(input, 5), Some(Position::new(2, 1)));
-        assert_eq!(index.marker(input, 8), Some(Position::new(2, 4)));
+        let index = LineStarts::new(input);
+        assert_eq!(index.marker(input, 0), Some(Location::new(1, 1)));
+        assert_eq!(index.marker(input, 5), Some(Location::new(2, 1)));
+        assert_eq!(index.marker(input, 8), Some(Location::new(2, 4)));
         assert_eq!(index.line_count(), 3);
     }
 
     #[test]
     fn unicode_columns_count_scalars_not_bytes() {
         let input = "é: 1\nkéy: 2\n";
-        let index = LineIndex::new(input);
-        assert_eq!(index.marker(input, 0), Some(Position::new(1, 1)));
-        assert_eq!(index.marker(input, 2), Some(Position::new(1, 2)));
+        let index = LineStarts::new(input);
+        assert_eq!(index.marker(input, 0), Some(Location::new(1, 1)));
+        assert_eq!(index.marker(input, 2), Some(Location::new(1, 2)));
         // "kéy" starts at byte 6, after the newline.
-        assert_eq!(index.marker(input, 6), Some(Position::new(2, 1)));
-        assert_eq!(index.marker(input, 9), Some(Position::new(2, 3)));
+        assert_eq!(index.marker(input, 6), Some(Location::new(2, 1)));
+        assert_eq!(index.marker(input, 9), Some(Location::new(2, 3)));
     }
 
     #[test]
     fn crlf_is_one_line_break() {
         let input = "a\r\nb\r\n";
-        let index = LineIndex::new(input);
-        assert_eq!(index.marker(input, 3), Some(Position::new(2, 1)));
+        let index = LineStarts::new(input);
+        assert_eq!(index.marker(input, 3), Some(Location::new(2, 1)));
         assert_eq!(index.line_count(), 3);
     }
 
@@ -471,27 +729,27 @@ mod tests {
     fn nel_ls_ps_are_content() {
         for separator in ['\u{85}', '\u{2028}', '\u{2029}'] {
             let input = format!("a{separator}b");
-            let index = LineIndex::new(&input);
+            let index = LineStarts::new(&input);
             let after = 1 + separator.len_utf8();
-            assert_eq!(index.marker(&input, after), Some(Position::new(1, 3)));
+            assert_eq!(index.marker(&input, after), Some(Location::new(1, 3)));
         }
     }
 
     #[test]
     fn leading_bom_is_not_a_column() {
         let input = "\u{feff}k: v\n";
-        let index = LineIndex::new(input);
-        assert_eq!(index.marker(input, 3), Some(Position::new(1, 1)));
-        assert_eq!(index.marker(input, 4), Some(Position::new(1, 2)));
+        let index = LineStarts::new(input);
+        assert_eq!(index.marker(input, 3), Some(Location::new(1, 1)));
+        assert_eq!(index.marker(input, 4), Some(Location::new(1, 2)));
     }
 
     #[test]
     fn a_later_lines_bom_is_not_a_column() {
         let input = "a\n\u{feff}\u{feff}k: v\n";
-        let index = LineIndex::new(input);
+        let index = LineStarts::new(input);
         let marker = index.marker(input, input.find('k').unwrap()).unwrap();
         assert_eq!((marker.line(), marker.column()), (2, 1));
-        let index = LineIndex::counting_line_boms(input);
+        let index = LineStarts::counting_line_boms(input);
         let marker = index.marker(input, input.find('k').unwrap()).unwrap();
         assert_eq!((marker.line(), marker.column()), (2, 3));
     }
@@ -499,7 +757,7 @@ mod tests {
     #[test]
     fn columns_are_right_in_any_order() {
         let input = "é\u{feff}x é y\n\u{feff}\u{feff}é z\n";
-        let index = LineIndex::new(input);
+        let index = LineStarts::new(input);
         let at = |needle: &str| input.find(needle).unwrap();
         let column = |offset| index.marker(input, offset).unwrap().column();
         // Forward, backward, into the marks at a line's start, and forward again.
@@ -515,15 +773,15 @@ mod tests {
     #[test]
     fn non_boundary_is_none() {
         let input = "é";
-        let index = LineIndex::new(input);
+        let index = LineStarts::new(input);
         assert_eq!(index.marker(input, 1), None);
     }
 
     #[test]
     fn checked_scan_agrees_with_the_index_and_collects_quoted_only_characters() {
         for input in ["", "a\nb\r\nc", "é\n\u{feff}x\n", "a\u{85}b\u{2028}c"] {
-            let index = LineIndex::new(input);
-            let (checked, quoted) = LineIndex::new_checked(input, false).unwrap();
+            let index = LineStarts::new(input);
+            let (checked, quoted) = LineStarts::new_checked(input, false).unwrap();
             assert_eq!(index.line_count(), checked.line_count(), "{input:?}");
             assert!(quoted.is_empty(), "{input:?}: {quoted:?}");
             for at in (0..=input.len()).filter(|&at| input.is_char_boundary(at)) {
@@ -539,7 +797,7 @@ mod tests {
             ("a\u{fffe}b", vec![1]),
             ("a\u{1}b", Vec::new()),
         ] {
-            let result = LineIndex::new_checked(input, false);
+            let result = LineStarts::new_checked(input, false);
             if expected.is_empty() {
                 assert_eq!(result.unwrap_err(), 1, "{input:?}");
             } else {
@@ -547,9 +805,9 @@ mod tests {
             }
         }
         let input = "\u{feff}---\nx\n";
-        let normal = LineIndex::new(input);
-        let compat = LineIndex::counting_line_boms(input);
-        let checked_compat = LineIndex::new_checked(input, true).unwrap().0;
+        let normal = LineStarts::new(input);
+        let compat = LineStarts::counting_line_boms(input);
+        let checked_compat = LineStarts::new_checked(input, true).unwrap().0;
         assert_eq!(normal.marker(input, 3).unwrap().column(), 1);
         assert_eq!(compat.marker(input, 3).unwrap().column(), 2);
         // A run of marks before a marker is the one column that a single mark is, and no column
@@ -559,8 +817,8 @@ mod tests {
             let run = "\u{feff}".repeat(marks);
             let input = format!("{run}---\nx\n");
             for index in [
-                LineIndex::counting_line_boms(&input),
-                LineIndex::new_checked(&input, true).unwrap().0,
+                LineStarts::counting_line_boms(&input),
+                LineStarts::new_checked(&input, true).unwrap().0,
             ] {
                 assert_eq!(
                     index.marker(&input, start).unwrap().column(),
@@ -574,14 +832,14 @@ mod tests {
                 );
             }
             assert_eq!(
-                LineIndex::new(&input)
+                LineStarts::new(&input)
                     .marker(&input, start)
                     .unwrap()
                     .column(),
                 1
             );
             let input = format!("{run}a\n");
-            let index = LineIndex::counting_line_boms(&input);
+            let index = LineStarts::counting_line_boms(&input);
             assert_eq!(
                 index.marker(&input, start).unwrap().column(),
                 1,

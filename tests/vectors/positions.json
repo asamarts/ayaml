@@ -1,0 +1,120 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "bom-first-visible",
+      "source": "\ufeffA=1\n",
+      "offset": 3,
+      "expected": {
+        "utf8": {"line": 0, "column": 3},
+        "scalar": {"line": 0, "column": 1},
+        "utf16": {"line": 0, "column": 1}
+      },
+      "without_bom": {
+        "utf8": {"line": 0, "column": 0},
+        "scalar": {"line": 0, "column": 0},
+        "utf16": {"line": 0, "column": 0}
+      }
+    },
+    {
+      "name": "bom-inside-mark",
+      "source": "\ufeffA=1\n",
+      "offset": 1,
+      "expected": {
+        "utf8": {"line": 0, "column": 1},
+        "scalar": {"error": "invalid-utf8-boundary"},
+        "utf16": {"error": "invalid-utf8-boundary"}
+      },
+      "without_bom": {
+        "utf8": {"line": 0, "column": 0},
+        "scalar": {"line": 0, "column": 0},
+        "utf16": {"line": 0, "column": 0}
+      }
+    },
+    {
+      "name": "bom-empty-line",
+      "source": "\ufeff\n",
+      "offset": 3,
+      "expected": {
+        "utf8": {"line": 0, "column": 3},
+        "scalar": {"line": 0, "column": 1},
+        "utf16": {"line": 0, "column": 1}
+      },
+      "without_bom": {
+        "utf8": {"line": 0, "column": 0},
+        "scalar": {"line": 0, "column": 0},
+        "utf16": {"line": 0, "column": 0}
+      }
+    },
+    {
+      "name": "crlf-line-end",
+      "source": "A=1\r\nB=2",
+      "offset": 3,
+      "expected": {
+        "utf8": {"line": 0, "column": 3},
+        "scalar": {"line": 0, "column": 3},
+        "utf16": {"line": 0, "column": 3}
+      }
+    },
+    {
+      "name": "crlf-inside",
+      "source": "A=1\r\nB=2",
+      "offset": 4,
+      "expected": {
+        "utf8": {"error": "inside-crlf"},
+        "scalar": {"error": "inside-crlf"},
+        "utf16": {"error": "inside-crlf"}
+      }
+    },
+    {
+      "name": "lone-cr-next-line",
+      "source": "A=1\rB=2",
+      "offset": 4,
+      "expected": {
+        "utf8": {"line": 1, "column": 0},
+        "scalar": {"line": 1, "column": 0},
+        "utf16": {"line": 1, "column": 0}
+      }
+    },
+    {
+      "name": "astral",
+      "source": "A=\ud83d\ude00!\n",
+      "offset": 6,
+      "expected": {
+        "utf8": {"line": 0, "column": 6},
+        "scalar": {"line": 0, "column": 3},
+        "utf16": {"line": 0, "column": 4}
+      }
+    },
+    {
+      "name": "nel-ls-ps-are-content",
+      "source": "A=\u0085\u2028\u2029\n",
+      "offset": 7,
+      "expected": {
+        "utf8": {"line": 0, "column": 7},
+        "scalar": {"line": 0, "column": 4},
+        "utf16": {"line": 0, "column": 4}
+      }
+    },
+    {
+      "name": "invalid-utf8-boundary",
+      "source": "é\n",
+      "offset": 1,
+      "expected": {
+        "utf8": {"line": 0, "column": 1},
+        "scalar": {"error": "invalid-utf8-boundary"},
+        "utf16": {"error": "invalid-utf8-boundary"}
+      }
+    },
+    {
+      "name": "out-of-bounds",
+      "source": "A=1",
+      "offset": 4,
+      "expected": {
+        "utf8": {"error": "out-of-bounds"},
+        "scalar": {"error": "out-of-bounds"},
+        "utf16": {"error": "out-of-bounds"}
+      }
+    }
+  ]
+}

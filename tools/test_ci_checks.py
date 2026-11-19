@@ -1475,5 +1475,44 @@ class AllocationGate(unittest.TestCase):
                 self.assertEqual(len(calls), measured, calls)
 
 
+class SharedVectors(unittest.TestCase):
+    """The vendored format-contract vectors are the ones whose digests this test records.
+
+    tests/vectors/SOURCE.md says where the set is from, and why its own manifest of digests is
+    not among the files: the digests are here instead, so no vendored file changes alone.
+    """
+
+    DIRECTORY = Path(__file__).resolve().parent.parent / "tests" / "vectors"
+    FILES = {
+        "README.md": "sha256:82f680921fc80c4477737fa898b086d493c0f678d32d2be92765f2834813f879",
+        "positions.json": "sha256:0d3d3e27db8e75c6254e6e7a923e3dfe128846e239b06c0b2a60f1ce50f63567",
+        "edit-order.json": "sha256:3afb63ede762448883f1b1c37be6182e3ff5d8e3a2cdfacb76da1e69abe3427b",
+        "github-escaping.json": "sha256:79a42d3123318860c645c429d6dde8e02cc0d2cb3313a26a4c2662f5293630d7",
+        "schema/check-report.v1.json": "sha256:1a025ca40b7b3c9821c3f8c42521a69dbac9d76fd2b5035f32059da375b0defa",
+        "schema/diff-report.v1.json": "sha256:9361744c8eba0ba3dbc67347a6e9ddc1aa6cdc4b3259626ae1e5c75816f480dc",
+    }
+    # The one file of ours beside the vendored ones.
+    OURS = {"SOURCE.md"}
+
+    def test_every_file_has_the_digest_recorded_for_it(self) -> None:
+        self.assertEqual(len(self.FILES), 6)
+        for name, recorded in self.FILES.items():
+            with self.subTest(name=name):
+                digest = hashlib.sha256((self.DIRECTORY / name).read_bytes()).hexdigest()
+                self.assertEqual(f"sha256:{digest}", recorded)
+
+    def test_no_file_stands_beside_the_recorded_ones(self) -> None:
+        present = {
+            path.relative_to(self.DIRECTORY).as_posix()
+            for path in self.DIRECTORY.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(present, set(self.FILES) | self.OURS)
+
+    def test_the_source_names_a_commit(self) -> None:
+        source = (self.DIRECTORY / "SOURCE.md").read_text(encoding="utf-8")
+        self.assertRegex(source, r"commit `[0-9a-f]{40}`")
+
+
 if __name__ == "__main__":
     unittest.main()

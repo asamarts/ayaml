@@ -9,7 +9,7 @@ mod writer;
 
 use ayaml::{
     Anchor, CollectionStyle, ColumnEncoding, Error, ErrorKind, Event, LimitKind, Limits, LineIndex,
-    Location, Mapping, Number, ScalarStyle, Span, Tag, TaggedValue, Value,
+    Location, Mapping, Number, Position, ScalarStyle, Span, Tag, TaggedValue, Value,
 };
 
 /// A reader of a whole event stream.

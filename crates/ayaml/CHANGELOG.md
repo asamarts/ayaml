@@ -13,10 +13,12 @@ The breaking changes come first, each with what a caller has to change.
 - **Breaking: a span is two byte offsets.** `Span::start()` and `Span::end()` return `usize`,
   where they returned a `Marker`, and `Span::new` and `Span::empty` take offsets. A span
   converts to and from `Range<usize>`. For a line and column, build a `LineIndex` for the input
-  and ask it for a `Position` in a `ColumnEncoding`: `ColumnEncoding::Scalar` gives the columns
-  that a `Marker` held in 0.1.3, and UTF-8 and UTF-16 columns are there too. `Marker` remains,
-  deprecated, for code that keeps one; nothing returns or takes one. `Location` is now another
-  name for `Position`, and prints as one.
+  and ask it for the `Position` of an offset in a `ColumnEncoding`. A `Position` counts from
+  zero, for a machine; `Location::from(position)` counts from one, as a `Marker` did and as an
+  error's location does. With `ColumnEncoding::Scalar` that is the line and column that a
+  `Marker` held in 0.1.3, on a line that begins with no byte-order mark, and UTF-8 and UTF-16
+  columns are there too. `Marker` remains, deprecated, for code that keeps one; nothing
+  returns or takes one. `Location` is as it was.
 - **Breaking: an error built by hand has no location until it is given one.**
   `Error::location()` still returns a one-based line and column for every error of a reader
   that has a span; one for input that isn't UTF-8 has neither, as in 0.1.3. `Error::with_span`
@@ -42,13 +44,28 @@ The breaking changes come first, each with what a caller has to change.
   caller with Clippy's pedantic lints is told to write `for entry in &mapping`. `indexmap`'s
   version is no longer part of this crate's API; the requirement is now 2.6, the first release
   whose owning iterator is `Clone`.
+- **The writers refuse what no reader of this crate loads**, where they returned success and
+  text that failed when it was read. The event writers refuse an alias with no anchor of its
+  name earlier in its document, a `%YAML` or `%TAG` directive that neither the default reader
+  nor the compatibility reader takes, and a second `%YAML` or a second `%TAG` for one handle
+  in a document. An event reader reports an alias as it is written, so events read from a
+  document with a dangling alias are refused when they are written back. The event writers
+  hold the names of a document's anchors, at most `max_anchors` of them. The value writers
+  count an empty collection as a level of depth, as the parser and the event writers do, so
+  `- - []` is refused at `max_depth` 2. And they refuse a `!!int`, `!!float`, `!!bool`, or
+  `!!null` tag on a scalar that the tag's rule doesn't take, such as `!!int` on the string
+  `x`, before any of the document is written; such a value can only be built by hand. A
+  caller that got one of these errors was writing text that no reader could load.
 - The event size falls from 176 to 144 bytes, a span from 48 to 16, and an error from 112 to 104
   on 64-bit targets.
 - An error about a stream that holds no document is now placed at the end of the input, where
   its value would stand; 0.1.3 gave it that byte offset with line 1, column 1.
-- In compatibility mode a byte-order mark past the start of the input counts as a column of its
-  line, as libyaml counts it, and `LineIndex` counts as default mode does. So there an error's
-  `location()` can differ from the position that a `LineIndex` gives for its span.
+- An error's `location()` is the place that a `LineIndex` gives for the start of its span,
+  counted from one, on every line that begins with no byte-order mark. On a line that begins
+  with one the columns can differ: the index counts as an editor does, a default reader leaves
+  every mark that begins a line out of its columns, and a compatibility reader the run of
+  marks that opens the input, of which it counts one where a document marker follows, as
+  libyaml does.
 - A reader of one document into a type, such as `from_str`, now reports the first problem in the
   document at every input size, as `parse_value` does: any that the scanner finds, and then the
   first that parsing or building meets. With a duplicate key and a later flow collection that
@@ -64,9 +81,11 @@ The breaking changes come first, each with what a caller has to change.
   `Mapping` give back the room that growing without a size leaves spare. Another target keeps
   what its own growth leaves: a `Vec<u64>` of 1,500 items read from a block sequence has room
   for 2,048, where 0.1.3 gave it room for 1,500.
-- Three of the fixes below refuse documents that 0.1.3 read: a bare variant name for a variant
+- Four of the fixes below refuse documents that 0.1.3 read: a bare variant name for a variant
   that holds a sequence or a mapping, a quoted scalar's continuation line that starts with a
-  tab, and a block scalar header after node properties that is not indented past its parent.
+  tab, a block scalar header after node properties that is not indented past its parent, and,
+  in compatibility mode, a document such as `&a:[: x` followed by a `- y` line, where an
+  anchor's name now ends before a `:` and a flow indicator in every check.
 - Two of them change what a caller gets for a document that 0.1.3 took the same way. In
   compatibility mode a run of byte-order marks at the start of the stream is skipped as one
   mark is, so `"\u{feff}\u{feff}key: v"` has the key `key`, where 0.1.3 read the second mark as
@@ -86,13 +105,23 @@ The breaking changes come first, each with what a caller has to change.
   entry has none, and nor does an entry that shares its first line, has an explicit `?`, defines
   an anchor or stands inside a collection that has one, or is the only entry of its collection.
   A value that the source doesn't write has an empty span right after its key's `:`.
-- `LineIndex`, `Position`, `PositionError`, and `ColumnEncoding` give lines and columns for byte
-  offsets, in UTF-8 bytes, Unicode scalar values, or UTF-16 code units. `Error::with_location`
-  sets an error's. `ColumnEncoding` and `PositionError` are non-exhaustive, so a later release
-  can add a unit or a reason without a break.
+- `LineIndex`, `Position`, `PositionError`, and `ColumnEncoding` are the positions layer of the
+  format contract that ayaml shares with adotenv, in its names and by its rules.
+  `LineIndex::new(input)` borrows the input; `to_position(offset, encoding)` gives a zero-based
+  line and column in UTF-8 bytes, Unicode scalar values, or UTF-16 code units, `to_offset`
+  converts back, and `line_count` counts the lines. One byte-order mark that opens the input
+  is in the offsets and out of the columns, and every other mark is a column of its line; a
+  byte column needs no character boundary, and an offset between a CR and its LF is an error.
+  A column in scalar values or UTF-16 code units reads its line up to the offset, so it costs
+  more on a long line. The contract's position vectors are vendored under `tests/vectors/`
+  and checked in CI. `ColumnEncoding` and `PositionError` are non-exhaustive,
+  so a later release can add a unit or a reason without a break.
+- `Error::with_location` sets an error's one-based `Location`.
 - `compat::parse_events` reads a lazy `EventStream`, and `compat::parse_events_eager_with_limits`
   the vector that `compat::parse_events_with_limits` returned (see Changed).
 - `Mapping::shrink_to_fit` gives back the room that a mapping's entries don't need.
+- `to_writer_events_with_limits` writes collected events to a writer within a caller's limits,
+  as the other event writers can.
 - `Limits::for_max_input()` lifts the four count limits for a valid document within
   `MAX_INPUT_BYTES`, while the default profile stays memory-bounded.
 
@@ -107,7 +136,10 @@ The breaking changes come first, each with what a caller has to change.
 - Mapping lookups by `&str`, including `get_str`, `get_str_mut`, `get`, `get_mut`, and
   `contains_key`, no longer allocate a `String` per lookup.
 - A compatibility indentation mistake now names the collection whose indentation it breaks,
-  instead of reporting the line as unexpected content after the document.
+  as in `this line is indented differently from the mapping at line 2 column 1`. It was
+  reported as unexpected content after the document, and in some documents as a block entry
+  indented less than its parent or as a mapping line with no `:`. The error stands where it
+  stood.
 - A short quoted continuation with no closing quote now reports the opening quote.
 - Serde `invalid_type` errors now name the actual unexpected value for string, enum, and struct
   targets.

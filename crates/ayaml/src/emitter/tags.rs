@@ -1,7 +1,8 @@
+use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use crate::error::{Error, ErrorKind};
-use crate::tag::{is_uri_byte, verbatim_reads_back};
+use crate::tag::{Tag, TaggedValue, is_uri_byte, verbatim_reads_back};
 use crate::value::Value;
 
 /// Which of the default tag handles a document redefines with `%TAG`.
@@ -33,7 +34,7 @@ impl TagForm {
     /// gets a `%TAG` directive, whose prefix and shorthand suffix are read with their escapes
     /// decoded, so they can hold any text. A tag of fewer than two characters that is neither local
     /// nor written verbatim has no form: both parts of a directive's shorthand hold a character.
-    pub(crate) fn of(tag: &crate::tag::Tag, redefined: RedefinedHandles) -> Result<Self, Error> {
+    pub(crate) fn of(tag: &Tag, redefined: RedefinedHandles) -> Result<Self, Error> {
         let (handle, suffix) = (tag.handle(), tag.suffix());
         // The non-specific tag `!` is not a shorthand.
         if tag.is_non_specific() {
@@ -86,7 +87,7 @@ impl TagForm {
 
 /// Whether `tag` takes a `%TAG` directive, or has no form, in a document that redefines no handle:
 /// [`TagForm::of`] without building the token.
-pub(super) fn needs_directive(tag: &crate::tag::Tag) -> bool {
+pub(super) fn needs_directive(tag: &Tag) -> bool {
     let (handle, suffix) = (tag.handle(), tag.suffix());
     !(handle.starts_with('!')
         || (tag.is_core() && !suffix.is_empty())
@@ -165,7 +166,7 @@ impl TagDirectives {
     /// Write `tag` in its form, adding a directive for it if it needs one.
     pub(crate) fn token(
         &mut self,
-        tag: &crate::tag::Tag,
+        tag: &Tag,
         redefined: RedefinedHandles,
     ) -> Result<String, Error> {
         Ok(match TagForm::of(tag, redefined)? {
@@ -200,42 +201,47 @@ impl TagDirectives {
     }
 
     /// Add a directive for each tag in `value` that needs one, in the order the writer meets them,
-    /// or fail at the first tag that has no form, as the writer would. The walk stops where the
+    /// or fail at the first tag that can't be written, as the writer would: one with no form,
+    /// and a tag of the core schema on a scalar that it doesn't take. The walk stops where the
     /// writer does, at a collection past `max_depth` and at a tag on a tagged value, so its
-    /// recursion is no deeper than the writer's.
+    /// recursion is no deeper than the writer's. It runs before a document's first line, so a
+    /// tag is refused before any of the document is written.
     pub(super) fn scan(&mut self, value: &Value, max_depth: usize) -> Result<(), Error> {
         if may_hold_a_tag(value)
-            && let Err(tag) = self.scan_at(value, max_depth)
+            && let Err(tagged) = self.scan_at(value, max_depth)
         {
-            return TagForm::of(tag, RedefinedHandles::default()).map(|_| ());
+            return match core_tag_refusal(&tagged.tag, &tagged.value) {
+                Some(refusal) => Err(refusal),
+                None => TagForm::of(&tagged.tag, RedefinedHandles::default()).map(|_| ()),
+            };
         }
         Ok(())
     }
 
-    /// Add the directive that `tag` needs, apart from the walk so that the walk's frame stays small.
+    /// Add the directive that a tag needs, apart from the walk so that the walk's frame stays
+    /// small.
     #[cold]
     #[inline(never)]
-    fn add<'v>(&mut self, tag: &'v crate::tag::Tag) -> Result<(), &'v crate::tag::Tag> {
-        match self.token(tag, RedefinedHandles::default()) {
+    fn add<'v>(&mut self, tagged: &'v TaggedValue) -> Result<(), &'v TaggedValue> {
+        match self.token(&tagged.tag, RedefinedHandles::default()) {
             Ok(_) => Ok(()),
-            Err(_) => Err(tag),
+            Err(_) => Err(tagged),
         }
     }
 
-    /// [`TagDirectives::scan`] with `depth_left` more collections to enter. Returns the tag with
-    /// no form that stopped it.
-    fn scan_at<'v>(
-        &mut self,
-        value: &'v Value,
-        depth_left: usize,
-    ) -> Result<(), &'v crate::tag::Tag> {
+    /// [`TagDirectives::scan`] with `depth_left` more collections to enter. Returns the tagged
+    /// value whose tag stopped it.
+    fn scan_at<'v>(&mut self, value: &'v Value, depth_left: usize) -> Result<(), &'v TaggedValue> {
         match value {
             Value::Tagged(tagged) => {
                 if matches!(tagged.value, Value::Tagged(_)) {
                     return Ok(());
                 }
+                if tagged.tag.is_core() && core_tag_refusal(&tagged.tag, &tagged.value).is_some() {
+                    return Err(tagged);
+                }
                 if needs_directive(&tagged.tag) {
-                    self.add(&tagged.tag)?;
+                    self.add(tagged)?;
                 }
                 self.scan_at(&tagged.value, depth_left)
             }
@@ -267,4 +273,50 @@ fn may_hold_a_tag(value: &Value) -> bool {
         value,
         Value::Tagged(_) | Value::Sequence(_) | Value::Mapping(_)
     )
+}
+
+/// The error for a tag of the core schema on a scalar that the tag doesn't take, or `None`.
+///
+/// A reader resolves a scalar under `!!int`, `!!float`, `!!bool`, or `!!null` by that tag's
+/// rule, whatever style the scalar is written in, and refuses one that doesn't fit: `!!int x`
+/// has no reader. This asks the reader's own rule about the text that the payload is written
+/// as, so the two can't drift apart. Every other pairing has a reader: `!!str` takes any
+/// scalar, a collection keeps its kind beneath any core tag, and a name that the core schema
+/// doesn't define is the application's.
+pub(super) fn core_tag_refusal(tag: &Tag, value: &Value) -> Option<Error> {
+    if !tag.is_core() || !matches!(tag.suffix(), "int" | "float" | "bool" | "null") {
+        return None;
+    }
+    let text: Cow<'_, str> = match value {
+        // A null beneath a tag is written as no text at all.
+        Value::Null => Cow::Borrowed(""),
+        Value::Bool(value) => Cow::Borrowed(if *value { "true" } else { "false" }),
+        Value::Number(number) => Cow::Owned(number.to_string()),
+        Value::String(text) => Cow::Borrowed(text),
+        Value::Sequence(_) | Value::Mapping(_) | Value::Tagged(_) => return None,
+    };
+    crate::resolver::resolve_explicit_core(&text, tag.suffix(), tag)
+        .err()
+        .map(|_| {
+            Error::new(
+                ErrorKind::Emitter,
+                format!(
+                    "the tag !!{} cannot be written on {}: no reader takes {text:?} as one",
+                    tag.suffix(),
+                    value_kind(value)
+                ),
+            )
+        })
+}
+
+fn value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "a null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "this number",
+        Value::String(_) => "this string",
+        Value::Sequence(_) => "a sequence",
+        Value::Mapping(_) => "a mapping",
+        Value::Tagged(_) => "a tagged value",
+    }
 }
