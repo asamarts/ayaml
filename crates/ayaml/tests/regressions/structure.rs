@@ -1425,6 +1425,13 @@ fn a_stream_start_run_of_marks_reads_as_one_mark_does() {
         "...\n",
         "a: 1\n",
         "- a\n- b\n",
+        // A comment after the run, and then a plain scalar of two lines: the scalar's second
+        // line looks back past the comment for what it belongs to.
+        "#\n x\ny\n",
+        "# c\n  x\n y\n",
+        "#\n\n x\ny\n",
+        "#\n\u{feff}---\nb\n",
+        "#e\n#e\n  li;wo\ne!",
     ] {
         let one = readings(&format!("\u{feff}{rest}"));
         for marks in [2, 3] {
@@ -1456,6 +1463,116 @@ fn a_stream_start_run_of_marks_reads_as_one_mark_does() {
         let value = ayaml::compat::from_str::<ayaml::Value>(&deeper).expect("a deeper value");
         assert_eq!(value["... g"], ayaml::Value::from(0_u64), "{deeper:?}");
     }
+}
+
+/// The same on every short text: whatever follows one mark at the start of the stream reads the
+/// same after two marks and after three, as a value or as an error, in each mode. The texts are
+/// every one of up to four pieces of a wide alphabet, and of up to six of a narrow one, which
+/// reaches a comment, a break, and a scalar of two lines.
+#[test]
+fn every_short_text_reads_after_a_run_of_marks_as_after_one() {
+    fn texts(pieces: &[&str], length: usize) -> Vec<String> {
+        let mut all = vec![String::new()];
+        let mut last = all.clone();
+        for _ in 0..length {
+            last = last
+                .iter()
+                .flat_map(|text| pieces.iter().map(move |piece| format!("{text}{piece}")))
+                .collect();
+            all.extend(last.iter().cloned());
+        }
+        all
+    }
+    let wide = [
+        "#", " ", "\n", "x", ":", "-", "---", "...", "\u{feff}", "\"", "[",
+    ];
+    let narrow = ["#", " ", "\n", "x", ":", "\u{feff}", "---"];
+    let mut compared = 0_usize;
+    for rest in texts(&wide, 4).iter().chain(&texts(&narrow, 6)) {
+        // A text that starts with a mark would make the run one longer.
+        if rest.starts_with('\u{feff}') {
+            continue;
+        }
+        let one = readings(&format!("\u{feff}{rest}"));
+        for marks in [2, 3] {
+            let input = format!("{}{rest}", "\u{feff}".repeat(marks));
+            for ((mode, read), (_, expected)) in readings(&input).into_iter().zip(one.clone()) {
+                // An error's column counts from the text, so it is the same too.
+                assert_eq!(read, expected, "{input:?} in {mode}");
+                compared += 1;
+            }
+        }
+    }
+    assert!(compared >= 2 * 130_000, "{compared} readings compared");
+}
+
+/// On a later line, the compatibility reader reads past one mark that begins the line, as
+/// libyaml does, and a second mark there is text like any other character. So a line that
+/// begins with two marks reads as the line with a letter in the second one's place, with the
+/// mark where that letter comes out, in a value or in an error's text. Every short text
+/// after such a line is tried, after each first line of one piece.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn a_second_mark_on_a_later_line_is_text() {
+    fn texts(pieces: &[&str], length: usize) -> Vec<String> {
+        let mut all = vec![String::new()];
+        let mut last = all.clone();
+        for _ in 0..length {
+            last = last
+                .iter()
+                .flat_map(|text| pieces.iter().map(move |piece| format!("{text}{piece}")))
+                .collect();
+            all.extend(last.iter().cloned());
+        }
+        all
+    }
+    fn with_marks(value: &ayaml::Value) -> ayaml::Value {
+        match value {
+            ayaml::Value::String(text) => ayaml::Value::String(text.replace('z', "\u{feff}")),
+            ayaml::Value::Sequence(items) => {
+                ayaml::Value::Sequence(items.iter().map(with_marks).collect())
+            }
+            ayaml::Value::Mapping(entries) => ayaml::Value::Mapping(
+                entries
+                    .iter()
+                    .map(|(key, value)| (with_marks(key), with_marks(value)))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+    let pieces = ["#", " ", "\n", "x", ":", "-", "'", "\""];
+    let (mut read, mut refused) = (0_usize, 0_usize);
+    for head in texts(&pieces, 1) {
+        for tail in texts(&pieces, 5) {
+            let marked = format!("{head}\n\u{feff}\u{feff}{tail}");
+            let lettered = format!("{head}\n\u{feff}z{tail}");
+            match (
+                ayaml::compat::from_str::<ayaml::Value>(&marked),
+                ayaml::compat::from_str::<ayaml::Value>(&lettered),
+            ) {
+                (Ok(marked_value), Ok(lettered_value)) => {
+                    assert_eq!(marked_value, with_marks(&lettered_value), "{marked:?}");
+                    read += 1;
+                }
+                (Err(marked_error), Err(lettered_error)) => {
+                    assert_eq!(
+                        marked_error.to_string(),
+                        lettered_error.to_string().replace('z', "\u{feff}"),
+                        "{marked:?}"
+                    );
+                    refused += 1;
+                }
+                (marked_read, lettered_read) => panic!(
+                    "{marked:?} reads as {marked_read:?}, and {lettered:?} as {lettered_read:?}"
+                ),
+            }
+        }
+    }
+    assert!(
+        read >= 20_000 && refused >= 20_000,
+        "{read} read, {refused} refused"
+    );
 }
 
 /// The compatibility scanner and the line reader end an anchor name at the same `:` before a

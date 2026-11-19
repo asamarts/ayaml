@@ -17,7 +17,8 @@ tools/instruction-rises.tsv in that change, saying why:
     OPERATION<TAB>WORKLOAD<TAB>PERCENT<TAB>REASON
 
 Only lines the change itself adds count, so an old allowance can't hide a new rise.
-Scratch goes under target/instructions. Exit status: 0 within limits, 1 over a limit,
+An operation that BASE_REV's probe doesn't have is counted and shown, and compared from
+the next change on. Scratch goes under target/instructions. Exit status: 0 within limits, 1 over a limit,
 2 the check could not run.
 """
 
@@ -37,8 +38,16 @@ ROOT = Path(__file__).resolve().parent.parent
 WORK = ROOT / "target" / "instructions"
 RISES = "tools/instruction-rises.tsv"
 PROBE = "tools/instruction-probe.rs"
-OPERATIONS = ("events", "value", "typed", "emit")
+OPERATIONS = ("events", "value", "typed", "emit", "walk")
 COLLECTED = re.compile(r"Collected\s*:\s*(\d+)")
+
+
+def nested_keys(depth: int, width: int) -> str:
+    """A mapping of `width` entries that is the key of a mapping, `depth` times over."""
+    inner = "{" + ", ".join(f"k{index}: {index}" for index in range(width)) + "}"
+    for _ in range(depth):
+        inner = "{? " + inner + ": null}"
+    return inner + "\n"
 
 
 def workloads() -> dict[str, str]:
@@ -52,6 +61,9 @@ def workloads() -> dict[str, str]:
         "aliases-1000": "base: &base {x: 1}\nitems:\n" + "  - *base\n" * 1000,
         "mapping-1000": "".join(f"key{i}: value{i}\n" for i in range(1000)),
         "short-sequence": "- a\n" * 5000,
+        # A key is hashed and compared once at each level it is nested in, not once for every
+        # level beneath it: a cache taken out shows here as a rise, on any host.
+        "nested-keys": nested_keys(100, 1000),
     }
 
 
@@ -81,12 +93,21 @@ def extract_base(rev: str) -> Path:
     return tree
 
 
+def probe_source(tree: Path) -> Path:
+    """The probe that is built against `tree`: that tree's own, if it has one."""
+    return tree / PROBE if (tree / PROBE).exists() else ROOT / PROBE
+
+
+def known_operations(source: str) -> tuple[str, ...]:
+    """The operations that a probe's source has an arm for."""
+    return tuple(operation for operation in OPERATIONS if f'"{operation}" =>' in source)
+
+
 def build_probe(side: str, tree: Path) -> Path:
     """Build a probe against `tree`, using that tree's probe if it has one."""
     crate = WORK / f"probe-{side}"
     (crate / "src").mkdir(parents=True)
-    source = tree / PROBE if (tree / PROBE).exists() else ROOT / PROBE
-    shutil.copy(source, crate / "src" / "main.rs")
+    shutil.copy(probe_source(tree), crate / "src" / "main.rs")
     shutil.copy(tree / "Cargo.lock", crate / "Cargo.lock")
     (crate / "Cargo.toml").write_text(
         "[package]\n"
@@ -177,17 +198,32 @@ def main() -> int:
         inputs[name] = WORK / "inputs" / f"{name}.yml"
         inputs[name].write_text(text, encoding="utf-8")
 
-    base_probe = build_probe("base", extract_base(base_rev))
+    base_tree = extract_base(base_rev)
+    in_base = known_operations(probe_source(base_tree).read_text(encoding="utf-8"))
+    in_head = known_operations((ROOT / PROBE).read_text(encoding="utf-8"))
+    if in_head != OPERATIONS:
+        print(f"could not run: {PROBE} has no arm for {set(OPERATIONS) - set(in_head)}", file=sys.stderr)
+        return 2
+    base_probe = build_probe("base", base_tree)
     head_probe = build_probe("head", ROOT)
 
     cells = [(operation, name) for operation in OPERATIONS for name in inputs]
+
+    def count_base(cell: tuple[str, str]) -> int | None:
+        return per_iteration(base_probe, cell[0], inputs[cell[1]]) if cell[0] in in_base else None
+
     with ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 1)) as pool:
-        base = list(pool.map(lambda cell: per_iteration(base_probe, cell[0], inputs[cell[1]]), cells))
+        base = list(pool.map(count_base, cells))
         head = list(pool.map(lambda cell: per_iteration(head_probe, cell[0], inputs[cell[1]]), cells))
 
     failed = []
+    compared = 0
     print(f"{'operation':<10}{'workload':<18}{'base':>14}{'head':>14}{'change':>10}")
     for (operation, name), before, after in zip(cells, base, head):
+        if before is None:
+            print(f"{operation:<10}{name:<18}{'':>14}{after:>14}{'new':>10}")
+            continue
+        compared += 1
         change = (after - before) * 100.0 / max(before, 1)
         limit = accepted.get((operation, name), LIMIT_PERCENT)
         mark = "" if change <= limit else f"  over {limit:g}%"
@@ -202,7 +238,7 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"\nchecked {len(cells)} counts against {base_rev}")
+    print(f"\nchecked {compared} counts against {base_rev}")
     return 0
 
 

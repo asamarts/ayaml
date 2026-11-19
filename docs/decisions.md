@@ -653,7 +653,7 @@ mapping entry or a block sequence item has one when all of this holds:
   one that ends in any other scalar with no text has no known end. A key that is a block scalar
   ends with its last line, so a `:` on the line after it is not on its line;
 - no line that begins with `:` follows it, which would give its value to a key before the entry;
-- the input holds no byte-order mark past its first character, since what such a mark means
+- the input holds no byte-order mark past the marks that open it, since what such a mark means
   depends on the lines before it: the compatibility reader counts one toward its line's
   indentation unless it opens the input;
 - it defines no anchor and stands inside no collection that has one, since an alias reads what
@@ -770,7 +770,7 @@ the `Deserializer`, build the tree and read from it as before.
 **Alternatives.** Report the first error in document order, of either kind: one read, but a value
 that doesn't suit its target would then hide a duplicate key or a syntax error after it, which
 every release has reported first and D91 keeps first. Read every input from events: one path, but
-about 700 more instructions for a document of a few bytes, whose tree costs nothing to hold. Tell
+about 1,300 more instructions for a document of a few bytes, whose tree costs nothing to hold. Tell
 a target the size of each collection by looking ahead at its lines: a target could then reserve
 its room as it can with a tree, at the cost of a second pass over the lines of every nested
 collection.
@@ -791,12 +791,14 @@ written, and the first read costs what an accepted document of that content cost
 that is read from events tells its target no size, but for a root flow collection, whose entries
 the parser counts: a vector or a map then grows by doubling, peaks higher, and keeps up to twice
 the room its entries need, which `Value` and `Mapping` give back at each collection's end. A
-visitor that asks a mapping for a value after the mapping has told
-it the end is refused, where the tree gave it the last value it had left unread. A node with an
-anchor that is not the root is kept as a tree beside the tokens and the value, so a document
-made mostly of anchored nodes peaks about a quarter above a read that builds the tree first. A
-typed read of many short entries executes about 4% more instructions than one that builds the
-tree, which the instruction gate accepts for its three such workloads. The tree reader stays: it
+visitor that asks a mapping for a value after the mapping has told it the end is refused by
+both readers; the tree gave it the last value it had left unread, until that was found. A node
+that is built whole and is not the root, because it has an anchor or a tag that it keeps, an
+enum reads it, or it is a key that is a collection, is kept as a tree beside the tokens and the
+value: a megabyte flow sequence with an anchor peaks about a third above a read that builds
+the tree first, and a document made mostly of anchored nodes about a quarter above it as a
+JSON tree. A typed read of many short entries executes 4% to 7% more instructions than one
+that builds the tree, which the instruction gate accepts for its three such workloads. The tree reader stays: it
 reads small inputs and anchored nodes, and it words every error. The tests read documents both
 ways and compare, the `borrowed` fuzz target does the same, and a build with
 `--cfg ayaml_typed_from_events` runs the whole suite on events at every size.

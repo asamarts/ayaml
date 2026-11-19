@@ -479,7 +479,7 @@ fn untagged(value: &ayaml::Value) -> ayaml::Value {
         }
         ayaml::Value::Mapping(mapping) => {
             let mut result = ayaml::Mapping::new();
-            for (key, value) in mapping.iter() {
+            for (key, value) in mapping {
                 result.insert(untagged(key), untagged(value));
             }
             ayaml::Value::Mapping(result)
