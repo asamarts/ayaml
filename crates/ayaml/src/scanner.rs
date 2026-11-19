@@ -13,7 +13,7 @@ use std::fmt;
 use crate::error::{Code, Error, ErrorKind};
 use crate::event::ScalarStyle;
 use crate::limits::Limits;
-use crate::position::{LineIndex, starts_with_document_marker};
+use crate::position::{LineStarts, starts_with_document_marker};
 use crate::span::Span;
 use crate::tag::{Tag, verbatim_reads_back};
 
@@ -134,7 +134,7 @@ impl fmt::Display for TokenKind<'_> {
 pub(crate) struct Scanner<'a> {
     input: &'a str,
     pos: usize,
-    line_index: LineIndex,
+    line_index: LineStarts,
     limits: Limits,
     /// The tokens a reader keeps, which count against `max_events`: every token but the stream's
     /// start and end and the line breaks, which no reader stores.
@@ -234,15 +234,15 @@ impl<'a> Scanner<'a> {
         limits.check_input(input.len()).map_err(|error| {
             Error::from(error)
                 .with_span(Span::empty(0))
-                .with_location(crate::span::Position::new(1, 1))
+                .with_location(crate::span::Location::new(1, 1))
         })?;
-        let (line_index, quoted_only) = match LineIndex::new_checked(input, compat_flow) {
+        let (line_index, quoted_only) = match LineStarts::new_checked(input, compat_flow) {
             Ok(checked) => checked,
             Err(index) => {
                 let marker = if compat_flow {
-                    LineIndex::counting_line_boms(input).marker(input, index)
+                    LineStarts::counting_line_boms(input).marker(input, index)
                 } else {
-                    LineIndex::new(input).marker(input, index)
+                    LineStarts::new(input).marker(input, index)
                 };
                 let error = non_printable_error(input, index);
                 return Err(match marker {
@@ -311,7 +311,7 @@ impl<'a> Scanner<'a> {
     }
 
     /// The line index built for this input, for a parser that needs columns.
-    pub(crate) fn line_index(&self) -> &LineIndex {
+    pub(crate) fn line_index(&self) -> &LineStarts {
         &self.line_index
     }
 

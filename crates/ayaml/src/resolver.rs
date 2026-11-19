@@ -63,7 +63,7 @@ fn resolve_plain(text: &str) -> Option<Value> {
     clippy::match_same_arms,
     reason = "the arms stay separate to document each representation or state"
 )]
-fn resolve_explicit_core(text: &str, suffix: &str, tag: &Tag) -> Result<Value, Error> {
+pub(crate) fn resolve_explicit_core(text: &str, suffix: &str, tag: &Tag) -> Result<Value, Error> {
     match suffix {
         "str" => Ok(Value::String(text.to_owned())),
         "int" => parse_int_with(text, true)

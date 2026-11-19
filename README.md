@@ -95,8 +95,9 @@ fn main() -> Result<(), ayaml::Error> {
 }
 ```
 
-A span is a byte range. Use `LineIndex` and `ColumnEncoding` when a line and column are needed,
-with UTF-8, scalar, or UTF-16 columns.
+A span is a byte range. When a line and column are needed, `LineIndex::new(input)` converts an
+offset to a zero-based `Position` in UTF-8, scalar, or UTF-16 columns, and back;
+`Location::from(position)` is the one-based place that a person reads.
 
 Apply stricter limits:
 

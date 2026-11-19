@@ -246,6 +246,12 @@ pub fn to_string_with_options<T: serde::Serialize + ?Sized>(
 
 /// Serialize an existing generic value as YAML, preserving its tags.
 ///
+/// A tag is written as it is given, with two exceptions that have no text: a tag on a value
+/// that is itself tagged, and `!!int`, `!!float`, `!!bool`, or `!!null` on a scalar that the
+/// tag's rule doesn't take, such as `!!int` on the string `x`, which no reader loads. A tag of
+/// the core schema that is written reads back as what a reader makes of it: `!!str` on the
+/// number 1 reads back as the string `1`, and a collection reads back without the tag.
+///
 /// # Errors
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
@@ -998,7 +1004,9 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
     }
 
     /// Write a tag token. Fails for a tag whose payload is also tagged, which
-    /// YAML cannot express.
+    /// YAML cannot express. A tag of the core schema on a scalar that it doesn't take was
+    /// refused before the document's first line, by the scan for the tags that need a
+    /// directive.
     fn push_tag(&mut self, tagged: &crate::tag::TaggedValue) -> bool {
         if matches!(tagged.value, Value::Tagged(_)) {
             self.fail(nested_tag_error());
@@ -1403,8 +1411,20 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
             Value::Bool(value) => self.push_str(if *value { "true" } else { "false" }),
             Value::Number(value) => self.push_str(&value.to_string()),
             Value::String(value) => self.emit_string(value),
-            Value::Sequence(sequence) if sequence.is_empty() => self.push_str("[]"),
-            Value::Mapping(mapping) if mapping.is_empty() => self.push_str("{}"),
+            // An empty collection is one level too, as the parser and the event writer count
+            // it: what is written within `max_depth` is read back within it.
+            Value::Sequence(sequence) if sequence.is_empty() => {
+                if self.enter() {
+                    self.push_str("[]");
+                    self.leave();
+                }
+            }
+            Value::Mapping(mapping) if mapping.is_empty() => {
+                if self.enter() {
+                    self.push_str("{}");
+                    self.leave();
+                }
+            }
             Value::Sequence(sequence) => {
                 if !self.enter() {
                     return;

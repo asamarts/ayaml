@@ -34,7 +34,7 @@ use crate::error::{Code, Error, ErrorKind};
 use crate::event::Event;
 use crate::limits::Limits;
 use crate::parser::{DocumentEvents, EventConsumer};
-use crate::span::{Position, Span};
+use crate::span::{Location, Span};
 
 /// Read one document into what `seed` makes of it.
 pub(super) fn read<'de, T: DeserializeSeed<'de>>(
@@ -48,7 +48,7 @@ pub(super) fn read<'de, T: DeserializeSeed<'de>>(
     limits.check_input(input.len()).map_err(|error| {
         Error::from(error)
             .with_span(Span::empty(0))
-            .with_location(Position::new(1, 1))
+            .with_location(Location::new(1, 1))
     })?;
     // The scanner reads the whole input before the first event, here and for the tree, so its
     // error is the same one and needs no second read.

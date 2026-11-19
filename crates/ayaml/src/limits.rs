@@ -176,7 +176,8 @@ pub struct Limits {
     /// aliases, tags, indicators, document markers, and directives. Neither count includes a
     /// line break or a comment.
     pub max_events: usize,
-    /// Maximum anchors in one stream.
+    /// Maximum anchors in one stream. An event writer counts the names of one document's
+    /// anchors against it, which it holds to check that document's aliases.
     pub max_anchors: usize,
     /// Maximum alias dereferences in one stream.
     pub max_alias_dereferences: usize,

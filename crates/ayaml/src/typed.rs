@@ -28,7 +28,7 @@ use crate::limits::{AliasBudget, Limits};
 use crate::number::Number;
 use crate::parser::{self, EventConsumer};
 use crate::resolver::{float_from_text, plain_resolves_to_string, resolve_scalar};
-use crate::span::{Position, Span};
+use crate::span::{Location, Span};
 use crate::tag::Tag;
 use crate::value::Value;
 
@@ -333,7 +333,7 @@ fn parse_document<'de>(
     limits.check_input(input.len()).map_err(|error| {
         Error::from(error)
             .with_span(Span::empty(0))
-            .with_location(Position::new(1, 1))
+            .with_location(Location::new(1, 1))
     })?;
     // A larger input is built as its events arrive, which is the answer for every size.
     if input.len() > SMALL_INPUT_BYTES {

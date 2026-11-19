@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "insertion-before-replacement",
+      "source": "A=1\n",
+      "edits": [
+        {"range": {"start": 0, "end": 0}, "replacement": "export "},
+        {"range": {"start": 0, "end": 1}, "replacement": "B"}
+      ],
+      "expected": "export B=1\n"
+    },
+    {
+      "name": "multiple-disjoint-edits",
+      "source": "A=1\nB=2\n",
+      "edits": [
+        {"range": {"start": 0, "end": 1}, "replacement": "C"},
+        {"range": {"start": 4, "end": 5}, "replacement": "D"}
+      ],
+      "expected": "C=1\nD=2\n"
+    },
+    {
+      "name": "insertion-before-deletion",
+      "source": "A=1\n",
+      "edits": [
+        {"range": {"start": 3, "end": 3}, "replacement": "!"},
+        {"range": {"start": 3, "end": 4}, "replacement": ""}
+      ],
+      "expected": "A=1!"
+    },
+    {
+      "name": "two-insertions-at-one-offset",
+      "source": "A=1\n",
+      "edits": [
+        {"range": {"start": 0, "end": 0}, "replacement": "x"},
+        {"range": {"start": 0, "end": 0}, "replacement": "y"}
+      ],
+      "expected": "xyA=1\n"
+    }
+  ]
+}

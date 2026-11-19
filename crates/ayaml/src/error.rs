@@ -131,7 +131,7 @@ impl Error {
     /// Attach a source span.
     ///
     /// A span carries byte offsets. [`location`](Self::location) is filled in when the error
-    /// crosses a reader that has the input's [`LineIndex`](crate::LineIndex); a manually built
+    /// crosses a reader, which has the input's line index; a manually built
     /// error has no location until [`with_location`](Self::with_location) supplies one. This
     /// clears a location that was set before, which was the earlier span's, so set the location
     /// after the span.
@@ -159,9 +159,9 @@ impl Error {
             return self;
         }
         let index = if compat {
-            crate::position::LineIndex::counting_line_boms(input)
+            crate::position::LineStarts::counting_line_boms(input)
         } else {
-            crate::position::LineIndex::new(input)
+            crate::position::LineStarts::new(input)
         };
         self.with_location_from(&index, input)
     }
@@ -170,7 +170,7 @@ impl Error {
     #[must_use]
     pub(crate) fn with_location_from(
         mut self,
-        index: &crate::position::LineIndex,
+        index: &crate::position::LineStarts,
         input: &str,
     ) -> Self {
         if self.location.is_some() {
@@ -179,7 +179,7 @@ impl Error {
         let Some(span) = self.span else {
             return self;
         };
-        if let Ok(position) = index.position(input, span.start(), crate::ColumnEncoding::Scalar) {
+        if let Ok(position) = index.location(input, span.start(), crate::ColumnEncoding::Scalar) {
             self.location = Some(position);
         }
         self
@@ -404,7 +404,7 @@ impl serde::ser::Error for Error {
 #[cfg(test)]
 mod tests {
     use super::{Error, ErrorKind};
-    use crate::span::{Position, Span};
+    use crate::span::{Location, Span};
     use std::error::Error as _;
 
     #[test]
@@ -422,7 +422,7 @@ mod tests {
         let span = Span::new(4, 5);
         let error = Error::new(ErrorKind::Scanner, "bad token")
             .with_span(span)
-            .with_location(Position::new(2, 3));
+            .with_location(Location::new(2, 3));
         assert_eq!(error.span(), Some(span));
         let location = error.location().expect("location");
         assert_eq!((location.line(), location.column()), (2, 3));
@@ -507,12 +507,12 @@ mod tests {
         let span = Span::new(4, 5);
         let error = Error::new(ErrorKind::Serde, "bad")
             .with_span(span)
-            .with_location(Position::new(2, 3))
+            .with_location(Location::new(2, 3))
             .inside_key("at line 9");
         assert_eq!(error.to_string(), "[\"at line 9\"]: bad at line 2 column 3");
         let error = Error::new(ErrorKind::Serde, "invalid type: string \"at line 9\"")
             .with_span(span)
-            .with_location(Position::new(2, 3))
+            .with_location(Location::new(2, 3))
             .inside_key("a");
         assert_eq!(
             error.to_string(),
@@ -549,7 +549,7 @@ mod tests {
         let error = Error::new(ErrorKind::Parser, "bad")
             .with_context(&context)
             .with_span(span)
-            .with_location(Position::new(2, 3));
+            .with_location(Location::new(2, 3));
         assert_eq!(
             error.to_string(),
             format!("bad{context} at line 2 column 3")
@@ -562,7 +562,7 @@ mod tests {
         let error = Error::new(ErrorKind::Parser, "unterminated flow sequence")
             .with_context(", opened at line 1 column 1")
             .with_span(span)
-            .with_location(Position::new(2, 3));
+            .with_location(Location::new(2, 3));
         assert_eq!(
             error.message(),
             "unterminated flow sequence, opened at line 1 column 1"

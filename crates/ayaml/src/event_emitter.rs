@@ -12,8 +12,16 @@
 //! need (see [`Tag`]) come before it. The lazy entry point therefore needs
 //! memory for the nesting depth and for one document's text, which
 //! `max_output_bytes` bounds.
+//!
+//! The writer refuses three things that no reader of this crate would load. An alias needs an
+//! anchor of its name earlier in its document. A `%YAML` or `%TAG` directive has to be one
+//! that the scanner reads, in its default mode or in the one that reads as libyaml does, and
+//! neither stands twice in a document. What the events mean is not checked.
+//! The names of a document's anchors are held while it is written, at most `max_anchors` of
+//! them.
 
 use std::borrow::Borrow;
+use std::collections::HashSet;
 use std::io::Write;
 use std::marker::PhantomData;
 
@@ -26,12 +34,21 @@ use crate::emitter::{
 use crate::error::{Error, ErrorKind};
 use crate::event::{Anchor, CollectionStyle, Event, ScalarStyle};
 use crate::limits::Limits;
+use crate::scanner::Scanner;
 use crate::tag::Tag;
 
 /// Indentation step of the event writer.
 const STEP: usize = 2;
 
 /// Emit a collected event stream as YAML text.
+///
+/// Three things that no reader of this crate loads are refused: an alias with no node of its
+/// anchor earlier in its document, a `%YAML` or `%TAG` directive that the scanner reads in
+/// neither of its modes, and a second `%YAML`, or a second `%TAG` for one handle, in a
+/// document. An event reader reports an alias as it is written, so events that were read from
+/// a document with a dangling alias are refused here. Events are a document's syntax, and
+/// what they mean is not checked: an alias inside the node it names, a tag that doesn't suit
+/// its node, and a key that a mapping has twice are written as they are given.
 ///
 /// # Errors
 ///
@@ -62,15 +79,31 @@ pub fn to_string_events_with_limits(
 
 /// Write a collected event stream to a writer.
 ///
+/// The writer is handed what is written in pieces, so when an error is returned it may hold
+/// the documents before the one that was refused, and the start of that one.
+///
 /// # Errors
 ///
 /// Returns an error when the events cannot be written, a configured limit is exceeded, or the writer fails.
 pub fn to_writer_events<W: Write>(writer: &mut W, events: &[Event<'_>]) -> Result<(), Error> {
-    let limits = Limits::default();
+    to_writer_events_with_limits(writer, events, &Limits::default())
+}
+
+/// Write a collected event stream to a writer, within `limits`: `max_output_bytes` for all that
+/// is written, `max_depth`, and `max_anchors` for the anchors of one document.
+///
+/// # Errors
+///
+/// Returns an error when the events cannot be written, a configured limit is exceeded, or the writer fails.
+pub fn to_writer_events_with_limits<W: Write>(
+    writer: &mut W,
+    events: &[Event<'_>],
+    limits: &Limits,
+) -> Result<(), Error> {
     write_events(
-        Output::new(writer, &limits),
+        Output::new(writer, limits),
         events.iter().map(Ok::<_, Error>),
-        &limits,
+        limits,
     )
 }
 
@@ -79,7 +112,9 @@ pub fn to_writer_events<W: Write>(writer: &mut W, events: &[Event<'_>]) -> Resul
 /// The output is the same as [`to_string_events`] would produce for the
 /// collected events. It holds one document's text at a time, since the
 /// document's `%TAG` directives come first, and otherwise needs memory for the
-/// nesting depth.
+/// nesting depth and for the names of that document's anchors. The writer is handed
+/// what is written in pieces, so when an error is returned it may hold the documents
+/// before the one that was refused.
 ///
 /// # Errors
 ///
@@ -128,6 +163,9 @@ where
         handles: RedefinedHandles::default(),
         directives: TagDirectives::default(),
         declared: Vec::new(),
+        anchors: HashSet::new(),
+        handles_seen: HashSet::new(),
+        version_seen: false,
         marker: PhantomData,
     };
     emitter.run()?;
@@ -251,6 +289,14 @@ struct EventWriter<'o, 'w, 'l, 'e, W: Write, I, B> {
     directives: TagDirectives,
     /// The named handles that the next document's own `%TAG` directives declare.
     declared: Vec<String>,
+    /// The anchors that the document being written has defined so far. An alias refers to one
+    /// of them, and to none of another document.
+    anchors: HashSet<String>,
+    /// Every handle that the next document's `%TAG` directives have declared, `!` and `!!`
+    /// included: a document gives a handle one prefix.
+    handles_seen: HashSet<String>,
+    /// Whether the next document has its `%YAML` directive already.
+    version_seen: bool,
     marker: PhantomData<Event<'e>>,
 }
 
@@ -312,6 +358,7 @@ where
                             "cannot write the directive %{name} {value}"
                         )));
                     }
+                    self.check_directive(name, value)?;
                     // A directive cannot follow a document left open.
                     if open_ended {
                         self.push("...\n")?;
@@ -342,6 +389,11 @@ where
                     // The directives a tag needs are known only once the document is written,
                     // so it is held until then, and they go in before it.
                     self.directives = TagDirectives::declaring(std::mem::take(&mut self.declared));
+                    // The directives before this point were this document's, and an anchor is
+                    // one document's too.
+                    self.handles_seen.clear();
+                    self.version_seen = false;
+                    self.anchors.clear();
                     let held = self.output.hold();
                     // An empty root needs `---`, or the document would vanish.
                     let marker = *explicit || documents > 0 || directives || empty_root;
@@ -387,6 +439,49 @@ where
         Ok(())
     }
 
+    /// Refuse a `%YAML` or `%TAG` directive that the scanner would refuse in both of its modes
+    /// when it reads the output back, or that the document already has. The scanner reads the
+    /// one line, so what a directive may say is its rule alone; what a document may hold once
+    /// is the parser's rule, and is counted here. The compatibility mode takes a little more
+    /// than the default one, such as a `%TAG` prefix that starts with a flow indicator, and
+    /// events read in that mode are written back. A directive of another name is the
+    /// application's, and its characters were checked already.
+    fn check_directive(&mut self, name: &str, value: &str) -> Result<(), Error> {
+        if name != "YAML" && name != "TAG" {
+            return Ok(());
+        }
+        let refused = |reason: &str| {
+            emitter_error(format!(
+                "cannot write the directive %{name} {value}: {reason}"
+            ))
+        };
+        let line = format!("%{name} {value}\n");
+        // The stream's start, and then the directive or the reason it is none. Only the
+        // line's syntax is asked about, so the caller's limits on what it reads stay out.
+        let scan = |compat: bool| -> Result<(), Error> {
+            let mut scanner = Scanner::with_compat(&line, Limits::default(), compat)?;
+            scanner.next_token()?;
+            scanner.next_token()?;
+            Ok(())
+        };
+        if scan(false).is_err()
+            && let Err(error) = scan(true)
+        {
+            // The reason is the compatibility mode's: the one that stands in both.
+            return Err(refused(error.message()));
+        }
+        if name == "YAML" && std::mem::replace(&mut self.version_seen, true) {
+            return Err(refused("a document has one %YAML directive"));
+        }
+        if name == "TAG"
+            && let Some(handle) = value.split([' ', '\t']).find(|part| !part.is_empty())
+            && !self.handles_seen.insert(handle.to_owned())
+        {
+            return Err(refused("a document gives a handle one prefix"));
+        }
+        Ok(())
+    }
+
     /// `&anchor !tag`, or an empty string.
     fn properties(
         &mut self,
@@ -401,6 +496,12 @@ where
                     anchor.as_str()
                 )));
             }
+            // An anchor may be defined again, and an alias then refers to the later one. Its
+            // name is new to the document once.
+            if !self.anchors.contains(anchor.as_str()) {
+                self.limits.check_anchors(self.anchors.len() + 1)?;
+                self.anchors.insert(anchor.as_str().to_owned());
+            }
             output.push('&');
             output.push_str(anchor.as_str());
         }
@@ -413,15 +514,27 @@ where
         Ok(output)
     }
 
-    fn alias(&mut self, anchor: &Anchor<'_>) -> Result<(), Error> {
+    /// `*name`, for an alias whose name reads back and whose anchor a node earlier in its
+    /// document has. Every alias is written through here, a mapping's key too.
+    fn alias_token(&self, anchor: &Anchor<'_>) -> Result<String, Error> {
         if !anchor_name_ok(anchor.as_str()) {
             return Err(emitter_error(format!(
                 "cannot write the alias name {:?}",
                 anchor.as_str()
             )));
         }
-        self.push("*")?;
-        self.push(anchor.as_str())
+        if !self.anchors.contains(anchor.as_str()) {
+            return Err(emitter_error(format!(
+                "cannot write the alias {:?}: no node before it in its document has that anchor",
+                anchor.as_str()
+            )));
+        }
+        Ok(format!("*{}", anchor.as_str()))
+    }
+
+    fn alias(&mut self, anchor: &Anchor<'_>) -> Result<(), Error> {
+        let token = self.alias_token(anchor)?;
+        self.push(&token)
     }
 
     fn separate(&mut self, pos: Pos) -> Result<(), Error> {
@@ -747,14 +860,8 @@ where
     fn implicit_key(&mut self, key: &Event<'_>) -> Result<Option<String>, Error> {
         match key {
             Event::Alias { anchor, .. } => {
-                if !anchor_name_ok(anchor.as_str()) {
-                    return Err(emitter_error(format!(
-                        "cannot write the alias name {:?}",
-                        anchor.as_str()
-                    )));
-                }
                 // `:` can be part of an alias name, so it needs a space.
-                Ok(Some(format!("*{} ", anchor.as_str())))
+                Ok(Some(format!("{} ", self.alias_token(anchor)?)))
             }
             Event::Scalar {
                 value,

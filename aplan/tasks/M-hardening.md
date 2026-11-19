@@ -4,7 +4,6 @@ title: Close remaining test, API, and consumer follow-ups after 0.1.2
 phase: 2
 status: todo
 blocked_by:
-- AY-020
 - AY-036
 - AY-037
 - AY-039

@@ -1,8 +1,9 @@
-//! Byte offsets and one-based source locations.
+//! Byte offsets, zero-based positions, and one-based locations.
 //!
 //! Spans are half-open byte ranges over the original UTF-8 input. A line and
 //! column come from a [`LineIndex`](crate::LineIndex), which can count UTF-8
-//! bytes, Unicode scalar values, or UTF-16 code units.
+//! bytes, Unicode scalar values, or UTF-16 code units. A [`Position`] counts
+//! from zero, for a machine; a [`Location`] counts from one, for a person.
 
 use std::ops::Range;
 
@@ -10,7 +11,7 @@ use std::ops::Range;
 ///
 /// This is the pre-byte-span position type. Spans no longer store it; use
 /// [`LineIndex`](crate::LineIndex) for positions derived from a span.
-#[deprecated(note = "use Span byte offsets with LineIndex and Position")]
+#[deprecated(note = "use Span byte offsets with LineIndex, Position, and Location")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Marker {
     index: usize,
@@ -50,20 +51,46 @@ impl Marker {
 
     /// The line/column location, without the byte offset.
     #[must_use]
-    pub const fn location(self) -> Position {
-        Position::new(self.line, self.column)
+    pub const fn location(self) -> Location {
+        Location::new(self.line, self.column)
     }
 }
 
-/// A one-based line and column, suitable for diagnostics and editors.
+/// A zero-based line and column, as a [`LineIndex`](crate::LineIndex) gives and takes them.
+///
+/// This is the position for a machine: an editor protocol, a source map, another index. What
+/// the column counts is the [`ColumnEncoding`](crate::ColumnEncoding) that was asked for. For a
+/// person, convert it to a [`Location`], which counts from one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Position {
+    /// The line, counted from zero.
+    pub line: usize,
+    /// The column on that line, counted from zero.
+    pub column: usize,
+}
+
+impl Position {
+    /// Create a zero-based line/column position.
+    #[must_use]
+    pub const fn new(line: usize, column: usize) -> Self {
+        Self { line, column }
+    }
+}
+
+/// A one-based line and column, for display: what [`Error::location`](crate::Error::location)
+/// returns and what an error prints.
+///
+/// Its `Default` is line 0, column 0, as in 0.1.x: no place in a text, for a location that
+/// isn't known. The first character of a text is at `Location::new(1, 1)`, which is what
+/// `Location::from(Position::default())` gives.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Location {
     line: usize,
     column: usize,
 }
 
-impl Position {
-    /// Create a one-based line/column position.
+impl Location {
+    /// Create a one-based line/column location.
     #[must_use]
     pub const fn new(line: usize, column: usize) -> Self {
         Self { line, column }
@@ -82,11 +109,18 @@ impl Position {
     }
 }
 
-/// A one-based line and column, suitable for diagnostics and editors.
-pub type Location = Position;
+/// The location that a person reads for a position: one more in the line and in the column.
+impl From<Position> for Location {
+    fn from(position: Position) -> Self {
+        Self::new(
+            position.line.saturating_add(1),
+            position.column.saturating_add(1),
+        )
+    }
+}
 
 #[allow(deprecated, reason = "converts the compatibility marker")]
-impl From<Marker> for Position {
+impl From<Marker> for Location {
     fn from(marker: Marker) -> Self {
         marker.location()
     }
@@ -176,13 +210,19 @@ impl From<Range<usize>> for Span {
 
 #[cfg(test)]
 mod tests {
-    use super::{Position, Span};
+    use super::{Location, Position, Span};
 
     #[test]
-    fn positions_are_one_based() {
-        let position = Position::new(2, 3);
-        assert_eq!(position.line(), 2);
-        assert_eq!(position.column(), 3);
+    fn a_location_is_one_more_than_its_position() {
+        let location = Location::new(2, 3);
+        assert_eq!((location.line(), location.column()), (2, 3));
+        let position = Position::new(1, 2);
+        assert_eq!((position.line, position.column), (1, 2));
+        assert_eq!(Location::from(position), location);
+        assert_eq!(Location::from(Position::default()), Location::new(1, 1));
+        // The last position there is has no location past it, and doesn't overflow.
+        let last = Location::from(Position::new(usize::MAX, usize::MAX));
+        assert_eq!((last.line(), last.column()), (usize::MAX, usize::MAX));
     }
 
     #[test]

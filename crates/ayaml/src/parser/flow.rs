@@ -1,6 +1,6 @@
 use super::{
     Anchor, Call, CollectionStyle, Cont, Cow, DUPLICATE_PROPERTIES, Error, ErrorKind, Event,
-    FlowLack, FlowState, LineIndex, Parser, Properties, Run, ScalarStyle, Span, Step, Tag, Token,
+    FlowLack, FlowState, LineStarts, Parser, Properties, Run, ScalarStyle, Span, Step, Tag, Token,
     TokenKind, implicit_key_fits,
 };
 
@@ -668,7 +668,7 @@ impl<'a> Parser<'a> {
 
     /// An empty span at the end of the input, counted as the scanner counts it.
     pub(super) fn end_of_input(&self) -> Span {
-        Span::empty(LineIndex::end_marker(self.input, self.compat))
+        Span::empty(LineStarts::end_marker(self.input, self.compat))
     }
 
     /// A node's properties at the start of `run`, and how many tokens they are. A node

@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "kind": "property",
+      "input": "a,b:c%\n",
+      "expected": "a%2Cb%3Ac%25%0A"
+    },
+    {
+      "kind": "data",
+      "input": "a,b:c%\r\n",
+      "expected": "a,b:c%25%0D%0A"
+    },
+    {
+      "kind": "property",
+      "input": "plain.env",
+      "expected": "plain.env"
+    },
+    {
+      "kind": "data",
+      "input": "line\nnext",
+      "expected": "line%0Anext"
+    }
+  ]
+}

@@ -11,10 +11,9 @@ fn span_offsets_are_byte_based_and_locations_are_one_based() {
     let text = "é: 1\n";
     let span = Span::new(0, 2);
     assert_eq!(span.slice(text), Some("é"));
-    assert_eq!(
-        LineIndex::new(text).position(text, span.start(), ColumnEncoding::Scalar),
-        Ok(Location::new(1, 1))
-    );
+    let position = LineIndex::new(text).to_position(span.start(), ColumnEncoding::Scalar);
+    assert_eq!(position, Ok(Position::new(0, 0)));
+    assert_eq!(position.map(Location::from), Ok(Location::new(1, 1)));
     assert_eq!(span.len(), 2);
 }
 
@@ -336,10 +335,11 @@ fn event_places_match_their_offsets() {
             for event in read(input) {
                 for offset in [event.span().start(), event.span().end()] {
                     let position = LineIndex::new(input)
-                        .position(input, offset, ColumnEncoding::Scalar)
+                        .to_position(offset, ColumnEncoding::Scalar)
                         .expect("position");
+                    let location = Location::from(position);
                     assert_eq!(
-                        (position.line(), position.column()),
+                        (location.line(), location.column()),
                         place_of(input, offset),
                         "{name} {input:?} {event:?}"
                     );
@@ -620,9 +620,15 @@ fn line_index_supports_byte_scalar_and_utf16_columns() {
     let input = "\u{feff}é𝄞x\n";
     let index = LineIndex::new(input);
     let position = |offset, encoding| {
-        index
-            .position(input, offset, encoding)
-            .unwrap_or_else(|error| panic!("{offset} {encoding:?}: {error}"))
+        let position = index
+            .to_position(offset, encoding)
+            .unwrap_or_else(|error| panic!("{offset} {encoding:?}: {error}"));
+        assert_eq!(
+            index.to_offset(position, encoding),
+            Ok(offset),
+            "{encoding:?}"
+        );
+        Location::from(position)
     };
     assert_eq!(
         [
@@ -657,11 +663,16 @@ fn line_index_supports_byte_scalar_and_utf16_columns() {
         ]
     );
     assert_eq!(
-        index.position(input, 4, ColumnEncoding::Scalar),
-        Err(ayaml::PositionError::NotCharBoundary)
+        index.to_position(4, ColumnEncoding::Scalar),
+        Err(ayaml::PositionError::InvalidUtf8Boundary)
+    );
+    // A byte column needs no character boundary.
+    assert_eq!(
+        index.to_position(4, ColumnEncoding::Utf8),
+        Ok(Position::new(0, 1))
     );
     assert_eq!(
-        index.position(input, input.len() + 1, ColumnEncoding::Scalar),
+        index.to_position(input.len() + 1, ColumnEncoding::Scalar),
         Err(ayaml::PositionError::OutOfBounds)
     );
     assert_eq!(Span::new(3, 5).range(), 3..5);

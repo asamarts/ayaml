@@ -148,6 +148,39 @@ fn nested_value() -> impl Strategy<Value = Value> {
     })
 }
 
+/// The first alias in `events` that has no node with its anchor earlier in its own document.
+fn first_dangling_alias<'e>(events: &'e [ayaml::Event<'_>]) -> Option<&'e str> {
+    use ayaml::Event;
+
+    let mut anchors = std::collections::HashSet::new();
+    for event in events {
+        match event {
+            Event::DocumentStart { .. } => anchors.clear(),
+            Event::Alias { anchor, .. } => {
+                if !anchors.contains(anchor.as_str()) {
+                    return Some(anchor.as_str());
+                }
+            }
+            Event::Scalar {
+                anchor: Some(anchor),
+                ..
+            }
+            | Event::SequenceStart {
+                anchor: Some(anchor),
+                ..
+            }
+            | Event::MappingStart {
+                anchor: Some(anchor),
+                ..
+            } => {
+                anchors.insert(anchor.as_str());
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn reparse(output: &str) -> Value {
     ayaml::parse_value(output).unwrap_or_else(|error| panic!("{error}; output={output:?}"))
 }
@@ -202,14 +235,35 @@ proptest! {
         prop_assert_eq!(String::from_utf8(lazy).expect("utf8"), output);
     }
 
-    /// Whatever parses, both emitters write as text that parses back.
+    /// Whatever parses, both emitters write as text that parses back. The one exception is an
+    /// alias with no anchor before it in its document, which the event readers report as it is
+    /// written and the event writer refuses, since no value reader loads it (D97).
     #[test]
     fn emitters_accept_whatever_parses(input in yamlish_text()) {
         let Ok(events) = ayaml::parse_events(&input).and_then(Iterator::collect::<Result<Vec<_>, _>>)
         else {
             return Ok(());
         };
-        let output = ayaml::to_string_events(&events).expect("emit events");
+        let dangling = first_dangling_alias(&events);
+        let output = match ayaml::to_string_events(&events) {
+            Ok(output) => output,
+            Err(error) => {
+                // The refusal is of the first such alias, and no reader of values loads the
+                // stream that holds it.
+                let name = dangling.unwrap_or_else(|| panic!("{error}; input={input:?}"));
+                prop_assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "cannot write the alias {name:?}: no node before it in its document has that anchor"
+                    ),
+                    "input={:?}",
+                    input
+                );
+                prop_assert!(ayaml::parse_documents(&input).is_err(), "input={:?}", input);
+                return Ok(());
+            }
+        };
+        prop_assert!(dangling.is_none(), "input={:?} output={:?}", input, output);
         let reparsed = ayaml::parse_events(&output)
             .and_then(Iterator::collect::<Result<Vec<_>, _>>)
             .unwrap_or_else(|error| panic!("{error}; input={input:?} output={output:?}"));

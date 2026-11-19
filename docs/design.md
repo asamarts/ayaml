@@ -20,8 +20,9 @@ UTF-8 input
 Each layer has a narrow responsibility:
 
 - The **scanner** validates UTF-8 and YAML lexical structure and produces tokens
-  with byte offsets. It builds the index of line starts that gives an error, or a
-  caller, a one-based line and column on request (D89).
+  with byte offsets. It builds the index of line starts that gives an error its
+  one-based line and column on request (D89). A caller builds a `LineIndex` of
+  its own for an input, which answers in zero-based positions (D96).
 - The **parser** turns tokens into stream, document, collection, scalar, tag,
   anchor, alias, and directive events. Collections use explicit stacks, so
   hostile nesting consumes heap rather than the native call stack. Event readers
@@ -75,9 +76,11 @@ resource model is described in [limits.md](limits.md).
 
 Spans are half-open UTF-8 byte ranges over the original input. A `Span` holds
 only its byte offsets and converts to `Range<usize>`. `LineIndex` turns an
-offset into a one-based `Position`, counting UTF-8 bytes, Unicode scalar values,
-or UTF-16 code units with `ColumnEncoding`; a leading byte-order mark is outside
-the columns and inside the offsets. Block and flow collections, scalars, tags,
+offset into a zero-based `Position` and back, counting UTF-8 bytes, Unicode
+scalar values, or UTF-16 code units with `ColumnEncoding`; a leading byte-order
+mark is outside the columns and inside the offsets. An error's `Location` is
+the one-based form of the same place. These are the names and rules of the
+format contract's positions layer ([interface.md](interface.md), D96). Block and flow collections, scalars, tags,
 anchors, aliases, and directives expose source spans in the event stream. A
 plain scalar's span and raw text end at its last non-whitespace character, so
 the separation before a comment, line break, or flow indicator stays outside it.

@@ -18,3 +18,4 @@ cc 58e14de5c263a39208143190afbbe2c333692da40436a82c5bd805a30b7c1aea # shrinks to
 cc 9c033391f5eaee7d0265349f48723944779a7fe61ffd7c0a3abcea1e72d5d614 # shrinks to value = Sequence([Mapping(Mapping {Tagged(TaggedValue { tag: Tag { handle: "!", suffix: "a" }, value: Bool(false) }): Null, Null: Null})])
 cc 6c71b6dc4e8ab17a39e7ca1e90d250c1d027ce85673361a4f464192013cab119 # shrinks to input = "!"
 cc 97f63c381e4ce9e76da90371229c1ff799ff8ae550bcc1c7044a5998c563638c # shrinks to value = Tagged(TaggedValue { tag: Tag { handle: "!", suffix: "A" }, value: String("\n\t{") })
+cc 53ebcfc4411ce3156b2e4972ea430a9e67867de5acad1e6c8157ab0612d61391 # shrinks to input = "*`"

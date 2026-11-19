@@ -12,7 +12,7 @@ use super::{Cont, EventSink, Lines, Opening, Parser, Step, flow_ends, read_lines
 use crate::error::{Error, ErrorKind};
 use crate::event::Event;
 use crate::limits::Limits;
-use crate::position::LineIndex;
+use crate::position::LineStarts;
 use crate::scanner::Scanner;
 use crate::span::Span;
 
@@ -159,7 +159,7 @@ impl<'a> DocumentEvents<'a> {
             self.parser.lines = Vec::new();
             self.parser.token_arena = Vec::new();
             self.parser.flow_ends = HashMap::new();
-            self.parser.positions = LineIndex::new("");
+            self.parser.positions = LineStarts::new("");
             self.stack = Vec::new();
         }
     }

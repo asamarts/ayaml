@@ -169,7 +169,7 @@ pub use emitter::{
 };
 pub use event_emitter::{
     to_string_events, to_string_events_with_limits, to_writer_event_stream,
-    to_writer_event_stream_with_limits, to_writer_events,
+    to_writer_event_stream_with_limits, to_writer_events, to_writer_events_with_limits,
 };
 pub use serde_impl::{from_value, from_value_seed, to_value};
 
@@ -788,7 +788,7 @@ pub fn parse_value_with_limits(input: &str, limits: &Limits) -> Result<Value, Er
     limits.check_input(input.len()).map_err(|error| {
         Error::from(error)
             .with_span(Span::empty(0))
-            .with_location(Position::new(1, 1))
+            .with_location(Location::new(1, 1))
     })?;
     let mut documents = parser::parse_documents(input, limits, true)?;
     if documents.len() > 1 {
@@ -821,7 +821,7 @@ pub fn parse_documents_with_limits(input: &str, limits: &Limits) -> Result<Vec<V
     limits.check_input(input.len()).map_err(|error| {
         Error::from(error)
             .with_span(Span::empty(0))
-            .with_location(Position::new(1, 1))
+            .with_location(Location::new(1, 1))
     })?;
     parser::parse_documents(input, limits, false)
 }
@@ -909,7 +909,7 @@ fn text_of(input: &[u8]) -> Result<&str, Error> {
         .map_err(|error| {
             Error::from(error)
                 .with_span(Span::empty(0))
-                .with_location(Position::new(1, 1))
+                .with_location(Location::new(1, 1))
         })?;
     std::str::from_utf8(input).map_err(|error| {
         Error::new(ErrorKind::InvalidEncoding, "input is not valid UTF-8").with_source(error)
