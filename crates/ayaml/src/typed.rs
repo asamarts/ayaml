@@ -251,8 +251,10 @@ pub(crate) fn from_str_visitor<'de, V: Visitor<'de>>(
 }
 
 /// Decode one document with a seed. A small input is built as a tree and read from it, which
-/// costs it the least; a larger one is read from its events, so that no tree of it is kept
-/// beside its tokens and its value (see `stream`). Both give the same value or error. A build
+/// costs a document of a few bytes the least; a larger one is read from its events, so that no
+/// tree of it is kept beside its tokens and its value (see `stream`). Both give the same value
+/// or error. What a target can see of the difference is that a collection read from events
+/// tells it no size, and that it has read the start of a document that is then refused. A build
 /// with `--cfg ayaml_typed_from_events` reads every input from its events, which is how the
 /// tests run on that reader at every size.
 pub(crate) fn from_str_seed_with_options<'de, T: DeserializeSeed<'de>>(
@@ -471,7 +473,9 @@ struct Built<'de> {
 #[derive(Clone, Debug)]
 enum SeenKey<'de> {
     Scalar(Cow<'de, str>),
-    Node(Node<'de>),
+    /// Boxed: nearly every key is a scalar, and a node here would make each slot of the set
+    /// as large as a node, more than three times a scalar key's.
+    Node(Box<Node<'de>>),
 }
 
 impl PartialEq for SeenKey<'_> {
@@ -501,7 +505,7 @@ impl<'de> SeenKey<'de> {
             Self::Scalar(text)
         } else {
             node.cached_hash();
-            Self::Node(node.clone())
+            Self::Node(Box::new(node.clone()))
         }
     }
 }

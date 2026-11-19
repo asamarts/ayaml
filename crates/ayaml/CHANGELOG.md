@@ -96,8 +96,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   measures, now peaks at 0.52 to 0.96 times the reference that the issue gives for its nine
   shapes: at 24.2 MB on a 1.1 MB service description, 96.9 MB on a 4.4 MB one, and 17.4 MB on a
   megabyte block sequence of short words, which was the last shape over the issue's target. A
-  20 KB configuration fixture decoded into `Value` peaks at about 218 KB and allocates about
-  363 KB in total.
+  20 KB configuration fixture decoded into `Value` peaks at about 175 KB and keeps about 98 KB.
 - Mappings and typed mapping keys cache their structural hash, so a mapping nested inside a
   mapping key is hashed once per level instead of once for every outer level and entry.
 

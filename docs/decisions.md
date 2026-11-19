@@ -631,7 +631,8 @@ testable against each other, and agreeing with `parse_value` leaves one order to
 which the changelog states. An input of at most 4 KiB that fails while it is scanned or parsed is
 read twice. One that is accepted, or that fails only while it is built, is read once, as before.
 The `Deserializer` is unchanged: it reads a document's events before it builds from them, at
-every size, so within a document it reports a syntax error first.
+every size, so within a document it reports a syntax error first. D95 later changed what an
+input of more than 4 KiB costs: it is read from its events, and read twice when it is refused.
 
 ## D92 — An entry span is given only where its removal is exact
 
@@ -756,7 +757,9 @@ target reads and drops, and a collection is read entry by entry. A tree is built
 that is read whole or again: a node with an anchor and what an alias refers to, a collection that
 keeps its tag, a mapping key, and what an enum reads. The checks that the tree's builder makes are
 made as the events pass: depth, duplicate keys, anchors and the alias budget, and a single
-document.
+document. A root that is built whole is the document as a tree, so it is built before its target
+reads, the stream is read to its end, and the tokens are freed first, as when the tree reader
+builds it.
 
 Such a read's own error is not always the one to report. After any error the document is built as
 a tree, and that tree's error, if it has one, is the answer. Only a document that builds reports
@@ -780,9 +783,19 @@ the 76,861 files of the fuzz corpus the two readers gave the same value or the s
 and go on, read nothing, or leave values behind.
 
 **Consequences.** A refused input of more than 4 KiB is read twice, unless the scanner refuses
-it, which reads the whole input before any event. A collection that is read from events tells
-its target no size. A typed read of many short entries executes about 4% more instructions than
-one that builds the tree, which the instruction gate accepts for its three such workloads. The
-tree reader stays: it reads small inputs and anchored nodes, and it words every error. The tests
-read documents both ways and compare, the `borrowed` fuzz target does the same, and a build with
+it, which reads the whole input before any event. Its target has read what stands before the
+fault by then, where the tree reader refuses a document before its target sees any of it: the
+value and the error are the same, but a seed that writes to its caller's data as it reads has
+written, and the first read costs what an accepted document of that content costs. A collection
+that is read from events tells its target no size, but for a root flow collection, whose entries
+the parser counts: a vector or a map then grows by doubling, peaks higher, and keeps up to twice
+the room its entries need, which `Value` and `Mapping` give back at each collection's end. A
+visitor that asks a mapping for a value after the mapping has told
+it the end is refused, where the tree gave it the last value it had left unread. A node with an
+anchor that is not the root is kept as a tree beside the tokens and the value, so a document
+made mostly of anchored nodes peaks about a quarter above a read that builds the tree first. A
+typed read of many short entries executes about 4% more instructions than one that builds the
+tree, which the instruction gate accepts for its three such workloads. The tree reader stays: it
+reads small inputs and anchored nodes, and it words every error. The tests read documents both
+ways and compare, the `borrowed` fuzz target does the same, and a build with
 `--cfg ayaml_typed_from_events` runs the whole suite on events at every size.

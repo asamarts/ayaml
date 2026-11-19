@@ -142,11 +142,16 @@ impl<'de> Visitor<'de> for MappingVisitor {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
-        let mut mapping = Mapping::new();
+        let told = access.size_hint();
+        let mut mapping = Mapping::with_capacity(told.unwrap_or(0).min(4096));
         while let Some((key, value)) = access.next_entry()? {
             mapping.insert_new(key, value).map_err(|key| {
                 serde::de::Error::custom(format!("duplicate entry with key {key}"))
             })?;
+        }
+        // As for a `Value`: a mapping that wasn't told its size gives back what it doesn't need.
+        if told.is_none() {
+            mapping.shrink_to_fit();
         }
         Ok(mapping)
     }
@@ -236,7 +241,8 @@ impl<'de> Visitor<'de> for ValueVisitor {
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
-        let hint = access.size_hint().unwrap_or(0);
+        let told = access.size_hint();
+        let hint = told.unwrap_or(0);
         let mut sequence = if (8..=1024).contains(&hint) {
             Vec::with_capacity(hint)
         } else {
@@ -245,16 +251,24 @@ impl<'de> Visitor<'de> for ValueVisitor {
         while let Some(value) = access.next_element()? {
             sequence.push(value);
         }
+        // A collection that is read from the parser's events isn't told its size. It has grown
+        // by doubling, and would keep up to twice the room that its entries need.
+        if told.is_none() {
+            sequence.shrink_to_fit();
+        }
         Ok(Value::Sequence(sequence))
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
-        let capacity = access.size_hint().unwrap_or(0).min(4096);
-        let mut mapping = Mapping::with_capacity(capacity);
+        let told = access.size_hint();
+        let mut mapping = Mapping::with_capacity(told.unwrap_or(0).min(4096));
         while let Some((key, value)) = access.next_entry()? {
             mapping.insert_new(key, value).map_err(|key| {
                 serde::de::Error::custom(format!("duplicate entry with key {key}"))
             })?;
+        }
+        if told.is_none() {
+            mapping.shrink_to_fit();
         }
         Ok(Value::Mapping(mapping))
     }

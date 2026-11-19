@@ -53,15 +53,7 @@ pub(super) fn read<'de, T: DeserializeSeed<'de>>(
     // The scanner reads the whole input before the first event, here and for the tree, so its
     // error is the same one and needs no second read.
     let events = DocumentEvents::new(input, limits, options.compat_flow).map_err(located)?;
-    let mut stream = Stream {
-        events,
-        builder: Builder::streaming(input.len(), limits, options, None),
-        open: Vec::new(),
-        ahead: Ahead::Unknown,
-        due: false,
-        ended: false,
-        fault: None,
-    };
+    let mut stream = Stream::new(events, input.len(), limits, options);
     let result = stream.document(|document| seed.deserialize(document));
     let fault = stream.fault.take();
     // The tokens are freed before a tree is built.
@@ -158,6 +150,23 @@ enum Open<'de> {
 }
 
 impl<'de> Stream<'de> {
+    fn new(
+        events: DocumentEvents<'de>,
+        input_len: usize,
+        limits: &Limits,
+        options: NodeOptions,
+    ) -> Self {
+        Self {
+            events,
+            builder: Builder::streaming(input_len, limits, options, None),
+            open: Vec::new(),
+            ahead: Ahead::Unknown,
+            due: false,
+            ended: false,
+            fault: None,
+        }
+    }
+
     fn document<R>(
         &mut self,
         target: impl for<'s> FnOnce(StreamDeserializer<'de, 's>) -> Result<R, Error>,
@@ -816,5 +825,66 @@ impl<'de> MapAccess<'de> for MappingAccess<'de, '_> {
 
     fn size_hint(&self) -> Option<usize> {
         self.stream.left(self.level)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde::de::{Deserialize, IgnoredAny};
+
+    use super::{DocumentEvents, NodeOptions, Stream};
+    use crate::limits::Limits;
+
+    /// The tokens that are held when the target begins to read `input`, and those held once it
+    /// has read it into a `T`.
+    fn tokens<'de, T: Deserialize<'de>>(input: &'de str) -> (usize, usize) {
+        let limits = Limits::default();
+        let events = DocumentEvents::new(input, &limits, false).expect("a scanned input");
+        let mut stream = Stream::new(events, input.len(), &limits, NodeOptions::default());
+        let mut before = usize::MAX;
+        stream
+            .document(|document| {
+                before = document.stream.events.tokens();
+                T::deserialize(document)
+            })
+            .unwrap_or_else(|error| panic!("{input:?}: {error}"));
+        (before, stream.events.tokens())
+    }
+
+    /// A root that is built whole is the document as a tree, so its target reads it with the
+    /// tokens freed, as it reads the tree that the tree reader builds. A root that is read
+    /// entry by entry needs them to its end.
+    #[test]
+    fn a_root_that_is_built_whole_is_read_after_the_tokens_are_freed() {
+        #[derive(serde::Deserialize)]
+        enum Kind {
+            #[allow(dead_code, reason = "read, to see what is held meanwhile")]
+            V(Vec<u8>),
+            #[allow(dead_code, reason = "read, to see what is held meanwhile")]
+            W { a: u8 },
+        }
+
+        for input in [
+            "&a [1, 2, 3]\n",
+            "&a\n- 1\n- 2\n",
+            "!t [1, 2]\n",
+            "&a {k: [1, 2]}\n",
+            "text\n",
+        ] {
+            assert_eq!(tokens::<IgnoredAny>(input), (0, 0), "{input:?}");
+        }
+        for input in ["[1, 2, 3]\n", "- 1\n- 2\n", "k: [1, 2]\n", "k: &a [1, 2]\n"] {
+            let (before, after) = tokens::<IgnoredAny>(input);
+            assert!(before > 0 && after > 0, "{input:?}: {before}, {after}");
+        }
+        // An enum reads its node whole, which the stream learns when the target asks. At the
+        // root that is the document, and the tokens are freed before the variant is read.
+        for input in ["V: [1, 2, 3]\n", "W:\n  a: 1\n", "V:\n- 1\n"] {
+            let (before, after) = tokens::<Kind>(input);
+            assert!(before > 0, "{input:?}: {before}");
+            assert_eq!(after, 0, "{input:?}");
+        }
+        let (_, after) = tokens::<Vec<Kind>>("- V: [1]\n- W: {a: 2}\n");
+        assert!(after > 0, "an enum inside the root: {after}");
     }
 }

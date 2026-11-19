@@ -175,3 +175,15 @@ fn the_room_reserved_for_a_root_collection_is_not_reserved_for_its_items() {
     };
     assert_eq!(inner.capacity(), 0);
 }
+
+/// With duplicate keys refused, every key of an open mapping has a slot in a set. Nearly every
+/// key is a scalar, so a slot is as large as a scalar's text and no larger: a node in it, for
+/// the rare key that is a collection, would more than triple the set.
+#[test]
+fn a_seen_key_is_no_larger_than_a_scalar_s_text() {
+    assert_eq!(
+        std::mem::size_of::<SeenKey<'_>>(),
+        std::mem::size_of::<std::borrow::Cow<'_, str>>()
+    );
+    assert!(std::mem::size_of::<Node<'_>>() > 3 * std::mem::size_of::<SeenKey<'_>>());
+}

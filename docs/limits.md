@@ -88,8 +88,12 @@ report different ones, because they don't check in the same order:
   reports what is wrong with the document before anything about the target, wherever each
   stands. To do that it reads a refused input a second time, building the document as the
   other readers do, unless the scanner refused it, which reads the whole input before either.
-  So a refusal can cost such a reader twice the time of a read, and never more memory than
-  the one read that builds the document.
+  By then its target has read what stands before the fault, as it would read that part of a
+  document that is accepted, aliases included. So a refusal can cost such a reader two reads:
+  one that an accepted document of the same content up to the fault would cost, and one that
+  builds the document. The first read's memory is freed before the second begins. A target or
+  a seed that writes somewhere else as it reads, such as a seed that fills its caller's
+  vector, has written what it read before the fault when the reader returns the error.
 
 ## What the limits count
 
@@ -183,10 +187,22 @@ that document's tokens. Every other reader holds the tokens of the whole stream.
   `parse_events` and the `Deserializer` keep one document's tokens, in vectors that double.
 - A reader of one document into a type, such as `from_str`, holds no tree of an input of more
   than 4 KiB beside those: it builds the target's value from the events, and keeps a tree only
-  of what an alias may read again, of a collection that keeps its tag, and of a mapping's keys
-  while that mapping is open. With duplicate keys refused it also holds the keys' text for each
-  open mapping. A read that fails frees its tokens and then builds the document once more to
-  report the error.
+  of what an alias may read again, of a collection that keeps its tag, of what an enum reads,
+  and of a mapping's key while its value is read. With duplicate keys refused it also holds a
+  set of each open mapping's keys, at 24 bytes a slot and the text of a key that isn't taken
+  from the source as it stands. A root that is built whole, because it has an anchor or a tag
+  that it keeps or because an enum reads it, is the document as a tree: the tokens are freed
+  before its target reads it. A node with an anchor that is not the root is kept beside the
+  tokens and the value, so a document made mostly of such nodes peaks about a quarter above
+  a read that builds the whole tree first. A read that fails frees its tokens and then builds
+  the document once more to report the error.
+- A collection that is read from events tells its target no size, since its entries are
+  counted only at its end. The root is the exception where it is a flow collection, whose
+  entries the parser counts first. A `Vec` or a map that isn't told its size grows by
+  doubling, so it can keep up to twice the room its entries need. `Value` and `Mapping` give
+  that room back at each collection's end, and keep what a value keeps that was told each
+  size. Another target keeps the spare room unless it does the same, as with
+  `Vec::shrink_to_fit` or `Mapping::shrink_to_fit`.
 - A block scalar is built as it is read. At its peak a read of one takes about 5 times
   its input in resident memory for short lines, and about 10 times for blank lines,
   where the index costs most. Counting the capacity it reserves without touching, a

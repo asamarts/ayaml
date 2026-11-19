@@ -922,9 +922,10 @@ fn a_root_flow_collection_tells_its_visitor_how_many_entries_it_has() {
         assert_eq!(read("{a: 1, b: [2, 3]}\n"), known(2, 1, 2));
         assert_eq!(read("[]\n"), known(0, 0, 0));
         assert_eq!(read("--- [1, 2]\n"), known(2, 1, 2));
-        // An anchor or a tag has the root built whole, and the tree knows its size.
+        // An anchor has the root built whole, and the tree knows its size, in any style.
         assert_eq!(read("&a [1, 2, 3]\n"), known(3, 2, 3));
-        assert_eq!(read("!t {a: 1, b: 2}\n"), known(2, 1, 2));
+        assert_eq!(read("&a {a: 1, b: 2}\n"), known(2, 1, 2));
+        assert_eq!(read("&a\n- 1\n- 2\n"), known(2, 1, 2));
         // A block collection's entries are not counted before they are read.
         assert_eq!(read("- 1\n- 2\n- 3\n"), unknown(3));
         assert_eq!(read("a: 1\nb: 2\n"), unknown(2));

@@ -162,7 +162,8 @@ fn the_repository_lint_policy_is_the_one_the_plan_requires() {
 }
 
 /// The nine document shapes of issue #178 each have a peak, an allocation count, and a total
-/// in the budgets of the untyped decode, and the gate script reads that file.
+/// in the budgets of the untyped decode, and the gate script reads that file. So do the shapes
+/// that a reader of events builds as trees, and the one that is all directives.
 #[test]
 fn allocation_budgets_cover_the_json_decode() {
     let Some(root) = repository_root() else {
@@ -196,6 +197,10 @@ fn allocation_budgets_cover_the_json_decode() {
             "@flow-ones-1mb",
             "@block-seq-1mb",
             "@block-words-1mb",
+            "@anchored-flow-ones-1mb",
+            "@anchored-block-words-1mb",
+            "@anchored-maps-50000",
+            "@directives-100k",
         ]
     );
 }

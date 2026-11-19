@@ -1,5 +1,6 @@
 # Allocation budgets for an untyped decode into a JSON tree, checked by tools/check_alloc_corpus.sh
-# with AYAML_JSON=1: the nine document shapes of issue #178, measured as the issue measures them.
+# with AYAML_JSON=1: the nine document shapes of issue #178, measured as the issue measures them,
+# and four more below them.
 # The decode goes through the compatibility reader with the count limits lifted, and a
 # reallocation counts by the bytes it adds.
 # Each budget is about 1.10 times the measured value, rounded up. The shapes peak at 0.52 to
@@ -15,3 +16,12 @@
 @flow-ones-1mb	53700000	36	53700000
 @block-seq-1mb	14900000	79500	14900000
 @block-words-1mb	19200000	143000	19200000
+# Shapes that a reader of events can't read entry by entry, so that what they cost can't grow
+# unseen. A root with an anchor is built whole, and peaks as a read that builds the tree first:
+# the tokens are freed before the tree is read. A node with an anchor inside the root is kept
+# for the aliases that may follow it, beside the tokens and the value. A directive is an event
+# with no node, and none waits for the reader beyond a few.
+@anchored-flow-ones-1mb	79300000	41	97700000
+@anchored-block-words-1mb	25500000	143000	30800000
+@anchored-maps-50000	105000000	386000	110000000
+@directives-100k	13300000	111000	13300000
