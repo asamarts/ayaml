@@ -1,6 +1,6 @@
 //! Path lookup and spans over the read-only spanned tree.
 
-use ayaml::{PathSegment, SpannedTree, Value};
+use ayaml::{Event, PathSegment, SpannedTree, Value};
 
 #[test]
 fn scalar_positions_and_encodings_follow_the_source() {
@@ -111,6 +111,56 @@ impl Mode {
             Self::Compat => ayaml::compat::from_str(input),
         }
     }
+
+    /// The document's events without their places: what each is, with its tag, its anchor,
+    /// its style, and its text. `None` if the events don't read.
+    fn events(self, input: &str) -> Option<Vec<String>> {
+        let stream = match self {
+            Self::Default => ayaml::parse_events(input),
+            #[cfg(feature = "libyaml-compat")]
+            Self::Compat => ayaml::compat::parse_events(input),
+        };
+        stream
+            .ok()?
+            .map(|event| {
+                Some(match event.ok()? {
+                    Event::Scalar {
+                        value,
+                        style,
+                        tag,
+                        anchor,
+                        ..
+                    } => format!("scalar {value:?} {style:?} {tag:?} {anchor:?}"),
+                    Event::Alias { anchor, .. } => format!("alias {anchor:?}"),
+                    Event::SequenceStart {
+                        tag, anchor, style, ..
+                    } => format!("sequence {style:?} {tag:?} {anchor:?}"),
+                    Event::MappingStart {
+                        tag, anchor, style, ..
+                    } => format!("mapping {style:?} {tag:?} {anchor:?}"),
+                    Event::DocumentStart { explicit, .. } => format!("document {explicit}"),
+                    Event::DocumentEnd { explicit, .. } => format!("document end {explicit}"),
+                    Event::Directive { name, value, .. } => format!("directive {name} {value}"),
+                    other => format!("{:?}", std::mem::discriminant(&other)),
+                })
+            })
+            .collect()
+    }
+}
+
+/// Whether `after` is `before` with one run of events taken out, and nothing else changed. An
+/// entry's events stand together, so that is what removing an entry does to them. It tells
+/// what a value can't: a tag that is dropped, an anchor, and a scalar's style.
+fn one_run_removed(before: &[String], after: &[String]) -> bool {
+    let same = |pair: &(&String, &String)| pair.0 == pair.1;
+    let prefix = before.iter().zip(after).take_while(same).count();
+    let suffix = before[prefix..]
+        .iter()
+        .rev()
+        .zip(after[prefix..].iter().rev())
+        .take_while(same)
+        .count();
+    after.len() < before.len() && prefix + suffix == after.len()
 }
 
 /// `value` without the entry at `path`, or `None` if the path leads to no entry, or to the only
@@ -163,13 +213,27 @@ fn inexact(
     }
     let mut rest = input.to_owned();
     rest.replace_range(span.range(), "");
+    let before = mode.events(input)?;
+    match mode.events(&rest) {
+        None => return Some(format!("the rest, {rest:?}, has no events")),
+        Some(after) if !one_run_removed(&before, &after) => {
+            return Some(format!(
+                "the rest, {rest:?}, differs by more than one run of events: {after:?}"
+            ));
+        }
+        Some(_) => {}
+    }
     let original = mode.value(input).ok()?;
     let Some(expected) = without(&original, path) else {
         return Some("it removes the only entry of a collection".to_owned());
     };
     match mode.value(&rest) {
         Err(error) => Some(format!("the rest, {rest:?}, does not read: {error}")),
-        Ok(read) if read != expected => Some(format!("the rest, {rest:?}, reads as {read:?}")),
+        // A mapping is equal to one with its entries in another order, so what is printed is
+        // compared too.
+        Ok(read) if read != expected || format!("{read:?}") != format!("{expected:?}") => {
+            Some(format!("the rest, {rest:?}, reads as {read:?}"))
+        }
         Ok(_) => None,
     }
 }
@@ -297,6 +361,201 @@ fn an_entry_with_no_exact_span_has_none() {
         entry("k: !!int\n  a: 1\nz: 0\n", &[key("k"), key("a")]),
         None
     );
+    // A key that is a block scalar ends with its last line, so the `:` on the next line is
+    // another entry's, and the entry around the key ends where no one can say.
+    assert_eq!(entry("a:\n  ? |\n:\nb: 1\n", &[key("a")]), None);
+    assert_eq!(entry("a:\n  ? |\n    k\n:\nb: 1\n", &[key("a")]), None);
+}
+
+/// A byte-order mark at the start of a later line doesn't open the stream. The compatibility
+/// reader counts it toward that line's indentation, and reads past one that begins a comment
+/// or a blank line. With the lines before it gone it would open the input and count for
+/// nothing. So what such a mark means depends on the lines before it, and an input that holds
+/// one past its first character gives no entry span.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn an_input_with_a_byte_order_mark_past_its_start_has_no_entry_span() {
+    for (input, path) in [
+        (" - 1\n\u{feff}- 2\n - 3\n", vec![index(0)]),
+        (" - 1\n\u{feff}- 2\n - 3\n", vec![index(2)]),
+        ("? a\nb: 2\n\u{feff}# c\n: 3\n", vec![key("b")]),
+        ("? a\nb: 2\n\n\u{feff}# c\n: 3\n", vec![key("b")]),
+        ("top:\n\u{feff} - a:\n      !!map\nz: 1\n", vec![key("top")]),
+    ] {
+        let tree = SpannedTree::parse_compat(input).expect("a tree");
+        assert_eq!(tree.entry_span_at(&path), None, "{input:?} at {path:?}");
+    }
+    // A mark that opens the input is no part of the first entry, and takes no span away.
+    assert_eq!(entry("\u{feff}a: 1\nb: 2\n", &[key("a")]), Some("a: 1\n"));
+}
+
+/// A tag or an anchor before a key puts the key further right than its mapping. Whether the
+/// next line could hold the key's value is judged from the mapping's column: a line indented
+/// past the mapping that holds only a tag for a collection's kind is that value, with no event
+/// to show for it, so the entries around it end where no one can say.
+#[test]
+fn a_value_s_place_is_judged_from_the_mapping_s_column() {
+    let tagged = "k: 0\ntop:\n  x: 1\n  !t a:\n   !!seq\nnext: 1\n";
+    assert_eq!(entry(tagged, &[key("top")]), None);
+    assert_eq!(entry("- x\n- !t a:\n   !!map\n- y\n", &[index(1)]), None);
+    assert_eq!(
+        entry("top:\n  x: 1\n  &n a:\n   !!map\nz: 1\n", &[key("top")]),
+        None
+    );
+    // With the next line at the mapping's column, the value is plainly missing.
+    let missing = "top:\n  x: 1\n  &n a:\n  b: 2\nnext: 1\n";
+    for mode in Mode::all() {
+        let tree = mode.tree(missing).expect("a tree");
+        let at = tree.span_at(&[key("top"), key("a")]).expect("a span");
+        assert_eq!((at.start(), at.end()), (19, 19), "{mode:?}");
+        // The first key of a mapping on its item's line: the mapping begins at the key.
+        let item = "- a:\n  b: 1\n- c\n";
+        let tree = mode.tree(item).expect("a tree");
+        let at = tree.span_at(&[index(0), key("a")]).expect("a span");
+        assert_eq!((at.start(), at.end()), (4, 4), "{mode:?}");
+    }
+    let tagged = "top:\n  x: 1\n  !t a:\n  b: 2\nnext: 1\n";
+    assert_eq!(
+        entry(tagged, &[key("top")]),
+        Some("top:\n  x: 1\n  !t a:\n  b: 2\n")
+    );
+}
+
+/// Each of these has no span for a reason of its own, which no other test reaches.
+#[test]
+fn an_entry_has_no_span_for_each_of_these_reasons() {
+    // A flow entry that begins its own line is still a flow entry.
+    let flow = "x: {\n  a: 1\n  ,\n  b: 2\n}\ny: 0\n";
+    assert_eq!(entry(flow, &[key("x"), key("a")]), None);
+    assert_eq!(
+        entry("x: [\n  1,\n  2\n]\ny: 0\n", &[key("x"), index(0)]),
+        None
+    );
+    // An item of a sequence that has an anchor, and an entry of an item that has one.
+    let sequence = "base: &b\n  - x\n  - y\nuse: *b\n";
+    assert_eq!(entry(sequence, &[key("base"), index(0)]), None);
+    assert_eq!(entry(sequence, &[key("base")]), None);
+    let item = "- &m\n  k: 1\n  j: 2\n- *m\n- z\n";
+    assert_eq!(entry(item, &[index(0), key("k")]), None);
+    assert_eq!(entry(item, &[index(0)]), None);
+    assert_eq!(entry(item, &[index(2)]), Some("- z\n"));
+    // A `:` line is looked for past blank and comment lines, and a tab may follow the `:`.
+    assert_eq!(entry("? a\nb: 1\n\n# c\n: c\n", &[key("b")]), None);
+    assert_eq!(entry("? a\nb: 1\n:\tc\n", &[key("b")]), None);
+    // An item that defines an anchor, an entry around one that does, an entry around a key
+    // that does, and an entry whose key holds one.
+    assert_eq!(entry("- &n 1\n- *n\n- 2\n", &[index(0)]), None);
+    assert_eq!(entry("- k: &n 1\n  j: 2\n- *n\n- z\n", &[index(0)]), None);
+    assert_eq!(entry("- - &n 1\n  - 2\n- *n\n- z\n", &[index(0)]), None);
+    assert_eq!(entry("a:\n  - &n 1\n  - 2\nb: *n\n", &[key("a")]), None);
+    assert_eq!(entry("a:\n  &k x: 1\n  y: 2\nb: *k\n", &[key("a")]), None);
+    let holds = PathSegment::Key(ayaml::parse_value("[a]").expect("a key"));
+    assert_eq!(entry("[&k a]: 1\nb: *k\nc: 2\n", &[holds]), None);
+    let own = "base: &b\n  x: 1\n  y: 2\nuse: *b\n";
+    assert_eq!(entry(own, &[key("base")]), None);
+    // A key with no text.
+    assert_eq!(entry(": 1\nb: 2\n", &[PathSegment::Key(Value::Null)]), None);
+    // A mapping item and a sequence item after a block scalar, with a blank line after each.
+    let after = "- |+\n  x\n- a: 1\n  b: 2\n\n- c\n";
+    assert_eq!(entry(after, &[index(1)]), None);
+    let after = "- |+\n  x\n- - 1\n  - 2\n\n- c\n";
+    assert_eq!(entry(after, &[index(1)]), None);
+    // In a stream of several documents no path leads to one of them.
+    for mode in Mode::all() {
+        let tree = mode.tree("a: 1\nb: 2\n---\na: 3\nb: 4\n").expect("a tree");
+        assert_eq!(tree.entry_span_at(&[key("a")]), None, "{mode:?}");
+        assert!(tree.lookup(&[key("a")]).is_none(), "{mode:?}");
+    }
+}
+
+/// Each of these has a span, where a rule that is too wide would give none.
+#[test]
+fn an_entry_keeps_its_span_in_each_of_these() {
+    // A tab before a comment, and a blank before the key's `:`.
+    assert_eq!(entry("a: 1\t# c\nb: 2\n", &[key("a")]), Some("a: 1\t# c\n"));
+    assert_eq!(entry("a : 1\nb: 2\n", &[key("a")]), Some("a : 1\n"));
+    // Lines that end in a carriage return alone.
+    assert_eq!(entry("a: 1\rb: 2\rc: 3\r", &[key("b")]), Some("b: 2\r"));
+    assert_eq!(entry("a: 1\rb: 2\rc: 3\r", &[key("c")]), Some("c: 3\r"));
+    // An entry that ends in an alias.
+    let alias = "- &n 1\n- k:\n    - 2\n    - *n\n- 3\n";
+    assert_eq!(entry(alias, &[index(1)]), Some("- k:\n    - 2\n    - *n\n"));
+    // A comment line between two entries stays with the entry after it.
+    assert_eq!(
+        entry("a: 1\n# about b\nb: 2\n", &[key("a")]),
+        Some("a: 1\n")
+    );
+    // An alias and an empty flow collection are written, so each ends the block scalar before
+    // it: the entry after one is not after a block scalar, and a blank line may follow it.
+    for between in ["- *n", "- []", "- {}"] {
+        let input = format!("- &n q\n- |\n  x\n{between}\n- y\n\n- z\n");
+        assert_eq!(entry(&input, &[index(3)]), Some("- y\n"), "{input:?}");
+    }
+}
+
+/// A value that isn't written stands after its key's `:` where the source shows that it wrote
+/// none: past a comment after tabs, and in a flow mapping before a `,` or the closing brace. An
+/// empty value with an anchor or a tag is written, as that, and stays where the parser puts it.
+#[test]
+fn a_missing_value_is_placed_by_what_follows_its_key() {
+    for mode in Mode::all() {
+        for (input, path, place) in [
+            ("a:\n\t# c\nb: 1\n", vec![key("a")], Some(2)),
+            ("a:\n  \t# c\nb: 1\n", vec![key("a")], Some(2)),
+            ("x: {a: , b: 1}\n", vec![key("x"), key("a")], Some(6)),
+            ("x: {a: 1, b: }\n", vec![key("x"), key("b")], Some(12)),
+            ("x: {a: [1], b: 2}\n", vec![key("x"), key("b")], None),
+            ("a: &n\nb: *n\n", vec![key("a")], None),
+            ("a: !t\nb: 1\n", vec![key("a")], None),
+            // A tag for a collection's kind leaves no event, and stands where a value would.
+            ("x: {a: !!map, b: 1}\n", vec![key("x"), key("a")], None),
+            ("x:\n  a: !!map\n  b: 1\n", vec![key("x"), key("a")], None),
+        ] {
+            let tree = mode.tree(input).expect("a tree");
+            let span = tree.span_at(&path).expect("a span");
+            match place {
+                Some(place) => {
+                    assert_eq!(
+                        (span.start(), span.end()),
+                        (place, place),
+                        "{mode:?} {input:?}"
+                    );
+                }
+                None => assert_ne!(
+                    span.start(),
+                    after_colon(input, &path),
+                    "{mode:?} {input:?}"
+                ),
+            }
+        }
+    }
+}
+
+/// The offset after the `:` of the last key of `path`, found by the key's name.
+fn after_colon(input: &str, path: &[PathSegment]) -> usize {
+    let Some(PathSegment::Key(Value::String(name))) = path.last() else {
+        panic!("a path that ends in a string key");
+    };
+    input.find(&format!("{name}:")).expect("the key") + name.len() + 1
+}
+
+/// A pair in a flow sequence is a mapping with no braces. Its span ends where its value does,
+/// not at the token after it.
+#[test]
+fn a_pair_in_a_flow_sequence_ends_with_its_value() {
+    for mode in Mode::all() {
+        for (input, text) in [
+            ("x: [a: b ]\n", "a: b"),
+            ("x: [a: b\n  ]\n", "a: b"),
+            ("x: [ a: b # c\n  , d]\n", "a: b"),
+            ("x: [a: [1, 2] , d]\n", "a: [1, 2]"),
+            ("x: [{a: b} , d]\n", "{a: b}"),
+        ] {
+            let tree = mode.tree(input).expect("a tree");
+            let span = tree.span_at(&[key("x"), index(0)]).expect("a span");
+            assert_eq!(span.slice(input), Some(text), "{mode:?} {input:?}");
+        }
+    }
 }
 
 /// A key after a `?`, on that line or a later one, has no entry span, and nor does a key with
@@ -484,6 +743,19 @@ const LINES: &[&str] = &[
     "? a: 1",
     "x: 1\r",
     "...",
+    "? |",
+    "? >-",
+    "\u{feff}- 1",
+    "\u{feff}a: 1",
+    "\u{feff}",
+    "\u{feff}# c",
+    "!t a:",
+    "&n b:",
+    "!!map",
+    "!!seq",
+    "c: &n",
+    "- &n",
+    "a: !!set",
 ];
 
 /// The next number of a fixed sequence (xorshift64*), so the documents are the same in every

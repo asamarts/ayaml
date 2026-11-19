@@ -144,4 +144,34 @@ fn a_root_flow_collection_is_built_with_room_for_its_entries() {
         };
         assert_eq!((items.len(), items.capacity()), (5, 5), "{input:?}");
     }
+    let input = "{a: 1, b: 2, c: 3}\n";
+    let node = parse_streaming(input, &Limits::default(), NodeOptions::default()).expect("a node");
+    let NodeKind::Mapping(entries) = &node.kind else {
+        panic!("{input:?}: a mapping");
+    };
+    assert_eq!((entries.len(), entries.capacity()), (3, 3), "{input:?}");
+}
+
+/// The room is for the root collection alone: a collection inside it starts with none, so a
+/// count of a hundred thousand entries is not reserved again for each of them.
+#[test]
+fn the_room_reserved_for_a_root_collection_is_not_reserved_for_its_items() {
+    let input = "[[1], {a: 1}, [], 4]\n";
+    let node = parse_streaming(input, &Limits::default(), NodeOptions::default()).expect("a node");
+    let NodeKind::Sequence(items) = &node.kind else {
+        panic!("a sequence");
+    };
+    assert_eq!((items.len(), items.capacity()), (4, 4));
+    let NodeKind::Sequence(inner) = &items[0].kind else {
+        panic!("a sequence in the sequence");
+    };
+    assert!(inner.capacity() < 16, "{}", inner.capacity());
+    let NodeKind::Mapping(inner) = &items[1].kind else {
+        panic!("a mapping in the sequence");
+    };
+    assert!(inner.capacity() < 16, "{}", inner.capacity());
+    let NodeKind::Sequence(inner) = &items[2].kind else {
+        panic!("an empty sequence in the sequence");
+    };
+    assert_eq!(inner.capacity(), 0);
 }

@@ -198,9 +198,41 @@ fn allocation_budgets_cover_the_json_decode() {
             "@block-words-1mb",
         ]
     );
+}
+
+/// The gate checks each of its three budget files, with no condition that could pass one over,
+/// and CI runs the gate. A call that is commented out, or that stands inside an `if`, is not a
+/// line of its own.
+#[test]
+fn the_allocation_gate_checks_every_budget_file() {
+    let Some(root) = repository_root() else {
+        return;
+    };
     let script = read(&root, "tools/check_alloc_corpus.sh");
-    assert!(script.contains("check_json_file tools/json-alloc-corpus.tsv"));
-    assert!(script.contains("check_file tools/typed-alloc-corpus.tsv typed"));
+    for call in [
+        "check_file \"$manifest\" value",
+        "check_file tools/typed-alloc-corpus.tsv typed",
+        "check_json_file tools/json-alloc-corpus.tsv",
+    ] {
+        assert!(
+            script.lines().any(|line| line == call),
+            "the gate has to run `{call}` on a line of its own"
+        );
+    }
+    let typed = read(&root, "tools/typed-alloc-corpus.tsv");
+    assert!(
+        typed
+            .lines()
+            .any(|line| !line.is_empty() && !line.starts_with('#')),
+        "the typed path has no budget"
+    );
+    let workflow = read(&root, ".github/workflows/ci.yml");
+    assert!(
+        workflow
+            .lines()
+            .any(|line| line.trim() == "run: tools/check_alloc_corpus.sh"),
+        "CI has to run the allocation gate"
+    );
 }
 
 /// Every allocation workload budgets total bytes as well as peak bytes and allocation counts.
@@ -242,5 +274,11 @@ fn the_ci_check_tests_all_run() {
         after.trim(),
         "unittest.main()",
         "nothing may follow the call that runs the tests"
+    );
+    // A second call, earlier and outside that condition, would end the run where it stands.
+    assert_eq!(
+        tests.matches("unittest.main(").count(),
+        1,
+        "one call runs the tests"
     );
 }

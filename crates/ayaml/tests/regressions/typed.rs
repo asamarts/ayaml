@@ -1023,6 +1023,84 @@ fn a_scalar_a_core_tag_retypes_reads_into_a_string_by_its_text() {
     }
 }
 
+/// A target that borrows reads that text from the source where the source holds it: a plain
+/// null, boolean, or number, and a quoted one under a core tag. Where only decoding gives the
+/// text, there is nothing in the source to borrow, and an owned target still reads it.
+#[test]
+fn a_scalar_that_is_not_a_string_lends_its_text_from_the_source() {
+    let read = ayaml::from_str_borrowed::<Vec<&str>>("[1, true, ~, 1.50, 0x1F]\n").expect("texts");
+    assert_eq!(read, ["1", "true", "~", "1.50", "0x1F"]);
+    let read = ayaml::from_str_borrowed::<Vec<&str>>("[!!int \"12\", !!bool 'True']\n");
+    assert_eq!(read.expect("texts"), ["12", "True"]);
+    let escaped = "[!!int \"1\\x32\"]\n";
+    let error = ayaml::from_str_borrowed::<Vec<&str>>(escaped).expect_err("no text to lend");
+    assert_eq!(error.kind(), ayaml::ErrorKind::Serde, "{error}");
+    assert_eq!(
+        ayaml::from_str::<Vec<String>>(escaped).expect("a text"),
+        ["12"]
+    );
+}
+
+/// A float target reads a number by what it is, and from a plain scalar's text besides, so
+/// that an integer too wide for 64 bits and a spelling with a leading zero read. A quoted
+/// scalar under `!!int` is a number with no plain text: it reads as the integer it is. A plain
+/// radix integer is refused, since its text is no float's.
+#[test]
+fn a_float_target_reads_a_tagged_integer_by_its_style() {
+    for (input, expected) in [
+        ("x: !!int \"0x1F\"\n", Some(31.0)),
+        ("x: !!int '12'\n", Some(12.0)),
+        ("x: !!int 12\n", Some(12.0)),
+        ("x: !!int 0x1F\n", None),
+        ("x: 0x1F\n", None),
+    ] {
+        for (reader, result) in source_readers::<f64>(input) {
+            if let Some(expected) = expected {
+                let read = result.unwrap_or_else(|error| panic!("{reader} {input:?}: {error}"));
+                assert!(
+                    (read["x"] - expected).abs() < f64::EPSILON,
+                    "{reader} {input:?}"
+                );
+            } else {
+                let error = result.expect_err(reader);
+                assert_eq!(error.kind(), ayaml::ErrorKind::Serde, "{reader} {input:?}");
+            }
+        }
+    }
+}
+
+/// A custom tag doesn't make a scalar a string; its text does. So a plain spelling with a
+/// leading zero under a custom tag reads into a float as it does with no tag, which 0.1.3 did
+/// and a later change lost. A tag that makes it a string still does.
+#[test]
+fn a_custom_tag_keeps_the_text_a_float_target_reads() {
+    for input in [
+        "x: 080\n",
+        "x: !port 080\n",
+        "x: !port 80\n",
+        "x: !port 80.0\n",
+    ] {
+        for (reader, result) in source_readers::<f64>(input) {
+            let read = result.unwrap_or_else(|error| panic!("{reader} {input:?}: {error}"));
+            assert!(
+                (read["x"] - 80.0).abs() < f64::EPSILON,
+                "{reader} {input:?}"
+            );
+        }
+    }
+    for input in [
+        "x: !!str 080\n",
+        "x: ! 080\n",
+        "x: !port '080'\n",
+        "x: !port abc\n",
+    ] {
+        for (reader, result) in source_readers::<f64>(input) {
+            let error = result.expect_err(reader);
+            assert_eq!(error.kind(), ayaml::ErrorKind::Serde, "{reader} {input:?}");
+        }
+    }
+}
+
 /// A key names a field by its text, never by its number: an integer key is not the field at that
 /// index, whatever style and escapes spell it.
 #[test]

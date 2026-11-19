@@ -28,10 +28,11 @@ mode; that mode has its own `ayaml::compat` entry points.
 ### Count profile for the input limit
 
 The default count limits are a lower profile than `max_input_bytes`: they bound the tokens
-an eager read keeps to between 32 MB and about 80 MB, by what the tokens are (see
-[Memory](#memory)). A dense but valid document can therefore reach
-`max_events`, `max_collection_entries`, `max_anchors`, or `max_alias_dereferences` before it
-reaches the 32 MiB input limit. This is intentional for hostile input.
+an eager read keeps to 32 MB where they are plain scalars and indicators, and to about 150 MB
+at the most, where each is a tag with a long name (see [Memory](#memory)). A dense but valid
+document can therefore reach `max_events`, `max_collection_entries`, `max_anchors`, or
+`max_alias_dereferences` before it reaches the 32 MiB input limit. This is intentional for
+hostile input.
 
 When a caller needs the four count limits not to refuse a valid document within
 `MAX_INPUT_BYTES`, start from `Limits::for_max_input()`:
@@ -158,10 +159,14 @@ that document's tokens. Every other reader holds the tokens of the whole stream.
   byte each, costs 8 times its size there. That is 8 bytes a line, or under 16 where
   lines end in CRLF. An error at the end of the input is placed without a second index.
 - A token takes 32 bytes on a 64-bit target, and every token a read keeps counts against
-  `max_events`. A tag, a directive, and a scalar that is quoted, a block scalar, or on several
-  lines each hold a second allocation of 32 to 48 bytes, and their text where decoding changes
-  it. So at the default limit a read holds about 32 MB of tokens when they are plain scalars
-  and indicators, and about 80 MB when every one is a tag.
+  `max_events`. A directive, and a scalar that is quoted, a block scalar, or on several lines
+  each hold a second allocation of 32 to 48 bytes, and their text where decoding changes it. A
+  tag holds one too, and its name in full, as a prefix and a suffix. So at the default limit a
+  read holds about 32 MB of tokens when they are plain scalars and indicators, about 65 MB when
+  every one is a quoted scalar, and about 80 MB when every one is a short tag such as `!a`. A
+  tag that a handle expands holds the expanded name: every one a `!!a` comes to about 100 MB,
+  and names that a `%TAG` prefix makes long to about 150 MB, where `max_tag_expansion_bytes`
+  stops them.
 - The readers that scan the whole stream keep its tokens in one arena, which reserves room for
   no more tokens than `max_events` allows, whatever the input promises. Past its first chunk
   the arena is sized from the density of the input scanned so far: one reservation is at most

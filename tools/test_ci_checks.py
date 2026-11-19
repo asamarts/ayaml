@@ -1367,5 +1367,27 @@ class ScannerDependencyPolicy(unittest.TestCase):
         self.assertIn("missing", problem)
 
 
+class AllocationGate(unittest.TestCase):
+    """A budget file with no row would pass by checking nothing, so the gate refuses it."""
+
+    def gate(self, manifest: str) -> subprocess.CompletedProcess[str]:
+        script = Path(__file__).resolve().parent / "check_alloc_corpus.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "budgets.tsv"
+            path.write_text(manifest, encoding="utf-8")
+            # The value path's file is read first, so a refusal comes before anything is built.
+            return subprocess.run([script, path], capture_output=True, text=True, timeout=60)
+
+    def test_an_empty_budget_file_fails(self) -> None:
+        completed = self.gate("")
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        self.assertIn("no budgets found", completed.stderr)
+
+    def test_a_budget_file_of_comments_fails(self) -> None:
+        completed = self.gate("# path\tparse_peak\n\n# nothing is budgeted\n")
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        self.assertIn("no budgets found", completed.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

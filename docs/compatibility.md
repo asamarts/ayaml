@@ -87,8 +87,9 @@ reading, so the event writer may leave a tagged scalar plain.
   a unit variant as its name. An enum also reads from a scalar that names a
   variant, and from a mapping of one entry whose key is a string naming it, as
   in `B: 5` or `! B: 5`, in both modes. A scalar that names a variant holds
-  nothing: it fills a unit variant and one that holds an option, and not a
-  variant that holds a sequence, a mapping, or other data (D87). Any other mapping is an error, such as
+  nothing: it fills a unit variant and one that holds an option, a unit, or any
+  value, and not a variant that holds a sequence, a mapping, a struct, or a
+  scalar (D87). Any other mapping is an error, such as
   one of two entries, or one whose key is `1`, `true`, or under a custom tag, as
   in `!x B: 5` (D80). A null, boolean, or number scalar does not name a variant,
   even when a variant is renamed to its spelling; use a quoted scalar or a

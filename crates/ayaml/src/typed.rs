@@ -1114,7 +1114,13 @@ fn scalar_node<'de>(
         }
         Some(tag) => {
             if style != ScalarStyle::Plain || plain_resolves_to_string(text) {
-                let inner = Node::scalar(NodeKind::String(scalar_text.clone()), Text::None, span);
+                // A custom tag doesn't make the scalar a string, its text does, so the string
+                // keeps that text as an untagged one would: `!port 080` reads into a float.
+                let inner = Node::scalar(
+                    NodeKind::String(scalar_text.clone()),
+                    string_text(raw, style),
+                    span,
+                );
                 return Ok(Node::scalar(
                     NodeKind::Tagged(Box::new(tag.clone()), Box::new(inner)),
                     Text::None,
@@ -1126,14 +1132,20 @@ fn scalar_node<'de>(
         None => style != ScalarStyle::Plain || plain_resolves_to_string(text),
     };
     if string {
-        let text = match raw {
-            Cow::Borrowed(text) if style == ScalarStyle::Plain => Text::Plain(text),
-            _ => Text::None,
-        };
+        let text = string_text(raw, style);
         return Ok(Node::scalar(NodeKind::String(scalar_text), text, span));
     }
     let resolved = resolve_scalar(text, style, tag).map_err(|error| error.with_span(span))?;
     Ok(node_from_value(resolved, value, raw, style, span))
+}
+
+/// The text a string keeps beside its value: a plain scalar's, which only a float target reads
+/// (see `deserialize_f64`).
+fn string_text<'de>(raw: &Cow<'de, str>, style: ScalarStyle) -> Text<'de> {
+    match raw {
+        Cow::Borrowed(text) if style == ScalarStyle::Plain => Text::Plain(text),
+        _ => Text::None,
+    }
 }
 
 fn node_from_value<'de>(
@@ -1169,9 +1181,12 @@ fn node_from_value<'de>(
     // A plain scalar keeps its source text. A quoted or block scalar reaches here only when a
     // tag makes it a null, a boolean, or a number, and keeps its value, which is what a string
     // target reads and what tells an explicit null from a value that isn't written.
+    // The parser gives a plain scalar's text as a slice of the source. Text that isn't one is
+    // kept all the same: a null or a number with no text would read as a value that isn't
+    // written, and a number key would no longer name a field by its text.
     let text = match (style, raw, scalar_text) {
         (ScalarStyle::Plain, Cow::Borrowed(text), _) => Text::Plain(text),
-        (ScalarStyle::Plain, Cow::Owned(_), _) => Text::None,
+        (ScalarStyle::Plain, Cow::Owned(text), _) => Text::Decoded(text.as_str().into()),
         (_, _, Cow::Borrowed(value)) => Text::Spelled(value),
         (_, _, Cow::Owned(value)) => Text::Decoded(value.into_boxed_str()),
     };

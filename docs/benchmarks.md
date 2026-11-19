@@ -68,15 +68,18 @@ The allocation gate has three sets of budgets, all counted by the same allocator
 
 - `tools/alloc-corpus.tsv` budgets the value path: parsing, emission, and serialization of
   fixtures and generated workloads. Each budget is about 1.25 times its measured value. Against
-  0.1.3 the peak budgets are 4% to 67% lower: 40% lower on the short-sequence workload, 34% on
-  short explicit pairs, and 31% on the short map. The short-node workloads may allocate at most
-  130 times their input bytes in total.
+  0.1.3 these workloads peak up to 68% lower while they parse, and allocate 25% to 73% fewer
+  bytes in total: the short-sequence workload peaks 34% lower, short explicit pairs 35%, and the
+  short map 32%. Emission and serialization are as they were. The short-node workloads may
+  allocate at most 130 times their input bytes in total.
 - `tools/typed-alloc-corpus.tsv` budgets typed decoding of a 20 KB configuration fixture, which
   peaks at about 250 KB and allocates about 470 KB in total.
 - `tools/json-alloc-corpus.tsv` budgets an untyped decode into a JSON tree through the
   compatibility reader, as a consumer that reads YAML into JSON does, on the nine document shapes
   of issue #178. It counts a reallocation by the bytes it adds, as the issue does, so its figures
-  are the issue's. Each budget is about 1.10 times its measured value.
+  are the issue's, and are not to be set beside the other two files', which count a
+  reallocation as a new block. Each budget is about 1.10 times its measured value, but for a
+  shape that is over the issue's target, whose budget is about 1% over its measurement.
 
 What holds those peaks down: the token arena is sized from the density of the input scanned so
 far, within the token limit (`docs/limits.md` gives its bounds). Event vectors reserve four
@@ -84,20 +87,21 @@ fifths of the token count plus headroom. A typed read of more than 8 KiB streams
 into the builder, so no document event vector is kept. Scalar tokens keep their raw text as a
 span and box only values that need decoding; typed nodes box tags, keep scalar text as a source
 slice, and cache hashes in one atomic word. Root flow collections reserve their entry count
-from the parser before their items are built. The 1 MB nested test document peaks at about
-29.7 MB; the 11 MB one peaks at about 297 MB and allocates about 420 MB in total, against the
-376 MB peak and roughly 673 MB total that issues #127 and #163 give for a libyaml-based
-reader.
+from the parser before their items are built.
 
-On the nine shapes of #178, the three service descriptions peak at about 30 bytes for each input
-byte, and five of the six megabyte documents at 19 to 72 bytes: all within the 1.2 times that the
-issue asks for, at 0.61 to 1.06 times its reference. The ninth, a megabyte block sequence of
-short words, peaks at 23.1 MB, where 1.2 times allows 21.7 MB. At that peak the token arena
-(8.4 MB), the typed node vector (10.5 MB), the line records (3.2 MB), and the line index
-(1.0 MB) are all live, and the JSON tree, 4.8 MB, is not yet built. AY-104 tracks composition
-without the intermediate node tree, which takes the node vector out of that peak. Earlier
-figures for these shapes in this document and in the issue's thread, such as 98 MB for a flow
-sequence of `1`, measured a decode into ayaml's own `Value`, a larger tree than the issue's.
+Issue #178 gives a reference for each of its nine shapes, the peak of a libyaml-based reader:
+1.40, 41.5, and 165.9 MB for the three service descriptions, and 36.6, 35.7, 34.3, 67.8, 18.4,
+and 18.1 MB for the six megabyte documents, in the order of the budget file. Against those, the
+service descriptions peak at about 30 bytes for each input byte, 0.80 to 0.81 times the
+reference, and five of the six megabyte documents at 19 to 72 bytes: all within the 1.2 times
+that the issue asks for, at 0.61 to 1.06 times. The ninth, a megabyte block sequence of short
+words, peaks at 23.1 MB, where 1.2 times allows 21.7 MB. At that peak the token arena (8.4 MB),
+the typed node vector (10.5 MB), the line records (3.1 MB), and the line index (1.0 MB) are all
+live, and the JSON tree, 4.8 MB, is not yet built. AY-104 tracks composition without the
+intermediate node tree, which takes the node vector out of that peak. Earlier figures for these
+shapes in this document and in the issue's thread, such as 98 MB for a flow sequence of `1`,
+measured a decode into ayaml's own `Value`, another tree than the issue's, so they were not
+figures to set beside its reference.
 
 The release process keeps the results of its timing and comparison gates private; `CONTRIBUTING.md`
 says what those gates are. The figures here are the ones that CI budgets. Where an issue reports
