@@ -1333,6 +1333,21 @@ class InstructionsBase(unittest.TestCase):
             self.assertEqual(check_instructions.base_revision(given), "HEAD~1")
         self.assertEqual(check_instructions.base_revision("abc123"), "abc123")
 
+    def test_the_probe_in_the_tree_has_every_operation(self) -> None:
+        source = (check_instructions.ROOT / check_instructions.PROBE).read_text(encoding="utf-8")
+        self.assertEqual(check_instructions.known_operations(source), check_instructions.OPERATIONS)
+        self.assertIn("walk", check_instructions.OPERATIONS)
+
+    def test_the_nested_key_is_a_key_at_every_level(self) -> None:
+        self.assertEqual(check_instructions.nested_keys(0, 2), "{k0: 0, k1: 1}\n")
+        self.assertEqual(check_instructions.nested_keys(2, 1), "{? {? {k0: 0}: null}: null}\n")
+        self.assertIn("nested-keys", check_instructions.workloads())
+
+    def test_an_operation_that_a_probe_lacks_is_not_one_it_knows(self) -> None:
+        older = '"events" => {}\n"value" => {}\n"typed" => {}\n"emit" => {}\n// "walk" is to come\n'
+        self.assertEqual(check_instructions.known_operations(older), ("events", "value", "typed", "emit"))
+        self.assertEqual(check_instructions.known_operations(""), ())
+
 
 class ScannerDependencyPolicy(unittest.TestCase):
     def scanner(self, source: str) -> str | None:
@@ -1372,15 +1387,24 @@ class AllocationGate(unittest.TestCase):
     """A budget file with no row would pass by checking nothing, so the gate refuses it.
 
     The gate runs here with a `cargo` that records how it was called and measures nothing, so
-    each test sees which rows of which file the gate checked.
+    each test sees which rows of which file the gate checked, with which budgets, in which
+    build. Each budget of a row is a different number, so one passed twice shows.
     """
 
-    VALUE = "# path\tbudgets\nv1\t1\t2\t3\t4\t5\t6\t7\t8\t9\nv2\t1\t2\t3\t4\t5\t6\t7\t8\t9\n"
-    TYPED = "t1\t1\t2\t3\t4\t5\t6\t7\t8\t9\n"
-    # No newline ends the last row, which the gate still has to read.
-    JSON = "# path\tjson_peak\tjson_allocs\tjson_total\nj1\t1\t2\t3\n\nj2\t1\t2\t3"
+    # A generated shape's name starts with `@`, and is a row like any other.
+    VALUE = (
+        "# path\tbudgets\nv1\t11\t12\t13\t14\t15\t16\t17\t18\t19\n"
+        "@v2\t21\t22\t23\t24\t25\t26\t27\t28\t29\n"
+    )
+    # No newline ends the last row of these two, which the gate still has to read.
+    TYPED = "t1\t31\t32\t33\t34\t35\t36\t37\t38\t39"
+    JSON = "# path\tjson_peak\tjson_allocs\tjson_total\nj1\t41\t42\t43\n\n@j2\t51\t52\t53"
+    CARGO = "run --quiet --release --locked --manifest-path fuzz/Cargo.toml --bin memcount"
 
-    def gate(self, value: str, typed: str, json: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    def gate(
+        self, value: str, typed: str, json: str, failing: str = ""
+    ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        """Run the gate on three budget files. The measurement of mode `failing` fails."""
         script = Path(__file__).resolve().parent / "check_alloc_corpus.sh"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1395,12 +1419,16 @@ class AllocationGate(unittest.TestCase):
             stub.write_text(
                 "#!/usr/bin/env bash\n"
                 'mode=value; [[ -n "${AYAML_TYPED:-}" ]] && mode=typed; [[ -n "${AYAML_JSON:-}" ]] && mode=json\n'
-                'while [[ "$1" != "--" ]]; do shift; done\n'
-                f'echo "$mode $2 $(($# - 2))" >>{shlex.quote(str(calls))}\n',
+                "build=()\n"
+                'while [[ $# -gt 0 && "$1" != "--" ]]; do build+=("$1"); shift; done\n'
+                "shift\n"
+                f'echo "$mode [${{build[*]}}] $*" >>{shlex.quote(str(calls))}\n'
+                f'[[ "$mode" != {shlex.quote(failing)} ]]\n',
                 encoding="utf-8",
             )
             stub.chmod(0o755)
             environment = dict(os.environ, PATH=f"{stub.parent}{os.pathsep}{os.environ['PATH']}")
+            # Whatever the caller's shell has set, the gate alone chooses what is measured.
             environment.pop("AYAML_TYPED", None)
             environment.pop("AYAML_JSON", None)
             completed = subprocess.run(
@@ -1413,7 +1441,13 @@ class AllocationGate(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(
             calls,
-            ["value v1 9", "value v2 9", "typed t1 9", "json j1 3", "json j2 3"],
+            [
+                f"value [{self.CARGO}] v1 11 12 13 14 15 16 17 18 19",
+                f"value [{self.CARGO}] @v2 21 22 23 24 25 26 27 28 29",
+                f"typed [{self.CARGO}] t1 31 32 33 34 35 36 37 38 39",
+                f"json [{self.CARGO}] j1 41 42 43",
+                f"json [{self.CARGO}] @j2 51 52 53",
+            ],
         )
         self.assertIn("checked 5 allocation budgets", completed.stdout)
 
@@ -1431,27 +1465,14 @@ class AllocationGate(unittest.TestCase):
                     # The files before it were checked, and none after it.
                     self.assertEqual(len(calls), (0, 2, 3)[missing], calls)
 
-    def test_a_failed_measurement_fails_the_gate(self) -> None:
-        script = Path(__file__).resolve().parent / "check_alloc_corpus.sh"
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            for name, text in (("value.tsv", self.VALUE), ("typed.tsv", self.TYPED), ("json.tsv", self.JSON)):
-                (root / name).write_text(text, encoding="utf-8")
-            stub = root / "bin" / "cargo"
-            stub.parent.mkdir()
-            # Over budget only for the JSON decode, the last file.
-            stub.write_text('#!/usr/bin/env bash\n[[ -z "${AYAML_JSON:-}" ]]\n', encoding="utf-8")
-            stub.chmod(0o755)
-            environment = dict(os.environ, PATH=f"{stub.parent}{os.pathsep}{os.environ['PATH']}")
-            completed = subprocess.run(
-                [script, root / "value.tsv", root / "typed.tsv", root / "json.tsv"],
-                capture_output=True,
-                text=True,
-                timeout=60,
-                env=environment,
-            )
-            self.assertNotEqual(completed.returncode, 0, completed.stdout)
-            self.assertNotIn("checked", completed.stdout)
+    def test_a_failed_measurement_fails_the_gate_whichever_file_it_is_of(self) -> None:
+        # The gate stops at the first row over its budget: the rows before it were measured.
+        for failing, measured in (("value", 1), ("typed", 3), ("json", 4)):
+            with self.subTest(failing=failing):
+                completed, calls = self.gate(self.VALUE, self.TYPED, self.JSON, failing=failing)
+                self.assertNotEqual(completed.returncode, 0, completed.stdout)
+                self.assertNotIn("checked", completed.stdout)
+                self.assertEqual(len(calls), measured, calls)
 
 
 if __name__ == "__main__":

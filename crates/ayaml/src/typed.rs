@@ -1707,6 +1707,9 @@ impl<'de> MapAccess<'de> for NodeMapAccess<'de, '_> {
         seed: K,
     ) -> Result<Option<K::Value>, Self::Error> {
         let Some(entry) = self.iter.next() else {
+            // The end leaves no value to ask for, as it leaves none to a reader of events: a
+            // value that was passed over would otherwise be given out after it.
+            self.entry = None;
             return Ok(None);
         };
         let key = &entry.0;

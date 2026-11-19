@@ -36,11 +36,12 @@ check_file() {
         case "$path" in
             "" | \#*) continue ;;
         esac
-        local env=()
+        # Never an empty array: bash before 4.4 calls expanding one an unset variable.
+        local measure=(cargo run --quiet --release --locked --manifest-path fuzz/Cargo.toml --bin memcount --)
         if [[ "$typed" == "typed" ]]; then
-            env=(env AYAML_TYPED=1)
+            measure=(env AYAML_TYPED=1 "${measure[@]}")
         fi
-        "${env[@]}" cargo run --quiet --release --locked --manifest-path fuzz/Cargo.toml --bin memcount -- \
+        "${measure[@]}" \
             "$path" \
             "$parse_peak" "$emit_peak" "$parse_allocs" "$emit_allocs" \
             "$serialize_peak" "$serialize_allocs" \

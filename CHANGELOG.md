@@ -18,25 +18,30 @@ The breaking changes come first, each with what a caller has to change.
   deprecated, for code that keeps one; nothing returns or takes one. `Location` is now another
   name for `Position`, and prints as one.
 - **Breaking: an error built by hand has no location until it is given one.**
-  `Error::location()` still returns a one-based line and column for every error that a reader
-  returns. `Error::with_span` no longer implies one, and clears one that was set before it:
+  `Error::location()` still returns a one-based line and column for every error of a reader
+  that has a span; one for input that isn't UTF-8 has neither, as in 0.1.3. `Error::with_span`
+  no longer implies a location, and clears one that was set before it:
   set the span, and then the location with the new `Error::with_location`. Without a location
   an error prints no `at line L column C`.
 - **Breaking: `compat::parse_events_with_limits` returns a lazy `EventStream`**, as
   `ayaml::parse_events_with_limits` does, where it returned a `Vec<Event>`. The new
   `compat::parse_events` returns the same. A caller that wants the vector calls the new
-  `compat::parse_events_eager_with_limits`, or collects the stream. The stream reports a
-  problem when its events come to it, so an input with two problems can report the one that
-  stands first where the vector reports a scanner's problem first, wherever it stands.
+  `compat::parse_events_eager_with_limits`, or collects the stream. The stream reads one
+  document at a time, so it reports a problem of an earlier document before a scanner's
+  problem in a later one, which the vector reports first. Within one document both report a
+  scanner's problem first, wherever it stands.
 - **Breaking: a mapping iterates through this crate's own types.** `Mapping`, `&Mapping`, and
   `&mut Mapping` give `mapping::IntoIter`, `mapping::Iter`, and `mapping::IterMut`, where their
   `IntoIterator` implementations named `indexmap`'s iterator types. The entries, their order,
   and iteration from both ends with a known length are as they were, and the new types have
   the standard traits of the old ones, `Clone` and `Default` among them. A caller that named
-  the old types names these, and one that called a method only the old types have, such as
-  `as_slice`, collects the entries or uses the standard iterator methods. `indexmap`'s version
-  is no longer part of this crate's API; the requirement is now 2.6, the first release whose
-  owning iterator is `Clone`.
+  the old types names these, and one that called a method only the old types have, which are
+  `as_slice`, `into_slice`, and `as_mut_slice`, collects the entries or uses the standard
+  iterator methods. `Mapping::iter` and `Mapping::iter_mut` return the new types too, where
+  they returned an unnamed iterator, so `mapping.iter().rev()` and `.len()` now compile; a
+  caller with Clippy's pedantic lints is told to write `for entry in &mapping`. `indexmap`'s
+  version is no longer part of this crate's API; the requirement is now 2.6, the first release
+  whose owning iterator is `Clone`.
 - The event size falls from 176 to 144 bytes, a span from 48 to 16, and an error from 112 to 104
   on 64-bit targets.
 - An error about a stream that holds no document is now placed at the end of the input, where
@@ -56,16 +61,24 @@ The breaking changes come first, each with what a caller has to change.
   a document before the target saw any of it: the error is the same, but a seed that writes to
   its caller's data as it reads has written. And a collection tells its visitor no size, since
   its entries are counted only at its end; a root flow collection still does. `Value` and
-  `Mapping` give back the room that growing without a size leaves spare.
+  `Mapping` give back the room that growing without a size leaves spare. Another target keeps
+  what its own growth leaves: a `Vec<u64>` of 1,500 items read from a block sequence has room
+  for 2,048, where 0.1.3 gave it room for 1,500.
 - Three of the fixes below refuse documents that 0.1.3 read: a bare variant name for a variant
   that holds a sequence or a mapping, a quoted scalar's continuation line that starts with a
   tab, and a block scalar header after node properties that is not indented past its parent.
+- Two of them change what a caller gets for a document that 0.1.3 took the same way. In
+  compatibility mode a run of byte-order marks at the start of the stream is skipped as one
+  mark is, so `"\u{feff}\u{feff}key: v"` has the key `key`, where 0.1.3 read the second mark as
+  the key's first character, as libyaml does. And a block scalar that is not indented past its
+  parent, which 0.1.3 refused in some documents with `ErrorKind::Parser`, is refused in all of
+  them with `ErrorKind::Scanner`.
 
 ### Added
 
 - `SpannedTree` and `SpannedNode` provide path lookup, value and entry byte spans, source scalar
   text, and conservative ambiguity handling for aliases, merge keys, duplicate keys, a mapping
-  with an alias among its keys, and multiple documents. With the `libyaml-compat` feature,
+  with an alias among its keys or a merge key inside one, and multiple documents. With the `libyaml-compat` feature,
   `SpannedTree::parse_compat` and its `_with_limits` form read as the compatibility reader
   does. An entry span is given only where deleting it removes that entry and changes
   nothing else: for a block mapping entry or block sequence item that begins its own line,
@@ -114,11 +127,15 @@ The breaking changes come first, each with what a caller has to change.
   by a flow indicator, matching the scanner and the continuation indentation check.
 - After a leading byte order mark, a compatibility error keeps its line and column, a quoted
   scalar's continuation check still applies, and a second stream-start mark is skipped instead
-  of read as content. A run of marks reads as one mark does: a comment may follow it, and a
-  document marker after it is text one column in, as after one mark.
+  of read as content. A run of marks reads as one mark does: a comment may follow it, with a
+  plain scalar of several lines after that, and a document marker after it is text one column
+  in, as after one mark.
 - A block scalar header after node properties on their own line is now rejected when it is not
   indented past its parent, in both modes and after an anchor or a tag. The error is the
   scanner's, with `ErrorKind::Scanner`, and comes before a later problem in the document.
+- A visitor that asks a mapping for a value after the mapping has told it the end is refused
+  with `map value requested before key`. A reader that builds a tree, and `from_value`, gave
+  it the last value that it had passed over.
 - A top-level block scalar with indented empty lines now ends before a document marker, leaving
   an empty scalar and continuing the stream after the marker.
 
@@ -136,7 +153,7 @@ The breaking changes come first, each with what a caller has to change.
   text as a source slice, and cache hashes in one atomic word. Where a tree of the document is
   built, a root flow collection reserves its entry count before its items are built, so a wide
   flow collection avoids a final vector copy. With duplicate keys refused, the set of an open
-  mapping's keys takes 24 bytes a key.
+  mapping's keys takes 24 bytes a slot, where it took a node's 80.
 - A reader of one document into a type, such as `from_str`, builds its value from the parser's
   events when the input is more than 4 KiB, and keeps no tree of the document beside its tokens
   and its value. It reads a scalar and drops it, reads a collection entry by entry, and builds a

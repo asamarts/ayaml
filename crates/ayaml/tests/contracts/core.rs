@@ -798,11 +798,13 @@ fn a_mapping_iterates_through_its_own_types() {
 
 /// The iterator types have the standard traits that the types they replace had: the two that
 /// don't lend a value mutably can be cloned, and each can be made empty. A caller that kept one
-/// in a type of its own, and derived those traits for it, still can.
+/// in a type of its own, and derived those traits for it, still can. They are as free with
+/// their lifetime and with threads, pins, and panics as those were, and print as they did.
 #[test]
 fn a_mapping_s_iterators_keep_the_traits_of_the_ones_they_replace() {
     use std::fmt::Debug;
     use std::iter::FusedIterator;
+    use std::panic::{RefUnwindSafe, UnwindSafe};
 
     use ayaml::mapping::{IntoIter, Iter, IterMut};
 
@@ -812,7 +814,17 @@ fn a_mapping_s_iterators_keep_the_traits_of_the_ones_they_replace() {
     {
     }
     fn cloned<T: Clone>() {}
-    fn sent<T: Send + Sync>() {}
+    fn sent<T: Send + Sync + Unpin>() {}
+    fn unwinds<T: UnwindSafe + RefUnwindSafe>() {}
+    // Either borrowing iterator can stand in for one of a shorter borrow: a type that held a
+    // lifetime in place, as a cell or a function's argument does, could not, and this would
+    // not compile.
+    fn shorter<'short, 'long: 'short>(iter: Iter<'long>) -> Iter<'short> {
+        iter
+    }
+    fn shorter_mut<'short, 'long: 'short>(iter: IterMut<'long>) -> IterMut<'short> {
+        iter
+    }
     an_iterator::<Iter<'_>>();
     an_iterator::<IterMut<'_>>();
     an_iterator::<IntoIter>();
@@ -821,6 +833,26 @@ fn a_mapping_s_iterators_keep_the_traits_of_the_ones_they_replace() {
     sent::<Iter<'_>>();
     sent::<IterMut<'_>>();
     sent::<IntoIter>();
+    // One that lends values mutably never crossed a caught panic, and still doesn't.
+    unwinds::<Iter<'_>>();
+    unwinds::<IntoIter>();
+    assert_eq!(shorter(Iter::default()).len(), 0);
+    assert_eq!(shorter_mut(IterMut::default()).len(), 0);
+
+    // Each prints the entries it has left, as a list of pairs, and nothing of itself.
+    let mut printed = Mapping::new();
+    printed.insert(Value::from("a"), Value::from("x"));
+    printed.insert(Value::from("b"), Value::Null);
+    let entries = r#"[(String("a"), String("x")), (String("b"), Null)]"#;
+    assert_eq!(format!("{:?}", printed.iter()), entries);
+    assert_eq!(format!("{:?}", (&printed).into_iter()), entries);
+    assert_eq!(format!("{:?}", printed.iter_mut()), entries);
+    assert_eq!(format!("{:?}", (&mut printed).into_iter()), entries);
+    assert_eq!(format!("{:?}", printed.clone().into_iter()), entries);
+    let mut rest = printed.iter();
+    rest.next();
+    assert_eq!(format!("{rest:?}"), r#"[(String("b"), Null)]"#);
+    assert_eq!(format!("{:?}", Iter::default()), "[]");
 
     #[derive(Clone, Debug, Default)]
     struct Kept(<Mapping as IntoIterator>::IntoIter);
@@ -844,6 +876,40 @@ fn a_mapping_s_iterators_keep_the_traits_of_the_ones_they_replace() {
     assert_eq!(Kept::default().0.len(), 0);
     assert_eq!(Iter::default().next(), None);
     assert_eq!(IterMut::default().len(), 0);
+}
+
+/// `iter` and `iter_mut` give the named types, so what those can do, a call of either can: go
+/// from the back, tell how many are left, and be kept in a field.
+#[test]
+fn iter_and_iter_mut_give_the_named_iterators() {
+    struct Kept<'a>(ayaml::mapping::Iter<'a>);
+
+    let mut mapping = Mapping::new();
+    for (name, number) in [("a", 1_u64), ("b", 2), ("c", 3)] {
+        mapping.insert(Value::from(name), Value::from(number));
+    }
+    assert_eq!(mapping.iter().len(), 3);
+    let backwards: Vec<_> = mapping.iter().rev().map(|(key, _)| key.clone()).collect();
+    assert_eq!(
+        backwards,
+        [Value::from("c"), Value::from("b"), Value::from("a")]
+    );
+    let mut kept = Kept(mapping.iter());
+    assert_eq!(
+        kept.0.nth(1),
+        Some((&Value::from("b"), &Value::from(2_u64)))
+    );
+    assert_eq!(kept.0.len(), 1);
+    assert_eq!(mapping.iter_mut().len(), 3);
+    if let Some((_, last)) = mapping.iter_mut().next_back() {
+        *last = Value::Null;
+    }
+    let mut iter_mut: ayaml::mapping::IterMut<'_> = mapping.iter_mut();
+    assert_eq!(
+        iter_mut.next_back().map(|(_, value)| value.is_null()),
+        Some(true)
+    );
+    assert_eq!(iter_mut.rev().count(), 2);
 }
 
 /// The named methods give the same entries, in the same order, as the iterator types do.

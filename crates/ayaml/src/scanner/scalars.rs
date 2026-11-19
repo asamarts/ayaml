@@ -801,9 +801,17 @@ impl<'a> Scanner<'a> {
             }
             let previous_start = self.line_index.line_start(previous_end);
             let line = self.after_line_boms(previous_start, previous_end);
-            // In compat, the line can still hold its mark, and a comment may follow that.
+            // In compat, the line can still hold its mark, and a comment may follow that. The
+            // stream's first line can hold a run of them, which reads as one mark does.
             let comment_after_mark = line
                 .strip_prefix('\u{feff}')
+                .map(|rest| {
+                    if previous_start == 0 {
+                        rest.trim_start_matches('\u{feff}')
+                    } else {
+                        rest
+                    }
+                })
                 .is_some_and(|rest| rest.trim_start_matches(is_blank).starts_with('#'));
             let code = if comment_after_mark {
                 ""

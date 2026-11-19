@@ -160,7 +160,7 @@ impl<'de> Visitor<'de> for MappingVisitor {
 impl Serialize for Mapping {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut map = serializer.serialize_map(Some(self.len()))?;
-        for (key, value) in self.iter() {
+        for (key, value) in self {
             map.serialize_entry(key, value)?;
         }
         map.end()
@@ -791,6 +791,8 @@ impl<'de> MapAccess<'de> for ValueMapAccess {
         seed: K,
     ) -> Result<Option<K::Value>, Self::Error> {
         let Some((key, value)) = self.iter.next() else {
+            // The end leaves no value to ask for, though the last one was passed over.
+            self.value = None;
             return Ok(None);
         };
         self.value = Some(value);
@@ -1857,5 +1859,35 @@ mod tests {
         let (name, value) = enum_parts(Value::Mapping(mapping)).expect("a variant");
         assert_eq!((name.as_str(), name.as_ptr().addr()), ("Both", address));
         assert_eq!(value, Value::from(1_u64));
+    }
+    /// A mapping that is told its size reserves that room once, and keeps no more: it holds
+    /// what one made for that many entries holds. Grown from nothing it would hold more.
+    #[test]
+    fn a_mapping_that_is_told_its_size_reserves_it_once() {
+        use serde::Deserialize as _;
+        use serde::de::value::{Error as ValueError, MapDeserializer, SeqDeserializer};
+
+        for entries in [3_usize, 100, 1_000] {
+            let pairs = || (0..entries).map(|index| (format!("k{index}"), index as u64));
+            let room = crate::Mapping::with_capacity(entries).capacity();
+            let told = MapDeserializer::<_, ValueError>::new(pairs());
+            let mapping = crate::Mapping::deserialize(told).expect("a mapping");
+            assert_eq!((mapping.len(), mapping.capacity()), (entries, room));
+            // A `Value` that is a mapping, or a sequence, does the same.
+            let told = MapDeserializer::<_, ValueError>::new(pairs());
+            let Value::Mapping(mapping) = Value::deserialize(told).expect("a mapping") else {
+                panic!("a mapping");
+            };
+            assert_eq!((mapping.len(), mapping.capacity()), (entries, room));
+            let told = SeqDeserializer::<_, ValueError>::new(0..entries as u64);
+            let Value::Sequence(items) = Value::deserialize(told).expect("a sequence") else {
+                panic!("a sequence");
+            };
+            assert_eq!(items.len(), entries);
+            // A sequence takes the size for its room from 8 items on, up to 1,024.
+            if entries >= 8 {
+                assert_eq!(items.capacity(), entries);
+            }
+        }
     }
 }

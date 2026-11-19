@@ -425,8 +425,62 @@ fn an_input_with_a_byte_order_mark_past_its_start_has_no_entry_span() {
         let tree = SpannedTree::parse_compat(input).expect("a tree");
         assert_eq!(tree.entry_span_at(&path), None, "{input:?} at {path:?}");
     }
-    // A mark that opens the input is no part of the first entry, and takes no span away.
+    // A mark that opens the input is no part of the first entry, and takes no span away. A
+    // run of them opens it as one does.
     assert_eq!(entry("\u{feff}a: 1\nb: 2\n", &[key("a")]), Some("a: 1\n"));
+    for marks in ["\u{feff}\u{feff}", "\u{feff}\u{feff}\u{feff}"] {
+        let input = format!("{marks}a: 1\nb: 2\n");
+        let tree = SpannedTree::parse_compat(&input).expect("a tree");
+        for (name, text) in [("a", "a: 1\n"), ("b", "b: 2\n")] {
+            let span = tree.entry_span_at(&[key(name)]).expect("an entry span");
+            assert_eq!(&input[span.range()], text, "{input:?}");
+        }
+    }
+    // One inside a quoted scalar is past the start, and no line's indentation: the rule is
+    // the wider one all the same, and gives no span.
+    let tree = SpannedTree::parse("a: 1\nb: \"\u{feff}\"\nc: 3\n").expect("a tree");
+    assert_eq!(tree.entry_span_at(&[key("a")]), None);
+}
+
+/// A pair of a flow sequence that writes no value ends with the last thing it writes. In the
+/// compatibility reader a byte-order mark that begins a line is read past, as the line's
+/// spaces are, and a comment may follow it: neither is the pair's text.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn a_pair_does_not_end_with_a_mark_that_begins_a_line() {
+    for (input, end) in [
+        ("a: [b:\n\u{feff}# c\n  ]\n", 6),
+        ("a: [b:\n\u{feff}  ]\n", 6),
+        ("a: [b: !t\n\u{feff}  # c\n  , d]\n", 9),
+        // A second mark on the line is text to the reader, so the pair has a value there.
+        ("a: [b:\n\u{feff}\u{feff}# c\n  ]\n", 16),
+        // Without a mark, the same.
+        ("a: [b:\n# c\n  ]\n", 6),
+        ("a: [b: !t\n  # c\n  , d]\n", 9),
+    ] {
+        let tree = SpannedTree::parse_compat(input).expect("a tree");
+        let span = tree.span_at(&[key("a"), index(0)]).expect("a span");
+        assert_eq!((span.start(), span.end()), (4, end), "{input:?}");
+    }
+}
+
+/// A key that holds a merge key may be any other key of its mapping again, once the merge is
+/// made, as a key that holds an alias may. So such a mapping gives no lookup, of any key.
+#[test]
+fn a_key_that_holds_a_merge_key_makes_its_mapping_s_lookups_a_guess() {
+    for input in [
+        "? {<<: {a: 1}}\n: x\nb: 2\n",
+        "b: 2\n? {<<: {a: 1}}\n: 1\nc: 3\n",
+        "? [{<<: {a: 1}}]\n: x\nb: 2\n",
+        "{<<: [1]}: x\nb: 2\n",
+    ] {
+        let tree = SpannedTree::parse(input).expect("a tree");
+        assert!(tree.lookup(&[key("b")]).is_none(), "{input:?}");
+    }
+    // A merge key among the entries leaves the other keys their lookups.
+    let tree = SpannedTree::parse("<<: {a: 1}\nb: 2\n").expect("a tree");
+    assert!(tree.lookup(&[key("b")]).is_some());
+    assert!(tree.lookup(&[key("<<")]).is_none());
 }
 
 /// In such an input a line's indentation is the reader's to say too: the compatibility reader
@@ -895,14 +949,18 @@ fn paths(value: &Value, here: &mut Vec<PathSegment>, all: &mut Vec<Vec<PathSegme
 
 /// On generated documents, every entry span that a tree gives is exact: deleting it leaves a
 /// document that reads as the original without that entry (see `inexact`). The count of spans
-/// keeps the test from passing because the generator stopped making documents that parse.
+/// keeps the test from passing because the generator stopped making documents that parse. One
+/// document in four opens with one to three byte-order marks, which are no part of an entry.
 #[test]
 fn every_entry_span_of_a_generated_document_is_exact() {
     for mode in Mode::all() {
         let mut state = 0x9E37_79B9_7F4A_7C15_u64;
-        let (mut documents, mut spans) = (0, 0);
-        for _ in 0..60_000 {
-            let input = generated(&mut state);
+        let (mut documents, mut spans, mut marked) = (0, 0, 0);
+        for round in 0..80_000 {
+            let mut input = generated(&mut state);
+            if round % 4 == 3 {
+                input.insert_str(0, &"\u{feff}".repeat(1 + round / 4 % 3));
+            }
             let (Ok(tree), Ok(value)) = (mode.tree(&input), mode.value(&input)) else {
                 continue;
             };
@@ -913,15 +971,19 @@ fn every_entry_span_of_a_generated_document_is_exact() {
             let mut all = Vec::new();
             paths(&value, &mut Vec::new(), &mut all);
             for path in all {
-                spans += usize::from(tree.entry_span_at(&path).is_some());
+                let found = usize::from(tree.entry_span_at(&path).is_some());
+                spans += found;
+                if input.starts_with('\u{feff}') {
+                    marked += found;
+                }
                 if let Some(problem) = inexact(mode, &input, &tree, &path) {
                     panic!("{mode:?} {input:?} at {path:?}: {problem}");
                 }
             }
         }
         assert!(
-            documents >= 5_000 && spans >= 2_000,
-            "{mode:?}: {spans} entry spans in {documents} documents"
+            documents >= 5_000 && spans >= 2_000 && marked >= 400,
+            "{mode:?}: {spans} entry spans in {documents} documents, {marked} after marks"
         );
     }
 }

@@ -842,6 +842,127 @@ fn a_value_asked_for_before_a_key_is_refused_in_the_same_words() {
     assert!(text.contains("map value requested before key"), "{text}");
 }
 
+/// Reads a mapping's keys and passes over their values, and then asks for a value after the
+/// mapping has told it the end. It keeps what it is told.
+#[derive(Debug)]
+struct LateValue(#[allow(dead_code, reason = "printed, to compare the readers")] String);
+
+impl<'de> Deserialize<'de> for LateValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Read;
+        impl<'de> Visitor<'de> for Read {
+            type Value = LateValue;
+
+            fn expecting(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a mapping")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<LateValue, A::Error> {
+                while access.next_key::<IgnoredAny>()?.is_some() {}
+                Ok(LateValue(match access.next_value::<IgnoredAny>() {
+                    Ok(IgnoredAny) => "a value".to_owned(),
+                    Err(error) => error.to_string(),
+                }))
+            }
+        }
+        deserializer.deserialize_map(Read)
+    }
+}
+
+/// A mapping that has told its visitor the end has no value left to give, though the visitor
+/// passed over the last one. Each reader says so in the same words, and so does a read from a
+/// `Value`; the tree gave out the value that was passed over.
+#[test]
+fn a_value_asked_for_after_the_end_is_refused_in_the_same_words() {
+    for input in ["a: 1\nb: 2\n", "{a: 1, b: 2}\n", "a: 1\n", "{}\n"] {
+        let text = both::<LateValue>(input);
+        assert!(
+            text.contains("map value requested before key"),
+            "{input:?}: {text}"
+        );
+        let value = ayaml::parse_value(input).expect("a mapping");
+        let late: LateValue = ayaml::from_value(value).expect("a mapping");
+        assert!(
+            late.0.contains("map value requested before key"),
+            "{late:?}"
+        );
+    }
+    // The public reader, at each size: a tree below 4 KiB, and events above it.
+    let long = format!(
+        "{}z: 1\n",
+        "# a line of comment that makes the input long\n".repeat(100)
+    );
+    assert!(long.len() > 4096);
+    for input in ["a: 1\nb: 2\n", long.as_str()] {
+        let late: LateValue = ayaml::from_str(input).expect("a mapping");
+        assert!(
+            late.0.contains("map value requested before key"),
+            "{late:?}"
+        );
+    }
+}
+
+thread_local! {
+    /// What a sequence said of its size each time `HintAfterFault` asked.
+    static HINTS: std::cell::RefCell<Vec<Option<usize>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Reads a sequence's items, takes an error and goes on, and notes what the sequence says of
+/// its size after each error and at its end.
+#[derive(Debug)]
+struct HintAfterFault;
+
+impl<'de> Deserialize<'de> for HintAfterFault {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Read;
+        impl<'de> Visitor<'de> for Read {
+            type Value = HintAfterFault;
+
+            fn expecting(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a sequence")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(
+                self,
+                mut access: A,
+            ) -> Result<HintAfterFault, A::Error> {
+                HINTS.with_borrow_mut(|hints| hints.push(access.size_hint()));
+                loop {
+                    match access.next_element::<IgnoredAny>() {
+                        Ok(Some(IgnoredAny)) => {}
+                        Ok(None) => break,
+                        Err(_) => HINTS.with_borrow_mut(|hints| hints.push(access.size_hint())),
+                    }
+                }
+                HINTS.with_borrow_mut(|hints| hints.push(access.size_hint()));
+                Ok(HintAfterFault)
+            }
+        }
+        deserializer.deserialize_seq(Read)
+    }
+}
+
+/// A root flow collection tells its size until a fault. After one it tells none: the entries
+/// that it counted are not all there to give.
+#[test]
+fn a_collection_tells_no_size_after_a_fault() {
+    let limits = Limits::default();
+    for compat in [false, true] {
+        HINTS.with_borrow_mut(Vec::clear);
+        let read = from_str_by_events::<HintAfterFault>("[1, *missing, 3]\n", &limits, compat);
+        assert!(read.is_err(), "the fault stands");
+        assert_eq!(
+            HINTS.with_borrow(Clone::clone),
+            [Some(3), None, None],
+            "compat {compat}"
+        );
+        // With no fault it tells what is left, down to none.
+        HINTS.with_borrow_mut(Vec::clear);
+        from_str_by_events::<HintAfterFault>("[1, 2, 3]\n", &limits, compat).expect("a sequence");
+        assert_eq!(HINTS.with_borrow(Clone::clone), [Some(3), Some(0)]);
+    }
+}
+
 /// What a collection says of its size before its first entry is read, after one entry, and how
 /// many entries it gave.
 #[derive(Debug, PartialEq)]
@@ -958,4 +1079,22 @@ fn the_build_that_reads_every_input_from_its_events_does() {
         cfg!(ayaml_typed_from_events),
         "{hinted:?}"
     );
+}
+
+/// The public reader builds a tree of an input of 4 KiB, and reads one a byte longer from its
+/// events: "more than 4 KiB" is 4,097 bytes. A block sequence shows which, as above.
+#[test]
+fn an_input_of_exactly_4_kib_is_read_from_a_tree() {
+    let at = format!("{}# x\n", "- a\n".repeat(1_023));
+    let over = format!("{}# xx\n", "- a\n".repeat(1_023));
+    assert_eq!((at.len(), over.len()), (4_096, 4_097));
+    let hinted: Hinted = ayaml::from_str(&at).expect("a sequence");
+    assert_eq!(hinted.entries, 1_023);
+    assert_eq!(
+        hinted.before,
+        (!cfg!(ayaml_typed_from_events)).then_some(1_023),
+        "an input of 4,096 bytes"
+    );
+    let hinted: Hinted = ayaml::from_str(&over).expect("a sequence");
+    assert_eq!((hinted.before, hinted.entries), (None, 1_023));
 }

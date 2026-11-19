@@ -70,6 +70,8 @@ impl Eq for Mapping {}
 /// either form are accepted without forcing callers to match one ownership
 /// convention.
 pub trait Index: private::Sealed {
+    // Each method that hands out or removes a value forgets the mapping's cached hash itself:
+    // the methods are hidden, not private, so a caller can reach one without `Mapping`'s own.
     #[doc(hidden)]
     fn contains_key(&self, mapping: &Mapping) -> bool;
     #[doc(hidden)]
@@ -171,7 +173,6 @@ impl Mapping {
     /// Mutably look up a value by key.
     #[must_use]
     pub fn get_mut<I: Index>(&mut self, key: I) -> Option<&mut Value> {
-        self.hash.take();
         Index::get_mut(&key, self)
     }
 
@@ -190,25 +191,29 @@ impl Mapping {
 
     /// Remove a key, swapping the last entry into its place.
     pub fn remove<I: Index>(&mut self, key: I) -> Option<Value> {
-        self.hash.take();
         Index::swap_remove(&key, self)
     }
 
     /// Remove a key, preserving the relative order of the remaining entries.
     pub fn shift_remove<I: Index>(&mut self, key: I) -> Option<Value> {
-        self.hash.take();
         Index::shift_remove(&key, self)
     }
 
     /// Iterate over entries in insertion order.
-    pub fn iter(&self) -> impl Iterator<Item = (&Value, &Value)> + '_ {
-        self.map.iter()
+    #[inline]
+    pub fn iter(&self) -> Iter<'_> {
+        Iter {
+            inner: self.map.iter(),
+        }
     }
 
     /// Mutably iterate over entries in insertion order.
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&Value, &mut Value)> + '_ {
+    #[inline]
+    pub fn iter_mut(&mut self) -> IterMut<'_> {
         self.hash.take();
-        self.map.iter_mut()
+        IterMut {
+            inner: self.map.iter_mut(),
+        }
     }
 
     /// Iterate over keys in insertion order.
@@ -463,14 +468,15 @@ impl Extend<(Value, Value)> for Mapping {
     }
 }
 
-/// An iterator over a mapping's entries in insertion order, by reference. `&Mapping` gives one.
+/// An iterator over a mapping's entries in insertion order, by reference. `&Mapping` and
+/// [`Mapping::iter`] give one.
 #[derive(Clone, Default)]
 pub struct Iter<'a> {
     inner: indexmap::map::Iter<'a, Value, Value>,
 }
 
 /// An iterator over a mapping's entries in insertion order, with each value mutable.
-/// `&mut Mapping` gives one.
+/// `&mut Mapping` and [`Mapping::iter_mut`] give one.
 #[derive(Default)]
 pub struct IterMut<'a> {
     inner: indexmap::map::IterMut<'a, Value, Value>,
@@ -485,43 +491,61 @@ pub struct IntoIter {
 /// Give a mapping iterator what the iterator inside it has: both ends, an exact length, an end
 /// that stays an end, and the entries it has left to print. Each can also be made empty, with
 /// `Default`, and the two that don't lend a value mutably can be cloned.
+///
+/// Each method only hands on to the iterator inside, and is marked `#[inline]` so that a loop
+/// in another crate costs what a loop over that iterator costs: these types have no type
+/// parameter, so without the mark their methods are compiled once, here, and called. `collect`
+/// is handed on too, for the same reason and because the inner iterator has a faster one.
 macro_rules! mapping_iterator {
     ($name:ident $(<$lifetime:lifetime>)?, $item:ty) => {
         impl$(<$lifetime>)? Iterator for $name$(<$lifetime>)? {
             type Item = $item;
 
+            #[inline]
             fn next(&mut self) -> Option<Self::Item> {
                 self.inner.next()
             }
 
+            #[inline]
             fn size_hint(&self) -> (usize, Option<usize>) {
                 self.inner.size_hint()
             }
 
+            #[inline]
             fn count(self) -> usize {
                 self.inner.len()
             }
 
+            #[inline]
             fn nth(&mut self, n: usize) -> Option<Self::Item> {
                 self.inner.nth(n)
             }
 
+            #[inline]
             fn last(mut self) -> Option<Self::Item> {
                 self.inner.next_back()
+            }
+
+            #[inline]
+            fn collect<C: FromIterator<Self::Item>>(self) -> C {
+                self.inner.collect()
             }
         }
 
         impl$(<$lifetime>)? DoubleEndedIterator for $name$(<$lifetime>)? {
+            #[inline]
             fn next_back(&mut self) -> Option<Self::Item> {
                 self.inner.next_back()
             }
 
+            #[inline]
             fn nth_back(&mut self, n: usize) -> Option<Self::Item> {
                 self.inner.nth_back(n)
             }
         }
 
         impl$(<$lifetime>)? ExactSizeIterator for $name$(<$lifetime>)? {
+            #[inline]
             fn len(&self) -> usize {
                 self.inner.len()
             }
@@ -545,6 +569,7 @@ impl IntoIterator for Mapping {
     type Item = (Value, Value);
     type IntoIter = IntoIter;
 
+    #[inline]
     fn into_iter(self) -> Self::IntoIter {
         IntoIter {
             inner: self.map.into_iter(),
@@ -556,10 +581,9 @@ impl<'a> IntoIterator for &'a Mapping {
     type Item = (&'a Value, &'a Value);
     type IntoIter = Iter<'a>;
 
+    #[inline]
     fn into_iter(self) -> Self::IntoIter {
-        Iter {
-            inner: self.map.iter(),
-        }
+        self.iter()
     }
 }
 
@@ -567,11 +591,9 @@ impl<'a> IntoIterator for &'a mut Mapping {
     type Item = (&'a Value, &'a mut Value);
     type IntoIter = IterMut<'a>;
 
+    #[inline]
     fn into_iter(self) -> Self::IntoIter {
-        self.hash.take();
-        IterMut {
-            inner: self.map.iter_mut(),
-        }
+        self.iter_mut()
     }
 }
 
@@ -697,6 +719,9 @@ mod tests {
         );
     }
 
+    /// A mapping caches its hash, and every way to change what it holds forgets the hash: each
+    /// row changes a mapping that has been hashed, and it must then hash as a mapping built
+    /// anew from the same entries does. Every row changes the entries, or the cache could stay.
     #[test]
     fn cached_hash_tracks_every_mutation() {
         use std::collections::hash_map::DefaultHasher;
@@ -708,38 +733,116 @@ mod tests {
             hasher.finish()
         }
 
+        type Change = fn(&mut Mapping);
+        let changes: [(&str, Change); 22] = [
+            ("insert a new key", |map| {
+                map.insert(key("z"), Value::from(9_u64));
+            }),
+            ("insert over a key", |map| {
+                map.insert(key("a"), Value::from(9_u64));
+            }),
+            ("insert_new", |map| {
+                map.insert_new(key("z"), Value::from(9_u64)).expect("new");
+            }),
+            ("get_mut by str", |map| {
+                *map.get_mut("a").expect("a") = Value::from(9_u64);
+            }),
+            ("get_mut by value", |map| {
+                let wanted = key("a");
+                *map.get_mut(&wanted).expect("a") = Value::from(9_u64);
+            }),
+            ("get_str_mut", |map| {
+                *map.get_str_mut("a").expect("a") = Value::from(9_u64);
+            }),
+            ("entry or_insert, absent", |map| {
+                let _ = map.entry(key("z")).or_insert(Value::from(9_u64));
+            }),
+            ("entry or_insert, present, written through", |map| {
+                *map.entry(key("a")).or_insert(Value::Null) = Value::from(9_u64);
+            }),
+            ("entry or_insert_with, absent", |map| {
+                map.entry(key("z")).or_insert_with(|| Value::from(9_u64));
+            }),
+            ("entry or_insert_with, present, written through", |map| {
+                *map.entry(key("a")).or_insert_with(|| Value::Null) = Value::from(9_u64);
+            }),
+            ("entry and_modify", |map| {
+                drop(
+                    map.entry(key("a"))
+                        .and_modify(|value| *value = Value::from(9_u64)),
+                );
+            }),
+            ("remove by str", |map| {
+                map.remove("a").expect("a");
+            }),
+            ("remove by value", |map| {
+                let wanted = key("a");
+                map.remove(&wanted).expect("a");
+            }),
+            ("shift_remove by str", |map| {
+                map.shift_remove("a").expect("a");
+            }),
+            ("shift_remove by value", |map| {
+                let wanted = key("a");
+                map.shift_remove(&wanted).expect("a");
+            }),
+            ("iter_mut", |map| {
+                for (_, value) in map.iter_mut() {
+                    *value = Value::from(9_u64);
+                }
+            }),
+            ("a loop over &mut", |map| {
+                for (_, value) in &mut *map {
+                    *value = Value::from(9_u64);
+                }
+            }),
+            ("values_mut", |map| {
+                for value in map.values_mut() {
+                    *value = Value::from(9_u64);
+                }
+            }),
+            ("extend", |map| {
+                map.extend([(key("z"), Value::from(9_u64))]);
+            }),
+            ("clear", Mapping::clear),
+            ("a value's index, absent", |map| {
+                let mut value = Value::Mapping(std::mem::take(map));
+                value["z"] = Value::from(9_u64);
+                let Value::Mapping(changed) = value else {
+                    unreachable!()
+                };
+                *map = changed;
+            }),
+            ("a value's index, present", |map| {
+                let mut value = Value::Mapping(std::mem::take(map));
+                value["a"] = Value::from(9_u64);
+                let Value::Mapping(changed) = value else {
+                    unreachable!()
+                };
+                *map = changed;
+            }),
+        ];
+        for (name, change) in changes {
+            let mut map = Mapping::new();
+            map.insert(key("a"), Value::from(1_u64));
+            map.insert(key("b"), Value::from(2_u64));
+            let before = digest(&map);
+            // Hashed again, it gives the cached hash; the change has to forget that.
+            assert_eq!(digest(&map), before, "{name}");
+            change(&mut map);
+            let fresh: Mapping = map
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            assert_ne!(digest(&fresh), before, "{name} changes nothing");
+            assert_eq!(digest(&map), digest(&fresh), "{name}");
+        }
+        // Giving back spare room changes no entry, and may keep the hash.
         let mut map = Mapping::new();
-        let mut fresh = Mapping::new();
         map.insert(key("a"), Value::from(1_u64));
-        fresh.insert(key("a"), Value::from(1_u64));
-        assert_eq!(digest(&map), digest(&fresh));
-        let _ = map.get_mut("a").map(|value| *value = Value::from(2_u64));
-        fresh.insert(key("a"), Value::from(2_u64));
-        assert_eq!(digest(&map), digest(&fresh));
-        let _ = map.entry(key("b")).or_insert(Value::from(3_u64));
-        fresh.insert(key("b"), Value::from(3_u64));
-        assert_eq!(digest(&map), digest(&fresh));
-        for value in map.values_mut() {
-            *value = Value::Null;
-        }
-        for value in fresh.values_mut() {
-            *value = Value::Null;
-        }
-        assert_eq!(digest(&map), digest(&fresh));
-        // A `for` loop over `&mut map` hands out the values too.
-        for (_, value) in &mut map {
-            *value = Value::from(4_u64);
-        }
-        for value in fresh.values_mut() {
-            *value = Value::from(4_u64);
-        }
-        assert_eq!(digest(&map), digest(&fresh));
-        map.remove("a");
-        fresh.remove("a");
-        assert_eq!(digest(&map), digest(&fresh));
-        map.clear();
-        fresh.clear();
-        assert_eq!(digest(&map), digest(&fresh));
+        let before = digest(&map);
+        map.shrink_to_fit();
+        assert_eq!(digest(&map), before);
     }
 
     /// Without a mark for each kind of number, these write the same bytes, and a mapping of them

@@ -89,8 +89,8 @@ the parser's events as it takes them, so neither a vector of the document's even
 its nodes stands between the tokens and the value: a scalar is one node that the target reads
 and drops, and a collection is read entry by entry. Only what is read whole or again is built as
 a tree: a node with an anchor, a collection that keeps its tag, a mapping key, and what an enum
-reads. A smaller read builds the tree, which costs a document of a few bytes about 700 fewer
-instructions. Scalar tokens keep their raw text as a span and box only values that need
+reads. A smaller read builds the tree, which costs a document of a few bytes about 1,300 fewer
+instructions, 7,000 against 8,300 for `a`. Scalar tokens keep their raw text as a span and box only values that need
 decoding; typed nodes box tags, keep scalar text as a source slice, and cache hashes in one
 atomic word. The parser counts a root flow collection's entries before it reads them: a root
 that is built as a tree reserves that room, and one that is read entry by entry tells its
@@ -99,15 +99,21 @@ target the count.
 What the events cost: a collection other than a root flow collection tells its target no size,
 so a vector or a map grows by doubling, and can keep up to twice the room its entries need.
 `Value` and `Mapping` give the spare room back at each collection's end, with one reallocation
-a collection: about 1% to 2% more instructions on a configuration document, and up to 6% on a
+a collection: about 1% to 2% more instructions on a configuration document, and 5% to 9% on a
 document of one-item collections (AY-118). A `Value` of the 4.4 MB
 service description then keeps 45 MB and its read peaks at 80 MB, where a read that built the
 tree first, and told each collection its size, kept 48 MB and peaked at 120 MB. A mapping of
-1,000 to 4,096 entries on its own still peaks about a third higher while it grows. A document
-whose nodes mostly have anchors keeps those nodes as trees beside the tokens and the value, and
-peaks about a quarter above a read that builds the whole tree first: 95 MB against 76 MB for
-50,000 anchored flow mappings of two entries, by issue #178's measure. A root with an anchor
-peaks as it did.
+1,000 to 4,096 entries on its own still peaks higher while it grows, counting both blocks of
+each reallocation: by about 14% in default mode and by about half in compatibility mode,
+where no set of keys stood beside the tree before. A node that is built whole inside the
+document, because it has an anchor or a tag that it keeps, an enum reads it, or it is a key
+that is a collection, stands as a tree beside the tokens and the value. A megabyte flow
+sequence that is a mapping's value peaks at 131 MB with an anchor or a tag, and at 106 MB with
+neither, where a read that built the whole tree first peaked at 99 MB; one that is a key peaks
+at 152 MB against 114 MB. A document whose nodes mostly have anchors peaks about a quarter
+above such a read as a JSON tree, 95 MB against 76 MB for 50,000 anchored flow mappings of two
+entries by issue #178's measure, and about a third above it as a `Value` (AY-119). A root with
+an anchor peaks as it did.
 
 Issue #178 gives a reference for each of its nine shapes, the peak of a libyaml-based reader:
 1.40, 41.5, and 165.9 MB for the three service descriptions, and 36.6, 35.7, 34.3, 67.8, 18.4,

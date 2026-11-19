@@ -246,7 +246,7 @@ impl TagDirectives {
                 Ok(())
             }
             Value::Mapping(mapping) if depth_left > 0 => {
-                for (key, value) in mapping.iter() {
+                for (key, value) in mapping {
                     for node in [key, value] {
                         if may_hold_a_tag(node) {
                             self.scan_at(node, depth_left - 1)?;

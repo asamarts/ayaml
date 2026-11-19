@@ -192,9 +192,10 @@ that document's tokens. Every other reader holds the tokens of the whole stream.
   set of each open mapping's keys, at 24 bytes a slot and the text of a key that isn't taken
   from the source as it stands. A root that is built whole, because it has an anchor or a tag
   that it keeps or because an enum reads it, is the document as a tree: the tokens are freed
-  before its target reads it. A node with an anchor that is not the root is kept beside the
-  tokens and the value, so a document made mostly of such nodes peaks about a quarter above
-  a read that builds the whole tree first. A read that fails frees its tokens and then builds
+  before its target reads it. Such a node that is not the root, and a key that is a
+  collection, is kept beside the tokens and the value: a megabyte flow sequence with an anchor
+  peaks about a third above a read that builds the whole tree first, and a document made
+  mostly of anchored nodes about a quarter above it as a JSON tree. A read that fails frees its tokens and then builds
   the document once more to report the error.
 - A collection that is read from events tells its target no size, since its entries are
   counted only at its end. The root is the exception where it is a flow collection, whose

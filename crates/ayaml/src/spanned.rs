@@ -116,8 +116,8 @@ impl<'a> SpannedTree<'a> {
     /// Look up a node by a path. A multi-document stream has no unambiguous root, so this returns
     /// `None` unless it holds exactly one document. A lookup that would have to guess returns
     /// `None` too: a key that the mapping holds twice, a merge key, and any key of a mapping
-    /// that has an alias among its keys, or a key that holds one, since that key may be any
-    /// other key of the mapping again.
+    /// that has an alias among its keys, or a key that holds an alias or a merge key, since
+    /// that key may be any other key of the mapping again.
     #[must_use]
     pub fn lookup(&self, path: &[PathSegment]) -> Option<&SpannedNode<'a>> {
         let [document] = self.documents.as_slice() else {
@@ -165,7 +165,7 @@ impl SpannedNode<'_> {
     /// parser places it, at the next token, which can lie past the end of the collection it is
     /// in: an item with nothing after its `-`, the value of a key with a `?`, a value that
     /// only a tag or an anchor stands for, and every such value of an input that holds a
-    /// byte-order mark past its first character.
+    /// byte-order mark past the marks that open it.
     #[must_use]
     pub const fn span(&self) -> Span {
         self.span
@@ -177,8 +177,8 @@ impl SpannedNode<'_> {
     ///
     /// A block mapping's entry and a block sequence's item can have one. The span runs from the
     /// start of the entry's first line through its last line break, so it takes the entry's
-    /// indentation, a value on later lines, a block scalar, and a comment after the value. A
-    /// byte-order mark before the first entry stays outside it.
+    /// indentation, a value on later lines, a block scalar, and a comment after the value.
+    /// The byte-order marks that open the input stay outside the first entry's.
     ///
     /// `None` is conservative: it means that no span is known to be exact. These have none:
     ///
@@ -195,8 +195,9 @@ impl SpannedNode<'_> {
     /// - the only entry of its collection, which would be no collection without it;
     /// - an entry before a line that begins with `:`, which would give its value to a key
     ///   before the entry;
-    /// - every entry of an input that holds a byte-order mark past its first character: what
-    ///   such a mark means depends on the lines before it;
+    /// - every entry of an input that holds a byte-order mark past the marks that open it, be
+    ///   it in a quoted scalar: what a mark that begins a line means depends on the lines
+    ///   before it;
     /// - an entry after a block scalar, unless content follows the entry directly: the scalar
     ///   would take the blank and comment lines after it.
     ///
@@ -312,9 +313,8 @@ fn build<'a>(
         stack: Vec::new(),
         root: None,
         after_block_scalar: false,
-        marked: input
-            .char_indices()
-            .any(|(at, ch)| at > 0 && ch == '\u{feff}'),
+        // A run of marks opens the input as one mark does.
+        marked: input.trim_start_matches('\u{feff}').contains('\u{feff}'),
     };
     for event in events {
         builder.event(event?)?;
@@ -332,7 +332,7 @@ struct Builder<'a> {
     /// The last scalar or alias that the source writes was a block scalar. One takes the blank
     /// and more indented lines after it as its own, until other content ends it.
     after_block_scalar: bool,
-    /// The input holds a byte-order mark past its first character. The compatibility reader
+    /// The input holds a byte-order mark past the marks that open it. The compatibility reader
     /// counts one at a line's start toward that line's indentation, and takes one after a line
     /// break for a comment's or a blank line's start, unless it opens the input. So what such
     /// a mark means depends on the lines before it, and no entry's removal is known to be
@@ -643,11 +643,20 @@ fn pair_end(input: &str, start: usize, entry: &Entry<'_>, next: usize) -> usize 
     let from = entry.key.content_end.unwrap_or(start).min(next);
     let bytes = input.as_bytes();
     let blank = |at: usize| matches!(bytes.get(at), Some(b' ' | b'\t' | b'\n' | b'\r'));
-    let (mut end, mut at) = (from, from);
+    // The compatibility reader reads past a byte-order mark that begins a line, so one is no
+    // more written text than the line's spaces are, and a comment may follow it. A mark
+    // anywhere else is text to it, which would be the pair's value, so one that stands here,
+    // in a pair with no value, begins its line, after the break that separates what follows.
+    let mark = '\u{feff}';
+    // Whether a `#` here would start a comment: something separates it from the pair's text.
+    let (mut end, mut at, mut separated) = (from, from, false);
     while at < next {
         if blank(at) {
             at += 1;
-        } else if bytes[at] == b'#' && at > from && blank(at - 1) {
+            separated = true;
+        } else if input[at..].starts_with(mark) {
+            at += mark.len_utf8();
+        } else if bytes[at] == b'#' && separated {
             while at < next && !matches!(bytes[at], b'\n' | b'\r') {
                 at += 1;
             }
@@ -656,6 +665,7 @@ fn pair_end(input: &str, start: usize, entry: &Entry<'_>, next: usize) -> usize 
                 at += 1;
             }
             end = at;
+            separated = false;
         }
     }
     end
@@ -688,8 +698,8 @@ enum Lead {
 /// has no such span (see [`SpannedNode::entry_span`]). The entry begins at `first`, its last
 /// character ends at `content_end`, when that is known, `anchored` says whether it defines an
 /// anchor, stands inside a collection that has one, or is in an input with a byte-order mark
-/// past its start, and `after_block_scalar` whether the last thing written before it is a
-/// block scalar.
+/// past the marks that open it, and `after_block_scalar` whether the last thing written before
+/// it is a block scalar.
 fn block_entry_span(
     input: &str,
     style: crate::event::CollectionStyle,
@@ -704,9 +714,9 @@ fn block_entry_span(
     }
     let content_end = content_end?;
     let mut start = line_start(input, first);
-    // A byte-order mark opens the input, not the first entry.
-    if start == 0 && input.starts_with('\u{feff}') {
-        start = '\u{feff}'.len_utf8();
+    // The byte-order marks that open the input are no part of the first entry.
+    if start == 0 {
+        start = input.len() - input.trim_start_matches('\u{feff}').len();
     }
     let before = input.get(start..first)?;
     let begins_its_line = match lead {

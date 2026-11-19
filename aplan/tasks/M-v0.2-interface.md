@@ -27,4 +27,4 @@ in a 0.2.x release when it is done.
 ## Acceptance criteria
 
 - [ ] every member is closed with test evidence
-- [ ] each member is in a published 0.2.x release, and the semver check finds no break in any of them
+- [ ] each member is in a published 0.2.x release that breaks nothing: the semver check finds no break, and neither does a comparison of the public API with the release before (AY-124), since the pinned checker reported none of the four breaks of 0.2.0

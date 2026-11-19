@@ -1,4 +1,5 @@
 # Typed allocation budgets, checked by tools/check_alloc_corpus.sh with AYAML_TYPED=1.
-# Each is about 1.25 times the measured value, rounded up.
+# Each is about 1.25 times the measured value, rounded up, but for the peak of a parse, which
+# is 1.10 times: at 1.25 the room that a `Value`'s collections grow with fits back in.
 # path	parse_peak	emit_peak	parse_allocs	emit_allocs	serialize_peak	serialize_allocs	parse_total	emit_total	serialize_total
-tests/fixtures/compat/toolchain-pins.yml	219000	62000	2220	30	125000	1400	454000	83000	125000
+tests/fixtures/compat/toolchain-pins.yml	193000	62000	2220	30	125000	1400	454000	83000	125000
