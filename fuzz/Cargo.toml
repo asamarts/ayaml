@@ -12,7 +12,7 @@ cargo-fuzz = true
 # `libyaml-compat` is only used by compatibility checks; the default parser is
 # unchanged. `bench-internals` gives `borrowed` the typed reader that builds a tree first, to
 # compare with the one that reads events.
-ayaml = { path = "../crates/ayaml", version = "=0.2.1", features = ["bench-internals", "libyaml-compat"] }
+ayaml = { path = "../crates/ayaml", version = "=0.2.2", features = ["bench-internals", "libyaml-compat"] }
 libfuzzer-sys = "=0.4.13"
 # `memcount` uses this for the JSON tree that its untyped decode builds, and `borrowed` for a
 # target that isn't ayaml's own. The version is the workspace's.
