@@ -2,7 +2,7 @@
 id: M-v0.2.0
 title: Publish ayaml 0.2.0 with every break that is decided
 phase: 3
-status: todo
+status: done
 blocked_by:
 - AY-020
 - AY-045
@@ -16,6 +16,9 @@ blocked_by:
 tags:
 - milestone
 - v0.2.0
+evidence:
+  - kind: url
+    ref: https://github.com/asamarts/ayaml/releases/tag/v0.2.1
 ---
 
 ## Why
@@ -27,6 +30,6 @@ published `0.2.x` release.
 
 ## Acceptance criteria
 
-- [ ] every member is closed with the evidence its tags require
-- [ ] ayaml 0.2.1 is published through the release flow, with a migration note in the changelog
-- [ ] `SECURITY.md` names the versions that get fixes after 0.2.1
+- [x] every member is closed with the evidence its tags require
+- [x] ayaml 0.2.1 is published through the release flow, with a migration note in the changelog
+- [x] `SECURITY.md` names the versions that get fixes after 0.2.1
