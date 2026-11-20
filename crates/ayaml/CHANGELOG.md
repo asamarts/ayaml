@@ -4,7 +4,11 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.1] — 2026-11-20
+
+First published `0.2.x` release (`0.2.0` was tagged but never published; see below). Carries every
+breaking change, addition, fix, security update, and performance improvement listed under `0.2.0`,
+plus the fixes below.
 
 ### Fixed
 
@@ -34,6 +38,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and retaining unused capacity.
 
 ## [0.2.0] — 2026-11-19
+
+*Not published.* The `v0.2.0` tag was held before publishing after post-tag audits and differential
+fuzzing found the fixes that ship in `0.2.1`; `0.2.1` is the first published `0.2.x` release and
+carries every change listed below.
 
 ### Changed
 
