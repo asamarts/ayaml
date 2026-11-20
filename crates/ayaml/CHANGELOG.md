@@ -19,8 +19,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - Refusing a node because of its tag now names the tag across typed and value deserializers (for
-  example, `invalid type: tagged value `!!foo`, expected struct S` instead of `invalid type: map`,
-  and `invalid type: tagged value `!!binary`, expected a sequence` instead of `invalid type: enum`).
+  example, ``invalid type: tagged value `!!foo`, expected struct S`` instead of `invalid type: map`,
+  and ``invalid type: tagged value `!!binary`, expected a sequence`` instead of `invalid type: enum`).
   `deserialize_struct` now also hands a retained tagged node through `visit_enum` before failing,
   matching `deserialize_map` and `deserialize_seq`.
 
