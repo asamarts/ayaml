@@ -20,6 +20,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The event writers now accept directives that hold a byte order mark inside a trailing comment
   (as produced by the compatibility event reader), while still refusing a byte order mark in a
   directive name or parameter.
+- In compatibility mode, a non-handle local tag containing `@` and `!` (such as `!@!`) now stops at
+  non-tag characters such as `[`, `]`, `<`, and `>`, rejecting unseparated flow indicators and
+  non-URI characters as libyaml does.
 
 ### Performance
 
