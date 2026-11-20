@@ -597,6 +597,94 @@ fn a_fault_in_the_document_stands_when_a_visitor_goes_on_after_it() {
     }
 }
 
+/// A variant, or [`Kind::Unread`] where reading one gave an error: what a target does that falls
+/// back to a default on any error.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+enum Kind {
+    #[default]
+    Unread,
+    V(u8),
+    Unit,
+}
+
+#[derive(Debug, PartialEq)]
+struct OrDefault(Kind);
+
+impl<'de> Deserialize<'de> for OrDefault {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self(Kind::deserialize(deserializer).unwrap_or_default()))
+    }
+}
+
+const TRAILING: &str = "expected a single YAML document, but found trailing documents";
+
+/// An enum at the root is read whole, and the stream to its end, while the target is already
+/// reading. What follows the root is the document's fault and not the target's to forgive.
+#[test]
+fn what_follows_a_root_enum_stands_when_its_target_takes_the_error() {
+    let limits = Limits::default();
+    for (input, read) in [("V: 1\n", Kind::V(1)), ("Unit\n", Kind::Unit)] {
+        for reader in [
+            from_str_by_tree::<OrDefault>,
+            from_str_by_events::<OrDefault>,
+        ] {
+            assert_eq!(
+                reader(input, &limits, false).expect(input).0,
+                read,
+                "{input:?}"
+            );
+        }
+        for (after, message) in [
+            ("---\nsecond: document\n", TRAILING),
+            ("--- 2\n", TRAILING),
+            ("...\nmore\n", TRAILING),
+            ("--- [unbalanced\n", TRAILING),
+            ("...\n%TAG !a! tag:x:\n--- 2\n", TRAILING),
+            (
+                "--- V: 2\n",
+                "a block collection cannot start on a `---` line",
+            ),
+        ] {
+            let input = format!("{input}{after}");
+            let tree = from_str_by_tree::<OrDefault>(&input, &limits, false).expect_err(&input);
+            let events = from_str_by_events::<OrDefault>(&input, &limits, false).expect_err(&input);
+            assert_eq!(format!("{tree:?}"), format!("{events:?}"), "{input:?}");
+            assert_eq!(
+                tree.to_string().split(" at ").next(),
+                Some(message),
+                "{input:?}"
+            );
+            // The public reader takes the events above 4 KiB, and a tree below.
+            let long = format!("# {}\n{input}", "x".repeat(5000));
+            let short = ayaml::from_str::<OrDefault>(&input).expect_err(&input);
+            let long = ayaml::from_str::<OrDefault>(&long).expect_err(&input);
+            assert_eq!(
+                short.to_string().split(" at ").next(),
+                Some(message),
+                "{input:?}"
+            );
+            assert_eq!(
+                long.to_string().split(" at ").next(),
+                Some(message),
+                "{input:?}"
+            );
+        }
+    }
+    // A fault inside the root is the target's to take, by either reader: the enum doesn't read.
+    for input in ["W: 1\n", "V: x\n", "[V]\n"] {
+        for reader in [
+            from_str_by_tree::<OrDefault>,
+            from_str_by_events::<OrDefault>,
+        ] {
+            assert_eq!(
+                reader(input, &limits, false).expect(input).0,
+                Kind::Unread,
+                "{input:?}"
+            );
+        }
+    }
+}
+
 thread_local! {
     /// The errors that [`Asking`] was given by the sequence it read last on this thread.
     static REFUSALS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };

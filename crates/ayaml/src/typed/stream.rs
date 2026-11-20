@@ -206,7 +206,11 @@ impl<'de> Stream<'de> {
             self.builder.reserve_collection(entries);
         }
         self.build()?;
-        self.end()?;
+        // The target may be reading already, as an enum at the root is, and may make something
+        // else of the error it is given. What follows the root is a fault of the document's.
+        if let Err(error) = self.end() {
+            return Err(self.faulted(error));
+        }
         self.events.release();
         Ok(())
     }

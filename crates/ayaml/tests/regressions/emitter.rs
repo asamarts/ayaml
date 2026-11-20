@@ -799,3 +799,70 @@ fn a_document_marker_line_ends_a_plain_scalar_in_a_flow_collection() {
         }
     }
 }
+
+/// Dropping a core collection tag on an empty flow-sequence scalar leaves an empty plain scalar
+/// with no tag or anchor; the event writers emit `~` so it round-trips in both modes.
+#[test]
+fn dropped_core_collection_tag_on_empty_flow_scalar_round_trips() {
+    for input in [
+        "[!!map ]\n",
+        "[!!seq ]\n",
+        "[!!set ]\n",
+        "[!!omap ]\n",
+        "[!!pairs ]\n",
+        "[!!map , a]\n",
+        "[a, !!seq ]\n",
+    ] {
+        let rendered = emit_events(input);
+        assert!(rendered.contains('~'), "{input:?} -> {rendered:?}");
+        assert_eq!(
+            ayaml::parse_value(&rendered).expect("reparse"),
+            ayaml::parse_value(input).expect("original"),
+            "{input:?}"
+        );
+        #[cfg(feature = "libyaml-compat")]
+        assert_eq!(
+            ayaml::compat::from_str::<ayaml::Value>(&rendered).expect("compat reparse"),
+            ayaml::compat::from_str::<ayaml::Value>(input).expect("compat original"),
+            "{input:?}"
+        );
+    }
+}
+
+/// Long alias keys use the explicit `?` form in both block and flow mappings, so aliases over the
+/// 1024-character implicit key ceiling still emit YAML that every reader loads.
+#[test]
+fn long_alias_keys_use_explicit_form() {
+    let anchor = "a".repeat(1_100);
+    let block_input = format!("a: &{anchor} k\n? *{anchor}\n: y\n");
+    let block_rendered = emit_events(&block_input);
+    assert!(
+        block_rendered.contains(&format!("? *{anchor}\n: y\n")),
+        "{block_rendered:?}"
+    );
+    assert_eq!(
+        ayaml::parse_value(&block_rendered).expect("reparse block"),
+        ayaml::parse_value(&block_input).expect("original block")
+    );
+    #[cfg(feature = "libyaml-compat")]
+    assert_eq!(
+        ayaml::compat::from_str::<ayaml::Value>(&block_rendered).expect("compat block"),
+        ayaml::compat::from_str::<ayaml::Value>(&block_input).expect("compat original block")
+    );
+
+    let flow_input = format!("{{a: &{anchor} k, ? *{anchor} : y}}\n");
+    let flow_rendered = emit_events(&flow_input);
+    assert!(
+        flow_rendered.contains(&format!("? *{anchor} : y")),
+        "{flow_rendered:?}"
+    );
+    assert_eq!(
+        ayaml::parse_value(&flow_rendered).expect("reparse flow"),
+        ayaml::parse_value(&flow_input).expect("original flow")
+    );
+    #[cfg(feature = "libyaml-compat")]
+    assert_eq!(
+        ayaml::compat::from_str::<ayaml::Value>(&flow_rendered).expect("compat flow"),
+        ayaml::compat::from_str::<ayaml::Value>(&flow_input).expect("compat original flow")
+    );
+}

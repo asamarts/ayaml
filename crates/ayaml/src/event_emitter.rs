@@ -342,17 +342,22 @@ where
             match event.borrow() {
                 Event::StreamStart { .. } | Event::StreamEnd { .. } => {}
                 Event::Directive { name, value, .. } => {
-                    // The parser reads a name up to a space or tab, and
-                    // neither may hold a line break or a byte order mark.
-                    // NEL, LS, and PS are content; a directive has no
-                    // escapes, so they are written as they are.
-                    let directive_char =
-                        |ch: char| is_printable(ch) && !matches!(ch, '\n' | '\r' | '\u{feff}');
+                    // The parser reads a name up to a space or tab, and neither may hold a line
+                    // break. A byte order mark is rejected in directive names and parameters,
+                    // while a trailing comment in compatibility mode may hold one, matching the
+                    // scanner. NEL, LS, and PS are content; a directive has no escapes, so they
+                    // are written as they are.
+                    let directive_char = |ch: char| is_printable(ch) && !matches!(ch, '\n' | '\r');
+                    let comment_start = value
+                        .match_indices('#')
+                        .find(|&(at, _)| at == 0 || value[..at].ends_with([' ', '\t']))
+                        .map_or(value.len(), |(at, _)| at);
                     if name.is_empty()
                         || !name
                             .chars()
-                            .all(|ch| directive_char(ch) && !matches!(ch, ' ' | '\t'))
+                            .all(|ch| directive_char(ch) && !matches!(ch, ' ' | '\t' | '\u{feff}'))
                         || !value.chars().all(directive_char)
+                        || value[..comment_start].contains('\u{feff}')
                     {
                         return Err(emitter_error(format!(
                             "cannot write the directive %{name} {value}"
@@ -801,12 +806,13 @@ where
                 if !first {
                     self.push(", ")?;
                 }
-                if is_empty_plain(event.borrow()) {
-                    return Err(emitter_error(
-                        "an empty plain scalar without a tag or anchor cannot be a flow sequence entry",
-                    ));
-                }
                 stack.push(Frame::FlowSequence { first: false });
+                if is_empty_plain(event.borrow()) {
+                    // An untagged, unanchored empty plain scalar (such as after dropping a
+                    // mismatched core collection tag like `[!!map ]`) has no empty form inside a
+                    // flow sequence; `~` keeps the plain-scalar event and its null value.
+                    return self.push("~");
+                }
                 self.flow_node(event, stack).map(drop)
             }
             Frame::FlowMapping { first } => {
@@ -861,7 +867,8 @@ where
         match key {
             Event::Alias { anchor, .. } => {
                 // `:` can be part of an alias name, so it needs a space.
-                Ok(Some(format!("{} ", self.alias_token(anchor)?)))
+                let token = format!("{} ", self.alias_token(anchor)?);
+                Ok((token.chars().count() <= MAX_IMPLICIT_KEY_CHARS).then_some(token))
             }
             Event::Scalar {
                 value,
@@ -916,6 +923,9 @@ where
         Ok(match key {
             Event::SequenceStart { .. } => !matches!(self.peek()?, Some(Event::SequenceEnd { .. })),
             Event::MappingStart { .. } => !matches!(self.peek()?, Some(Event::MappingEnd { .. })),
+            Event::Alias { anchor, .. } => {
+                anchor.as_str().chars().count().saturating_add(2) > MAX_IMPLICIT_KEY_CHARS
+            }
             Event::Scalar {
                 value,
                 style,

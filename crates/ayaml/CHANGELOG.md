@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- On an input of more than 4 KiB read from events, a root enum target that swallows deserialization
+  errors no longer hides a trailing document or a syntax error after the root; it now fails with the
+  same document error as a tree read.
+- The event writers now emit `~` for an untagged, unanchored empty plain scalar inside a flow
+  sequence (such as the event stream of `[!!map ]` after dropping the mismatched core collection
+  tag), so both readers reload it.
+- The event writers now write alias mapping keys longer than 128 characters in explicit `?` form in
+  both block and flow mappings, so aliases past the 1,024-character implicit-key limit emit YAML
+  that every reader loads.
+- The event writers now accept directives that hold a byte order mark inside a trailing comment
+  (as produced by the compatibility event reader), while still refusing a byte order mark in a
+  directive name or parameter.
+
+### Performance
+
+- `EventCursor` (used by `parse_events`, `compat::parse_events`, `Deserializer`, and `SpannedTree`)
+  now shrinks each parsed document chunk and moves it into the queue directly instead of copying it
+  and retaining unused capacity.
+
 ## [0.2.0] — 2026-11-19
 
 ### Changed

@@ -438,12 +438,17 @@ fn the_event_writer_refuses_a_directive_that_no_reader_takes() {
         loads(&text);
     }
     // What only the compatibility reader takes is written too, since events that it gave have
-    // to be written back: a prefix that starts with a flow indicator, and a `_` in a handle.
+    // to be written back: a prefix that starts with a flow indicator, a `_` in a handle, and a
+    // byte order mark inside a trailing comment.
     for directive in [
         ("TAG", "!e! [x"),
         ("TAG", "!e! ]tag:x,2000:"),
         ("TAG", "!e! ,x"),
         ("TAG", "!e_f! tag:x,2000:"),
+        ("TAG", "!e! tag:x,2000: #\u{feff}"),
+        ("YAML", "1.2 #\u{feff}"),
+        ("FOO", "bar #\u{feff}"),
+        ("FOO", "#\u{feff}"),
     ] {
         let text =
             one(vec![directive]).unwrap_or_else(|refusal| panic!("{directive:?}: {refusal}"));
@@ -461,6 +466,22 @@ fn the_event_writer_refuses_a_directive_that_no_reader_takes() {
                 back[1]
             );
         }
+    }
+    // A byte order mark in a directive name or parameter (outside a trailing comment) is refused
+    // by both readers, so the writer refuses it too.
+    for directive in [
+        ("TAG\u{feff}", "!e! tag:x,2000:"),
+        ("TAG", "!e!\u{feff} tag:x,2000:"),
+        ("TAG", "!e! tag:x,2000:\u{feff}"),
+        ("YAML", "1.2\u{feff}"),
+        ("FOO", "bar\u{feff}"),
+        ("FOO", "bar#\u{feff}"),
+    ] {
+        let refusal = one(vec![directive]).expect_err("a BOM outside a directive comment");
+        assert!(
+            refusal.starts_with("cannot write the directive %"),
+            "{directive:?}: {refusal}"
+        );
     }
     // What a document may hold once, the next document may hold again.
     let each = stream(vec![

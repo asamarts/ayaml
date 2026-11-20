@@ -1382,6 +1382,90 @@ class ScannerDependencyPolicy(unittest.TestCase):
         self.assertIsNotNone(problem)
         self.assertIn("missing", problem)
 
+    def test_visibility_qualified_and_attribute_prefixed_imports_fail(self) -> None:
+        for source in (
+            "pub use serde::Serialize;\n",
+            "pub(crate) use indexmap::IndexMap;\n",
+            "#[allow(unused_imports)] use serde::Deserialize;\n",
+            "use ::serde::Serialize;\n",
+            "use super::super::value::Value;\n",
+        ):
+            with self.subTest(source=source):
+                problem = self.scanner(source)
+                self.assertIsNotNone(problem)
+
+    def test_inline_disallowed_paths_fail_and_comments_do_not(self) -> None:
+        for source in (
+            "fn f() { let _ = indexmap::IndexMap::<u8, u8>::new(); }\n",
+            "fn f() -> crate::value::Value { todo!() }\n",
+            "fn f() { let _ = ::other::Thing; }\n",
+            "fn f() { let _ = super::super::value::Value::Null; }\n",
+        ):
+            with self.subTest(source=source):
+                problem = self.scanner(source)
+                self.assertIsNotNone(problem)
+        safe = (
+            "// use serde::Serialize; indexmap::IndexMap crate::value::Value\n"
+            "/* pub use serde::Deserialize; */\n"
+            'const NOTE: &str = "indexmap::IndexMap crate::value::Value";\n'
+            "fn lifetime<'a>(s: &'a str) -> &'a str { s }\n"
+        )
+        self.assertIsNone(self.scanner(safe))
+
+    def test_a_new_scanner_submodule_is_checked(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scanner").mkdir()
+            (root / "scanner.rs").write_text("mod extra;\n", encoding="utf-8")
+            (root / "scanner" / "line.rs").write_text("", encoding="utf-8")
+            (root / "scanner" / "scalars.rs").write_text("", encoding="utf-8")
+            (root / "scanner" / "extra.rs").write_text("use serde::Serialize;\n", encoding="utf-8")
+            problem = check_deps.scanner_problem(root)
+        self.assertIsNotNone(problem)
+        self.assertIn("extra.rs", problem)
+
+    def test_target_specific_manifest_dependencies_are_found(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "Cargo.toml"
+            manifest.write_text(
+                '[package]\nname = "ayaml"\nversion = "0.2.0"\n\n'
+                "[dependencies]\nserde = \"1\"\nindexmap = \"2\"\n\n"
+                "[target.'cfg(windows)'.dependencies]\n"
+                'windows-sys = "0.61"\n\n'
+                "[target.'cfg(unix)'.build-dependencies]\n"
+                'cc_alias = { package = "cc", version = "1" }\n',
+                encoding="utf-8",
+            )
+            deps = check_deps.manifest_direct_dependencies(manifest)
+        self.assertEqual(deps, {"serde", "indexmap", "windows-sys", "cc"})
+
+    def test_main_enforces_direct_transitive_target_and_scanner_checks(self) -> None:
+        ok_direct = set(check_deps.ALLOWED_DIRECT)
+        ok_graph = set(check_deps.ALLOWED_DIRECT) | set(check_deps.ALLOWED_TRANSITIVE)
+
+        def run(
+            manifest_deps: set[str] = ok_direct,
+            direct_deps: set[str] = ok_direct,
+            graph_deps: set[str] = ok_graph,
+            scanner_err: str | None = None,
+        ) -> int:
+            def fake_pkg(*extra: str) -> set[str]:
+                return direct_deps if "--depth" in extra else graph_deps
+
+            with (
+                mock.patch.object(check_deps, "manifest_direct_dependencies", return_value=manifest_deps),
+                mock.patch.object(check_deps, "package_names", side_effect=fake_pkg),
+                mock.patch.object(check_deps, "scanner_problem", return_value=scanner_err),
+                mock.patch("builtins.print"),
+            ):
+                return check_deps.main()
+
+        self.assertEqual(run(), 0)
+        self.assertEqual(run(manifest_deps=ok_direct | {"libc"}), 1)
+        self.assertEqual(run(direct_deps=ok_direct | {"anyhow"}), 1)
+        self.assertEqual(run(graph_deps=ok_graph | {"smallvec"}), 1)
+        self.assertEqual(run(scanner_err="disallowed"), 1)
+
 
 class AllocationGate(unittest.TestCase):
     """A budget file with no row would pass by checking nothing, so the gate refuses it.
