@@ -76,7 +76,7 @@
 //!
 //! # Resource limits
 //!
-//! The parser and document readers, the borrowed typed decoder, the
+//! The parser and document readers, the borrowed and seed typed decoders, the
 //! `Deserializer`, and the emitters that take limits have `_with_limits`
 //! forms. The convenience `from_str` and `from_slice` typed readers use the
 //! defaults; `from_value`, `from_value_seed`, and `to_value` do not take
@@ -186,6 +186,72 @@ pub mod compat {
     use crate::limits::LimitKind;
     use serde::de::Visitor;
 
+    /// How compatibility typed readers treat global tags outside the YAML 1.2 core schema, such as
+    /// `!!timestamp`, `!!binary`, `!<tag:example.com,2000:x>`, or a `%TAG` handle mapped to a URI.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum GlobalTags {
+        /// Keep global tags on their nodes, as the default readers do.
+        #[default]
+        Keep,
+        /// Drop global tags outside the core schema, as a libyaml-based reader does.
+        ///
+        /// A scalar beneath a dropped global tag reads as its text for a target that reads any
+        /// value and parses as the requested type for a typed target. A collection beneath one
+        /// reads as if it had no tag. Core-schema tags, the non-specific `!` tag, and local tags
+        /// keep their usual reading.
+        Drop,
+    }
+
+    /// Options for [`compat`](crate::compat) typed readers.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub struct ParseOptions {
+        /// Resource limits applied to the parse.
+        pub limits: crate::Limits,
+        /// How global tags outside the YAML 1.2 core schema are handled.
+        pub global_tags: GlobalTags,
+    }
+
+    impl Default for ParseOptions {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl ParseOptions {
+        /// Compatibility parse options with the default limits and [`GlobalTags::Keep`].
+        #[must_use]
+        pub const fn new() -> Self {
+            Self {
+                limits: crate::Limits::default_profile(),
+                global_tags: GlobalTags::Keep,
+            }
+        }
+
+        /// Set the resource limits applied to the parse.
+        #[must_use]
+        pub const fn with_limits(mut self, limits: crate::Limits) -> Self {
+            self.limits = limits;
+            self
+        }
+
+        /// Set how global tags outside the YAML 1.2 core schema are handled.
+        #[must_use]
+        pub const fn with_global_tags(mut self, global_tags: GlobalTags) -> Self {
+            self.global_tags = global_tags;
+            self
+        }
+    }
+
+    const fn node_options(global_tags: GlobalTags) -> crate::typed::NodeOptions {
+        crate::typed::NodeOptions {
+            allow_duplicates: true,
+            compat_flow: true,
+            drop_global_tags: matches!(global_tags, GlobalTags::Drop),
+        }
+    }
+
     /// Translate ayaml diagnostics into the strings expected by
     /// libyaml-compatible consumers. Each branch is a documented compatibility
     /// deviation keyed by the parser's structured failure, never by the text of
@@ -292,10 +358,28 @@ pub mod compat {
         crate::typed::from_str_seed_with_options(
             input,
             limits,
-            crate::typed::NodeOptions {
-                allow_duplicates: true,
-                compat_flow: true,
-            },
+            node_options(GlobalTags::Keep),
+            seed,
+        )
+        .map_err(map_error)
+    }
+
+    /// Deserialize one document with a caller-supplied seed and compatibility options.
+    ///
+    /// What [`from_str_seed`] says of a document that is refused holds here.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+    pub fn from_str_seed_with<'de, T: serde::de::DeserializeSeed<'de>>(
+        input: &'de str,
+        options: &ParseOptions,
+        seed: T,
+    ) -> Result<T::Value, Error> {
+        crate::typed::from_str_seed_with_options(
+            input,
+            &options.limits,
+            node_options(options.global_tags),
             seed,
         )
         .map_err(map_error)
@@ -321,13 +405,24 @@ pub mod compat {
         input: &'de str,
         limits: &crate::Limits,
     ) -> Result<T, Error> {
+        crate::typed::from_str_with_options(input, limits, node_options(GlobalTags::Keep))
+            .map_err(map_error)
+    }
+
+    /// Deserialize a typed value with compatibility options, using borrowed scalar text where
+    /// possible.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+    pub fn from_str_with<'de, T: serde::Deserialize<'de>>(
+        input: &'de str,
+        options: &ParseOptions,
+    ) -> Result<T, Error> {
         crate::typed::from_str_with_options(
             input,
-            limits,
-            crate::typed::NodeOptions {
-                allow_duplicates: true,
-                compat_flow: true,
-            },
+            &options.limits,
+            node_options(options.global_tags),
         )
         .map_err(map_error)
     }
@@ -401,13 +496,24 @@ pub mod compat {
         limits: &crate::Limits,
         visitor: V,
     ) -> Result<V::Value, Error> {
+        crate::typed::from_str_visitor(input, limits, node_options(GlobalTags::Keep), visitor)
+            .map_err(map_error)
+    }
+
+    /// Deserialize one document with a visitor and compatibility options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+    pub fn deserialize_any_with<'de, V: Visitor<'de>>(
+        input: &'de str,
+        options: &ParseOptions,
+        visitor: V,
+    ) -> Result<V::Value, Error> {
         crate::typed::from_str_visitor(
             input,
-            limits,
-            crate::typed::NodeOptions {
-                allow_duplicates: true,
-                compat_flow: true,
-            },
+            &options.limits,
+            node_options(options.global_tags),
             visitor,
         )
         .map_err(map_error)
@@ -479,12 +585,27 @@ pub mod internals {
         limits: &Limits,
         compat: bool,
     ) -> Result<T, Error> {
+        from_str_by_tree_with(input, limits, compat, false)
+    }
+
+    /// [`from_str_by_tree`], with an opt-in to drop non-core global tags.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+    pub fn from_str_by_tree_with<'de, T: serde::Deserialize<'de>>(
+        input: &'de str,
+        limits: &Limits,
+        compat: bool,
+        drop_global_tags: bool,
+    ) -> Result<T, Error> {
         crate::typed::from_str_by_tree(
             input,
             limits,
             crate::typed::NodeOptions {
                 allow_duplicates: compat,
                 compat_flow: compat,
+                drop_global_tags,
             },
             std::marker::PhantomData::<T>,
         )
@@ -501,12 +622,27 @@ pub mod internals {
         limits: &Limits,
         compat: bool,
     ) -> Result<T, Error> {
+        from_str_by_events_with(input, limits, compat, false)
+    }
+
+    /// [`from_str_by_events`], with an opt-in to drop non-core global tags.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+    pub fn from_str_by_events_with<'de, T: serde::Deserialize<'de>>(
+        input: &'de str,
+        limits: &Limits,
+        compat: bool,
+        drop_global_tags: bool,
+    ) -> Result<T, Error> {
         crate::typed::from_str_by_events(
             input,
             limits,
             crate::typed::NodeOptions {
                 allow_duplicates: compat,
                 compat_flow: compat,
+                drop_global_tags,
             },
             std::marker::PhantomData::<T>,
         )
@@ -881,6 +1017,41 @@ pub fn from_str_borrowed_with_limits<'de, T: serde::Deserialize<'de>>(
     limits: &Limits,
 ) -> Result<T, Error> {
     typed::from_str(input, limits)
+}
+
+/// Deserialize one YAML document with a caller-supplied seed, borrowing simple strings from
+/// `input`.
+///
+/// It reads as [`from_str_borrowed`] does, under the default YAML 1.2.2 rules and limits.
+/// Duplicate keys and trailing documents are rejected. An input of more than 4 KiB is read into
+/// the seed as it is parsed, as [`from_str`] says: a seed that writes to its caller's data as it
+/// reads may have written the start of a document that is then refused, so on an error what it
+/// wrote is to be dropped.
+///
+/// # Errors
+///
+/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+pub fn from_str_seed<'de, T: serde::de::DeserializeSeed<'de>>(
+    input: &'de str,
+    seed: T,
+) -> Result<T::Value, Error> {
+    from_str_seed_with_limits(input, &Limits::default(), seed)
+}
+
+/// Deserialize one YAML document with a caller-supplied seed and explicit limits, borrowing
+/// simple strings from `input`.
+///
+/// What [`from_str_seed`] says of a document that is refused holds here.
+///
+/// # Errors
+///
+/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+pub fn from_str_seed_with_limits<'de, T: serde::de::DeserializeSeed<'de>>(
+    input: &'de str,
+    limits: &Limits,
+    seed: T,
+) -> Result<T::Value, Error> {
+    typed::from_str_seed_with_options(input, limits, typed::NodeOptions::default(), seed)
 }
 
 /// Deserialize one UTF-8 YAML document from bytes, borrowing simple strings.

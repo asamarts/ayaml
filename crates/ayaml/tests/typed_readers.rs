@@ -7,7 +7,9 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Debug, Formatter};
 
-use ayaml::internals::{from_str_by_events, from_str_by_tree};
+use ayaml::internals::{
+    from_str_by_events, from_str_by_events_with, from_str_by_tree, from_str_by_tree_with,
+};
 use ayaml::{Limits, Value};
 use serde::Deserialize;
 use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -1185,4 +1187,99 @@ fn an_input_of_exactly_4_kib_is_read_from_a_tree() {
     );
     let hinted: Hinted = ayaml::from_str(&over).expect("a sequence");
     assert_eq!((hinted.before, hinted.entries), (None, 1_023));
+}
+
+/// Dropping non-core global tags gives the same value or error from a tree and from events across
+/// targets, limits, anchors, keys, enums, and local tags.
+#[test]
+fn tree_and_events_agree_when_dropping_global_tags() {
+    fn diff<'de, T: Deserialize<'de> + Debug + PartialEq>(
+        input: &'de str,
+        limits: &Limits,
+    ) -> Option<String> {
+        let tree = from_str_by_tree_with::<T>(input, limits, true, true);
+        let events = from_str_by_events_with::<T>(input, limits, true, true);
+        let same = match (&tree, &events) {
+            (Ok(tree), Ok(events)) => {
+                tree == events || format!("{tree:?}") == format!("{events:?}")
+            }
+            (Err(tree), Err(events)) => {
+                format!("{tree:?} {tree}") == format!("{events:?} {events}")
+            }
+            _ => false,
+        };
+        (!same).then(|| format!("tree={tree:?}\nevents={events:?}"))
+    }
+
+    let documents = [
+        "!!timestamp 2026-01-01\n",
+        "!!timestamp 5\n",
+        "!!timestamp -5\n",
+        "!!timestamp 1.5\n",
+        "!!timestamp 01\n",
+        "!!timestamp 0x1F\n",
+        "!!timestamp true\n",
+        "!!timestamp ~\n",
+        "!!timestamp \"5\"\n",
+        "!!timestamp\n",
+        "!!binary [1, 2]\n",
+        "!!binary {a: 1, k: x}\n",
+        "!!timestamp {a: 1}\n",
+        "a: !!timestamp 2026-01-01\nb: !!binary [1, !!timestamp 2]\n",
+        "a: &x !!timestamp 5\nb: *x\n",
+        "a: &x !!binary [1, 2]\nb: *x\n",
+        "!!timestamp a: !!timestamp 5\n",
+        "!!timestamp Unit\n",
+        "!!timestamp {New: !!timestamp 7}\n",
+        "{!!timestamp New: 7}\n",
+        "!!timestamp {Struct: {a: !!timestamp 3}}\n",
+        "!<tag:example.com,2000:x> 5\n",
+        "!<tag:example.com,2000:x> ~\n",
+        "!<tag:example.com,2000:x> [1, 2]\n",
+        "%TAG !e! tag:example.com,2000:\n---\n!e!x 5\n",
+        "%TAG ! tag:example.com,2000:\n---\n!x {a: 1}\n",
+        "!custom 5\n",
+        "! 5\n",
+        "!New 5\n",
+        "!!int \"5\"\n",
+        "!!int x\n",
+        "!!foo {a: 1}\n---\nb: 2\n",
+    ];
+    for input in documents {
+        for limits in [Limits::default(), tight()] {
+            macro_rules! check {
+                ($($target:ty),* $(,)?) => {
+                    $(
+                        if let Some(how) = diff::<$target>(input, &limits) {
+                            panic!("{input:?} into {}: {how}", stringify!($target));
+                        }
+                    )*
+                };
+            }
+            check!(
+                Value,
+                serde_json::Value,
+                Config<'_>,
+                Strict,
+                Shape,
+                Untagged,
+                Internal,
+                Lenient,
+                Unit,
+                String,
+                &str,
+                Cow<'_, str>,
+                bool,
+                i64,
+                u32,
+                f64,
+                (),
+                Option<u32>,
+                Option<String>,
+                Vec<u32>,
+                BTreeMap<String, u32>,
+                BTreeMap<String, serde_json::Value>,
+            );
+        }
+    }
 }

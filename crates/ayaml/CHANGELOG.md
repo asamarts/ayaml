@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `compat::GlobalTags`, `compat::ParseOptions`, `compat::from_str_with`,
+  `compat::from_str_seed_with`, and `compat::deserialize_any_with` (behind `libyaml-compat`),
+  letting compatibility callers opt into `GlobalTags::Drop` to drop non-core global tags (such as
+  `!!timestamp`, `!!binary`, verbatim URI tags, and `%TAG` URI handles) as a libyaml-based reader
+  does, while keeping core-schema tags, the non-specific `!` tag, and local tags unchanged.
+- `from_str_seed` and `from_str_seed_with_limits` at the crate root, mirroring the compatibility
+  module's seed readers under the default YAML 1.2.2 rules and limits.
+
+### Changed
+
+- Refusing a node because of its tag now names the tag across typed and value deserializers (for
+  example, ``invalid type: tagged value `!!foo`, expected struct S`` instead of `invalid type: map`,
+  and ``invalid type: tagged value `!!binary`, expected a sequence`` instead of `invalid type: enum`).
+  `deserialize_struct` now also hands a retained tagged node through `visit_enum` before failing,
+  matching `deserialize_map` and `deserialize_seq`.
+
 ## [0.2.1] — 2026-11-20
 
 First published `0.2.x` release (`0.2.0` was tagged but never published; see below). Carries every

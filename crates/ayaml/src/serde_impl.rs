@@ -358,6 +358,22 @@ pub(crate) fn unexpected_number(value: Number) -> serde::de::Unexpected<'static>
     }
 }
 
+/// Name the tag when a visitor refused a tagged node outright without reading its variant.
+/// An error raised after `variant_seed` ran came from inside the tagged value and stays as written.
+#[cold]
+pub(crate) fn tag_refused(error: crate::Error, tag: &Tag, entered: bool) -> crate::Error {
+    if entered || error.kind() != crate::ErrorKind::Serde {
+        return error;
+    }
+    error.map_message(|message| {
+        if let Some(rest) = message.strip_prefix("invalid type: enum") {
+            format!("invalid type: tagged value `{tag}`{rest}")
+        } else {
+            format!("tagged value `{tag}`: {message}")
+        }
+    })
+}
+
 /// Deserializer methods for targets that read a value as `deserialize_any` does, past an
 /// application tag (see `untagged`).
 macro_rules! plain_targets {
@@ -432,12 +448,20 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
                 check_consumed(access.iter.len(), total, "map")?;
                 Ok(value)
             }
-            Value::Tagged(tagged) => visitor.visit_enum(ValueEnumAccess {
-                variant: Cow::Owned(tagged.tag.serde_name()),
-                value: tagged.value,
-                in_path: false,
-                bare: false,
-            }),
+            Value::Tagged(tagged) => {
+                let mut entered = false;
+                let tag = tagged.tag;
+                let variant = tag.serde_name();
+                visitor
+                    .visit_enum(ValueEnumAccess {
+                        variant: Cow::Owned(variant),
+                        value: tagged.value,
+                        in_path: false,
+                        bare: false,
+                        entered: Some(&mut entered),
+                    })
+                    .map_err(|error| tag_refused(error, &tag, entered))
+            }
         }
     }
 
@@ -522,6 +546,10 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
                 value: Value::Mapping(value),
             }
             .deserialize_any(visitor),
+            Value::Tagged(tagged) => ValueDeserializer {
+                value: Value::Tagged(tagged),
+            }
+            .deserialize_any(visitor),
             Value::Null => Err(serde::de::Error::invalid_type(
                 serde::de::Unexpected::Unit,
                 &visitor,
@@ -566,6 +594,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
             value,
             in_path: true,
             bare,
+            entered: None,
         })
     }
 
@@ -909,6 +938,7 @@ impl<'de> Deserializer<'de> for KeyDeserializer<'_> {
             value: Value::Null,
             in_path: true,
             bare: true,
+            entered: None,
         })
     }
 
@@ -968,7 +998,7 @@ fn enum_parts(value: Value) -> Result<(String, Value), crate::Error> {
     })
 }
 
-struct ValueEnumAccess<'a> {
+struct ValueEnumAccess<'a, 'e> {
     variant: Cow<'a, str>,
     value: Value,
     /// Whether an error inside names the variant. A target that isn't an enum takes the tag as a
@@ -977,16 +1007,22 @@ struct ValueEnumAccess<'a> {
     /// Whether a scalar named the variant, so that it holds nothing, rather than a tag or a
     /// mapping that gives what it holds.
     bare: bool,
+    /// Set to `true` once the visitor reads the variant name, so a refusal before that is known
+    /// to be a refusal of the tag itself.
+    entered: Option<&'e mut bool>,
 }
 
-impl<'de, 'a> EnumAccess<'de> for ValueEnumAccess<'a> {
+impl<'de, 'a> EnumAccess<'de> for ValueEnumAccess<'a, '_> {
     type Error = crate::Error;
     type Variant = ValueVariantAccess<'a>;
 
     fn variant_seed<V: serde::de::DeserializeSeed<'de>>(
-        self,
+        mut self,
         seed: V,
     ) -> Result<(V::Value, Self::Variant), Self::Error> {
+        if let Some(entered) = self.entered.take() {
+            *entered = true;
+        }
         // A name kept for a path is lent to the visitor, and one that isn't is given to it.
         let (variant, name) = if self.in_path {
             let variant = seed.deserialize(KeyDeserializer {
@@ -1812,6 +1848,7 @@ mod tests {
             value: Value::Null,
             in_path: false,
             bare: true,
+            entered: None,
         };
         let (handed, variant) = access.variant_seed(Address).expect("a name");
         assert_eq!(handed, address, "the name was copied");
@@ -1823,6 +1860,7 @@ mod tests {
             value: Value::Null,
             in_path: true,
             bare: true,
+            entered: None,
         };
         let (handed, variant) = access.variant_seed(Address).expect("a name");
         assert_ne!(handed, key.as_ptr().addr());

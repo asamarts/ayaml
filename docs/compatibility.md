@@ -156,7 +156,17 @@ The compatibility module reads YAML the way a libyaml-compatible stack does, for
 callers that need it, apart from the differences listed below. Enabling the
 feature does not change the root parsing functions; choose the compatibility
 entry points explicitly. Its typed and visitor readers also provide
-`_with_limits` forms for callers that need their own budgets. `compat::parse_events`
+`_with_limits` forms for callers that need their own budgets, and `_with` forms
+(`compat::from_str_with`, `compat::from_str_seed_with`, and
+`compat::deserialize_any_with`) taking a `compat::ParseOptions` value for limits
+and global-tag handling. `compat::GlobalTags::Keep` (the default) keeps tags
+outside YAML's core schema as `Value::Tagged` and Serde enums;
+`compat::GlobalTags::Drop` drops non-core global tags such as `!!timestamp`,
+`!!binary`, `!<tag:example.com,2000:x>`, and `%TAG` URI handles as a
+libyaml-based reader does, reading a scalar beneath one as text for
+`deserialize_any` and parsing a plain one as the requested type for a typed
+target, reading a collection beneath one as untagged, and keeping local tags,
+the non-specific `!` tag, and core-schema tags unchanged. `compat::parse_events`
 and its `_with_limits` form return the same lazy `EventStream` as default mode;
 `compat::parse_events_eager_with_limits` keeps the whole-stream vector used by
 the conformance runner. These event readers report an alias as written and do not
@@ -217,7 +227,9 @@ these places, on purpose:
   through a `:` with more text after it, so `{*a:b}` looks for an anchor named `a:b`, where libyaml
   reads the key that `a` stands for and the value `b`. Only a JSON-like key takes a value right
   after its `:` there, so `{*a:[1]}` is an error, where libyaml reads the value `[1]`.
-- Global, verbatim, and non-specific tags are kept, with their escapes as written.
+- Global, verbatim, and non-specific tags are kept by default, with their escapes as written;
+  compatibility callers can opt into dropping non-core global tags with
+  `compat::ParseOptions::new().with_global_tags(compat::GlobalTags::Drop)`.
   Tag forms that YAML 1.2.2 allows and libyaml's scanner refuses are accepted, such as
   `!#`, `!<tag:a,1:b#c>`, or `!` right before a flow indicator. `!` isn't a tag character, so
   `!.!` and `!!!` are errors, except after an unseparated flow `?`, where compat keeps libyaml's

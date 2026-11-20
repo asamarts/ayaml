@@ -131,6 +131,17 @@ impl Tag {
         self.handle == "!" && self.suffix.is_empty()
     }
 
+    /// Whether this is a local tag (its full name starts with `!`), the non-specific `!` included.
+    pub(crate) fn is_local(&self) -> bool {
+        self.handle.starts_with('!') || (self.handle.is_empty() && self.suffix.starts_with('!'))
+    }
+
+    /// Whether this is a global tag outside the YAML 1.2 core schema, such as `!!timestamp`,
+    /// `!!binary`, or `!<tag:example.com,2000:x>`.
+    pub(crate) fn is_non_core_global(&self) -> bool {
+        !self.is_local() && !self.is_core_scalar() && !self.is_core_collection()
+    }
+
     /// [`Tag::variant_name`], which moves the suffix of a tag written with `!` rather than
     /// copying it.
     pub(crate) fn into_variant_name(self) -> String {

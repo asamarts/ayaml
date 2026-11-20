@@ -901,6 +901,39 @@ with a dangling alias can't be written back; the event readers still read such a
 event writers check what no reader loads and not what a stream means: an alias inside the node it
 names, a tag that doesn't suit its node, and a key that a mapping has twice are written as they are
 given. A tag is refused before the first line of its document, by the scan that finds the tags that
-need a directive, so a writer that is handed the output has none of that document. A tag that is
-written on a scalar that fits it still reads back as what the tag makes of the text: `!!int` on the
-string `1` reads back as the number, as it did.
+need a directive, so a writer that is handed the output has none of that document. A tag that is written on a scalar that fits it still reads back as what the tag makes of the text:
+`!!int` on the string `1` reads back as the number, as it did.
+
+## D98 — Options values are `non_exhaustive` structs with `const` builders and `*_with` entry points
+
+**Date:** 2026-11-20
+**Status:** Accepted
+
+**Decision.** Parsing options follow one shape across the crate, introduced first by
+`compat::ParseOptions` (AY-122) and followed by the root `ParseOptions` and `EmitOptions`
+(AY-048):
+
+- The options type is a `#[non_exhaustive]` struct (`Clone`, `Debug`, `PartialEq`, `Eq`,
+  `Default`) with public fields for each setting, a `pub const fn new() -> Self` preset matching
+  `Default::default()`, and `pub const fn with_*` builders.
+- Multi-way policy knobs such as `compat::GlobalTags` are `#[non_exhaustive]` enums with
+  `Default` selecting the existing behavior (`GlobalTags::Keep`).
+- Operations taking an options value are named `<operation>_with` (such as
+  `compat::from_str_with`, `compat::from_str_seed_with`, and `compat::deserialize_any_with`) and
+  take `&ParseOptions` in the same position that `*_with_limits` takes `&Limits`.
+
+**Alternatives.** Name the functions `*_with_options` and keep `limits` as a separate parameter:
+that repeats the combinatorial suffix problem AY-048 exists to end and would require deprecating
+the new functions as soon as AY-048 lands. Put `global_tags` on a root `ParseOptions` shared with
+the default readers: that would either expose a compatibility-only policy on default readers that
+ignore it, or change default-mode semantics that keep non-core global tags.
+
+**Why.** The shape matches the shared format contract (`docs/interface.md`) and existing
+`Limits` and `EmitterOptions` structs in this crate, allows `const` configuration values such as
+`ParseOptions::new().with_global_tags(GlobalTags::Drop)`, and lets AY-048 extend the same
+pattern to the remaining entry points without deprecating or renaming AY-122's API.
+
+**Consequences.** `compat::from_str_with`, `compat::from_str_seed_with`, and
+`compat::deserialize_any_with` accept both custom `Limits` and `GlobalTags` in one value. When
+AY-048 adds root `ParseOptions` and `EmitOptions`, it uses the same `#[non_exhaustive]` struct,
+`const fn new()`, `with_*` builders, and `*_with` naming convention.

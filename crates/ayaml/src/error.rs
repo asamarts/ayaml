@@ -194,6 +194,18 @@ impl Error {
         self
     }
 
+    /// Reword the message body, keeping any path prefix and trailing context intact.
+    #[cold]
+    pub(crate) fn map_message(mut self, update: impl FnOnce(&str) -> String) -> Self {
+        let start = self.path_len as usize;
+        let end = self.message.len().saturating_sub(self.context_len as usize);
+        if start <= end {
+            let replacement = update(&self.message[start..end]);
+            self.message.replace_range(start..end, &replacement);
+        }
+        self
+    }
+
     /// Attach a source error.
     #[must_use]
     pub fn with_source(mut self, source: impl StdError + Send + Sync + 'static) -> Self {

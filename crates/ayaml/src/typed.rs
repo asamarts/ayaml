@@ -27,7 +27,9 @@ use crate::event::{Anchor, Event, ScalarStyle};
 use crate::limits::{AliasBudget, Limits};
 use crate::number::Number;
 use crate::parser::{self, EventConsumer};
-use crate::resolver::{float_from_text, plain_resolves_to_string, resolve_scalar};
+use crate::resolver::{
+    float_from_text, parse_bool, parse_int, plain_resolves_to_string, resolve_scalar,
+};
 use crate::span::{Location, Span};
 use crate::tag::Tag;
 use crate::value::Value;
@@ -58,6 +60,9 @@ enum Text<'de> {
     /// No text, and not a value the source left out: what a bare variant name holds, which is
     /// nothing. It fills a unit variant and an optional one, and no collection (D87).
     Nothing,
+    /// A plain scalar whose global tag was dropped by compatibility options: it reads as its text
+    /// for `deserialize_any` and parses as the requested boolean or number for a typed target.
+    DroppedTag,
     /// A plain scalar's text in the source.
     Plain(&'de str),
     /// The value of a quoted or block scalar that a tag makes a null, a boolean, or a number,
@@ -71,7 +76,7 @@ impl Text<'_> {
     /// The text, if the node keeps any.
     fn as_str(&self) -> Option<&str> {
         match self {
-            Self::None | Self::Nothing => None,
+            Self::None | Self::Nothing | Self::DroppedTag => None,
             Self::Plain(text) | Self::Spelled(text) => Some(text),
             Self::Decoded(text) => Some(text),
         }
@@ -209,6 +214,7 @@ impl<'de> Node<'de> {
 pub(crate) struct NodeOptions {
     pub(crate) allow_duplicates: bool,
     pub(crate) compat_flow: bool,
+    pub(crate) drop_global_tags: bool,
 }
 
 /// Decode one document into a typed value, borrowing scalar strings from input.
@@ -729,7 +735,14 @@ impl<'de> Builder<'de> {
                 anchor,
                 span,
             } => {
-                let node = plain_scalar(&value, &raw, style, tag.as_ref(), span)?;
+                let node = plain_scalar(
+                    &value,
+                    &raw,
+                    style,
+                    tag.as_ref(),
+                    span,
+                    self.options.drop_global_tags,
+                )?;
                 let size = estimate_size(&node, self.limits.node_cost_bytes);
                 self.anchored(anchor.as_ref(), node, size, 0, Anchors::define)
             }
@@ -804,7 +817,11 @@ impl<'de> Builder<'de> {
                     size,
                     height,
                 }) => {
-                    let node = apply_tag(tag, Node::new(NodeKind::Sequence(items), span));
+                    let node = apply_tag(
+                        tag,
+                        Node::new(NodeKind::Sequence(items), span),
+                        self.options.drop_global_tags,
+                    );
                     let size = size.saturating_add(tag_cost(&node, self.limits.node_cost_bytes));
                     self.anchored(anchor.as_ref(), node, size, height + 1, Anchors::close)
                 }
@@ -821,7 +838,11 @@ impl<'de> Builder<'de> {
                     height,
                     ..
                 }) => {
-                    let node = apply_tag(tag, Node::new(NodeKind::Mapping(entries), span));
+                    let node = apply_tag(
+                        tag,
+                        Node::new(NodeKind::Mapping(entries), span),
+                        self.options.drop_global_tags,
+                    );
                     let size = size.saturating_add(tag_cost(&node, self.limits.node_cost_bytes));
                     self.anchored(anchor.as_ref(), node, size, height + 1, Anchors::close)
                 }
@@ -958,14 +979,16 @@ fn tag_cost(node: &Node<'_>, node_cost: usize) -> usize {
 }
 
 /// Whether a collection drops this tag: a core tag there names a node of another kind, or
-/// restates its kind. A custom tag is kept.
-fn collection_drops(tag: &Tag) -> bool {
-    tag.is_core_collection() || tag.is_core_scalar()
+/// restates its kind. Under `drop_global_tags`, any non-core global tag is dropped too.
+fn collection_drops(tag: &Tag, drop_global_tags: bool) -> bool {
+    tag.is_core_collection()
+        || tag.is_core_scalar()
+        || (drop_global_tags && tag.is_non_core_global())
 }
 
-fn apply_tag(tag: Option<Tag>, node: Node<'_>) -> Node<'_> {
+fn apply_tag(tag: Option<Tag>, node: Node<'_>, drop_global_tags: bool) -> Node<'_> {
     match tag {
-        Some(tag) if collection_drops(&tag) => node,
+        Some(tag) if collection_drops(&tag, drop_global_tags) => node,
         Some(tag) => {
             let span = node.span;
             Node::new(NodeKind::Tagged(Box::new(tag), Box::new(node)), span)
@@ -981,7 +1004,17 @@ fn plain_scalar<'de>(
     style: ScalarStyle,
     tag: Option<&Tag>,
     span: Span,
+    drop_global_tags: bool,
 ) -> Result<Node<'de>, Error> {
+    if drop_global_tags && tag.is_some_and(Tag::is_non_core_global) {
+        let scalar_text = borrowed_or_owned(value, raw, style);
+        let text = if style == ScalarStyle::Plain {
+            Text::DroppedTag
+        } else {
+            Text::None
+        };
+        return Ok(Node::scalar(NodeKind::String(scalar_text), text, span));
+    }
     let mut node = scalar_node(value.as_ref(), value, raw, style, tag, span)
         .map_err(|error| error.with_span(span))?;
     if tag.is_some_and(|tag| tag.is_core() || tag.is_non_specific()) {
@@ -1202,6 +1235,51 @@ struct NodeDeserializer<'de, 'a> {
     node: &'a Node<'de>,
 }
 
+/// Deserializer methods for integer targets, parsing a plain scalar whose global tag was dropped.
+macro_rules! int_targets {
+    ($($method:ident)*) => {
+        $(
+            fn $method<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+                let node = untagged(self.node);
+                if matches!(node.text, Text::DroppedTag) {
+                    return deserialize_dropped_tag_int(node, visitor);
+                }
+                NodeDeserializer::new(node).deserialize_any(visitor)
+            }
+        )*
+    };
+}
+
+#[cold]
+fn deserialize_dropped_tag_bool<'de, V: Visitor<'de>>(
+    node: &Node<'de>,
+    visitor: V,
+) -> Result<V::Value, Error> {
+    if let NodeKind::String(text) = &node.kind
+        && let Some(value) = parse_bool(text)
+    {
+        return visitor
+            .visit_bool(value)
+            .map_err(|error| with_span(error, node.span));
+    }
+    NodeDeserializer::new(node).deserialize_any(visitor)
+}
+
+#[cold]
+fn deserialize_dropped_tag_int<'de, V: Visitor<'de>>(
+    node: &Node<'de>,
+    visitor: V,
+) -> Result<V::Value, Error> {
+    if let NodeKind::String(text) = &node.kind
+        && let Some(value) = parse_int(text)
+    {
+        return value
+            .visit(visitor)
+            .map_err(|error| with_span(error, node.span));
+    }
+    NodeDeserializer::new(node).deserialize_any(visitor)
+}
+
 /// Deserializer methods for targets that read a node as `deserialize_any` does, past an
 /// application tag (see `untagged`).
 macro_rules! plain_targets {
@@ -1261,14 +1339,18 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
             // A tagged node is an enum whose variant names the tag, so a
             // `Value` keeps the tag.
             NodeKind::Tagged(tag, value) => {
+                let mut entered = false;
                 return visitor
                     .visit_enum(NodeEnumAccess {
                         variant: tag.serde_name(),
                         variant_span: span,
                         value: NodeValue::Ref(value),
                         in_path: false,
+                        entered: Some(&mut entered),
                     })
-                    .map_err(|error| with_span(error, span));
+                    .map_err(|error| {
+                        with_span(crate::serde_impl::tag_refused(error, tag, entered), span)
+                    });
             }
             NodeKind::Alias(_) => unreachable!("aliases are resolved by target"),
         };
@@ -1316,7 +1398,7 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
             _ => match &node.text {
                 Text::Plain(value) | Text::Spelled(value) => visitor.visit_borrowed_str(value),
                 Text::Decoded(value) => visitor.visit_str(value),
-                Text::None | Text::Nothing => {
+                Text::None | Text::Nothing | Text::DroppedTag => {
                     return NodeDeserializer::new(node)
                         .deserialize_any(visitor)
                         .map_err(|error| with_span(error, span));
@@ -1380,7 +1462,7 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
                 .map_err(|error| with_span(error, span));
         }
         null_is_not_a_collection(node, &visitor)?;
-        if matches!(node.kind, NodeKind::Mapping(_)) {
+        if matches!(node.kind, NodeKind::Mapping(_) | NodeKind::Tagged(_, _)) {
             return NodeDeserializer::new(node)
                 .deserialize_any(visitor)
                 .map_err(|error| with_span(error, span));
@@ -1492,6 +1574,7 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
                 variant_span,
                 value,
                 in_path: true,
+                entered: None,
             })
             .map_err(|error| with_span(error, span))
     }
@@ -1537,6 +1620,13 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
                 }
                 _ => {}
             }
+        } else if matches!(node.text, Text::DroppedTag)
+            && let NodeKind::String(text) = &node.kind
+            && let Some(value) = float_from_text(text)
+        {
+            return visitor
+                .visit_f64(value)
+                .map_err(|error| with_span(error, node.span));
         }
         NodeDeserializer::new(node).deserialize_any(visitor)
     }
@@ -1570,10 +1660,22 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
         self.deserialize_tuple(0, visitor)
     }
 
-    plain_targets! {
-        deserialize_bool deserialize_i8 deserialize_i16 deserialize_i32 deserialize_i64
+    fn deserialize_bool<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        let node = untagged(self.node);
+        if matches!(node.text, Text::DroppedTag) {
+            return deserialize_dropped_tag_bool(node, visitor);
+        }
+        NodeDeserializer::new(node).deserialize_any(visitor)
+    }
+
+    int_targets! {
+        deserialize_i8 deserialize_i16 deserialize_i32 deserialize_i64
         deserialize_i128 deserialize_u8 deserialize_u16 deserialize_u32 deserialize_u64
-        deserialize_u128 deserialize_unit
+        deserialize_u128
+    }
+
+    plain_targets! {
+        deserialize_unit
     }
 
     serde::forward_to_deserialize_any! {
@@ -1745,23 +1847,29 @@ impl<'de> MapAccess<'de> for NodeMapAccess<'de, '_> {
     }
 }
 
-struct NodeEnumAccess<'de, 'a> {
+struct NodeEnumAccess<'de, 'a, 'e> {
     variant: String,
     variant_span: Span,
     value: NodeValue<'de, 'a>,
     /// Whether an error inside names the variant. A target that isn't an enum takes the tag as a
     /// tag, and the document has no key by that name.
     in_path: bool,
+    /// Set to `true` once the visitor reads the variant name, so a refusal before that is known
+    /// to be a refusal of the tag itself.
+    entered: Option<&'e mut bool>,
 }
 
-impl<'de, 'a> EnumAccess<'de> for NodeEnumAccess<'de, 'a> {
+impl<'de, 'a> EnumAccess<'de> for NodeEnumAccess<'de, 'a, '_> {
     type Error = Error;
     type Variant = NodeVariantAccess<'de, 'a>;
 
     fn variant_seed<V: DeserializeSeed<'de>>(
-        self,
+        mut self,
         seed: V,
     ) -> Result<(V::Value, Self::Variant), Self::Error> {
+        if let Some(entered) = self.entered.take() {
+            *entered = true;
+        }
         let node = Node::new(
             NodeKind::String(Cow::Owned(self.variant)),
             self.variant_span,

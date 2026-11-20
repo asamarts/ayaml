@@ -334,13 +334,23 @@ impl<'de> Stream<'de> {
                 anchor: None,
                 span,
                 ..
-            }) if tag.as_ref().is_none_or(collection_drops) => Ahead::Sequence(*span),
+            }) if tag
+                .as_ref()
+                .is_none_or(|tag| collection_drops(tag, self.builder.options.drop_global_tags)) =>
+            {
+                Ahead::Sequence(*span)
+            }
             Some(Event::MappingStart {
                 tag,
                 anchor: None,
                 span,
                 ..
-            }) if tag.as_ref().is_none_or(collection_drops) => Ahead::Mapping(*span),
+            }) if tag
+                .as_ref()
+                .is_none_or(|tag| collection_drops(tag, self.builder.options.drop_global_tags)) =>
+            {
+                Ahead::Mapping(*span)
+            }
             Some(Event::SequenceEnd { span }) => Ahead::End {
                 sequence: true,
                 span: *span,
@@ -414,7 +424,14 @@ impl<'de> Stream<'de> {
             span,
         }) = self.events.front()
         {
-            let node = plain_scalar(value, raw, *style, tag.as_ref(), *span);
+            let node = plain_scalar(
+                value,
+                raw,
+                *style,
+                tag.as_ref(),
+                *span,
+                self.builder.options.drop_global_tags,
+            );
             self.events.discard();
             return match node {
                 Ok(node) => {
