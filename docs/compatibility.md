@@ -220,8 +220,9 @@ these places, on purpose:
 - Global, verbatim, and non-specific tags are kept, with their escapes as written.
   Tag forms that YAML 1.2.2 allows and libyaml's scanner refuses are accepted, such as
   `!#`, `!<tag:a,1:b#c>`, or `!` right before a flow indicator. `!` isn't a tag character, so
-  `!.!` and `!!!` are errors, except that `!!!` after a flow `?` is the core tag `!!` with
-  suffix `!`, which libyaml reads. A tag needs a name, so `!<!>` is an error too, where libyaml reads
+  `!.!` and `!!!` are errors, except after an unseparated flow `?`, where compat keeps libyaml's
+  reading for non-word local tags and `!!` suffixes holding `!` (and `!@!` anywhere). A tag needs a
+  name, so `!<!>` is an error too, where libyaml reads
   the non-specific tag. A verbatim tag names a local tag or a tag with a URI scheme, and each `%`
   in it starts a two-digit escape, so `!<foo>`, `!<]>`, and `!<tag:x:50%>` are errors.
 - In a flow collection, `[:a]` holds a plain scalar starting with `:`, `a:]` holds a key,
@@ -230,10 +231,10 @@ these places, on purpose:
   span lines or have a line break before its `:`. `[-]` is an error, and so is a `?` right
   before a flow indicator, as in `{?}` or `[?[a]]`, where libyaml reads an empty key or the
   key `[a]`. A `?` followed directly by `!` is a plain scalar in default mode; compat reads
-  the `?` as an explicit key and a local tag such as `!@!`, as libyaml does. A flow `?`
+  the `?` as an explicit key and reads non-word local tags such as `!@!` or `!)!` and `!!`
+  suffixes holding `!` such as `!!!` or `!!a!b` as libyaml does. A flow `?`
   followed by `-` and a flow indicator reads as an explicit key
-  whose key is the scalar `-`, as in `[?-]` or `{?-}`; a comment may follow the `?`;
-  and `!!!` after it is the core tag `!!` with suffix `!`, read as libyaml does.
+  whose key is the scalar `-`, as in `[?-]` or `{?-}`; a comment may follow the `?`.
 - An implicit key in a flow mapping may run past 1024 characters, as YAML 1.2.2 allows, where
   libyaml refuses it. Elsewhere an implicit key takes at most 1024, as in libyaml. The writers use
   `?` followed by a space for a key past 128 characters, as libyaml's emitter does.
