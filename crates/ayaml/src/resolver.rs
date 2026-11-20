@@ -95,7 +95,7 @@ fn is_null(text: &str) -> bool {
     matches!(text, "" | "~" | "null" | "Null" | "NULL")
 }
 
-fn parse_bool(text: &str) -> Option<bool> {
+pub(crate) fn parse_bool(text: &str) -> Option<bool> {
     match text {
         "true" | "True" | "TRUE" => Some(true),
         "false" | "False" | "FALSE" => Some(false),
@@ -103,7 +103,7 @@ fn parse_bool(text: &str) -> Option<bool> {
     }
 }
 
-fn parse_int(text: &str) -> Option<Number> {
+pub(crate) fn parse_int(text: &str) -> Option<Number> {
     parse_int_with(text, false)
 }
 

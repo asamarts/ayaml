@@ -1430,3 +1430,297 @@ fn a_typed_reader_reports_the_first_problem_at_every_input_size() {
         assert_eq!(error.kind(), ErrorKind::Parser, "after {bytes}: {error}");
     }
 }
+
+/// The default reader takes a seed, with default or explicit limits, borrowing from the input
+/// and keeping default duplicate-key, trailing-document, and tag rules across small and large
+/// documents.
+#[test]
+fn default_from_str_seed_reads_and_enforces_limits() {
+    use std::marker::PhantomData;
+
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct Borrowed<'a> {
+        #[serde(borrow)]
+        name: &'a str,
+        count: u32,
+    }
+
+    let read = ayaml::from_str_seed("name: ayaml\ncount: 3\n", PhantomData::<Borrowed<'_>>)
+        .expect("seed read");
+    assert_eq!(
+        read,
+        Borrowed {
+            name: "ayaml",
+            count: 3
+        }
+    );
+    let duplicate = ayaml::from_str_seed("a: 1\na: 2\n", PhantomData::<ayaml::Value>)
+        .expect_err("duplicate key");
+    assert_eq!(duplicate.kind(), ayaml::ErrorKind::DuplicateKey);
+    let trailing = ayaml::from_str_seed("a: 1\n---\nb: 2\n", PhantomData::<ayaml::Value>)
+        .expect_err("trailing doc");
+    assert_eq!(trailing.kind(), ayaml::ErrorKind::Parser);
+    let tight = ayaml::Limits::default().with_max_events(1);
+    let limited = ayaml::from_str_seed_with_limits("a: 1\n", &tight, PhantomData::<ayaml::Value>)
+        .expect_err("limit");
+    assert_eq!(limited.kind(), ayaml::ErrorKind::Limit);
+    // Global tags remain tagged on the default seed reader.
+    let tagged = ayaml::from_str_seed("!!timestamp 2026-01-01\n", PhantomData::<ayaml::Value>)
+        .expect("tagged value");
+    assert!(tagged.is_tagged(), "{tagged:?}");
+    // Large (> 4 KiB) inputs read the same through events.
+    let (prefix, _) = comments(4_200);
+    let large = format!("{prefix}name: ayaml\ncount: 7\n");
+    let read = ayaml::from_str_seed(&large, PhantomData::<Borrowed<'_>>).expect("large seed read");
+    assert_eq!(
+        read,
+        Borrowed {
+            name: "ayaml",
+            count: 7
+        }
+    );
+}
+
+/// Under `compat::GlobalTags::Drop`, non-core global tags drop as a libyaml-based reader drops
+/// them: a scalar beneath one reads as text for `deserialize_any` and parses as the requested
+/// type for a typed target, a collection beneath one reads as untagged, and local/core/`!` tags
+/// keep their usual reading. Both small (tree) and > 4 KiB (event) reads agree, and the default
+/// readers are unchanged.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_global_tags_drop_matches_libyaml_readings() {
+    use std::collections::BTreeMap;
+    use std::marker::PhantomData;
+
+    use ayaml::compat::{GlobalTags, ParseOptions};
+
+    const DROP: ParseOptions = ParseOptions::new().with_global_tags(GlobalTags::Drop);
+    assert_eq!(ParseOptions::default(), ParseOptions::new());
+    assert_eq!(ParseOptions::default().global_tags, GlobalTags::Keep);
+    assert_eq!(DROP.global_tags, GlobalTags::Drop);
+
+    // Issue #191 documents.
+    let json_val: Json = ayaml::compat::from_str_with("a: !!timestamp 2026-01-01\n", &DROP)
+        .expect("timestamp as json");
+    assert_eq!(json_val, json!({"a": "2026-01-01"}));
+    assert!(ayaml::compat::from_str::<Json>("a: !!timestamp 2026-01-01\n").is_err());
+    assert!(ayaml::from_str::<Json>("a: !!timestamp 2026-01-01\n").is_err());
+
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct Flattened {
+        title: String,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Json>,
+    }
+    let flattened: Flattened =
+        ayaml::compat::from_str_with("title: t\ncreated: !!timestamp 2024-01-15\n", &DROP)
+            .expect("flattened");
+    assert_eq!(flattened.title, "t");
+    assert_eq!(flattened.extra["created"], json!("2024-01-15"));
+
+    assert_eq!(
+        ayaml::compat::from_str_with::<u32>("!!timestamp 5\n", &DROP).expect("u32"),
+        5
+    );
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct Single {
+        a: u32,
+    }
+    assert_eq!(
+        ayaml::compat::from_str_with::<Single>("!!foo {a: 1}\n", &DROP).expect("struct"),
+        Single { a: 1 }
+    );
+    assert_eq!(
+        ayaml::compat::from_str_with::<Json>("a: !!binary [1]\n", &DROP).expect("binary seq"),
+        json!({"a": [1]})
+    );
+
+    // Every global tag form on scalars and collections for deserialize_any and typed targets.
+    for (input, expected) in [
+        ("a: !!timestamp 2026-01-01\n", json!({"a": "2026-01-01"})),
+        ("a: !!binary aGVsbG8=\n", json!({"a": "aGVsbG8="})),
+        ("a: !!timestamp 5\n", json!({"a": "5"})),
+        ("a: !!timestamp true\n", json!({"a": "true"})),
+        ("a: !!timestamp ~\n", json!({"a": "~"})),
+        ("a: !<tag:example.com,2000:x> 0x1F\n", json!({"a": "0x1F"})),
+        (
+            "%TAG !e! tag:example.com,2000:\n---\na: !e!x 1\n",
+            json!({"a": "1"}),
+        ),
+        (
+            "%TAG ! tag:example.com,2000:\n---\na: !x hello\n",
+            json!({"a": "hello"}),
+        ),
+        ("a: !!timestamp {b: 1}\n", json!({"a": {"b": 1}})),
+        (
+            "a: !<tag:example.com,2000:l> [1, 2]\n",
+            json!({"a": [1, 2]}),
+        ),
+        ("a: &x !!timestamp 5\nb: *x\n", json!({"a": "5", "b": "5"})),
+        (
+            "a: &x !!binary [1, 2]\nb: *x\n",
+            json!({"a": [1, 2], "b": [1, 2]}),
+        ),
+    ] {
+        let via_from: Json = ayaml::compat::from_str_with(input, &DROP)
+            .unwrap_or_else(|error| panic!("{input:?}: {error}"));
+        let via_seed: Json = ayaml::compat::from_str_seed_with(input, &DROP, PhantomData)
+            .unwrap_or_else(|error| panic!("seed {input:?}: {error}"));
+        assert_eq!(via_from, expected, "{input:?}");
+        assert_eq!(via_seed, expected, "seed {input:?}");
+    }
+}
+
+/// Typed targets, enums, options, limits, local tags, `!`, and core tags under
+/// `compat::GlobalTags::Drop` across small (tree) and > 4 KiB (events) inputs.
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_global_tags_drop_handles_typed_targets_and_keeps_local_tags() {
+    use std::marker::PhantomData;
+
+    use ayaml::compat::{GlobalTags, ParseOptions};
+
+    const DROP: ParseOptions = ParseOptions::new().with_global_tags(GlobalTags::Drop);
+
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct Single {
+        a: u32,
+    }
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    enum Status {
+        Todo,
+        Done,
+    }
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct Unit;
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct Count(u32);
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct AllTypes<'a> {
+        b: bool,
+        i: i128,
+        u: u128,
+        f: f64,
+        c: char,
+        #[serde(borrow)]
+        s: &'a str,
+        opt_num: Option<u32>,
+        opt_tilde: Option<String>,
+        wrapped: Count,
+        pair: (u8, String),
+        items: Vec<u32>,
+        single: Single,
+        status_bare: Status,
+        status_map: Status,
+        status_key: Status,
+    }
+    let (prefix, _) = comments(4_200);
+    for (tag, directive) in [
+        ("!!timestamp ", ""),
+        ("!<tag:example.com,2000:x> ", ""),
+        ("!e!x ", "%TAG !e! tag:example.com,2000:\n---\n"),
+    ] {
+        let body = format!(
+            "{directive}\
+             b: {tag}true\n\
+             i: {tag}-5\n\
+             u: {tag}0x1F\n\
+             f: {tag}1.5\n\
+             c: {tag}x\n\
+             s: {tag}5\n\
+             opt_num: {tag}5\n\
+             opt_tilde: {tag}~\n\
+             wrapped: {tag}7\n\
+             pair: {tag}[1, ok]\n\
+             items: {tag}[1, 2]\n\
+             single: {tag}{{a: 9}}\n\
+             status_bare: {tag}done\n\
+             status_map: {tag}{{todo: ~}}\n\
+             status_key: {{{tag}done: ~}}\n"
+        );
+        for doc in [body.clone(), format!("{prefix}{body}")] {
+            let read: AllTypes<'_> = ayaml::compat::from_str_with(&doc, &DROP)
+                .unwrap_or_else(|error| panic!("{tag:?} len={}: {error}", doc.len()));
+            assert_eq!(
+                read,
+                AllTypes {
+                    b: true,
+                    i: -5,
+                    u: 31,
+                    f: 1.5,
+                    c: 'x',
+                    s: "5",
+                    opt_num: Some(5),
+                    opt_tilde: Some("~".to_owned()),
+                    wrapped: Count(7),
+                    pair: (1, "ok".to_owned()),
+                    items: vec![1, 2],
+                    single: Single { a: 9 },
+                    status_bare: Status::Done,
+                    status_map: Status::Todo,
+                    status_key: Status::Done,
+                }
+            );
+        }
+        // `~` beneath a dropped global tag is text, not null, so unit and Option<u32> refuse it.
+        let tilde = format!("{directive}{tag}~\n");
+        assert!(ayaml::compat::from_str_with::<()>(&tilde, &DROP).is_err());
+        assert!(ayaml::compat::from_str_with::<Unit>(&tilde, &DROP).is_err());
+        assert!(ayaml::compat::from_str_with::<Option<u32>>(&tilde, &DROP).is_err());
+        // Quoted scalars beneath a dropped global tag stay strings.
+        let quoted = format!("{directive}{tag}\"5\"\n");
+        assert!(ayaml::compat::from_str_with::<u32>(&quoted, &DROP).is_err());
+        assert_eq!(
+            ayaml::compat::from_str_with::<String>(&quoted, &DROP).expect("quoted str"),
+            "5"
+        );
+    }
+
+    // `deserialize_any_with` and explicit limits inside `ParseOptions`.
+    let tight = DROP
+        .clone()
+        .with_limits(ayaml::Limits::default().with_max_events(1));
+    assert!(ayaml::compat::from_str_with::<Json>("a: !!timestamp 1\n", &tight).is_err());
+    assert!(
+        ayaml::compat::from_str_seed_with("a: !!timestamp 1\n", &tight, PhantomData::<Json>)
+            .is_err()
+    );
+    assert!(
+        ayaml::compat::deserialize_any_with("a: !!timestamp 1\n", &DROP, serde::de::IgnoredAny,)
+            .is_ok()
+    );
+    assert!(
+        ayaml::compat::deserialize_any_with("a: !!timestamp 1\n", &tight, serde::de::IgnoredAny,)
+            .is_err()
+    );
+
+    // Local tags, `!`, and core tags keep their usual reading under `GlobalTags::Drop`.
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    enum Shape {
+        Circle(f64),
+    }
+    assert_eq!(
+        ayaml::compat::from_str_with::<Shape>("!Circle 2.5\n", &DROP).expect("local enum"),
+        Shape::Circle(2.5)
+    );
+    let kept: ayaml::Value =
+        ayaml::compat::from_str_with("a: !custom 1\n", &DROP).expect("local tag in Value");
+    assert!(kept["a"].is_tagged());
+    let local_err = ayaml::compat::from_str_with::<Json>("a: !custom 1\n", &DROP)
+        .expect_err("local tag refused as JSON");
+    assert!(local_err.message().contains("`!custom`"), "{local_err}");
+    let bang_err = ayaml::compat::from_str_with::<Json>("a: ! 1\n", &DROP)
+        .expect_err("non-specific ! refused as JSON");
+    assert!(bang_err.message().contains("`!`"), "{bang_err}");
+    assert!(ayaml::compat::from_str_with::<bool>("! true\n", &DROP).is_err());
+    assert_eq!(
+        ayaml::compat::from_str_with::<u32>("!!int \"5\"\n", &DROP).expect("core int"),
+        5
+    );
+    assert!(ayaml::compat::from_str_with::<u32>("!!int x\n", &DROP).is_err());
+    assert!(ayaml::compat::from_str_with::<u32>("!!str 5\n", &DROP).is_err());
+    // `%TAG` mapping to a local `!` prefix stays local.
+    let local_handle = "%TAG !e! !\n---\na: !e!custom 1\n";
+    assert!(ayaml::compat::from_str_with::<Json>(local_handle, &DROP).is_err());
+}

@@ -36,6 +36,7 @@ fn every_reading<T: DeserializeOwned + Debug>(
             ayaml::from_str_borrowed::<T>(input),
             true,
         ),
+        ("from_str_seed", ayaml::from_str_seed(input, seed), true),
         (
             "Deserializer::next_borrowed",
             first(
@@ -798,10 +799,91 @@ fn an_application_tag_leaves_a_plain_target_s_reading() {
             "{name}: {error}"
         );
     }
-    // A YAML tag that a node keeps, as a collection keeps `!!binary`, isn't read past either.
+    // A YAML tag that a node keeps, as a collection keeps `!!binary`, isn't read past either,
+    // and its refusal names the tag.
     for (name, error, _) in every_reader::<Vec<u32>>("!!binary [1, 2]") {
         assert!(
-            error.message().starts_with("invalid type: enum"),
+            error
+                .message()
+                .starts_with("invalid type: tagged value `!!binary`"),
+            "{name}: {error}"
+        );
+    }
+}
+
+/// Refusing a node because of its tag names the tag on every typed reader, including a struct,
+/// scalar, collection, `serde_json::Value`, flattened field, or untagged enum, while an error
+/// raised after a visitor accepts the tag stays unchanged.
+#[test]
+fn a_refusal_for_a_tag_names_the_tag() {
+    #[derive(Debug, Deserialize)]
+    struct Fields {
+        a: u32,
+    }
+    #[derive(Debug, Deserialize)]
+    struct Flattened {
+        title: String,
+        #[serde(flatten)]
+        extra: BTreeMap<String, serde_json::Value>,
+    }
+    #[derive(Debug, Deserialize)]
+    #[serde(untagged)]
+    enum Untagged {
+        Number(u32),
+    }
+
+    for (name, error, _) in every_reader::<Fields>("!!foo {a: 1}") {
+        assert_eq!(
+            error.message(),
+            "invalid type: tagged value `!!foo`, expected struct Fields",
+            "{name}: {error}"
+        );
+    }
+    for (name, error, _) in every_reader::<u32>("!!timestamp 5") {
+        assert_eq!(
+            error.message(),
+            "invalid type: tagged value `!!timestamp`, expected u32",
+            "{name}: {error}"
+        );
+    }
+    for (name, error, _) in every_reader::<BTreeMap<String, u32>>("!!timestamp {a: 1}") {
+        assert_eq!(
+            error.message(),
+            "invalid type: tagged value `!!timestamp`, expected a map",
+            "{name}: {error}"
+        );
+    }
+    for (input, tag) in [
+        ("a: !custom 1", "!custom"),
+        ("a: ! 1", "!"),
+        ("a: !!timestamp 2026-01-01", "!!timestamp"),
+        ("a: !<tag:example.com,2000:x> 1", "tag:example.com,2000:x"),
+    ] {
+        for (name, error, _) in every_reader::<serde_json::Value>(input) {
+            assert!(
+                error
+                    .message()
+                    .starts_with(&format!("a: invalid type: tagged value `{tag}`")),
+                "{name} {input:?}: {error}"
+            );
+        }
+    }
+    for (name, error, _) in every_reader::<Flattened>("title: t\ncreated: !!timestamp 2024-01-15\n")
+    {
+        assert!(error.message().contains("`!!timestamp`"), "{name}: {error}");
+    }
+    for (name, error, _) in every_reader::<Untagged>("!t 5") {
+        assert!(
+            error.message().contains("`!t`")
+                && error.message().contains("do not support enum input"),
+            "{name}: {error}"
+        );
+    }
+    // A visitor that reads the tag and then fails inside the payload keeps its own error.
+    for (name, error, _) in every_reader::<BTreeMap<String, TagAndNumber>>("a: !t x\n") {
+        assert_eq!(
+            error.message(),
+            "a: invalid type: string \"x\", expected u8",
             "{name}: {error}"
         );
     }
