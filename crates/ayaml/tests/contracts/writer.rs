@@ -313,6 +313,19 @@ fn compat_reads_a_non_handle_bang_as_a_local_tag() {
         ayaml::compat::from_str::<Value>("!@!%41 x").unwrap(),
         Value::from(TaggedValue::new(Tag::local("@!A"), Value::from("x")))
     );
+    assert_eq!(
+        ayaml::compat::from_str::<Value>("[!@!]").unwrap(),
+        Value::Sequence(vec![Value::from(TaggedValue::new(
+            Tag::local("@!"),
+            Value::Null
+        ))])
+    );
+    // Non-tag characters such as flow indicators or `<` still end the suffix, so they are refused
+    // when not followed by whitespace or a flow separator.
+    for invalid in ["!@!@[", "!@!!@]!", "!---@!<x>"] {
+        let error = ayaml::compat::from_str::<Value>(invalid).expect_err(invalid);
+        assert_eq!(error.kind(), ErrorKind::Scanner, "{invalid}: {error}");
+    }
 }
 
 #[test]
