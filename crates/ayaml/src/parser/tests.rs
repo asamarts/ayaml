@@ -1323,3 +1323,28 @@ fn few_events_wait_for_a_reader_that_takes_them_one_at_a_time() {
         assert!(most <= 2 * EventSink::QUEUE_ROOM, "{most} events waited");
     }
 }
+
+/// Loading a document chunk into `EventCursor` hands the vector over without copying it into a
+/// second buffer and gives back any unused capacity the parser over-reserved.
+#[test]
+fn event_cursor_queue_gives_back_unused_capacity() {
+    // Four tokens per entry, one scalar event per entry: the parser reserves for ~4/5 of the
+    // token count, far more than the events produced.
+    let input = "- &a !t x\n".repeat(1_000);
+    let mut cursor = super::EventCursor::new(&input, &Limits::default()).expect("cursor");
+    assert!(matches!(
+        cursor.next_event().expect("stream start"),
+        Some(Event::StreamStart { .. })
+    ));
+    assert!(matches!(
+        cursor.next_event().expect("doc start"),
+        Some(Event::DocumentStart { .. })
+    ));
+    // After shrinking, queue capacity fits the remaining ~1,003 events, not the ~3,216 reserved.
+    assert!(
+        cursor.queue.capacity() <= cursor.queue.len() + 16,
+        "len={}, capacity={}",
+        cursor.queue.len(),
+        cursor.queue.capacity()
+    );
+}

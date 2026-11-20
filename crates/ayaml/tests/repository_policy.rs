@@ -275,6 +275,7 @@ fn the_allocation_gate_checks_every_budget_file() {
     for change in [
         "  allocation:\n    if: false\n",
         "  allocation:\n    continue-on-error: true\n",
+        "  allocation:\n    needs: skipped-prerequisite\n",
         "  allocation:\n    defaults:\n      run:\n        shell: true {0}\n",
     ] {
         let changed = text.replacen(job, change, 1);
@@ -284,8 +285,8 @@ fn the_allocation_gate_checks_every_budget_file() {
 
 /// How many steps of a workflow `wanted` picks, if each of them runs whenever its job's
 /// workflow does, in the default shell and directory, with the build flags that it states and
-/// no others: no condition, no error passed over, and no setting of the step, its job, or the
-/// workflow that changes the shell or replaces the compiler's flags.
+/// no others: no condition, no prerequisite job, no error passed over, and no setting of the
+/// step, its job, or the workflow that changes the shell or replaces the compiler's flags.
 fn steps_that_run(workflow: &str, wanted: &dyn Fn(&Value) -> bool) -> Result<usize, String> {
     let workflow = parse_value(workflow).map_err(|error| error.to_string())?;
     let jobs = workflow["jobs"].as_mapping().ok_or("no jobs")?;
@@ -300,6 +301,12 @@ fn steps_that_run(workflow: &str, wanted: &dyn Fn(&Value) -> bool) -> Result<usi
                 if !["name", "run", "env"].contains(&key) {
                     return Err(format!("{name:?}: the step sets `{key}`"));
                 }
+            }
+            if job
+                .as_mapping()
+                .is_some_and(|map| map.contains_key("needs"))
+            {
+                return Err(format!("{name:?}: the job sets `needs`"));
             }
             for (owner, what) in [(step, "step"), (job, "job"), (&workflow, "workflow")] {
                 let owner = owner.as_mapping().ok_or("not a mapping")?;

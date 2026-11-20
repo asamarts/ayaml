@@ -517,8 +517,13 @@ impl<'a> EventCursor<'a> {
             if self.stream_ended {
                 return Ok(None);
             }
-            if let Some(events) = self.load_chunk()? {
-                self.queue.extend(events);
+            if let Some(mut events) = self.load_chunk()? {
+                // The queue is empty here, so it takes the document's events as they stand,
+                // where extending it would hold them twice while they are copied. The room
+                // that the parser reserved and didn't fill goes back first: a reader builds
+                // its value while the events wait here.
+                events.shrink_to_fit();
+                self.queue = VecDeque::from(events);
             } else {
                 self.stream_ended = true;
                 let span = self
