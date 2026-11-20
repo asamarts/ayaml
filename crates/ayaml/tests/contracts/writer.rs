@@ -320,9 +320,33 @@ fn compat_reads_a_non_handle_bang_as_a_local_tag() {
             Value::Null
         ))])
     );
+    // After an unseparated flow `?`, default mode reads `?!...` as a plain scalar while compat
+    // takes `?` as an explicit key; compat matches libyaml for non-word local tags and `!` inside
+    // secondary-handle suffixes there, while still refusing non-tag delimiters and keeping `!`
+    // suffixes rejected elsewhere.
+    for (input, expected_tag) in [
+        ("[?!)!,]", Tag::local(")!")),
+        ("[?!.! x]", Tag::local(".!")),
+        ("[?!!a!b,]", Tag::new("tag:yaml.org,2002:", "a!b")),
+        ("[?!!!!,]", Tag::new("tag:yaml.org,2002:", "!!")),
+    ] {
+        let value = ayaml::compat::from_str::<Value>(input).expect(input);
+        let Value::Sequence(items) = &value else {
+            panic!("expected sequence for {input:?}: {value:?}");
+        };
+        let Value::Mapping(mapping) = &items[0] else {
+            panic!("expected explicit key mapping for {input:?}: {value:?}");
+        };
+        let (Value::Tagged(tagged), _) = mapping.iter().next().expect("entry") else {
+            panic!("expected tagged key for {input:?}: {value:?}");
+        };
+        assert_eq!(tagged.tag, expected_tag, "{input:?}");
+        let emitted = ayaml::to_string_value(&value).expect("emit");
+        assert_eq!(ayaml::parse_value(&emitted).expect("reparse"), value);
+    }
     // Non-tag characters such as flow indicators or `<` still end the suffix, so they are refused
     // when not followed by whitespace or a flow separator.
-    for invalid in ["!@!@[", "!@!!@]!", "!---@!<x>"] {
+    for invalid in ["!@!@[", "!@!!@]!", "!---@!<x>", "[?!)!@<x>,]"] {
         let error = ayaml::compat::from_str::<Value>(invalid).expect_err(invalid);
         assert_eq!(error.kind(), ErrorKind::Scanner, "{invalid}: {error}");
     }
@@ -333,6 +357,14 @@ fn default_reads_a_flow_question_before_a_non_handle_bang_as_a_plain_scalar() {
     assert_eq!(
         ayaml::parse_value("[?!@! x]").unwrap(),
         Value::Sequence(vec![Value::from("?!@! x")])
+    );
+    assert_eq!(
+        ayaml::parse_value("[?!)!,]").unwrap(),
+        Value::Sequence(vec![Value::from("?!)!")])
+    );
+    assert_eq!(
+        ayaml::parse_value("[?!!a!b,]").unwrap(),
+        Value::Sequence(vec![Value::from("?!!a!b")])
     );
 }
 

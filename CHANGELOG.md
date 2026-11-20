@@ -23,6 +23,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - In compatibility mode, a non-handle local tag containing `@` and `!` (such as `!@!`) now stops at
   non-tag characters such as `[`, `]`, `<`, and `>`, rejecting unseparated flow indicators and
   non-URI characters as libyaml does.
+- In compatibility mode, after an unseparated flow `?` (where default mode reads `?!...` as a plain
+  scalar), non-word local tags such as `[?!)!,]` and secondary-handle suffixes holding `!` such as
+  `[?!!a!b,]` now match libyaml instead of failing as an undefined handle or missing whitespace.
 
 ### Performance
 

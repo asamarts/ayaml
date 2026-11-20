@@ -1254,22 +1254,27 @@ impl<'a> Scanner<'a> {
         // A shorthand's handle needs a suffix after it (YAML 1.2.2 production 99), so `!!` and
         // `!e!` alone are errors. `!` alone is the non-specific tag.
         let mut no_suffix = false;
+        let after_flow_question = self.compat_flow
+            && self.flow_level > 0
+            && self
+                .flow_stack
+                .last()
+                .is_some_and(|&(_, _, explicit)| explicit)
+            && self.input[..start].ends_with('?');
         let tag = if self.peek() == Some('!') {
             self.pos += 1;
             let suffix_start = self.pos;
             self.consume_tag_suffix();
-            // libyaml reads `!!!` as the core tag with the suffix `!`; the YAML 1.2.2 tag
-            // character set ends the suffix before it. Keep libyaml's reading in compat.
-            if self.compat_flow
-                && self.flow_level > 0
-                && self
-                    .flow_stack
-                    .last()
-                    .is_some_and(|&(_, _, explicit)| explicit)
-                && self.pos == suffix_start
-                && self.peek() == Some('!')
-            {
-                self.pos += 1;
+            // libyaml allows `!` in a secondary-handle tag suffix; after an unseparated flow `?`,
+            // default mode reads `?!...` as a plain scalar while compat takes `?` as an explicit
+            // key, so compat keeps libyaml's reading (`[?!!!,]`, `[?!!a!b,]`).
+            if after_flow_question && self.peek() == Some('!') {
+                while let Some(ch) = self.peek() {
+                    if ch != '!' && !is_tag_char(ch) {
+                        break;
+                    }
+                    self.pos += ch.len_utf8();
+                }
             }
             let prefix = self
                 .expand_tag_handle(start, "!!")?
@@ -1325,11 +1330,18 @@ impl<'a> Scanner<'a> {
                 self.pos += ch.len_utf8();
             }
             let handle_name = &self.input[handle_start..self.pos];
-            if self.compat_flow && self.peek() == Some('!') && handle_name.contains('@') {
-                // libyaml reads `!@!` as a local tag, not as a handle whose name holds
-                // `@`. A named handle holds only word characters, so a later `!` here
-                // belongs to the local tag's suffix, which still holds only tag characters
-                // (and `!`).
+            let non_word_handle = !handle_name.is_empty()
+                && !handle_name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
+            if self.compat_flow
+                && self.peek() == Some('!')
+                && (handle_name.contains('@') || (after_flow_question && non_word_handle))
+            {
+                // libyaml reads a non-word handle such as `!@!` or `[?!)!,]` as a local tag
+                // under the primary handle `!`, not as a named handle. A named handle holds only
+                // word characters, so a later `!` here belongs to the tag's suffix, which still
+                // holds only tag characters (and `!`).
                 self.pos += 1;
                 while let Some(ch) = self.peek() {
                     if ch != '!' && !is_tag_char(ch) {
@@ -1337,8 +1349,10 @@ impl<'a> Scanner<'a> {
                     }
                     self.pos += ch.len_utf8();
                 }
-                let suffix = self.decode_tag_suffix(handle_start - 1)?;
-                Self::resolved_tag("", &suffix)
+                let prefix = self
+                    .expand_tag_handle(start, "!")?
+                    .ok_or_else(|| self.error_at(start, "undefined primary tag handle"))?;
+                Self::resolved_tag(&prefix, &self.decode_tag_suffix(handle_start)?)
             } else if self.peek() == Some('!') {
                 self.pos += 1;
                 let suffix_start = self.pos;
