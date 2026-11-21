@@ -91,10 +91,15 @@
 //!
 //! # Errors and spans
 //!
-//! [`Error`] has a stable category, an optional byte span, an optional source
-//! error, and a human-readable message. Input-related errors carry a span and
-//! [`Error::location`] returns the one-based line and column. Events carry
-//! their own spans for source-aware tooling.
+//! [`Error`] implements [`Clone`], [`PartialEq`], and [`Eq`], and carries a
+//! coarse category ([`Error::kind`] -> [`ErrorKind`]), a stable
+//! machine-readable code ([`Error::code`] -> [`ErrorCode`], with
+//! [`ErrorCode::as_str`] returning `yaml.<kebab-name>`), an optional byte
+//! span, an optional source error, and a human-readable message. Input-related
+//! errors carry a span and [`Error::location`] returns the one-based line and
+//! column. See `docs/error-codes.md` for the full code reference and its
+//! relation to [`ErrorKind`]. Events carry their own spans for source-aware
+//! tooling.
 //!
 //! # Minimum supported Rust version
 //!
@@ -145,7 +150,7 @@ pub mod span;
 pub mod tag;
 pub mod value;
 
-pub use error::{Error, ErrorKind};
+pub use error::{Error, ErrorCode, ErrorKind};
 pub use event::{Anchor, CollectionStyle, Event, ScalarStyle};
 pub use limits::{
     ALIAS_BYTES_PER_INPUT_BYTE, COMPAT_MAX_DOCUMENTS, DEFAULT_MAX_DOCUMENTS, LimitExceeded,
@@ -203,7 +208,7 @@ pub use serde_impl::{from_value, from_value_seed, to_value};
 #[cfg(feature = "libyaml-compat")]
 #[cfg_attr(docsrs, doc(cfg(feature = "libyaml-compat")))]
 pub mod compat {
-    use crate::error::{Code, Error, ErrorKind};
+    use crate::error::{Error, ErrorCode, ErrorKind};
     use crate::limits::LimitKind;
     use serde::de::Visitor;
 
@@ -297,9 +302,10 @@ pub mod compat {
     /// deviation keyed by the parser's structured failure, never by the text of
     /// the input or of the message.
     fn map_error(error: Error) -> Error {
-        if error.code() == Code::ReservedIndicatorAfterBom {
-            let mapped = Error::new(
+        if error.is_reserved_after_bom() {
+            let mapped = Error::coded(
                 ErrorKind::Scanner,
+                ErrorCode::ReservedIndicator,
                 "found character that cannot start any token",
             );
             return if let Some(span) = error.span() {
@@ -317,7 +323,11 @@ pub mod compat {
             .limit()
             .is_some_and(|limit| limit.kind() == LimitKind::Depth)
         {
-            let mapped = Error::new(ErrorKind::Serde, "recursion limit exceeded");
+            let mapped = Error::coded(
+                ErrorKind::Serde,
+                ErrorCode::DepthLimit,
+                "recursion limit exceeded",
+            );
             return if let Some(span) = error.span() {
                 let mapped = mapped.with_span(span);
                 if let Some(location) = error.location() {
@@ -329,9 +339,10 @@ pub mod compat {
                 mapped
             };
         }
-        if error.code() == Code::UnexpectedMappingValue {
-            let mapped = Error::new(
+        if error.code() == ErrorCode::UnexpectedMappingValue {
+            let mapped = Error::coded(
                 ErrorKind::Parser,
+                ErrorCode::UnexpectedMappingValue,
                 "mapping values are not allowed in this context",
             );
             return if let Some(span) = error.span() {
@@ -345,12 +356,16 @@ pub mod compat {
                 mapped
             };
         }
-        if error.code() == Code::TrailingDocuments
+        if error.code() == ErrorCode::TrailingDocuments
             || error
                 .limit()
                 .is_some_and(|limit| limit.kind() == LimitKind::Documents)
         {
-            let mapped = Error::new(ErrorKind::Parser, "more than one document in stream");
+            let mapped = Error::coded(
+                ErrorKind::Parser,
+                error.code(),
+                "more than one document in stream",
+            );
             return if let Some(span) = error.span() {
                 let mapped = mapped.with_span(span);
                 if let Some(location) = error.location() {
@@ -1065,8 +1080,9 @@ fn parse_single_value(input: &str, limits: &Limits) -> Result<Value, Error> {
     })?;
     let mut documents = parser::parse_documents(input, limits, true)?;
     if documents.len() > 1 {
-        return Err(Error::new(
+        return Err(Error::coded(
             ErrorKind::Parser,
+            ErrorCode::TrailingDocuments,
             "expected a single YAML document, but found trailing documents",
         ));
     }

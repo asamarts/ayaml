@@ -1,8 +1,19 @@
-//! Structured errors with a stable kind and, when the source provides one, a span.
+//! Structured errors with a stable kind, a stable machine-readable code, and, when the source
+//! provides one, a span.
+//!
+//! [`ErrorKind`] groups errors into broad pipeline categories (scanner, parser, limits, Serde,
+//! emitter, and so on). [`ErrorCode`] identifies the specific failure within those categories
+//! using a stable `yaml.<kebab-name>` string (returned by [`ErrorCode::as_str`]). Match on
+//! [`Error::code`] or [`Error::kind`] rather than message text; in `libyaml-compat` mode, a few
+//! failures remap [`Error::kind`] to match libyaml (for example, depth limits report
+//! [`ErrorKind::Serde`]) while keeping their specific [`ErrorCode`] (such as
+//! [`ErrorCode::DepthLimit`]).
 
 use std::error::Error as StdError;
 use std::fmt;
+use std::sync::Arc;
 
+use crate::limits::LimitKind;
 use crate::span::{Location, Span};
 
 /// The longest path a message holds. A longer one keeps its deepest steps, after [`ELIDED`].
@@ -12,7 +23,12 @@ const MAX_KEY_CHARS: usize = 64;
 /// What starts a path that lost its outer steps.
 const ELIDED: &str = "…";
 
-/// Stable error categories.
+/// Stable coarse error categories.
+///
+/// Use [`ErrorKind`] when handling failures by pipeline stage, and [`ErrorCode`] (via
+/// [`Error::code`]) when matching a specific failure reason. Multiple [`ErrorCode`] variants can
+/// share one [`ErrorKind`], and in `libyaml-compat` mode a few failures remap [`ErrorKind`] to
+/// match libyaml while preserving their specific [`ErrorCode`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorKind {
@@ -62,31 +78,331 @@ impl fmt::Display for ErrorKind {
     }
 }
 
-/// A private failure code, for mappings that must not depend on an error's message text.
+/// Stable, machine-readable failure codes in `yaml.<kebab-name>` form.
 ///
-/// The codes are not public yet. A later release can expose them without reclassifying the
-/// failures they name.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Code {
-    /// No specific code; the message and kind are all the error carries.
-    #[default]
-    Unspecified,
-    /// A reserved indicator follows a byte order mark at the start of a line.
-    ReservedIndicatorAfterBom,
-    /// A token appears where a mapping value belongs.
-    UnexpectedMappingValue,
-    /// A single-document reader found another document.
+/// Every error returned by `ayaml` carries an [`ErrorCode`] accessible through [`Error::code`],
+/// alongside its broader [`ErrorKind`] from [`Error::kind`]. Match on [`ErrorCode`] rather than
+/// message text. See `docs/error-codes.md` for the full reference table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ErrorCode {
+    // -- Encoding --
+    /// Input bytes are not valid UTF-8 (`yaml.invalid-utf8`).
+    InvalidUtf8,
+
+    // -- Scanner --
+    /// Disallowed non-printable character or invalid character boundary (`yaml.non-printable-char`).
+    NonPrintableChar,
+    /// Byte order mark in a position where YAML forbids one (`yaml.invalid-bom`).
+    InvalidBom,
+    /// Reserved indicator (`@` or `` ` ``) starting a plain scalar (`yaml.reserved-indicator`).
+    ReservedIndicator,
+    /// Tab used where YAML forbids tabs as indentation or structural separation
+    /// (`yaml.invalid-tab-indentation`).
+    InvalidTabIndentation,
+    /// Single- or double-quoted scalar was not closed (`yaml.unterminated-quoted-scalar`).
+    UnterminatedQuotedScalar,
+    /// Quoted scalar continuation line violates indentation or contains a document marker
+    /// (`yaml.invalid-quoted-continuation`).
+    InvalidQuotedContinuation,
+    /// Malformed or unknown escape sequence in a double-quoted scalar (`yaml.invalid-escape`).
+    InvalidEscape,
+    /// Malformed block scalar header (`yaml.invalid-block-scalar-header`).
+    InvalidBlockScalarHeader,
+    /// Block scalar indentation violates its parent or leading-empty-line rules
+    /// (`yaml.invalid-block-scalar-indentation`).
+    InvalidBlockScalarIndentation,
+    /// Flow collection continuation is not indented past its enclosing block collection
+    /// (`yaml.invalid-flow-indentation`).
+    InvalidFlowIndentation,
+    /// Document marker (`---` or `...`) inside a flow collection (`yaml.document-marker-in-flow`).
+    DocumentMarkerInFlow,
+    /// Unseparated `?` before a flow indicator (`yaml.invalid-flow-key`).
+    InvalidFlowKey,
+    /// `#` comment not separated by whitespace from the preceding token
+    /// (`yaml.missing-comment-whitespace`).
+    MissingCommentWhitespace,
+    /// Malformed `%YAML`, `%TAG`, or unknown directive syntax (`yaml.invalid-directive`).
+    InvalidDirective,
+    /// Duplicate `%YAML` directive or duplicate `%TAG` handle in one document
+    /// (`yaml.duplicate-directive`).
+    DuplicateDirective,
+    /// Empty or improperly terminated anchor or alias name (`yaml.invalid-anchor`).
+    InvalidAnchor,
+    /// Malformed tag syntax, verbatim URI, or percent-escape (`yaml.invalid-tag`).
+    InvalidTag,
+    /// Tag uses a handle not declared by `%TAG` (`yaml.undefined-tag-handle`).
+    UndefinedTagHandle,
+
+    // -- Parser --
+    /// Directive not followed by a document start marker (`yaml.directive-without-document`).
+    DirectiveWithoutDocument,
+    /// Invalid node or block collection on a `---` document start line
+    /// (`yaml.invalid-document-start`).
+    InvalidDocumentStart,
+    /// Unexpected non-comment tokens after a `...` document end marker
+    /// (`yaml.content-after-document-end`).
+    ContentAfterDocumentEnd,
+    /// Unexpected content after the document root (`yaml.trailing-content`).
+    TrailingContent,
+    /// Block sequence or mapping entry is misindented relative to its parent
+    /// (`yaml.invalid-block-indentation`).
+    InvalidBlockIndentation,
+    /// Mapping entry line is missing a `:` separator (`yaml.missing-mapping-colon`).
+    MissingMappingColon,
+    /// Single-document reader encountered another document (`yaml.trailing-documents`).
     TrailingDocuments,
+    /// Unexpected token in block or flow grammar (`yaml.unexpected-token`).
+    UnexpectedToken,
+    /// Unexpected token or mapping value in a mapping value position
+    /// (`yaml.unexpected-mapping-value`).
+    UnexpectedMappingValue,
+    /// Flow sequence or flow mapping reached end of input without a closing bracket
+    /// (`yaml.unterminated-flow-collection`).
+    UnterminatedFlowCollection,
+    /// Missing separator, unexpected bracket, or empty entry in a flow collection
+    /// (`yaml.invalid-flow-collection`).
+    InvalidFlowCollection,
+    /// Node carries more than one anchor or more than one tag (`yaml.duplicate-node-properties`).
+    DuplicateNodeProperties,
+    /// Node properties placed before a compact block sequence or explicit key
+    /// (`yaml.misplaced-node-properties`).
+    MisplacedNodeProperties,
+    /// Implicit mapping key spans multiple lines or exceeds 1,024 characters
+    /// (`yaml.invalid-implicit-key`).
+    InvalidImplicitKey,
+    /// Alias node carries a tag or anchor (`yaml.alias-with-properties`).
+    AliasWithProperties,
+
+    // -- Composition, aliases, and duplicate keys --
+    /// Alias refers to an anchor not defined earlier in the document (`yaml.unknown-anchor`).
+    UnknownAnchor,
+    /// Alias refers to an enclosing collection that is still open (`yaml.cyclic-alias`).
+    CyclicAlias,
+    /// Mapping contains two semantically equal keys (`yaml.duplicate-key`).
+    DuplicateKey,
+    /// Merge key (`<<`) operand is neither a mapping nor a sequence of mappings
+    /// (`yaml.invalid-merge-operand`).
+    InvalidMergeOperand,
+    /// Structural mismatch in an event stream during composition (`yaml.malformed-event-stream`).
+    MalformedEventStream,
+
+    // -- Scalar resolution --
+    /// Scalar does not match the YAML 1.2 Core Schema `!!int` rule (`yaml.invalid-int-scalar`).
+    InvalidIntScalar,
+    /// Scalar does not match the YAML 1.2 Core Schema `!!float` rule (`yaml.invalid-float-scalar`).
+    InvalidFloatScalar,
+    /// Scalar does not match the YAML 1.2 Core Schema `!!bool` rule (`yaml.invalid-bool-scalar`).
+    InvalidBoolScalar,
+    /// Scalar does not match the YAML 1.2 Core Schema `!!null` rule (`yaml.invalid-null-scalar`).
+    InvalidNullScalar,
+    /// Generic scalar resolution failure (`yaml.invalid-scalar`).
+    InvalidScalar,
+
+    // -- Resource limits --
+    /// Generic resource limit exceeded (`yaml.limit-exceeded`).
+    LimitExceeded,
+    /// Invalid [`Limits`](crate::Limits) configuration (`yaml.invalid-limits`).
+    InvalidLimits,
+    /// Input byte length exceeded `max_input_bytes` (`yaml.input-size-limit`).
+    InputSizeLimit,
+    /// Nesting depth exceeded `max_depth` (`yaml.depth-limit`).
+    DepthLimit,
+    /// Document count exceeded `max_documents` (`yaml.document-count-limit`).
+    DocumentCountLimit,
+    /// Scalar size exceeded `max_scalar_bytes` (`yaml.scalar-size-limit`).
+    ScalarSizeLimit,
+    /// Collection entry count exceeded `max_collection_entries`
+    /// (`yaml.collection-entries-limit`).
+    CollectionEntriesLimit,
+    /// Event or token count exceeded `max_events` (`yaml.event-count-limit`).
+    EventCountLimit,
+    /// Anchor count exceeded `max_anchors` (`yaml.anchor-count-limit`).
+    AnchorCountLimit,
+    /// Alias dereference count exceeded `max_alias_dereferences`
+    /// (`yaml.alias-dereference-limit`).
+    AliasDereferenceLimit,
+    /// Alias expansion budget exceeded `max_alias_expansion_bytes` (`yaml.alias-expansion-limit`).
+    AliasExpansionLimit,
+    /// Emitted byte count exceeded `max_output_bytes` (`yaml.output-size-limit`).
+    OutputSizeLimit,
+    /// Expanded `%TAG` bytes exceeded `max_tag_expansion_bytes` (`yaml.tag-expansion-limit`).
+    TagExpansionLimit,
+
+    // -- Serde --
+    /// Serde type mismatch (`yaml.invalid-type`).
+    InvalidType,
+    /// Serde value mismatch (`yaml.invalid-value`).
+    InvalidValue,
+    /// Serde sequence or tuple length mismatch (`yaml.invalid-length`).
+    InvalidLength,
+    /// Unknown enum variant name (`yaml.unknown-variant`).
+    UnknownVariant,
+    /// Unknown struct field name (`yaml.unknown-field`).
+    UnknownField,
+    /// Required struct field missing (`yaml.missing-field`).
+    MissingField,
+    /// Duplicate struct field (`yaml.duplicate-field`).
+    DuplicateField,
+    /// YAML node cannot be decoded as the requested enum representation
+    /// (`yaml.invalid-enum-representation`).
+    InvalidEnumRepresentation,
+    /// Serde map visitor or serializer handled a value before its key (`yaml.map-value-before-key`).
+    MapValueBeforeKey,
+    /// Custom Serde deserialization or serialization error (`yaml.serde-custom`).
+    SerdeCustom,
+
+    // -- Emitter and I/O --
+    /// Invalid emitter option such as out-of-range indentation (`yaml.invalid-emitter-options`).
+    InvalidEmitterOptions,
+    /// Tag cannot be emitted or does not match its scalar's core-schema rule
+    /// (`yaml.unsupported-tag`).
+    UnsupportedTag,
+    /// Event stream handed to an event writer is malformed or has a dangling alias or invalid
+    /// directive (`yaml.invalid-emit-event`).
+    InvalidEmitEvent,
+    /// Underlying `std::io::Write` returned an I/O error (`yaml.io`).
+    Io,
 }
 
-/// An ayaml error with a stable category, optional source span, and, for
+impl ErrorCode {
+    /// Stable `yaml.<kebab-name>` identifier for this error code.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidUtf8 => "yaml.invalid-utf8",
+            Self::NonPrintableChar => "yaml.non-printable-char",
+            Self::InvalidBom => "yaml.invalid-bom",
+            Self::ReservedIndicator => "yaml.reserved-indicator",
+            Self::InvalidTabIndentation => "yaml.invalid-tab-indentation",
+            Self::UnterminatedQuotedScalar => "yaml.unterminated-quoted-scalar",
+            Self::InvalidQuotedContinuation => "yaml.invalid-quoted-continuation",
+            Self::InvalidEscape => "yaml.invalid-escape",
+            Self::InvalidBlockScalarHeader => "yaml.invalid-block-scalar-header",
+            Self::InvalidBlockScalarIndentation => "yaml.invalid-block-scalar-indentation",
+            Self::InvalidFlowIndentation => "yaml.invalid-flow-indentation",
+            Self::DocumentMarkerInFlow => "yaml.document-marker-in-flow",
+            Self::InvalidFlowKey => "yaml.invalid-flow-key",
+            Self::MissingCommentWhitespace => "yaml.missing-comment-whitespace",
+            Self::InvalidDirective => "yaml.invalid-directive",
+            Self::DuplicateDirective => "yaml.duplicate-directive",
+            Self::InvalidAnchor => "yaml.invalid-anchor",
+            Self::InvalidTag => "yaml.invalid-tag",
+            Self::UndefinedTagHandle => "yaml.undefined-tag-handle",
+            Self::DirectiveWithoutDocument => "yaml.directive-without-document",
+            Self::InvalidDocumentStart => "yaml.invalid-document-start",
+            Self::ContentAfterDocumentEnd => "yaml.content-after-document-end",
+            Self::TrailingContent => "yaml.trailing-content",
+            Self::InvalidBlockIndentation => "yaml.invalid-block-indentation",
+            Self::MissingMappingColon => "yaml.missing-mapping-colon",
+            Self::TrailingDocuments => "yaml.trailing-documents",
+            Self::UnexpectedToken => "yaml.unexpected-token",
+            Self::UnexpectedMappingValue => "yaml.unexpected-mapping-value",
+            Self::UnterminatedFlowCollection => "yaml.unterminated-flow-collection",
+            Self::InvalidFlowCollection => "yaml.invalid-flow-collection",
+            Self::DuplicateNodeProperties => "yaml.duplicate-node-properties",
+            Self::MisplacedNodeProperties => "yaml.misplaced-node-properties",
+            Self::InvalidImplicitKey => "yaml.invalid-implicit-key",
+            Self::AliasWithProperties => "yaml.alias-with-properties",
+            Self::UnknownAnchor => "yaml.unknown-anchor",
+            Self::CyclicAlias => "yaml.cyclic-alias",
+            Self::DuplicateKey => "yaml.duplicate-key",
+            Self::InvalidMergeOperand => "yaml.invalid-merge-operand",
+            Self::MalformedEventStream => "yaml.malformed-event-stream",
+            Self::InvalidIntScalar => "yaml.invalid-int-scalar",
+            Self::InvalidFloatScalar => "yaml.invalid-float-scalar",
+            Self::InvalidBoolScalar => "yaml.invalid-bool-scalar",
+            Self::InvalidNullScalar => "yaml.invalid-null-scalar",
+            Self::InvalidScalar => "yaml.invalid-scalar",
+            Self::LimitExceeded => "yaml.limit-exceeded",
+            Self::InvalidLimits => "yaml.invalid-limits",
+            Self::InputSizeLimit => "yaml.input-size-limit",
+            Self::DepthLimit => "yaml.depth-limit",
+            Self::DocumentCountLimit => "yaml.document-count-limit",
+            Self::ScalarSizeLimit => "yaml.scalar-size-limit",
+            Self::CollectionEntriesLimit => "yaml.collection-entries-limit",
+            Self::EventCountLimit => "yaml.event-count-limit",
+            Self::AnchorCountLimit => "yaml.anchor-count-limit",
+            Self::AliasDereferenceLimit => "yaml.alias-dereference-limit",
+            Self::AliasExpansionLimit => "yaml.alias-expansion-limit",
+            Self::OutputSizeLimit => "yaml.output-size-limit",
+            Self::TagExpansionLimit => "yaml.tag-expansion-limit",
+            Self::InvalidType => "yaml.invalid-type",
+            Self::InvalidValue => "yaml.invalid-value",
+            Self::InvalidLength => "yaml.invalid-length",
+            Self::UnknownVariant => "yaml.unknown-variant",
+            Self::UnknownField => "yaml.unknown-field",
+            Self::MissingField => "yaml.missing-field",
+            Self::DuplicateField => "yaml.duplicate-field",
+            Self::InvalidEnumRepresentation => "yaml.invalid-enum-representation",
+            Self::MapValueBeforeKey => "yaml.map-value-before-key",
+            Self::SerdeCustom => "yaml.serde-custom",
+            Self::InvalidEmitterOptions => "yaml.invalid-emitter-options",
+            Self::UnsupportedTag => "yaml.unsupported-tag",
+            Self::InvalidEmitEvent => "yaml.invalid-emit-event",
+            Self::Io => "yaml.io",
+        }
+    }
+
+    /// Default code used when [`Error::new`] constructs an error with only an [`ErrorKind`].
+    #[must_use]
+    pub(crate) const fn default_for_kind(kind: ErrorKind) -> Self {
+        match kind {
+            ErrorKind::InvalidEncoding => Self::InvalidUtf8,
+            ErrorKind::Scanner | ErrorKind::Parser => Self::UnexpectedToken,
+            ErrorKind::Alias => Self::UnknownAnchor,
+            ErrorKind::DuplicateKey => Self::DuplicateKey,
+            ErrorKind::Tag => Self::InvalidTag,
+            ErrorKind::Resolution => Self::InvalidScalar,
+            ErrorKind::Limit => Self::LimitExceeded,
+            ErrorKind::Composition => Self::MalformedEventStream,
+            ErrorKind::Serde => Self::SerdeCustom,
+            ErrorKind::Emitter => Self::InvalidEmitEvent,
+            ErrorKind::Io => Self::Io,
+        }
+    }
+
+    /// Code corresponding to a structured [`LimitKind`].
+    #[must_use]
+    pub(crate) const fn from_limit_kind(kind: LimitKind) -> Self {
+        match kind {
+            LimitKind::InputBytes => Self::InputSizeLimit,
+            LimitKind::Depth => Self::DepthLimit,
+            LimitKind::Documents => Self::DocumentCountLimit,
+            LimitKind::ScalarBytes => Self::ScalarSizeLimit,
+            LimitKind::CollectionEntries => Self::CollectionEntriesLimit,
+            LimitKind::Events => Self::EventCountLimit,
+            LimitKind::Anchors => Self::AnchorCountLimit,
+            LimitKind::AliasDereferences => Self::AliasDereferenceLimit,
+            LimitKind::AliasExpansion => Self::AliasExpansionLimit,
+            LimitKind::OutputBytes => Self::OutputSizeLimit,
+            LimitKind::TagExpansion => Self::TagExpansionLimit,
+        }
+    }
+}
+
+impl fmt::Display for ErrorCode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl AsRef<str> for ErrorCode {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+/// An ayaml error with a stable category, a stable failure code, optional source span, and, for
 /// resource-limit failures, the structured limit that was exceeded.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Error {
     kind: ErrorKind,
-    code: Code,
+    code: ErrorCode,
+    /// Whether a `ReservedIndicator` followed a byte-order mark at line start, for compat wording.
+    reserved_after_bom: bool,
     /// How much of `message` is the path to what a typed reader rejected, with the `: ` after it.
-    /// A path is at most `MAX_PATH_BYTES` and one step long. Two `u16`s keep `Error` at 112 bytes.
+    /// A path is at most `MAX_PATH_BYTES` and one step long.
     path_len: u16,
     /// How much of the end of `message` is context that the error's location goes before.
     context_len: u16,
@@ -94,16 +410,50 @@ pub struct Error {
     location: Option<Location>,
     message: String,
     limit: Option<Box<crate::limits::LimitExceeded>>,
-    source: Option<Box<dyn StdError + Send + Sync + 'static>>,
+    source: Option<Arc<dyn StdError + Send + Sync + 'static>>,
+}
+
+impl PartialEq for Error {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.code == other.code
+            && self.path_len == other.path_len
+            && self.context_len == other.context_len
+            && self.span == other.span
+            && self.location == other.location
+            && self.message == other.message
+            && self.limit == other.limit
+            && sources_eq(self.source.as_ref(), other.source.as_ref())
+    }
+}
+
+impl Eq for Error {}
+
+fn sources_eq(
+    left: Option<&Arc<dyn StdError + Send + Sync + 'static>>,
+    right: Option<&Arc<dyn StdError + Send + Sync + 'static>>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a.to_string() == b.to_string(),
+        _ => false,
+    }
 }
 
 impl Error {
-    /// Create an error with no source location.
+    /// Create an error with no source location and the default [`ErrorCode`] for `kind`.
     #[must_use]
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+        Self::coded(kind, ErrorCode::default_for_kind(kind), message)
+    }
+
+    /// Create an error with an explicit [`ErrorCode`].
+    #[must_use]
+    pub(crate) fn coded(kind: ErrorKind, code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
             kind,
-            code: Code::Unspecified,
+            code,
+            reserved_after_bom: false,
             path_len: 0,
             context_len: 0,
             span: None,
@@ -114,18 +464,34 @@ impl Error {
         }
     }
 
-    /// Give this error its private failure code.
+    /// Override the stable failure code on this error.
     #[must_use]
-    pub(crate) fn with_code(mut self, code: Code) -> Self {
+    pub const fn with_code(mut self, code: ErrorCode) -> Self {
         self.code = code;
         self
     }
 
-    /// The private failure code, for mappings that must not read the message.
+    /// The stable machine-readable failure code.
+    ///
+    /// Prefer matching on [`ErrorCode`] (or [`ErrorCode::as_str`]) over inspecting
+    /// [`Error::message`].
+    #[must_use]
+    pub const fn code(&self) -> ErrorCode {
+        self.code
+    }
+
+    /// Mark that a reserved indicator appeared immediately after a byte order mark.
+    #[must_use]
+    pub(crate) const fn with_reserved_after_bom(mut self) -> Self {
+        self.reserved_after_bom = true;
+        self
+    }
+
+    /// Whether this error is a reserved indicator immediately after a byte order mark.
     #[cfg(feature = "libyaml-compat")]
     #[must_use]
-    pub(crate) fn code(&self) -> Code {
-        self.code
+    pub(crate) const fn is_reserved_after_bom(&self) -> bool {
+        self.reserved_after_bom
     }
 
     /// Attach a source span.
@@ -209,13 +575,24 @@ impl Error {
     /// Attach a source error.
     #[must_use]
     pub fn with_source(mut self, source: impl StdError + Send + Sync + 'static) -> Self {
-        self.source = Some(Box::new(source));
+        self.source = Some(Arc::new(source));
         self
     }
 
     /// Attach the structured limit that was exceeded.
+    ///
+    /// When the error still holds the generic [`ErrorCode::LimitExceeded`] code (or the code from
+    /// an earlier limit attached by this method), this updates the code to match `limit.kind()`.
     #[must_use]
     pub fn with_limit(mut self, limit: crate::limits::LimitExceeded) -> Self {
+        if self.code == ErrorCode::LimitExceeded
+            || self
+                .limit
+                .as_deref()
+                .is_some_and(|prev| self.code == ErrorCode::from_limit_kind(prev.kind()))
+        {
+            self.code = ErrorCode::from_limit_kind(limit.kind());
+        }
         self.limit = Some(Box::new(limit));
         self
     }
@@ -392,7 +769,7 @@ impl fmt::Display for Error {
 impl StdError for Error {
     #[allow(
         trivial_casts,
-        reason = "Box<dyn Error + Send + Sync> is widened to the plain error trait object"
+        reason = "Arc<dyn Error + Send + Sync> is widened to the plain error trait object"
     )]
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         self.source
@@ -401,28 +778,377 @@ impl StdError for Error {
     }
 }
 
+/// Minimal `serde::de::Error` adapter that formats Serde's default error messages verbatim so
+/// `Error` can assign specific [`ErrorCode`] variants without altering wording.
+#[derive(Debug)]
+struct SerdeMessage(String);
+
+impl fmt::Display for SerdeMessage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl StdError for SerdeMessage {}
+
+impl serde::de::Error for SerdeMessage {
+    fn custom<T: fmt::Display>(message: T) -> Self {
+        Self(message.to_string())
+    }
+}
+
 impl serde::de::Error for Error {
     fn custom<T: fmt::Display>(message: T) -> Self {
-        Self::new(ErrorKind::Serde, message.to_string())
+        Self::coded(
+            ErrorKind::Serde,
+            ErrorCode::SerdeCustom,
+            message.to_string(),
+        )
+    }
+
+    fn invalid_type(unexp: serde::de::Unexpected<'_>, exp: &dyn serde::de::Expected) -> Self {
+        Self::coded(
+            ErrorKind::Serde,
+            ErrorCode::InvalidType,
+            SerdeMessage::invalid_type(unexp, exp).0,
+        )
+    }
+
+    fn invalid_value(unexp: serde::de::Unexpected<'_>, exp: &dyn serde::de::Expected) -> Self {
+        Self::coded(
+            ErrorKind::Serde,
+            ErrorCode::InvalidValue,
+            SerdeMessage::invalid_value(unexp, exp).0,
+        )
+    }
+
+    fn invalid_length(len: usize, exp: &dyn serde::de::Expected) -> Self {
+        Self::coded(
+            ErrorKind::Serde,
+            ErrorCode::InvalidLength,
+            SerdeMessage::invalid_length(len, exp).0,
+        )
+    }
+
+    fn unknown_variant(variant: &str, expected: &'static [&'static str]) -> Self {
+        Self::coded(
+            ErrorKind::Serde,
+            ErrorCode::UnknownVariant,
+            SerdeMessage::unknown_variant(variant, expected).0,
+        )
+    }
+
+    fn unknown_field(field: &str, expected: &'static [&'static str]) -> Self {
+        Self::coded(
+            ErrorKind::Serde,
+            ErrorCode::UnknownField,
+            SerdeMessage::unknown_field(field, expected).0,
+        )
+    }
+
+    fn missing_field(field: &'static str) -> Self {
+        Self::coded(
+            ErrorKind::Serde,
+            ErrorCode::MissingField,
+            SerdeMessage::missing_field(field).0,
+        )
+    }
+
+    fn duplicate_field(field: &'static str) -> Self {
+        Self::coded(
+            ErrorKind::Serde,
+            ErrorCode::DuplicateField,
+            SerdeMessage::duplicate_field(field).0,
+        )
     }
 }
 
 impl serde::ser::Error for Error {
     fn custom<T: fmt::Display>(message: T) -> Self {
-        Self::new(ErrorKind::Serde, message.to_string())
+        Self::coded(
+            ErrorKind::Serde,
+            ErrorCode::SerdeCustom,
+            message.to_string(),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Error, ErrorKind};
+    use super::{Error, ErrorCode, ErrorKind};
+    use crate::limits::{LimitExceeded, LimitKind};
     use crate::span::{Location, Span};
+    use std::collections::HashSet;
     use std::error::Error as _;
+
+    const ALL_CODES: &[ErrorCode] = &[
+        ErrorCode::InvalidUtf8,
+        ErrorCode::NonPrintableChar,
+        ErrorCode::InvalidBom,
+        ErrorCode::ReservedIndicator,
+        ErrorCode::InvalidTabIndentation,
+        ErrorCode::UnterminatedQuotedScalar,
+        ErrorCode::InvalidQuotedContinuation,
+        ErrorCode::InvalidEscape,
+        ErrorCode::InvalidBlockScalarHeader,
+        ErrorCode::InvalidBlockScalarIndentation,
+        ErrorCode::InvalidFlowIndentation,
+        ErrorCode::DocumentMarkerInFlow,
+        ErrorCode::InvalidFlowKey,
+        ErrorCode::MissingCommentWhitespace,
+        ErrorCode::InvalidDirective,
+        ErrorCode::DuplicateDirective,
+        ErrorCode::InvalidAnchor,
+        ErrorCode::InvalidTag,
+        ErrorCode::UndefinedTagHandle,
+        ErrorCode::DirectiveWithoutDocument,
+        ErrorCode::InvalidDocumentStart,
+        ErrorCode::ContentAfterDocumentEnd,
+        ErrorCode::TrailingContent,
+        ErrorCode::InvalidBlockIndentation,
+        ErrorCode::MissingMappingColon,
+        ErrorCode::TrailingDocuments,
+        ErrorCode::UnexpectedToken,
+        ErrorCode::UnexpectedMappingValue,
+        ErrorCode::UnterminatedFlowCollection,
+        ErrorCode::InvalidFlowCollection,
+        ErrorCode::DuplicateNodeProperties,
+        ErrorCode::MisplacedNodeProperties,
+        ErrorCode::InvalidImplicitKey,
+        ErrorCode::AliasWithProperties,
+        ErrorCode::UnknownAnchor,
+        ErrorCode::CyclicAlias,
+        ErrorCode::DuplicateKey,
+        ErrorCode::InvalidMergeOperand,
+        ErrorCode::MalformedEventStream,
+        ErrorCode::InvalidIntScalar,
+        ErrorCode::InvalidFloatScalar,
+        ErrorCode::InvalidBoolScalar,
+        ErrorCode::InvalidNullScalar,
+        ErrorCode::InvalidScalar,
+        ErrorCode::LimitExceeded,
+        ErrorCode::InvalidLimits,
+        ErrorCode::InputSizeLimit,
+        ErrorCode::DepthLimit,
+        ErrorCode::DocumentCountLimit,
+        ErrorCode::ScalarSizeLimit,
+        ErrorCode::CollectionEntriesLimit,
+        ErrorCode::EventCountLimit,
+        ErrorCode::AnchorCountLimit,
+        ErrorCode::AliasDereferenceLimit,
+        ErrorCode::AliasExpansionLimit,
+        ErrorCode::OutputSizeLimit,
+        ErrorCode::TagExpansionLimit,
+        ErrorCode::InvalidType,
+        ErrorCode::InvalidValue,
+        ErrorCode::InvalidLength,
+        ErrorCode::UnknownVariant,
+        ErrorCode::UnknownField,
+        ErrorCode::MissingField,
+        ErrorCode::DuplicateField,
+        ErrorCode::InvalidEnumRepresentation,
+        ErrorCode::MapValueBeforeKey,
+        ErrorCode::SerdeCustom,
+        ErrorCode::InvalidEmitterOptions,
+        ErrorCode::UnsupportedTag,
+        ErrorCode::InvalidEmitEvent,
+        ErrorCode::Io,
+    ];
+
+    /// Exhaustive match so adding an `ErrorCode` variant without adding it to `ALL_CODES` fails
+    /// to compile.
+    fn is_listed(code: ErrorCode) -> bool {
+        match code {
+            ErrorCode::InvalidUtf8
+            | ErrorCode::NonPrintableChar
+            | ErrorCode::InvalidBom
+            | ErrorCode::ReservedIndicator
+            | ErrorCode::InvalidTabIndentation
+            | ErrorCode::UnterminatedQuotedScalar
+            | ErrorCode::InvalidQuotedContinuation
+            | ErrorCode::InvalidEscape
+            | ErrorCode::InvalidBlockScalarHeader
+            | ErrorCode::InvalidBlockScalarIndentation
+            | ErrorCode::InvalidFlowIndentation
+            | ErrorCode::DocumentMarkerInFlow
+            | ErrorCode::InvalidFlowKey
+            | ErrorCode::MissingCommentWhitespace
+            | ErrorCode::InvalidDirective
+            | ErrorCode::DuplicateDirective
+            | ErrorCode::InvalidAnchor
+            | ErrorCode::InvalidTag
+            | ErrorCode::UndefinedTagHandle
+            | ErrorCode::DirectiveWithoutDocument
+            | ErrorCode::InvalidDocumentStart
+            | ErrorCode::ContentAfterDocumentEnd
+            | ErrorCode::TrailingContent
+            | ErrorCode::InvalidBlockIndentation
+            | ErrorCode::MissingMappingColon
+            | ErrorCode::TrailingDocuments
+            | ErrorCode::UnexpectedToken
+            | ErrorCode::UnexpectedMappingValue
+            | ErrorCode::UnterminatedFlowCollection
+            | ErrorCode::InvalidFlowCollection
+            | ErrorCode::DuplicateNodeProperties
+            | ErrorCode::MisplacedNodeProperties
+            | ErrorCode::InvalidImplicitKey
+            | ErrorCode::AliasWithProperties
+            | ErrorCode::UnknownAnchor
+            | ErrorCode::CyclicAlias
+            | ErrorCode::DuplicateKey
+            | ErrorCode::InvalidMergeOperand
+            | ErrorCode::MalformedEventStream
+            | ErrorCode::InvalidIntScalar
+            | ErrorCode::InvalidFloatScalar
+            | ErrorCode::InvalidBoolScalar
+            | ErrorCode::InvalidNullScalar
+            | ErrorCode::InvalidScalar
+            | ErrorCode::LimitExceeded
+            | ErrorCode::InvalidLimits
+            | ErrorCode::InputSizeLimit
+            | ErrorCode::DepthLimit
+            | ErrorCode::DocumentCountLimit
+            | ErrorCode::ScalarSizeLimit
+            | ErrorCode::CollectionEntriesLimit
+            | ErrorCode::EventCountLimit
+            | ErrorCode::AnchorCountLimit
+            | ErrorCode::AliasDereferenceLimit
+            | ErrorCode::AliasExpansionLimit
+            | ErrorCode::OutputSizeLimit
+            | ErrorCode::TagExpansionLimit
+            | ErrorCode::InvalidType
+            | ErrorCode::InvalidValue
+            | ErrorCode::InvalidLength
+            | ErrorCode::UnknownVariant
+            | ErrorCode::UnknownField
+            | ErrorCode::MissingField
+            | ErrorCode::DuplicateField
+            | ErrorCode::InvalidEnumRepresentation
+            | ErrorCode::MapValueBeforeKey
+            | ErrorCode::SerdeCustom
+            | ErrorCode::InvalidEmitterOptions
+            | ErrorCode::UnsupportedTag
+            | ErrorCode::InvalidEmitEvent
+            | ErrorCode::Io => ALL_CODES.contains(&code),
+        }
+    }
+
+    #[test]
+    fn every_error_code_has_a_unique_yaml_kebab_name() {
+        let mut seen = HashSet::new();
+        for &code in ALL_CODES {
+            assert!(is_listed(code));
+            let text = code.as_str();
+            assert_eq!(code.to_string(), text);
+            assert_eq!(code.as_ref(), text);
+            let rest = text
+                .strip_prefix("yaml.")
+                .unwrap_or_else(|| panic!("missing yaml. prefix: {text}"));
+            assert!(!rest.is_empty(), "empty suffix: {text}");
+            assert!(
+                !rest.starts_with('-') && !rest.ends_with('-') && !rest.contains("--"),
+                "{text}"
+            );
+            assert!(
+                rest.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+                "not kebab-case: {text}"
+            );
+            assert!(seen.insert(text), "duplicate error code string: {text}");
+        }
+    }
+
+    #[test]
+    fn every_error_code_is_documented_in_reference_page() {
+        let doc = include_str!("../../../docs/error-codes.md");
+        let mut documented = HashSet::new();
+        for line in doc.lines() {
+            let trimmed = line.trim();
+            if !trimmed.starts_with('|') {
+                continue;
+            }
+            let cells: Vec<&str> = trimmed.split('|').map(str::trim).collect();
+            if cells.len() >= 4
+                && let Some(code_str) = cells[2].strip_prefix('`').and_then(|s| s.strip_suffix('`'))
+                && code_str.starts_with("yaml.")
+            {
+                assert!(
+                    documented.insert(code_str),
+                    "duplicate code in docs/error-codes.md: {code_str}"
+                );
+            }
+        }
+        let expected: HashSet<&str> = ALL_CODES.iter().map(|code| code.as_str()).collect();
+        let missing: Vec<_> = expected.difference(&documented).copied().collect();
+        let extra: Vec<_> = documented.difference(&expected).copied().collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "docs/error-codes.md drift: missing={missing:?}, extra={extra:?}"
+        );
+    }
+
+    #[test]
+    fn error_supports_clone_and_partial_eq() {
+        let a = Error::new(ErrorKind::Parser, "bad")
+            .with_code(ErrorCode::TrailingDocuments)
+            .with_span(Span::new(1, 3))
+            .with_location(Location::new(1, 2));
+        let b = a.clone();
+        assert_eq!(a, b);
+        assert_ne!(a, a.clone().with_code(ErrorCode::UnexpectedToken));
+
+        let with_limit = Error::new(ErrorKind::Limit, "too deep").with_limit(LimitExceeded::new(
+            LimitKind::Depth,
+            4,
+            5,
+        ));
+        assert_eq!(with_limit.code(), ErrorCode::DepthLimit);
+        assert_eq!(with_limit, with_limit.clone());
+        let replaced_limit = with_limit.with_limit(LimitExceeded::new(LimitKind::InputBytes, 8, 9));
+        assert_eq!(replaced_limit.code(), ErrorCode::InputSizeLimit);
+        let explicit_code = Error::new(ErrorKind::Limit, "custom")
+            .with_code(ErrorCode::InvalidLimits)
+            .with_limit(LimitExceeded::new(LimitKind::Depth, 4, 5));
+        assert_eq!(explicit_code.code(), ErrorCode::InvalidLimits);
+
+        let s1 = Error::new(ErrorKind::Io, "write failed")
+            .with_source(std::io::Error::other("broken pipe"));
+        let s2 = Error::new(ErrorKind::Io, "write failed")
+            .with_source(std::io::Error::other("broken pipe"));
+        let s3 = Error::new(ErrorKind::Io, "write failed")
+            .with_source(std::io::Error::other("disk full"));
+        assert_eq!(s1, s1.clone());
+        assert_eq!(s1, s2);
+        assert_ne!(s1, s3);
+        assert_ne!(s1, Error::new(ErrorKind::Io, "write failed"));
+    }
+
+    #[test]
+    fn default_codes_for_every_error_kind_are_pinned() {
+        let defaults = [
+            (ErrorKind::InvalidEncoding, ErrorCode::InvalidUtf8),
+            (ErrorKind::Scanner, ErrorCode::UnexpectedToken),
+            (ErrorKind::Parser, ErrorCode::UnexpectedToken),
+            (ErrorKind::Alias, ErrorCode::UnknownAnchor),
+            (ErrorKind::DuplicateKey, ErrorCode::DuplicateKey),
+            (ErrorKind::Tag, ErrorCode::InvalidTag),
+            (ErrorKind::Resolution, ErrorCode::InvalidScalar),
+            (ErrorKind::Limit, ErrorCode::LimitExceeded),
+            (ErrorKind::Composition, ErrorCode::MalformedEventStream),
+            (ErrorKind::Serde, ErrorCode::SerdeCustom),
+            (ErrorKind::Emitter, ErrorCode::InvalidEmitEvent),
+            (ErrorKind::Io, ErrorCode::Io),
+        ];
+        for (kind, expected) in defaults {
+            assert_eq!(Error::new(kind, "msg").code(), expected, "{kind:?}");
+        }
+    }
 
     #[test]
     fn kind_and_message_are_exposed() {
         let error = Error::new(ErrorKind::Parser, "unexpected token");
         assert_eq!(error.kind(), ErrorKind::Parser);
+        assert_eq!(error.code(), ErrorCode::UnexpectedToken);
         assert_eq!(error.message(), "unexpected token");
         assert_eq!(error.to_string(), "unexpected token");
         assert!(error.span().is_none());

@@ -9,7 +9,7 @@
 
 use std::fmt;
 
-use crate::error::{Error, ErrorKind};
+use crate::error::{Error, ErrorCode, ErrorKind};
 
 /// Maximum structured-document input bytes.
 pub const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
@@ -141,7 +141,12 @@ impl std::error::Error for LimitExceeded {}
 
 impl From<LimitExceeded> for Error {
     fn from(value: LimitExceeded) -> Self {
-        Self::new(ErrorKind::Limit, value.to_string()).with_limit(value)
+        Self::coded(
+            ErrorKind::Limit,
+            ErrorCode::from_limit_kind(value.kind()),
+            value.to_string(),
+        )
+        .with_limit(value)
     }
 }
 
@@ -372,8 +377,9 @@ impl Limits {
     /// copies free, so a nest of aliases to collections of nulls could grow without bound.
     pub(crate) fn validate(&self) -> Result<(), Error> {
         if self.max_depth > MAX_DEPTH_CAP {
-            return Err(Error::new(
+            return Err(Error::coded(
                 ErrorKind::Limit,
+                ErrorCode::InvalidLimits,
                 format!(
                     "max_depth {} is above the supported maximum of {MAX_DEPTH_CAP}",
                     self.max_depth
@@ -381,8 +387,9 @@ impl Limits {
             ));
         }
         if self.node_cost_bytes == 0 {
-            return Err(Error::new(
+            return Err(Error::coded(
                 ErrorKind::Limit,
+                ErrorCode::InvalidLimits,
                 "node_cost_bytes 0 would make the nodes an alias copies free, which turns off the \
                  alias budget; the least accepted cost is 1",
             ));

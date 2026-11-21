@@ -1,7 +1,7 @@
 use super::{
-    Anchor, Call, CollectionStyle, Cont, Cow, DUPLICATE_PROPERTIES, Error, ErrorKind, Event,
-    FlowLack, FlowState, LineStarts, Parser, Properties, Run, ScalarStyle, Span, Step, Tag, Token,
-    TokenKind, implicit_key_fits,
+    Anchor, Call, CollectionStyle, Cont, Cow, DUPLICATE_PROPERTIES, Error, ErrorCode, ErrorKind,
+    Event, FlowLack, FlowState, LineStarts, Parser, Properties, Run, ScalarStyle, Span, Step, Tag,
+    Token, TokenKind, implicit_key_fits,
 };
 
 impl<'a> Parser<'a> {
@@ -59,7 +59,10 @@ impl<'a> Parser<'a> {
             return Err(self.flow_error(
                 tokens,
                 index,
-                FlowLack::Node("unexpected empty flow sequence entry".to_owned()),
+                FlowLack::Node(
+                    ErrorCode::InvalidFlowCollection,
+                    "unexpected empty flow sequence entry".to_owned(),
+                ),
             ));
         }
         state.entries += 1;
@@ -322,7 +325,10 @@ impl<'a> Parser<'a> {
             return Err(self.flow_error(
                 tokens,
                 index,
-                FlowLack::Node("unexpected empty flow mapping entry".to_owned()),
+                FlowLack::Node(
+                    ErrorCode::InvalidFlowCollection,
+                    "unexpected empty flow mapping entry".to_owned(),
+                ),
             ));
         }
         if matches!(token.kind, TokenKind::Key) {
@@ -346,7 +352,10 @@ impl<'a> Parser<'a> {
                 return Err(self.flow_error(
                     tokens,
                     key_end,
-                    FlowLack::Node("unexpected ] in node position".to_owned()),
+                    FlowLack::Node(
+                        ErrorCode::InvalidFlowCollection,
+                        "unexpected ] in node position".to_owned(),
+                    ),
                 ));
             }
             let span = Span::empty(self.token(tokens, index.saturating_sub(1)).span.end());
@@ -414,7 +423,10 @@ impl<'a> Parser<'a> {
             return Err(self.flow_error(
                 tokens,
                 index,
-                FlowLack::Node("unexpected ] in node position".to_owned()),
+                FlowLack::Node(
+                    ErrorCode::InvalidFlowCollection,
+                    "unexpected ] in node position".to_owned(),
+                ),
             ));
         }
         let value = tokens.slice(index, value_end);
@@ -549,12 +561,18 @@ impl<'a> Parser<'a> {
     pub(super) fn flow_error(&self, tokens: Run, index: usize, lack: FlowLack) -> Error {
         let failure = self.token_at(tokens, index).map(|token| token.span);
         let span = failure.unwrap_or_else(|| self.end_of_input());
+        let code = match &lack {
+            FlowLack::Separator if failure.is_none() => ErrorCode::UnterminatedFlowCollection,
+            FlowLack::Separator => ErrorCode::InvalidFlowCollection,
+            FlowLack::Node(code, _) => *code,
+        };
         let Some((opening, sequence)) = self.open_flow(tokens, index) else {
             return self.error(
                 span,
+                code,
                 match lack {
                     FlowLack::Separator => "expected ',' or a closing bracket".to_owned(),
-                    FlowLack::Node(problem) => problem,
+                    FlowLack::Node(_, problem) => problem,
                 },
             );
         };
@@ -576,7 +594,7 @@ impl<'a> Parser<'a> {
                 format!("did not find expected ',' or '{closing}'"),
                 format!(", while parsing a flow {name} {there}"),
             ),
-            FlowLack::Node(_) if self.compat => (
+            FlowLack::Node(_, _) if self.compat => (
                 "did not find expected node content".to_owned(),
                 format!(", while parsing a flow {name} {there}"),
             ),
@@ -588,9 +606,9 @@ impl<'a> Parser<'a> {
                 format!("expected ',' or '{closing}'"),
                 format!(", in the flow {name} opened {there}"),
             ),
-            FlowLack::Node(problem) => (problem, format!(", in the flow {name} opened {there}")),
+            FlowLack::Node(_, problem) => (problem, format!(", in the flow {name} opened {there}")),
         };
-        self.error(span, problem).with_context(&context)
+        self.error(span, code, problem).with_context(&context)
     }
 
     /// What libyaml's parser lacks where compat's flow collection fails at `index` of `tokens`, or
@@ -639,7 +657,7 @@ impl<'a> Parser<'a> {
                         )
                     ) =>
             {
-                FlowLack::Node(String::new())
+                FlowLack::Node(ErrorCode::UnterminatedFlowCollection, String::new())
             }
             lack => lack,
         }
@@ -705,7 +723,11 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             if duplicate {
-                return Err(self.error(token.span, DUPLICATE_PROPERTIES));
+                return Err(self.error(
+                    token.span,
+                    ErrorCode::DuplicateNodeProperties,
+                    DUPLICATE_PROPERTIES,
+                ));
             }
             index += 1;
         }
@@ -871,8 +893,8 @@ impl<'a> Parser<'a> {
         clippy::unused_self,
         reason = "the method is part of a uniform grammar or diagnostic surface"
     )]
-    pub(super) fn error(&self, span: Span, message: impl Into<String>) -> Error {
-        Error::new(ErrorKind::Parser, message)
+    pub(super) fn error(&self, span: Span, code: ErrorCode, message: impl Into<String>) -> Error {
+        Error::coded(ErrorKind::Parser, code, message)
             .with_span(span)
             .with_location_from(&self.positions, self.input)
     }

@@ -188,6 +188,7 @@ budget formula.
 ## Documentation
 
 - [Design](https://github.com/asamarts/ayaml/blob/main/docs/design.md)
+- [Error codes](https://github.com/asamarts/ayaml/blob/main/docs/error-codes.md)
 - [Compatibility profile](https://github.com/asamarts/ayaml/blob/main/docs/compatibility.md)
 - [Resource limits](https://github.com/asamarts/ayaml/blob/main/docs/limits.md)
 - [Dependency policy](https://github.com/asamarts/ayaml/blob/main/docs/dependencies.md)

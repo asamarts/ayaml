@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use crate::error::{Error, ErrorKind};
+use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::{Anchor, Event};
 use crate::limits::{AliasBudget, Limits};
 use crate::mapping::Mapping;
@@ -140,12 +140,15 @@ impl<T> Anchors<T> {
         }
     }
 
-    /// The node an alias at this point refers to, or the message to reject it with.
-    pub(crate) fn resolve(&self, anchor: &str) -> Result<&T, &'static str> {
+    /// The node an alias at this point refers to, or the code and message to reject it with.
+    pub(crate) fn resolve(&self, anchor: &str) -> Result<&T, (ErrorCode, &'static str)> {
         match self.nodes.get(anchor) {
             Some(AnchorNode::Finished(value)) => Ok(value),
-            Some(AnchorNode::Open) => Err("an alias cannot refer to a collection that contains it"),
-            None => Err("unknown anchor"),
+            Some(AnchorNode::Open) => Err((
+                ErrorCode::CyclicAlias,
+                "an alias cannot refer to a collection that contains it",
+            )),
+            None => Err((ErrorCode::UnknownAnchor, "unknown anchor")),
         }
     }
 }
@@ -328,7 +331,7 @@ impl<'a> StreamingComposer<'a> {
                     .anchors
                     .resolve(anchor.as_str())
                     .cloned()
-                    .map_err(|message| self.error_at(span, message))?;
+                    .map_err(|(code, message)| self.error_at(span, message).with_code(code))?;
                 // Charge before cloning: the clone is the allocation this
                 // budget exists to bound.
                 self.budget
@@ -341,10 +344,10 @@ impl<'a> StreamingComposer<'a> {
                         .check_depth(self.stack.len() + definition.height)
                         .map_err(|error| Error::from(error).with_span(span))?;
                 }
-                let value = self
-                    .anchored(&definition.path)
-                    .cloned()
-                    .ok_or_else(|| self.error_at(span, "unknown anchor"))?;
+                let value = self.anchored(&definition.path).cloned().ok_or_else(|| {
+                    self.error_at(span, "unknown anchor")
+                        .with_code(ErrorCode::UnknownAnchor)
+                })?;
                 self.feed(value, span, definition.size, definition.height)?;
             }
             Event::SequenceStart {

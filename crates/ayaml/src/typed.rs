@@ -22,7 +22,7 @@ use serde::de::{DeserializeSeed, EnumAccess, MapAccess, SeqAccess, VariantAccess
 use serde::{Deserialize, Deserializer};
 
 use crate::composer::Anchors;
-use crate::error::{Code, Error, ErrorKind};
+use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::{Anchor, Event, ScalarStyle};
 use crate::limits::{AliasBudget, Limits};
 use crate::number::Number;
@@ -376,8 +376,9 @@ fn parse_streaming<'de>(
     let builder = Builder::streaming(input.len(), limits, options, Some(Rc::clone(&result)));
     parser::parse_document_with_consumer(input, limits, options.compat_flow, Box::new(builder))?;
     result.borrow_mut().take().ok_or_else(|| {
-        Error::new(
-            ErrorKind::Parser,
+        Error::coded(
+            ErrorKind::Composition,
+            ErrorCode::MalformedEventStream,
             "the event stream ended without a document",
         )
         .with_span(Span::empty(input.len()))
@@ -577,7 +578,7 @@ impl<'de> Builder<'de> {
                             "expected a single YAML document, but found trailing documents",
                         )
                         .with_span(span)
-                        .with_code(Code::TrailingDocuments));
+                        .with_code(ErrorCode::TrailingDocuments));
                     }
                     self.anchors.clear();
                     self.stack.clear();
@@ -663,7 +664,7 @@ impl<'de> Builder<'de> {
                         "expected a single YAML document, but found trailing documents",
                     )
                     .with_span(span)
-                    .with_code(Code::TrailingDocuments));
+                    .with_code(ErrorCode::TrailingDocuments));
                 }
                 if self.in_document {
                     return Err(self.error_at(
@@ -751,7 +752,7 @@ impl<'de> Builder<'de> {
                     .anchors
                     .resolve(anchor.as_str())
                     .cloned()
-                    .map_err(|message| self.error_at(span, message))?;
+                    .map_err(|(code, message)| self.error_at(span, message).with_code(code))?;
                 self.budget
                     .charge(&self.limits, self.input_len, target.size)
                     .map_err(|error| error.with_span(span))?;
@@ -1223,6 +1224,15 @@ fn estimate_size(node: &Node<'_>, node_cost: usize) -> usize {
     }
 }
 
+fn enum_error(message: &'static str, span: Span) -> Error {
+    Error::coded(
+        ErrorKind::Serde,
+        ErrorCode::InvalidEnumRepresentation,
+        message,
+    )
+    .with_span(span)
+}
+
 fn with_span(error: Error, span: Span) -> Error {
     if error.span().is_none() {
         error.with_span(span)
@@ -1529,18 +1539,10 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
             NodeKind::Mapping(entries) => {
                 let mut iter = entries.iter();
                 let Some((key, value)) = iter.next() else {
-                    return Err(Error::new(
-                        ErrorKind::Serde,
-                        "enum mapping must contain one variant",
-                    )
-                    .with_span(span));
+                    return Err(enum_error("enum mapping must contain one variant", span));
                 };
                 if iter.next().is_some() {
-                    return Err(Error::new(
-                        ErrorKind::Serde,
-                        "enum mapping must contain one variant",
-                    )
-                    .with_span(span));
+                    return Err(enum_error("enum mapping must contain one variant", span));
                 }
                 let variant_span = key.span;
                 let key = match &resolve(key).kind {
@@ -1549,10 +1551,10 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
                     _ => resolve(key),
                 };
                 let NodeKind::String(variant) = &key.kind else {
-                    return Err(
-                        Error::new(ErrorKind::Serde, "enum variant key must be a string")
-                            .with_span(variant_span),
-                    );
+                    return Err(enum_error(
+                        "enum variant key must be a string",
+                        variant_span,
+                    ));
                 };
                 (
                     variant.as_ref().to_owned(),
@@ -1561,11 +1563,10 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
                 )
             }
             _ => {
-                return Err(Error::new(
-                    ErrorKind::Serde,
+                return Err(enum_error(
                     "enum value must be tagged or a single-entry mapping",
-                )
-                .with_span(span));
+                    span,
+                ));
             }
         };
         visitor
@@ -1605,8 +1606,9 @@ impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
                     }
                     // A radix integer is a number to the resolver, but not text that parses
                     // into a float.
-                    return Err(Error::new(
+                    return Err(Error::coded(
                         ErrorKind::Serde,
+                        ErrorCode::InvalidType,
                         format!("invalid type: integer `{text}`, expected f64"),
                     )
                     .with_span(node.span));
@@ -1755,8 +1757,9 @@ impl<'de> MapAccess<'de> for EmptyMapAccess {
         &mut self,
         _seed: V,
     ) -> Result<V::Value, Self::Error> {
-        Err(Error::new(
+        Err(Error::coded(
             ErrorKind::Serde,
+            ErrorCode::MapValueBeforeKey,
             "map value requested before key",
         ))
     }
@@ -1833,10 +1836,13 @@ impl<'de> MapAccess<'de> for NodeMapAccess<'de, '_> {
         &mut self,
         seed: V,
     ) -> Result<V::Value, Self::Error> {
-        let (key, value) = self
-            .entry
-            .take()
-            .ok_or_else(|| Error::new(ErrorKind::Serde, "map value requested before key"))?;
+        let (key, value) = self.entry.take().ok_or_else(|| {
+            Error::coded(
+                ErrorKind::Serde,
+                ErrorCode::MapValueBeforeKey,
+                "map value requested before key",
+            )
+        })?;
         let span = value.span;
         seed.deserialize(NodeDeserializer::new(value))
             .map_err(|error| inside_key(with_span(error, span), key))
@@ -1913,9 +1919,7 @@ impl<'de> VariantAccess<'de> for NodeVariantAccess<'de, '_> {
         if matches!(&node.kind, NodeKind::Null) {
             Ok(())
         } else {
-            Err(self.inside_variant(
-                Error::new(ErrorKind::Serde, "expected a unit enum variant").with_span(node.span),
-            ))
+            Err(self.inside_variant(enum_error("expected a unit enum variant", node.span)))
         }
     }
 

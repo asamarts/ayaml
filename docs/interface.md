@@ -52,6 +52,9 @@ This page says what ayaml offers at each layer today, and which task holds what 
 
 ## Diagnostics
 
-An error has a kind, a message, an optional span, and an optional location. It has no stable
-code yet: AY-046 adds one, in the contract's `<format>.<kebab-name>` form, and AY-047 a way to
-print an error without text from the document.
+An error has a coarse category (`Error::kind()`, returning `ErrorKind`), a stable machine-readable
+code (`Error::code()`, returning a `#[non_exhaustive]` `ErrorCode` whose `as_str()` gives a
+`yaml.<kebab-name>` string), a message, an optional span, and an optional location, and implements
+`Clone`, `PartialEq`, and `Eq`. See [`docs/error-codes.md`](error-codes.md) for every code, its
+meaning, and its relation to `ErrorKind`. AY-047 adds a way to print an error without text from the
+document.

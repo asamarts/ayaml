@@ -31,7 +31,7 @@ use crate::emitter::{
     emit_double_quoted, expand_folded, is_printable, looks_like_leading_zero_numeral,
     needs_explicit_indent, plain_text_ok, single_quoted_ok, validate_options,
 };
-use crate::error::{Error, ErrorKind};
+use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::{Anchor, CollectionStyle, Event, ScalarStyle};
 use crate::limits::Limits;
 use crate::options::EmitOptions;
@@ -98,7 +98,12 @@ fn emit_events_to_string(events: &[Event<'_>], limits: &Limits) -> Result<String
         limits,
     )?;
     String::from_utf8(output).map_err(|error| {
-        Error::new(ErrorKind::Emitter, "emitter produced invalid UTF-8").with_source(error)
+        Error::coded(
+            ErrorKind::Emitter,
+            ErrorCode::InvalidEmitEvent,
+            "emitter produced invalid UTF-8",
+        )
+        .with_source(error)
     })
 }
 

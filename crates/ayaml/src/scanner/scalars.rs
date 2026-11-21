@@ -6,7 +6,7 @@ use super::line::{
     leading_spaces, line_shape, strip_comment, walk_line,
 };
 use super::{
-    BOM_FIRST_BYTE, EMPTY_LINE_TAB, Error, ScalarStyle, Scanner, Token, TokenKind,
+    BOM_FIRST_BYTE, EMPTY_LINE_TAB, Error, ErrorCode, ScalarStyle, Scanner, Token, TokenKind,
     starts_with_document_marker,
 };
 
@@ -18,7 +18,11 @@ impl<'a> Scanner<'a> {
         let mut value = String::new();
         loop {
             let Some(ch) = self.peek() else {
-                return Err(self.error_at(start, "unterminated single-quoted scalar"));
+                return Err(self.error_at(
+                    start,
+                    ErrorCode::UnterminatedQuotedScalar,
+                    "unterminated single-quoted scalar",
+                ));
             };
             match ch {
                 '\'' => {
@@ -157,7 +161,11 @@ impl<'a> Scanner<'a> {
     /// that isn't indented enough. Such a line most often follows a collection left open, so the
     /// error names where that collection opened, as the parser's flow errors do.
     pub(super) fn flow_indent_error(&self, at: usize) -> Error {
-        let error = self.error_at(at, "flow collection entries must be indented");
+        let error = self.error_at(
+            at,
+            ErrorCode::InvalidFlowIndentation,
+            "flow collection entries must be indented",
+        );
         let Some(&(open, opened, _)) = self.flow_stack.last() else {
             return error;
         };
@@ -209,7 +217,11 @@ impl<'a> Scanner<'a> {
                     None => *held.insert(self.quoted_indent(start)),
                 };
                 if tab < start_indent + usize::from(!allow_same_indent) {
-                    return Err(self.error_at(line_start + tab, EMPTY_LINE_TAB));
+                    return Err(self.error_at(
+                        line_start + tab,
+                        ErrorCode::InvalidTabIndentation,
+                        EMPTY_LINE_TAB,
+                    ));
                 }
             }
             self.consume_line_break();
@@ -237,6 +249,7 @@ impl<'a> Scanner<'a> {
         if !allow_same_indent && !closes && indentation.starts_with('\t') {
             return Err(self.error_at(
                 line_start,
+                ErrorCode::InvalidTabIndentation,
                 "tabs cannot be the only quoted-scalar indentation",
             ));
         }
@@ -247,7 +260,11 @@ impl<'a> Scanner<'a> {
                 .get(3..)
                 .is_none_or(|tail| tail.chars().next().is_none_or(is_blank))
         {
-            return Err(self.error_at(self.pos, "document marker inside quoted scalar"));
+            return Err(self.error_at(
+                self.pos,
+                ErrorCode::InvalidQuotedContinuation,
+                "document marker inside quoted scalar",
+            ));
         }
         // Only the closing quote is exempt: a line that starts with the other kind of quote, or
         // with `''` in a single-quoted scalar, is text and is held to the indent.
@@ -257,10 +274,15 @@ impl<'a> Scanner<'a> {
             // indentation rule that noticed it first.
             if !self.quoted_closes_from(self.pos, quote) {
                 let name = if quote == '"' { "double" } else { "single" };
-                return Err(self.error_at(start, format!("unterminated {name}-quoted scalar")));
+                return Err(self.error_at(
+                    start,
+                    ErrorCode::UnterminatedQuotedScalar,
+                    format!("unterminated {name}-quoted scalar"),
+                ));
             }
             return Err(self.error_at(
                 self.pos,
+                ErrorCode::InvalidQuotedContinuation,
                 "quoted scalar continuation must be indented more than its parent",
             ));
         }
@@ -284,7 +306,11 @@ impl<'a> Scanner<'a> {
         let mut protected_len = 0;
         loop {
             let Some(ch) = self.peek() else {
-                return Err(self.error_at(start, "unterminated double-quoted scalar"));
+                return Err(self.error_at(
+                    start,
+                    ErrorCode::UnterminatedQuotedScalar,
+                    "unterminated double-quoted scalar",
+                ));
             };
             match ch {
                 '"' => {
@@ -306,7 +332,11 @@ impl<'a> Scanner<'a> {
                         continue;
                     }
                     let Some(escape) = self.peek() else {
-                        return Err(self.error_at(escape_start, "unterminated escape"));
+                        return Err(self.error_at(
+                            escape_start,
+                            ErrorCode::InvalidEscape,
+                            "unterminated escape",
+                        ));
                     };
                     self.pos += escape.len_utf8();
                     let before = value.len();
@@ -332,9 +362,11 @@ impl<'a> Scanner<'a> {
                         'u' => value.push(self.scan_hex_escape(4, escape_start)?),
                         'U' => value.push(self.scan_hex_escape(8, escape_start)?),
                         other => {
-                            return Err(
-                                self.error_at(escape_start, format!("unknown escape \\{other}"))
-                            );
+                            return Err(self.error_at(
+                                escape_start,
+                                ErrorCode::InvalidEscape,
+                                format!("unknown escape \\{other}"),
+                            ));
                         }
                     }
                     if value.len() > before && value.ends_with([' ', '\t']) {
@@ -382,16 +414,29 @@ impl<'a> Scanner<'a> {
         let mut value = 0_u32;
         for _ in 0..digits {
             let Some(ch) = self.peek() else {
-                return Err(self.error_at(escape_start, "short hexadecimal escape"));
+                return Err(self.error_at(
+                    escape_start,
+                    ErrorCode::InvalidEscape,
+                    "short hexadecimal escape",
+                ));
             };
             let Some(digit) = ch.to_digit(16) else {
-                return Err(self.error_at(self.pos, "invalid hexadecimal escape"));
+                return Err(self.error_at(
+                    self.pos,
+                    ErrorCode::InvalidEscape,
+                    "invalid hexadecimal escape",
+                ));
             };
             value = value * 16 + digit;
             self.pos += ch.len_utf8();
         }
-        char::from_u32(value)
-            .ok_or_else(|| self.error_at(escape_start, "escape is not a Unicode scalar value"))
+        char::from_u32(value).ok_or_else(|| {
+            self.error_at(
+                escape_start,
+                ErrorCode::InvalidEscape,
+                "escape is not a Unicode scalar value",
+            )
+        })
     }
 
     #[allow(
@@ -434,6 +479,7 @@ impl<'a> Scanner<'a> {
                     if !previous.is_some_and(is_blank) {
                         return Err(self.error_at(
                             self.pos,
+                            ErrorCode::MissingCommentWhitespace,
                             "a block scalar header comment requires preceding whitespace",
                         ));
                     }
@@ -446,6 +492,7 @@ impl<'a> Scanner<'a> {
                         if ch == '\u{feff}' && !self.compat_flow {
                             return Err(self.error_at(
                                 self.pos,
+                                ErrorCode::InvalidBom,
                                 "a byte order mark can only start a document",
                             ));
                         }
@@ -457,6 +504,7 @@ impl<'a> Scanner<'a> {
                 Some(ch) => {
                     return Err(self.error_at(
                         self.pos,
+                        ErrorCode::InvalidBlockScalarHeader,
                         format!("unexpected {ch:?} in block scalar header"),
                     ));
                 }
@@ -464,7 +512,11 @@ impl<'a> Scanner<'a> {
             }
         }
         if self.peek().is_some_and(|ch| !is_line_break(ch)) {
-            return Err(self.error_at(start, "block scalar header must end at a line break"));
+            return Err(self.error_at(
+                start,
+                ErrorCode::InvalidBlockScalarHeader,
+                "block scalar header must end at a line break",
+            ));
         }
         let base_indent = self.line_indent(start);
         let line_start = self.input[..start]
@@ -500,7 +552,11 @@ impl<'a> Scanner<'a> {
                 && previous.trim().starts_with('&')
                 && previous.trim_end().ends_with("::");
             if header_indent <= parent && !anchored_colon_key {
-                return Err(self.error_at(start, "a block scalar is not indented past its parent"));
+                return Err(self.error_at(
+                    start,
+                    ErrorCode::InvalidBlockScalarIndentation,
+                    "a block scalar is not indented past its parent",
+                ));
             }
         }
         let root_like = matches!(&owner, Owner::Root)
@@ -560,6 +616,7 @@ impl<'a> Scanner<'a> {
                         if spaces == 0 && !rest.is_empty() && rest.chars().all(|ch| ch == '\t') {
                             return Err(self.error_at(
                                 probe,
+                                ErrorCode::InvalidTabIndentation,
                                 "tabs are not allowed as leading block-scalar indentation",
                             ));
                         }
@@ -580,6 +637,7 @@ impl<'a> Scanner<'a> {
                 if !self.input[leading..line_end].contains('\t') && spaces > first_spaces {
                     return Err(self.error_at(
                         leading,
+                        ErrorCode::InvalidBlockScalarIndentation,
                         "leading empty block-scalar lines are more indented than the content",
                     ));
                 }
@@ -652,6 +710,7 @@ impl<'a> Scanner<'a> {
                 if rest.starts_with('\t') && rest.trim_start_matches([' ', '\t']).starts_with('#') {
                     return Err(self.error_at(
                         line_start,
+                        ErrorCode::InvalidTabIndentation,
                         "a tab cannot start a comment after a block scalar",
                     ));
                 }
@@ -691,9 +750,11 @@ impl<'a> Scanner<'a> {
                     break;
                 }
                 if ch == '\u{feff}' && !self.compat_flow {
-                    return Err(
-                        self.error_at(self.pos, "a byte order mark can only start a document")
-                    );
+                    return Err(self.error_at(
+                        self.pos,
+                        ErrorCode::InvalidBom,
+                        "a byte order mark can only start a document",
+                    ));
                 }
                 self.pos += ch.len_utf8();
             }
@@ -937,6 +998,7 @@ impl<'a> Scanner<'a> {
         if self.peek() == Some('#') {
             return Err(self.error_at(
                 start,
+                ErrorCode::MissingCommentWhitespace,
                 "a comment must be separated from the preceding token",
             ));
         }
@@ -966,9 +1028,11 @@ impl<'a> Scanner<'a> {
                 }
                 if ch == '\u{feff}' && !self.compat_flow {
                     self.pos = position;
-                    return Err(
-                        self.error_at(position, "a byte order mark can only start a document")
-                    );
+                    return Err(self.error_at(
+                        position,
+                        ErrorCode::InvalidBom,
+                        "a byte order mark can only start a document",
+                    ));
                 }
             }
             self.pos = content_end;
@@ -1031,7 +1095,7 @@ impl<'a> Scanner<'a> {
         // changes only what the token and event report, not what comes next.
         let end = self.trim_trailing_whitespace(start, self.pos);
         if end == start {
-            return Err(self.error_at(start, "expected a token"));
+            return Err(self.error_at(start, ErrorCode::UnexpectedToken, "expected a token"));
         }
         if let Some((_, line)) = self.short_flow_scalar {
             self.short_flow_scalar = Some((end, line));
@@ -1215,7 +1279,7 @@ impl<'a> Scanner<'a> {
             return Ok(None);
         }
         if let Some(tab) = empty_line_tab {
-            return Err(self.error_at(tab, EMPTY_LINE_TAB));
+            return Err(self.error_at(tab, ErrorCode::InvalidTabIndentation, EMPTY_LINE_TAB));
         }
         if let Some(required) = flow_indent
             && let Some(tab) = self.input[line_start..self.pos].find('\t')
@@ -1224,6 +1288,7 @@ impl<'a> Scanner<'a> {
             // Only compat gets here.
             return Err(self.error_at(
                 line_start + tab,
+                ErrorCode::InvalidTabIndentation,
                 "a tab cannot indent a flow collection's line under a block collection",
             ));
         }
