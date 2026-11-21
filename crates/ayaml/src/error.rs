@@ -8,6 +8,16 @@
 //! failures remap [`Error::kind`] to match libyaml (for example, depth limits report
 //! [`ErrorKind::Serde`]) while keeping their specific [`ErrorCode`] (such as
 //! [`ErrorCode::DepthLimit`]).
+//!
+//! # Masking sensitive documents
+//!
+//! Normal [`Display`](fmt::Display) and [`Debug`](fmt::Debug) output on [`Error`] (as well as
+//! [`Error::message`] and [`std::error::Error::source`]) may include text from the YAML document,
+//! such as scalar values, mapping keys and typed error paths, tags, directives, anchor or alias
+//! names, or underlying I/O error text. When logging or exposing errors from untrusted or
+//! sensitive inputs, format [`Error::masked`] ([`MaskedError`]) instead: its `Display` and
+//! `Debug` forms report only the kind, code, and source location (plus byte span and numeric
+//! resource-limit metadata in `Debug`) and never include document text or source error strings.
 
 use std::error::Error as StdError;
 use std::fmt;
@@ -396,6 +406,10 @@ impl AsRef<str> for ErrorCode {
 
 /// An ayaml error with a stable category, a stable failure code, optional source span, and, for
 /// resource-limit failures, the structured limit that was exceeded.
+///
+/// Normal [`Display`](fmt::Display) and [`Debug`](fmt::Debug) formatting may include text from
+/// the YAML document (such as scalar values, mapping keys, tags, directives, or anchor names).
+/// Use [`Error::masked`] when logging or returning errors from sensitive or untrusted documents.
 #[derive(Clone, Debug)]
 pub struct Error {
     kind: ErrorKind,
@@ -622,7 +636,38 @@ impl Error {
         self.location
     }
 
+    /// Return a wrapper whose [`Display`](fmt::Display) and [`Debug`](fmt::Debug) output hold no
+    /// text from the YAML document.
+    ///
+    /// Normal [`Display`](fmt::Display) and [`Debug`](fmt::Debug) output on [`Error`] may include
+    /// scalar values, mapping keys, typed error paths, tags, directives, anchor or alias names,
+    /// or underlying source error text. Use `masked()` when logging, recording telemetry, or
+    /// returning diagnostics from sensitive or untrusted documents.
+    ///
+    /// ```
+    /// use std::collections::HashMap;
+    ///
+    /// let error = ayaml::from_str::<HashMap<String, u32>>("secret_token: hunter2\n").unwrap_err();
+    /// assert!(error.to_string().contains("secret_token"));
+    /// assert!(error.to_string().contains("hunter2"));
+    ///
+    /// let masked = error.masked();
+    /// assert!(!masked.to_string().contains("secret_token"));
+    /// assert!(!masked.to_string().contains("hunter2"));
+    /// assert_eq!(
+    ///     masked.to_string(),
+    ///     "serde error (yaml.invalid-type) at line 1 column 15"
+    /// );
+    /// ```
+    #[must_use]
+    pub const fn masked(&self) -> MaskedError<'_> {
+        MaskedError(self)
+    }
+
     /// The human-readable message without location decoration.
+    ///
+    /// This message may include text from the YAML document. When logging or displaying errors
+    /// from sensitive or untrusted inputs, use [`Error::masked`] instead.
     ///
     /// A flow collection's error ends with where the collection opened, as in
     /// `unterminated flow sequence, opened at line 1 column 1`. That is part of the message, and
@@ -778,6 +823,96 @@ impl StdError for Error {
             .map(|source| source as &(dyn StdError + 'static))
     }
 }
+
+/// A view of an [`Error`] whose [`Display`](fmt::Display) and [`Debug`](fmt::Debug) forms exclude
+/// all document text.
+///
+/// Returned by [`Error::masked`]. Normal [`Error`] formatting may include values, mapping keys,
+/// paths, tags, directives, anchor or alias names, or underlying source error messages from the
+/// document. `MaskedError` reports only the coarse [`ErrorKind`], stable [`ErrorCode`], and
+/// one-based [`Location`] (plus byte [`Span`] and numeric [`LimitExceeded`](crate::LimitExceeded)
+/// metadata in `Debug`), and its [`std::error::Error::source`] always returns `None` so an
+/// unmasked cause cannot leak through error-chain formatters.
+///
+/// Use `MaskedError` whenever errors from untrusted or secret-bearing YAML documents are written
+/// to logs, metrics, crash reports, or user-visible responses.
+#[derive(Clone, Copy)]
+pub struct MaskedError<'a>(&'a Error);
+
+impl MaskedError<'_> {
+    /// The stable coarse error category.
+    #[must_use]
+    pub const fn kind(&self) -> ErrorKind {
+        self.0.kind
+    }
+
+    /// The stable machine-readable failure code.
+    #[must_use]
+    pub const fn code(&self) -> ErrorCode {
+        self.0.code
+    }
+
+    /// The byte span of the failure, if any.
+    #[must_use]
+    pub const fn span(&self) -> Option<Span> {
+        self.0.span
+    }
+
+    /// The one-based line and column of the failure, if any.
+    #[must_use]
+    pub const fn location(&self) -> Option<Location> {
+        self.0.location
+    }
+
+    /// The structured resource-limit metadata, when this is a limit error.
+    #[must_use]
+    pub fn limit(&self) -> Option<crate::limits::LimitExceeded> {
+        self.0.limit()
+    }
+}
+
+impl PartialEq for MaskedError<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.kind == other.0.kind
+            && self.0.code == other.0.code
+            && self.0.span == other.0.span
+            && self.0.location == other.0.location
+            && self.0.limit == other.0.limit
+    }
+}
+
+impl Eq for MaskedError<'_> {}
+
+impl fmt::Display for MaskedError<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0.location {
+            Some(location) => write!(
+                formatter,
+                "{} ({}) at line {} column {}",
+                self.0.kind,
+                self.0.code,
+                location.line(),
+                location.column()
+            ),
+            None => write!(formatter, "{} ({})", self.0.kind, self.0.code),
+        }
+    }
+}
+
+impl fmt::Debug for MaskedError<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MaskedError")
+            .field("kind", &self.0.kind)
+            .field("code", &self.0.code)
+            .field("span", &self.0.span)
+            .field("location", &self.0.location)
+            .field("limit", &self.0.limit)
+            .finish()
+    }
+}
+
+impl StdError for MaskedError<'_> {}
 
 /// Minimal `serde::de::Error` adapter that formats Serde's default error messages verbatim so
 /// `Error` can assign specific [`ErrorCode`] variants without altering wording.
@@ -1344,5 +1479,117 @@ mod tests {
     fn categories_display_stably() {
         assert_eq!(ErrorKind::DuplicateKey.to_string(), "duplicate key");
         assert_eq!(ErrorKind::Limit.to_string(), "resource limit");
+    }
+
+    #[test]
+    fn masked_error_shows_kind_code_and_location_without_message_or_source() {
+        fn assert_masked_traits<
+            T: Copy
+                + Clone
+                + PartialEq
+                + Eq
+                + Send
+                + Sync
+                + std::fmt::Display
+                + std::fmt::Debug
+                + std::error::Error,
+        >(
+            _: T,
+        ) {
+        }
+
+        let secret = "TOP_SECRET_VALUE_991";
+        let error = Error::new(
+            ErrorKind::Serde,
+            format!("invalid type: string \"{secret}\""),
+        )
+        .with_code(ErrorCode::InvalidType)
+        .with_span(Span::new(10, 20))
+        .with_location(Location::new(3, 5))
+        .with_context(", in flow mapping")
+        .inside_key("secret_key_991")
+        .with_source(std::io::Error::other(format!("inner {secret}")));
+
+        assert!(error.to_string().contains(secret));
+        assert!(error.to_string().contains("secret_key_991"));
+
+        let masked = error.masked();
+        let display = masked.to_string();
+        let debug = format!("{masked:?}");
+
+        assert_eq!(
+            display,
+            "serde error (yaml.invalid-type) at line 3 column 5"
+        );
+        assert!(!display.contains(secret), "leaked in display: {display}");
+        assert!(
+            !display.contains("secret_key_991"),
+            "leaked key in display: {display}"
+        );
+        assert!(!debug.contains(secret), "leaked in debug: {debug}");
+        assert!(
+            !debug.contains("secret_key_991"),
+            "leaked key in debug: {debug}"
+        );
+        assert!(debug.contains("Serde") && debug.contains("InvalidType"));
+        assert!(masked.source().is_none());
+        assert_eq!(masked.kind(), ErrorKind::Serde);
+        assert_eq!(masked.code(), ErrorCode::InvalidType);
+        assert_eq!(masked.span(), Some(Span::new(10, 20)));
+        assert_eq!(masked.location(), Some(Location::new(3, 5)));
+        assert_eq!(masked.limit(), None);
+
+        let no_loc = Error::new(ErrorKind::Io, format!("write {secret}"))
+            .with_source(std::io::Error::other(secret));
+        assert_eq!(no_loc.masked().to_string(), "I/O error (yaml.io)");
+        assert!(!format!("{:?}", no_loc.masked()).contains(secret));
+        assert!(no_loc.masked().source().is_none());
+
+        let with_limit = Error::new(ErrorKind::Limit, format!("too deep {secret}"))
+            .with_limit(LimitExceeded::new(LimitKind::Depth, 4, 5));
+        assert_eq!(
+            with_limit.masked().to_string(),
+            "resource limit (yaml.depth-limit)"
+        );
+        assert_eq!(
+            with_limit.masked().limit(),
+            Some(LimitExceeded::new(LimitKind::Depth, 4, 5))
+        );
+        assert!(!format!("{:?}", with_limit.masked()).contains(secret));
+
+        let loc_without_span = Error::new(ErrorKind::Parser, format!("bad {secret}"))
+            .with_location(Location::new(2, 3));
+        assert_eq!(
+            loc_without_span.masked().to_string(),
+            "parser error (yaml.unexpected-token) at line 2 column 3"
+        );
+        assert_eq!(loc_without_span.masked().span(), None);
+        assert_eq!(
+            loc_without_span.masked().location(),
+            Some(Location::new(2, 3))
+        );
+        assert_masked_traits(masked);
+    }
+
+    #[test]
+    fn masked_error_equality_ignores_redacted_message_and_source() {
+        let a = Error::new(ErrorKind::Serde, "secret A")
+            .with_code(ErrorCode::InvalidType)
+            .with_span(Span::new(0, 4))
+            .with_location(Location::new(1, 1))
+            .with_source(std::io::Error::other("cause A"));
+        let b = Error::new(ErrorKind::Serde, "secret B")
+            .with_code(ErrorCode::InvalidType)
+            .with_span(Span::new(0, 4))
+            .with_location(Location::new(1, 1))
+            .with_source(std::io::Error::other("cause B"));
+        let c = Error::new(ErrorKind::Serde, "secret A")
+            .with_code(ErrorCode::InvalidValue)
+            .with_span(Span::new(0, 4))
+            .with_location(Location::new(1, 1));
+
+        assert_ne!(a, b);
+        assert_eq!(a.masked(), b.masked());
+        assert_ne!(a.masked(), c.masked());
     }
 }

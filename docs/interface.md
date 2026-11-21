@@ -55,6 +55,9 @@ This page says what ayaml offers at each layer today, and which task holds what 
 An error has a coarse category (`Error::kind()`, returning `ErrorKind`), a stable machine-readable
 code (`Error::code()`, returning a `#[non_exhaustive]` `ErrorCode` whose `as_str()` gives a
 `yaml.<kebab-name>` string), a message, an optional span, and an optional location, and implements
-`Clone`, `PartialEq`, and `Eq`. See [`docs/error-codes.md`](error-codes.md) for every code, its
-meaning, and its relation to `ErrorKind`. AY-047 adds a way to print an error without text from the
-document.
+`Clone`, `PartialEq`, and `Eq`. Normal `Display` and `Debug` on `Error` may include text from the
+document (such as scalar values, mapping keys, paths, tags, or directives); when logging or
+returning errors from sensitive or untrusted documents, format `Error::masked()` (`MaskedError`),
+whose `Display` and `Debug` show only kind, code, and location (plus span and numeric limit
+metadata in `Debug`) with no document text. See [`docs/error-codes.md`](error-codes.md) for every
+code, its meaning, its relation to `ErrorKind`, and masked error formatting.

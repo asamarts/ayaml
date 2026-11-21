@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `Error::masked()` and `MaskedError` (`Display`, `Debug`, `std::error::Error`, `Clone`, `Copy`,
+  `PartialEq`, `Eq`, plus safe `kind`, `code`, `span`, `location`, and `limit` accessors), giving
+  callers a document-text-free formatting view for logging or surfacing errors from sensitive or
+  untrusted YAML documents.
 - `ErrorCode` (`#[non_exhaustive]`, `as_str()`, `Display`, `AsRef<str>`), `Error::code()`, and
   `Error::with_code()`, exposing stable `yaml.<kebab-name>` failure codes across encoding,
   scanner, parser, composition, alias, duplicate-key, scalar-resolution, resource-limit, Serde,
