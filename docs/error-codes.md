@@ -12,6 +12,36 @@ Match on `Error::code()` or `Error::kind()` rather than `Error::message()` text.
 may be clarified across releases; `ErrorCode` variants and their `yaml.<kebab-name>` strings are
 part of the crate's stability contract.
 
+## Masked error output
+
+Normal `Display`, `Debug`, `Error::message()`, and `std::error::Error::source()` output on `Error`
+may include text from the YAML document — for example, scalar values, mapping keys and typed error
+paths, `%TAG` handles or prefixes, anchor and alias names, unexpected characters, or underlying
+I/O error text.
+
+When logging, recording telemetry, or surfacing errors from untrusted or sensitive YAML files
+(such as configuration files containing credentials, tokens, or personal data), format
+`error.masked()` (`MaskedError`) instead:
+
+```rust
+use std::collections::HashMap;
+
+let err = ayaml::from_str::<HashMap<String, u32>>("api_key: secret-value\n").unwrap_err();
+// Normal Display may include document text:
+assert!(err.to_string().contains("api_key"));
+assert!(err.to_string().contains("secret-value"));
+
+// Masked Display and Debug never include document text or source error strings:
+let masked = err.masked();
+assert_eq!(masked.to_string(), "serde error (yaml.invalid-type) at line 1 column 10");
+assert!(!format!("{masked:?}").contains("secret-value"));
+```
+
+`MaskedError` formats only the coarse `ErrorKind`, the stable `ErrorCode`, and the one-based
+`Location` (when present) in `Display`, plus the byte `Span` and numeric `LimitExceeded` metadata
+in `Debug`. Its `std::error::Error::source()` implementation always returns `None` so an unmasked
+underlying cause cannot leak through error-chain formatters.
+
 ## `ErrorKind` and `ErrorCode`
 
 `ErrorKind` answers which layer failed (encoding, scanner, parser, aliases, duplicate keys, tags,

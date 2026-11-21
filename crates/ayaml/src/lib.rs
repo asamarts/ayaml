@@ -97,9 +97,13 @@
 //! [`ErrorCode::as_str`] returning `yaml.<kebab-name>`), an optional byte
 //! span, an optional source error, and a human-readable message. Input-related
 //! errors carry a span and [`Error::location`] returns the one-based line and
-//! column. See `docs/error-codes.md` for the full code reference and its
-//! relation to [`ErrorKind`]. Events carry their own spans for source-aware
-//! tooling.
+//! column. Normal [`Display`](std::fmt::Display) and [`Debug`](std::fmt::Debug)
+//! output on [`Error`] may include text from the document (such as scalar
+//! values, mapping keys, paths, tags, or directives); use [`Error::masked`]
+//! ([`MaskedError`]) when logging or returning errors from sensitive or
+//! untrusted documents. See `docs/error-codes.md` for the full code reference,
+//! its relation to [`ErrorKind`], and masked error formatting. Events carry
+//! their own spans for source-aware tooling.
 //!
 //! # Minimum supported Rust version
 //!
@@ -150,7 +154,7 @@ pub mod span;
 pub mod tag;
 pub mod value;
 
-pub use error::{Error, ErrorCode, ErrorKind};
+pub use error::{Error, ErrorCode, ErrorKind, MaskedError};
 pub use event::{Anchor, CollectionStyle, Event, ScalarStyle};
 pub use limits::{
     ALIAS_BYTES_PER_INPUT_BYTE, COMPAT_MAX_DOCUMENTS, DEFAULT_MAX_DOCUMENTS, LimitExceeded,

@@ -1026,3 +1026,32 @@ resource-limit, Serde, emitter, and I/O failure carries a pinned `ErrorCode`, an
 `ErrorKind::Parser` for document limits) keep their specific `ErrorCode`. Adding a new `ErrorCode`
 variant requires updating `docs/error-codes.md` and `crates/ayaml/tests/error_codes.rs`, enforced
 by tests.
+
+## D101 — Masked error wrapper (`Error::masked()` / `MaskedError`)
+
+**Date:** 2026-11-21
+**Status:** Accepted
+
+**Decision.** Add `Error::masked(&self) -> MaskedError<'_>` and export `MaskedError` at the crate
+root (`ayaml::MaskedError` and `ayaml::error::MaskedError`). `MaskedError<'a>` is a `Clone + Copy`
+borrowing view whose `Display` prints `<kind> (<code>)` (followed by `at line <L> column <C>` when a
+location is present), whose `Debug` prints only `kind`, `code`, `span`, `location`, and `limit`,
+whose `std::error::Error::source()` always returns `None`, and whose `PartialEq`/`Eq` compares
+only those five non-document fields.
+
+**Alternatives.** Keep YAML mapping keys or typed paths in masked output (as `.env` formats do for
+plain environment variable names): in YAML, mapping keys can be arbitrary scalars or collections
+and may themselves hold sensitive data (identifiers, tokens, or user-supplied strings), so masking
+must withhold the entire `message` and `source`. Mutate `Error` into a redacted `Error` value:
+forces allocation and makes it harder for a caller to keep the full diagnostic internally while
+formatting only the masked view to a log sink.
+
+**Why.** Normal `Display` and `Debug` on `Error` intentionally include helpful context from the
+document (values, keys, tags, directives, anchor/alias names, and source errors), which is unsafe
+to log verbatim from untrusted or secret-bearing inputs. A zero-allocation borrowing wrapper with
+no `message()` or `source()` surface lets callers safely format errors for logs and telemetry while
+preserving `ErrorKind`, `ErrorCode`, and `Location` for triage.
+
+**Consequences.** Callers logging or surfacing errors from sensitive or untrusted documents can
+format `error.masked()` without leaking document contents, and `crates/ayaml/tests/masked_errors.rs`
+pins every error path in the crate that can interpolate document text against regressions.
