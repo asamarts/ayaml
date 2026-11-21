@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 
 use crate::composer::StreamingComposer;
-use crate::error::{Code, Error, ErrorKind};
+use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::{Anchor, CollectionStyle, Event, ScalarStyle};
 use crate::limits::Limits;
 use crate::position::LineStarts;
@@ -1047,7 +1047,11 @@ impl<'a> Parser<'a> {
         }
         if index >= self.lines.len() {
             if saw_directive {
-                return Err(self.error(self.empty_span(index), "directive without a document"));
+                return Err(self.error(
+                    self.empty_span(index),
+                    ErrorCode::DirectiveWithoutDocument,
+                    "directive without a document",
+                ));
             }
             return Ok(Opening::End);
         }
@@ -1059,6 +1063,7 @@ impl<'a> Parser<'a> {
             return Err(self.error(
                 self.line_first(index)
                     .map_or_else(|| self.empty_span(index), |token| token.span),
+                ErrorCode::DirectiveWithoutDocument,
                 "directive must be followed by a document start",
             ));
         }
@@ -1092,6 +1097,7 @@ impl<'a> Parser<'a> {
                 if rest_start > 0 && is_mapping_line(self.tokens(line.from(rest_start))) {
                     return Err(self.error(
                         self.token(line, 0).span,
+                        ErrorCode::InvalidDocumentStart,
                         "a document-start property cannot precede a same-line block mapping key",
                     ));
                 }
@@ -1103,6 +1109,7 @@ impl<'a> Parser<'a> {
                 {
                     return Err(self.error(
                         tokens[0].span,
+                        ErrorCode::InvalidDocumentStart,
                         "a block collection cannot start on a `---` line",
                     ));
                 }
@@ -1123,12 +1130,11 @@ impl<'a> Parser<'a> {
                 })?;
                 return Ok(Opening::End);
             }
-            return Err(self
-                .error(
-                    document_start_span,
-                    "expected a single YAML document, but found trailing documents",
-                )
-                .with_code(Code::TrailingDocuments));
+            return Err(self.error(
+                document_start_span,
+                ErrorCode::TrailingDocuments,
+                "expected a single YAML document, but found trailing documents",
+            ));
         }
         self.emit(Event::DocumentStart {
             explicit: explicit_start,
@@ -1190,7 +1196,11 @@ impl<'a> Parser<'a> {
                 .take_line_first_span(index)
                 .unwrap_or(document_end_span);
             if let Some(token) = self.line_first(index) {
-                return Err(self.error(token.span, "content after document end marker"));
+                return Err(self.error(
+                    token.span,
+                    ErrorCode::ContentAfterDocumentEnd,
+                    "content after document end marker",
+                ));
             }
             index += 1;
         }
@@ -1211,33 +1221,50 @@ impl<'a> Parser<'a> {
                 .line_first(index)
                 .map_or_else(|| self.empty_span(index), |token| token.span);
             let tabbed = root_block && tab_leads_line(self.input, span.start());
-            let fallback = match tokens.first().map(|token| &token.kind) {
+            let (fallback_code, fallback) = match tokens.first().map(|token| &token.kind) {
                 Some(kind)
                     if kind.scalar_style().is_some_and(|style| {
                         matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
                     }) =>
                 {
-                    "a block scalar is not indented past its parent"
+                    (
+                        ErrorCode::InvalidBlockScalarIndentation,
+                        "a block scalar is not indented past its parent",
+                    )
                 }
-                Some(TokenKind::BlockEntry) => "a block entry is indented less than its parent",
+                Some(TokenKind::BlockEntry) => (
+                    ErrorCode::InvalidBlockIndentation,
+                    "a block entry is indented less than its parent",
+                ),
                 Some(TokenKind::PlainScalar | TokenKind::Scalar(_))
                     if root_block
                         && self.lines[index].indent > 0
                         && previous_line_is_blank(self.input, span.start()) =>
                 {
-                    "a mapping line is missing a `:`"
+                    (
+                        ErrorCode::MissingMappingColon,
+                        "a mapping line is missing a `:`",
+                    )
                 }
-                _ => "unexpected content after document",
-            }
-            .to_owned();
-            let message = if tabbed {
-                "unexpected content after document".to_owned()
-            } else if self.compat {
-                self.compat_indentation_message(index).unwrap_or(fallback)
-            } else {
-                fallback
+                _ => (
+                    ErrorCode::TrailingContent,
+                    "unexpected content after document",
+                ),
             };
-            let error = self.error(span, message);
+            let (code, message) = if tabbed {
+                (
+                    ErrorCode::InvalidTabIndentation,
+                    "unexpected content after document".to_owned(),
+                )
+            } else if self.compat {
+                self.compat_indentation_message(index).map_or_else(
+                    || (fallback_code, fallback.to_owned()),
+                    |message| (ErrorCode::InvalidBlockIndentation, message),
+                )
+            } else {
+                (fallback_code, fallback.to_owned())
+            };
+            let error = self.error(span, code, message);
             // A node that only a tab seemed to indent under a key or an entry sits at its
             // line's left edge, so it ends up here.
             return Err(if tabbed {
@@ -1358,14 +1385,24 @@ impl<'a> Parser<'a> {
     ) -> Result<Step<'a>, Error> {
         match cont {
             Cont::NodeInline { rest, index } => {
-                self.expect_consumed(rest, value, "unexpected token after node")?;
+                self.expect_consumed(
+                    rest,
+                    value,
+                    ErrorCode::UnexpectedToken,
+                    "unexpected token after node",
+                )?;
                 Ok(Step::Return(index + 1))
             }
             Cont::ItemInline {
                 content,
                 next_index,
             } => {
-                self.expect_consumed(content, value, "unexpected token after node")?;
+                self.expect_consumed(
+                    content,
+                    value,
+                    ErrorCode::UnexpectedToken,
+                    "unexpected token after node",
+                )?;
                 Ok(Step::Return(next_index))
             }
             Cont::Sequence(mut state) => {
@@ -1382,7 +1419,12 @@ impl<'a> Parser<'a> {
                 value_index,
                 key,
             } => {
-                self.expect_consumed(key, value, "unexpected token in mapping key")?;
+                self.expect_consumed(
+                    key,
+                    value,
+                    ErrorCode::UnexpectedToken,
+                    "unexpected token in mapping key",
+                )?;
                 self.mapping_after_implicit_key(state, tokens, value_index, stack)
             }
             Cont::MappingEntry(mut state) => {
@@ -1393,8 +1435,12 @@ impl<'a> Parser<'a> {
                 value: tokens,
                 current_index,
             } => {
-                self.expect_consumed(tokens, value, "unexpected token in mapping value")
-                    .map_err(|error| error.with_code(Code::UnexpectedMappingValue))?;
+                self.expect_consumed(
+                    tokens,
+                    value,
+                    ErrorCode::UnexpectedMappingValue,
+                    "unexpected token in mapping value",
+                )?;
                 Ok(Step::Return(current_index))
             }
             Cont::FlowSequenceItem { mut state, inline } => {
@@ -1402,6 +1448,7 @@ impl<'a> Parser<'a> {
                     if value == 0 {
                         return Err(self.error(
                             self.token(state.tokens, state.index).span,
+                            ErrorCode::InvalidFlowCollection,
                             "expected a flow item",
                         ));
                     }
@@ -1489,11 +1536,17 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect_consumed(&self, run: Run, consumed: usize, message: &str) -> Result<(), Error> {
+    fn expect_consumed(
+        &self,
+        run: Run,
+        consumed: usize,
+        code: ErrorCode,
+        message: &str,
+    ) -> Result<(), Error> {
         if consumed == run.len() {
             Ok(())
         } else {
-            Err(self.error(self.token(run, consumed).span, message))
+            Err(self.error(self.token(run, consumed).span, code, message))
         }
     }
 }
@@ -1609,8 +1662,8 @@ type Properties<'a> = (Option<Tag>, Option<Anchor<'a>>, usize);
 enum FlowLack {
     /// `,` or its closing bracket.
     Separator,
-    /// A node, with what stands there instead.
-    Node(String),
+    /// A node, with its error code and what stands there instead.
+    Node(ErrorCode, String),
 }
 
 /// A run of one logical line's tokens in the shared token arena.

@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::PathSegment;
-use crate::error::{Error, ErrorKind};
+use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::{Event, ScalarStyle};
 use crate::limits::Limits;
 use crate::mapping::Mapping;
@@ -470,10 +470,18 @@ impl<'a> Builder<'a> {
             }
             Event::SequenceEnd { span } => {
                 let Some(frame) = self.stack.pop() else {
-                    return Err(Error::new(ErrorKind::Parser, "unexpected sequence end"));
+                    return Err(Error::coded(
+                        ErrorKind::Parser,
+                        ErrorCode::MalformedEventStream,
+                        "unexpected sequence end",
+                    ));
                 };
                 let FrameKind::Sequence(items) = frame.kind else {
-                    return Err(Error::new(ErrorKind::Parser, "sequence end for a mapping"));
+                    return Err(Error::coded(
+                        ErrorKind::Parser,
+                        ErrorCode::MalformedEventStream,
+                        "sequence end for a mapping",
+                    ));
                 };
                 let flow = frame.style == crate::event::CollectionStyle::Flow;
                 let mut items = items;
@@ -518,10 +526,18 @@ impl<'a> Builder<'a> {
             }
             Event::MappingEnd { span } => {
                 let Some(frame) = self.stack.pop() else {
-                    return Err(Error::new(ErrorKind::Parser, "unexpected mapping end"));
+                    return Err(Error::coded(
+                        ErrorKind::Parser,
+                        ErrorCode::MalformedEventStream,
+                        "unexpected mapping end",
+                    ));
                 };
                 let FrameKind::Mapping { entries, guess, .. } = frame.kind else {
-                    return Err(Error::new(ErrorKind::Parser, "mapping end for a sequence"));
+                    return Err(Error::coded(
+                        ErrorKind::Parser,
+                        ErrorCode::MalformedEventStream,
+                        "mapping end for a sequence",
+                    ));
                 };
                 let flow = frame.style == crate::event::CollectionStyle::Flow;
                 let mut entries = entries;

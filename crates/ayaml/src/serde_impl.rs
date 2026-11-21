@@ -119,8 +119,9 @@ fn display_error() -> crate::Error {
 /// and the output would silently lose the other.
 fn insert_entry(mapping: &mut Mapping, key: Value, value: Value) -> Result<(), crate::Error> {
     mapping.insert_new(key, value).map_err(|key| {
-        crate::Error::new(
+        crate::Error::coded(
             crate::ErrorKind::Serde,
+            crate::ErrorCode::DuplicateKey,
             format!("duplicate entry with key {key}"),
         )
     })
@@ -844,7 +845,11 @@ impl<'de> MapAccess<'de> for ValueMapAccess {
         seed: V,
     ) -> Result<V::Value, Self::Error> {
         let value = self.value.take().ok_or_else(|| {
-            crate::Error::new(crate::ErrorKind::Serde, "map value requested before key")
+            crate::Error::coded(
+                crate::ErrorKind::Serde,
+                crate::ErrorCode::MapValueBeforeKey,
+                "map value requested before key",
+            )
         })?;
         seed.deserialize(ValueDeserializer { value })
             .map_err(|error| match (&self.key, self.plain_key) {
@@ -961,14 +966,16 @@ fn enum_parts(value: Value) -> Result<(String, Value), crate::Error> {
         Value::Mapping(mapping) => {
             let mut iter = mapping.into_iter();
             let Some((key, value)) = iter.next() else {
-                return Err(crate::Error::new(
+                return Err(crate::Error::coded(
                     crate::ErrorKind::Serde,
+                    crate::ErrorCode::InvalidEnumRepresentation,
                     "enum mapping must contain one variant",
                 ));
             };
             if iter.next().is_some() {
-                return Err(crate::Error::new(
+                return Err(crate::Error::coded(
                     crate::ErrorKind::Serde,
+                    crate::ErrorCode::InvalidEnumRepresentation,
                     "enum mapping must contain one variant",
                 ));
             }
@@ -982,16 +989,18 @@ fn enum_parts(value: Value) -> Result<(String, Value), crate::Error> {
                 _ => None,
             };
             let Some(variant) = variant else {
-                return Err(crate::Error::new(
+                return Err(crate::Error::coded(
                     crate::ErrorKind::Serde,
+                    crate::ErrorCode::InvalidEnumRepresentation,
                     "enum variant key must be a string",
                 ));
             };
             (variant, value)
         }
         _ => {
-            return Err(crate::Error::new(
+            return Err(crate::Error::coded(
                 crate::ErrorKind::Serde,
+                crate::ErrorCode::InvalidEnumRepresentation,
                 "enum value must be tagged or a single-entry mapping",
             ));
         }
@@ -1072,7 +1081,11 @@ impl<'de> VariantAccess<'de> for ValueVariantAccess<'_> {
         } else {
             Err(Self::inside_variant(
                 self.name.as_deref(),
-                crate::Error::new(crate::ErrorKind::Serde, "expected a unit enum variant"),
+                crate::Error::coded(
+                    crate::ErrorKind::Serde,
+                    crate::ErrorCode::InvalidEnumRepresentation,
+                    "expected a unit enum variant",
+                ),
             ))
         }
     }
@@ -1528,7 +1541,11 @@ impl SerializeMap for ValueMapSerializer {
             return Ok(());
         }
         let key = self.key.take().ok_or_else(|| {
-            crate::Error::new(crate::ErrorKind::Serde, "map value serialized before key")
+            crate::Error::coded(
+                crate::ErrorKind::Serde,
+                crate::ErrorCode::MapValueBeforeKey,
+                "map value serialized before key",
+            )
         })?;
         insert_entry(
             &mut self.mapping,

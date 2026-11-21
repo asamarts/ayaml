@@ -10,7 +10,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::error::{Code, Error, ErrorKind};
+use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::ScalarStyle;
 use crate::limits::Limits;
 use crate::position::{LineStarts, starts_with_document_marker};
@@ -351,9 +351,11 @@ impl<'a> Scanner<'a> {
                     && (self.directive_pending
                         || (self.document_open && !self.bom_starts_prefix(self.pos)))
                 {
-                    return Err(
-                        self.error_at(self.pos, "a byte order mark can only start a document")
-                    );
+                    return Err(self.error_at(
+                        self.pos,
+                        ErrorCode::InvalidBom,
+                        "a byte order mark can only start a document",
+                    ));
                 }
                 self.pos += '\u{feff}'.len_utf8();
                 if !self.compat_flow {
@@ -414,6 +416,7 @@ impl<'a> Scanner<'a> {
             {
                 return Err(self.error_at(
                     self.pos,
+                    ErrorCode::DocumentMarkerInFlow,
                     "document markers are not allowed inside flow collections",
                 ));
             }
@@ -513,6 +516,7 @@ impl<'a> Scanner<'a> {
             {
                 Err(self.error_at(
                     start,
+                    ErrorCode::InvalidFlowKey,
                     "a flow collection's `?` must be separated from what follows it",
                 ))
             }
@@ -558,10 +562,11 @@ impl<'a> Scanner<'a> {
             '%' | '@' | '`' => {
                 let error = self.error_at(
                     start,
+                    ErrorCode::ReservedIndicator,
                     format!("{ch:?} is a reserved indicator and cannot start a plain scalar"),
                 );
                 Err(if self.reserved_after_bom(start) {
-                    error.with_code(Code::ReservedIndicatorAfterBom)
+                    error.with_reserved_after_bom()
                 } else {
                     error
                 })
@@ -759,9 +764,9 @@ impl<'a> Scanner<'a> {
     }
 
     fn span(&self, start: usize, end: usize) -> Result<Span, Error> {
-        self.line_index
-            .span(self.input, start, end)
-            .ok_or_else(|| self.error_at(start, "invalid span position"))
+        self.line_index.span(self.input, start, end).ok_or_else(|| {
+            self.error_at(start, ErrorCode::UnexpectedToken, "invalid span position")
+        })
     }
 
     fn limit_at(&self, index: usize, limit: crate::limits::LimitExceeded) -> Error {
@@ -792,9 +797,10 @@ impl<'a> Scanner<'a> {
         before.is_empty() || before.ends_with(['\n', '\r'])
     }
 
-    fn error_at(&self, index: usize, message: impl Into<String>) -> Error {
+    fn error_at(&self, index: usize, code: ErrorCode, message: impl Into<String>) -> Error {
         let marker = self.line_index.marker(self.input, index);
-        let mut error = Error::new(ErrorKind::Scanner, message).with_span(Span::empty(index));
+        let mut error =
+            Error::coded(ErrorKind::Scanner, code, message).with_span(Span::empty(index));
         if let Some(marker) = marker {
             error = error.with_location(marker);
         }
@@ -865,6 +871,7 @@ impl<'a> Scanner<'a> {
                         if self.tab_indents_block_collection(self.pos, self.tab_run_end) {
                             return Err(self.error_at(
                                 self.pos,
+                                ErrorCode::InvalidTabIndentation,
                                 "tab cannot separate a block structural indicator",
                             ));
                         }
@@ -875,6 +882,7 @@ impl<'a> Scanner<'a> {
                     {
                         return Err(self.error_at(
                             self.pos,
+                            ErrorCode::InvalidTabIndentation,
                             "tabs cannot be the only flow-collection indentation",
                         ));
                     }
@@ -888,6 +896,7 @@ impl<'a> Scanner<'a> {
                         if ch == '\u{feff}' && !self.compat_flow {
                             return Err(self.error_at(
                                 self.pos,
+                                ErrorCode::InvalidBom,
                                 "a byte order mark can only start a document",
                             ));
                         }
@@ -1028,7 +1037,11 @@ impl<'a> Scanner<'a> {
             self.pos += ch.len_utf8();
         }
         if self.pos == name_start {
-            return Err(self.error_at(start, "a directive needs a name"));
+            return Err(self.error_at(
+                start,
+                ErrorCode::InvalidDirective,
+                "a directive needs a name",
+            ));
         }
         let name = Cow::Borrowed(&self.input[name_start..self.pos]);
         while matches!(self.peek(), Some(' ' | '\t')) {
@@ -1056,7 +1069,11 @@ impl<'a> Scanner<'a> {
             directive
         };
         if checked.contains('\u{feff}') {
-            return Err(self.error_at(start, "a directive cannot contain a byte order mark"));
+            return Err(self.error_at(
+                start,
+                ErrorCode::InvalidBom,
+                "a directive cannot contain a byte order mark",
+            ));
         }
         if name == "YAML" {
             let version_end = value.find(is_blank).unwrap_or(value.len());
@@ -1070,10 +1087,18 @@ impl<'a> Scanner<'a> {
             let valid = version_like(version)
                 && (trailing.is_empty() || trailing.starts_with('#') || version_like(trailing));
             if !valid {
-                return Err(self.error_at(start, "invalid %YAML directive"));
+                return Err(self.error_at(
+                    start,
+                    ErrorCode::InvalidDirective,
+                    "invalid %YAML directive",
+                ));
             }
             if self.yaml_directive_seen {
-                return Err(self.error_at(start, "duplicate %YAML directive"));
+                return Err(self.error_at(
+                    start,
+                    ErrorCode::DuplicateDirective,
+                    "duplicate %YAML directive",
+                ));
             }
             self.yaml_directive_seen = true;
         }
@@ -1081,10 +1106,18 @@ impl<'a> Scanner<'a> {
             let mut parts = value.split(is_blank).filter(|part| !part.is_empty());
             // Only a comment may follow the prefix, and the split leaves a blank before it.
             let (Some(handle), Some(prefix)) = (parts.next(), parts.next()) else {
-                return Err(self.error_at(start, "%TAG requires a handle and a prefix"));
+                return Err(self.error_at(
+                    start,
+                    ErrorCode::InvalidDirective,
+                    "%TAG requires a handle and a prefix",
+                ));
             };
             if parts.next().is_some_and(|part| !part.starts_with('#')) {
-                return Err(self.error_at(start, "%TAG requires a handle and a prefix"));
+                return Err(self.error_at(
+                    start,
+                    ErrorCode::InvalidDirective,
+                    "%TAG requires a handle and a prefix",
+                ));
             }
             // A handle is `!`, `!!`, or word characters between two `!`s;
             // libyaml also allows `_`, and the compat scanner keeps that.
@@ -1100,12 +1133,20 @@ impl<'a> Scanner<'a> {
                         })
                 });
             if !(handle == "!" || handle == "!!" || named) {
-                return Err(self.error_at(start, format!("invalid %TAG handle {handle}")));
+                return Err(self.error_at(
+                    start,
+                    ErrorCode::InvalidDirective,
+                    format!("invalid %TAG handle {handle}"),
+                ));
             }
             // One document may give a handle one prefix, even the same one twice (YAML 1.2.2
             // section 6.8.2.2).
             if self.pending_tag_handles.contains_key(handle) {
-                return Err(self.error_at(start, format!("duplicate %TAG directive for {handle}")));
+                return Err(self.error_at(
+                    start,
+                    ErrorCode::DuplicateDirective,
+                    format!("duplicate %TAG directive for {handle}"),
+                ));
             }
             // A prefix is `!` and URI characters (a local prefix), or URI
             // characters that do not start with `!` or a flow indicator.
@@ -1118,12 +1159,21 @@ impl<'a> Scanner<'a> {
                 }
             };
             if !prefix_ok {
-                return Err(self.error_at(start, format!("invalid %TAG prefix {prefix}")));
+                return Err(self.error_at(
+                    start,
+                    ErrorCode::InvalidDirective,
+                    format!("invalid %TAG prefix {prefix}"),
+                ));
             }
             // The prefix's %-escapes are decoded like a suffix's, as libyaml
             // does. `uri_text_ok` has checked their syntax.
-            let prefix = decode_percent_escapes(prefix)
-                .map_err(|_| self.error_at(start, "tag %-escapes do not form valid UTF-8"))?;
+            let prefix = decode_percent_escapes(prefix).map_err(|_| {
+                self.error_at(
+                    start,
+                    ErrorCode::InvalidDirective,
+                    "tag %-escapes do not form valid UTF-8",
+                )
+            })?;
             self.pending_tag_handles.insert(handle.to_owned(), prefix);
         }
         self.make(
@@ -1144,9 +1194,11 @@ impl<'a> Scanner<'a> {
             // Anchor names are `ns-char`s, which exclude the BOM; libyaml
             // allows only word characters.
             if ch == '\u{feff}' {
-                return Err(
-                    self.error_at(self.pos, "an anchor name cannot contain a byte order mark")
-                );
+                return Err(self.error_at(
+                    self.pos,
+                    ErrorCode::InvalidBom,
+                    "an anchor name cannot contain a byte order mark",
+                ));
             }
             // YAML 1.2.2 allows any non-space, non-flow-indicator character in
             // an anchor name, so `&an:chor` is the anchor `an:chor` (Y2GN).
@@ -1171,7 +1223,11 @@ impl<'a> Scanner<'a> {
             self.pos += ch.len_utf8();
         }
         if self.pos == name_start {
-            return Err(self.error_at(start, "anchor/alias name must not be empty"));
+            return Err(self.error_at(
+                start,
+                ErrorCode::InvalidAnchor,
+                "anchor/alias name must not be empty",
+            ));
         }
         // libyaml ends a name at any `:`, so `*a: b` has the key `*a`. Compat follows it for an
         // alias, unless an anchor in this document has that exact name, as `&a: b` does (2SXE, W5VH).
@@ -1189,6 +1245,7 @@ impl<'a> Scanner<'a> {
         if matches!(self.peek(), Some('[' | '{')) {
             return Err(self.error_at(
                 self.pos,
+                ErrorCode::InvalidAnchor,
                 "an anchor or alias must be followed by white space",
             ));
         }
@@ -1276,9 +1333,13 @@ impl<'a> Scanner<'a> {
                     self.pos += ch.len_utf8();
                 }
             }
-            let prefix = self
-                .expand_tag_handle(start, "!!")?
-                .ok_or_else(|| self.error_at(start, "undefined secondary tag handle"))?;
+            let prefix = self.expand_tag_handle(start, "!!")?.ok_or_else(|| {
+                self.error_at(
+                    start,
+                    ErrorCode::UndefinedTagHandle,
+                    "undefined secondary tag handle",
+                )
+            })?;
             no_suffix = self.pos == suffix_start;
             Self::resolved_tag(&prefix, &self.decode_tag_suffix(suffix_start)?)
         } else if self.peek() == Some('<') {
@@ -1291,31 +1352,42 @@ impl<'a> Scanner<'a> {
                 if !is_uri_char(ch) {
                     return Err(self.error_at(
                         self.pos,
+                        ErrorCode::InvalidTag,
                         "a verbatim tag may only hold URI characters; escape others as %XX",
                     ));
                 }
                 self.pos += ch.len_utf8();
             }
             if self.peek() != Some('>') {
-                return Err(self.error_at(start, "unterminated verbatim tag"));
+                return Err(self.error_at(
+                    start,
+                    ErrorCode::InvalidTag,
+                    "unterminated verbatim tag",
+                ));
             }
             let suffix = &self.input[suffix_start..self.pos];
             // A verbatim tag holds at least one character (production 97), and `!` alone names
             // no local tag (example 6.25).
             if suffix.is_empty() || suffix == "!" {
-                return Err(self.error_at(start, "a verbatim tag needs a name"));
+                return Err(self.error_at(
+                    start,
+                    ErrorCode::InvalidTag,
+                    "a verbatim tag needs a name",
+                ));
             }
             // A verbatim tag is read as written, so a `%` is part of the name only when it starts
             // an escape, and the name must be one YAML can hold: a local tag or one with a scheme.
             if !uri_text_ok(suffix) {
                 return Err(self.error_at(
                     start,
+                    ErrorCode::InvalidTag,
                     "a `%` in a verbatim tag must start a two-digit escape",
                 ));
             }
             if !verbatim_reads_back("", suffix) {
                 return Err(self.error_at(
                     start,
+                    ErrorCode::InvalidTag,
                     "a verbatim tag must name a local tag or a tag with a scheme",
                 ));
             }
@@ -1349,9 +1421,13 @@ impl<'a> Scanner<'a> {
                     }
                     self.pos += ch.len_utf8();
                 }
-                let prefix = self
-                    .expand_tag_handle(start, "!")?
-                    .ok_or_else(|| self.error_at(start, "undefined primary tag handle"))?;
+                let prefix = self.expand_tag_handle(start, "!")?.ok_or_else(|| {
+                    self.error_at(
+                        start,
+                        ErrorCode::UndefinedTagHandle,
+                        "undefined primary tag handle",
+                    )
+                })?;
                 Self::resolved_tag(&prefix, &self.decode_tag_suffix(handle_start)?)
             } else if self.peek() == Some('!') {
                 self.pos += 1;
@@ -1359,7 +1435,11 @@ impl<'a> Scanner<'a> {
                 self.consume_tag_suffix();
                 let handle = &self.input[handle_start - 1..suffix_start];
                 let prefix = self.expand_tag_handle(start, handle)?.ok_or_else(|| {
-                    self.error_at(start, format!("undefined tag handle {handle:?}"))
+                    self.error_at(
+                        start,
+                        ErrorCode::UndefinedTagHandle,
+                        format!("undefined tag handle {handle:?}"),
+                    )
                 })?;
                 no_suffix = self.pos == suffix_start;
                 Self::resolved_tag(&prefix, &self.decode_tag_suffix(suffix_start)?)
@@ -1368,8 +1448,13 @@ impl<'a> Scanner<'a> {
                 let prefix = if self.pos == handle_start {
                     "!".to_owned()
                 } else {
-                    self.expand_tag_handle(start, "!")?
-                        .ok_or_else(|| self.error_at(start, "undefined primary tag handle"))?
+                    self.expand_tag_handle(start, "!")?.ok_or_else(|| {
+                        self.error_at(
+                            start,
+                            ErrorCode::UndefinedTagHandle,
+                            "undefined primary tag handle",
+                        )
+                    })?
                 };
                 Self::resolved_tag(&prefix, &self.decode_tag_suffix(handle_start)?)
             }
@@ -1379,11 +1464,16 @@ impl<'a> Scanner<'a> {
         }) {
             return Err(self.error_at(
                 self.pos,
+                ErrorCode::InvalidTag,
                 "a tag must be followed by whitespace or a line break",
             ));
         }
         if no_suffix {
-            return Err(self.error_at(start, "a tag's handle needs a suffix after it"));
+            return Err(self.error_at(
+                start,
+                ErrorCode::InvalidTag,
+                "a tag's handle needs a suffix after it",
+            ));
         }
         self.make(TokenKind::Tag(Box::new(tag)), start, self.pos)
     }
@@ -1393,8 +1483,16 @@ impl<'a> Scanner<'a> {
     /// are delivered as written.
     fn decode_tag_suffix(&self, start: usize) -> Result<String, Error> {
         decode_percent_escapes(&self.input[start..self.pos]).map_err(|error| match error {
-            PercentError::Escape(index) => self.error_at(start + index, "invalid %-escape in tag"),
-            PercentError::Utf8 => self.error_at(start, "tag %-escapes do not form valid UTF-8"),
+            PercentError::Escape(index) => self.error_at(
+                start + index,
+                ErrorCode::InvalidTag,
+                "invalid %-escape in tag",
+            ),
+            PercentError::Utf8 => self.error_at(
+                start,
+                ErrorCode::InvalidTag,
+                "tag %-escapes do not form valid UTF-8",
+            ),
         })
     }
 

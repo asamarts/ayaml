@@ -10,7 +10,7 @@
 //! merged keys after them, in operand order. A merge operand that itself holds
 //! `<<` is merged first, so chained merges flatten fully.
 
-use crate::error::{Error, ErrorKind};
+use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::mapping::Mapping;
 use crate::value::Value;
 
@@ -78,8 +78,9 @@ fn merge_operand_into(operand: Value, target: &mut Mapping) -> Result<(), Error>
         Value::Sequence(sequence) => {
             for item in sequence {
                 let Value::Mapping(mapping) = item else {
-                    return Err(Error::new(
+                    return Err(Error::coded(
                         ErrorKind::Composition,
+                        ErrorCode::InvalidMergeOperand,
                         "merge sequence operands must be mappings",
                     ));
                 };
@@ -87,8 +88,9 @@ fn merge_operand_into(operand: Value, target: &mut Mapping) -> Result<(), Error>
             }
             Ok(())
         }
-        _ => Err(Error::new(
+        _ => Err(Error::coded(
             ErrorKind::Composition,
+            ErrorCode::InvalidMergeOperand,
             "merge operand must be a mapping or a sequence of mappings",
         )),
     }

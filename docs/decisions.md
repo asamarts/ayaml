@@ -986,3 +986,43 @@ breaks unless named in `### Changed`. Compiler-internal unstable marker traits (
 `StructuralPartialEq`, `StructuralEq`) are filtered out while stable auto traits (`Send`, `Sync`,
 `Unpin`, `UnwindSafe`, `RefUnwindSafe`) stay enforced. The `public-api` crate version/checksum and
 its paired nightly toolchain must move together by hand.
+
+## D100 — Stable `ErrorCode` (`yaml.<kebab-name>`) alongside `ErrorKind`, plus `Clone` and `PartialEq` on `Error`
+
+**Date:** 2026-11-20
+**Status:** Accepted
+
+**Decision.** Publish `ErrorCode` (`#[non_exhaustive]`, `Clone`, `Copy`, `Debug`, `PartialEq`,
+`Eq`, `Hash`, `Display`, `AsRef<str>`, with `const fn as_str(self) -> &'static str` returning a
+stable `yaml.<kebab-name>` string) at the crate root, expose `Error::code(&self) -> ErrorCode` and
+`Error::with_code(self, ErrorCode) -> Self`, keep `ErrorKind` intact for coarse pipeline matching,
+and implement `Clone`, `PartialEq`, and `Eq` on `Error`.
+
+`Error` stores `source` as `Option<Arc<dyn StdError + Send + Sync + 'static>>` instead of `Box`,
+keeping `size_of::<Error>() == 104` and preserving all auto traits (`Send`, `Sync`, `Unpin`). Two
+`Error` values are equal when their `kind`, `code`, path/context offsets, `span`, `location`,
+`message`, `limit`, and source (by `Arc::ptr_eq` or display text) match. All seven
+`serde::de::Error` methods (`invalid_type`, `invalid_value`, `invalid_length`, `unknown_variant`,
+`unknown_field`, `missing_field`, `duplicate_field`) are overridden on `Error` so typed readers and
+derived `Deserialize` implementations emit exact `ErrorCode`s while preserving Serde's wording
+byte for byte. A dedicated reference page (`docs/error-codes.md`) documents every variant, its
+`yaml.<kebab-name>` string, its usual `ErrorKind` (including `libyaml-compat` kind remappings), and
+its meaning, checked bidirectionally by unit and integration tests.
+
+**Alternatives.** Replace `ErrorKind` with `ErrorCode`: breaking change in `0.2.x` and loses
+coarse pipeline-stage matching. Expose codes as `&'static str` only: gives up compile-time
+exhaustiveness/typo checking and diverges from the format contract (`docs/interface.md`). Drop
+`source` on `Error::clone()` or ignore `source` in `PartialEq`: silently loses underlying I/O or
+UTF-8 causes on clone or treats sourced and unsourced errors as equal.
+
+**Why.** Callers need a stable contract for matching specific failures without coupling to
+human-readable message text, and tests and diagnostic wrappers need `Error: Clone + PartialEq`.
+Using `Arc` for the rare `source` field keeps `Error` at 104 bytes with zero hot-path overhead.
+
+**Consequences.** Every encoding, scanner, parser, composition, alias, duplicate-key, resolver,
+resource-limit, Serde, emitter, and I/O failure carries a pinned `ErrorCode`, and
+`Error::with_limit` refines `ErrorCode::LimitExceeded` to the specific `LimitKind` code. In
+`libyaml-compat` mode, `ErrorKind` remappings (such as `ErrorKind::Serde` for depth limits and
+`ErrorKind::Parser` for document limits) keep their specific `ErrorCode`. Adding a new `ErrorCode`
+variant requires updating `docs/error-codes.md` and `crates/ayaml/tests/error_codes.rs`, enforced
+by tests.
