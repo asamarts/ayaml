@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `ErrorCode` (`#[non_exhaustive]`, `as_str()`, `Display`, `AsRef<str>`), `Error::code()`, and
+  `Error::with_code()`, exposing stable `yaml.<kebab-name>` failure codes across encoding,
+  scanner, parser, composition, alias, duplicate-key, scalar-resolution, resource-limit, Serde,
+  emitter, and I/O errors; documented in `docs/error-codes.md` alongside `ErrorKind`.
+- `Clone`, `PartialEq`, and `Eq` implementations for `Error`.
 - `ParseOptions` (`#[non_exhaustive]`, `new`, `for_max_input`, `with_limits`, `Default`,
   `From<Limits>`) and `EmitOptions` (`#[non_exhaustive]`, `new`, `flow`, `with_limits`,
   `with_flow`, `with_explicit_start`, `with_explicit_end`, `with_scalar_style`, `with_indent`,

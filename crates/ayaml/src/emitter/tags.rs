@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::fmt::Write as _;
 
-use crate::error::{Error, ErrorKind};
+use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::tag::{Tag, TaggedValue, is_uri_byte, verbatim_reads_back};
 use crate::value::Value;
 
@@ -77,8 +77,9 @@ impl TagForm {
                     suffix: name[cut..].to_owned(),
                 })
             }
-            _ => Err(Error::new(
+            _ => Err(Error::coded(
                 ErrorKind::Emitter,
+                ErrorCode::UnsupportedTag,
                 format!("YAML has no way to write the tag {name:?}"),
             )),
         }
@@ -298,8 +299,9 @@ pub(super) fn core_tag_refusal(tag: &Tag, value: &Value) -> Option<Error> {
     crate::resolver::resolve_explicit_core(&text, tag.suffix(), tag)
         .err()
         .map(|_| {
-            Error::new(
+            Error::coded(
                 ErrorKind::Emitter,
+                ErrorCode::UnsupportedTag,
                 format!(
                     "the tag !!{} cannot be written on {}: no reader takes {text:?} as one",
                     tag.suffix(),

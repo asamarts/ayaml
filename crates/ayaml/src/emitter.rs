@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 
-use crate::error::{Error, ErrorKind};
+use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::limits::Limits;
 use crate::options::EmitOptions;
 use crate::value::Value;
@@ -501,7 +501,12 @@ fn emit_documents_to_string(
         styles,
     )?;
     String::from_utf8(output).map_err(|error| {
-        Error::new(ErrorKind::Emitter, "emitter produced invalid UTF-8").with_source(error)
+        Error::coded(
+            ErrorKind::Emitter,
+            ErrorCode::InvalidEmitEvent,
+            "emitter produced invalid UTF-8",
+        )
+        .with_source(error)
     })
 }
 
@@ -520,7 +525,12 @@ fn emit_value_to_string(
         styles,
     )?;
     String::from_utf8(output).map_err(|error| {
-        Error::new(ErrorKind::Emitter, "emitter produced invalid UTF-8").with_source(error)
+        Error::coded(
+            ErrorKind::Emitter,
+            ErrorCode::InvalidEmitEvent,
+            "emitter produced invalid UTF-8",
+        )
+        .with_source(error)
     })
 }
 
@@ -1002,16 +1012,18 @@ pub(crate) fn validate_options(options: &EmitterOptions) -> Result<(), Error> {
     if (2..=9).contains(&options.indent) {
         Ok(())
     } else {
-        Err(Error::new(
+        Err(Error::coded(
             ErrorKind::Emitter,
+            ErrorCode::InvalidEmitterOptions,
             format!("indent must be between 2 and 9, got {}", options.indent),
         ))
     }
 }
 
 fn nested_tag_error() -> Error {
-    Error::new(
+    Error::coded(
         ErrorKind::Emitter,
+        ErrorCode::UnsupportedTag,
         "YAML cannot write a tagged value whose payload is also tagged (for example a nested Serde enum)",
     )
 }

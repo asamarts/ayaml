@@ -1,6 +1,6 @@
 use super::{
-    Anchor, BlockState, Call, CollectionStyle, Cont, Cow, DUPLICATE_PROPERTIES, Error, Event,
-    FlowLack, NodeBounds, Parser, Run, ScalarStyle, Span, Step, Tag, TokenKind,
+    Anchor, BlockState, Call, CollectionStyle, Cont, Cow, DUPLICATE_PROPERTIES, Error, ErrorCode,
+    Event, FlowLack, NodeBounds, Parser, Run, ScalarStyle, Span, Step, Tag, TokenKind,
     flow_brackets_match, has_value_indicator, implicit_key_fits, is_mapping_line,
     value_indicator_index,
 };
@@ -36,7 +36,11 @@ impl<'a> Parser<'a> {
                 || (inherited_anchor.is_some() && line_anchor.is_some());
             if rest.is_empty() {
                 if duplicate {
-                    return Err(self.error(self.token(line, 0).span, DUPLICATE_PROPERTIES));
+                    return Err(self.error(
+                        self.token(line, 0).span,
+                        ErrorCode::DuplicateNodeProperties,
+                        DUPLICATE_PROPERTIES,
+                    ));
                 }
                 let next_index = index + 1;
                 let has_properties = tag.is_some() || anchor.is_some();
@@ -82,6 +86,7 @@ impl<'a> Parser<'a> {
                 if line_tag.is_some() || line_anchor.is_some() {
                     return Err(self.error(
                         self.token(rest, 0).span,
+                        ErrorCode::MisplacedNodeProperties,
                         "properties cannot precede a compact block sequence",
                     ));
                 }
@@ -118,7 +123,11 @@ impl<'a> Parser<'a> {
                 }));
             }
             if duplicate {
-                return Err(self.error(self.token(rest, 0).span, DUPLICATE_PROPERTIES));
+                return Err(self.error(
+                    self.token(rest, 0).span,
+                    ErrorCode::DuplicateNodeProperties,
+                    DUPLICATE_PROPERTIES,
+                ));
             }
             stack.push(Cont::NodeInline { rest, index });
             return Ok(Step::Call(Call::Inline {
@@ -293,6 +302,7 @@ impl<'a> Parser<'a> {
             if tag.is_some() || anchor.is_some() {
                 return Err(self.error(
                     content_first.span,
+                    ErrorCode::MisplacedNodeProperties,
                     "properties cannot precede a compact block sequence",
                 ));
             }
@@ -314,6 +324,7 @@ impl<'a> Parser<'a> {
             if explicit_key && (tag.is_some() || anchor.is_some()) {
                 return Err(self.error(
                     self.token(content, 0).span,
+                    ErrorCode::MisplacedNodeProperties,
                     "properties cannot precede an explicit mapping key",
                 ));
             }
@@ -518,6 +529,7 @@ impl<'a> Parser<'a> {
                 {
                     return Err(self.error(
                         key_tokens[0].span,
+                        ErrorCode::InvalidImplicitKey,
                         "implicit mapping keys must be on one line",
                     ));
                 }
@@ -529,6 +541,7 @@ impl<'a> Parser<'a> {
                 {
                     return Err(self.error(
                         key_tokens[0].span,
+                        ErrorCode::InvalidImplicitKey,
                         "an implicit mapping key may be at most 1024 characters long",
                     ));
                 }
@@ -608,6 +621,7 @@ impl<'a> Parser<'a> {
         let Some(value_index) = value_index else {
             return Err(self.error(
                 self.token(tokens, 0).span,
+                ErrorCode::MissingMappingColon,
                 "explicit mapping key must be followed by a ':' line",
             ));
         };
@@ -675,6 +689,7 @@ impl<'a> Parser<'a> {
             if tag.is_some() || anchor.is_some() {
                 return Err(self.error(
                     content_first.span,
+                    ErrorCode::MisplacedNodeProperties,
                     "properties cannot precede a compact block sequence",
                 ));
             }
@@ -696,6 +711,7 @@ impl<'a> Parser<'a> {
             if explicit_key && (tag.is_some() || anchor.is_some()) {
                 return Err(self.error(
                     self.token(content, 0).span,
+                    ErrorCode::MisplacedNodeProperties,
                     "properties cannot precede an explicit mapping key",
                 ));
             }
@@ -748,7 +764,11 @@ impl<'a> Parser<'a> {
                 self.emit(self.null_scalar_with(span, tag, anchor))?;
                 return Ok(Step::Return(index));
             }
-            return Err(self.flow_error(tokens, 0, FlowLack::Node("expected a node".to_owned())));
+            return Err(self.flow_error(
+                tokens,
+                0,
+                FlowLack::Node(ErrorCode::UnexpectedToken, "expected a node".to_owned()),
+            ));
         }
         let token = self.token(tokens, index);
         let span = token.span;
@@ -779,7 +799,11 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Alias => {
                 if tag.is_some() || anchor.is_some() {
-                    return Err(self.error(span, "aliases cannot carry tags or anchors"));
+                    return Err(self.error(
+                        span,
+                        ErrorCode::AliasWithProperties,
+                        "aliases cannot carry tags or anchors",
+                    ));
                 }
                 let event = Event::Alias {
                     anchor: Anchor::new(&self.input[span.start() + 1..span.end()]),
@@ -812,7 +836,11 @@ impl<'a> Parser<'a> {
             }
             kind => {
                 let problem = format!("unexpected {kind} in node position");
-                Err(self.flow_error(tokens, index, FlowLack::Node(problem)))
+                Err(self.flow_error(
+                    tokens,
+                    index,
+                    FlowLack::Node(ErrorCode::UnexpectedToken, problem),
+                ))
             }
         }
     }

@@ -30,7 +30,7 @@ use super::{
     Builder, Node, NodeDeserializer, NodeOptions, SeenKey, check_consumed, collection_drops,
     inside_key, node_key_text, parse_document, plain_scalar, with_span,
 };
-use crate::error::{Code, Error, ErrorKind};
+use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::Event;
 use crate::limits::Limits;
 use crate::parser::{DocumentEvents, EventConsumer};
@@ -229,12 +229,12 @@ impl<'de> Stream<'de> {
                 Some(Event::StreamEnd { .. }) | None => return Ok(()),
                 Some(Event::Directive { .. }) => {}
                 Some(Event::DocumentStart { span, .. }) => {
-                    return Err(Error::new(
+                    return Err(Error::coded(
                         ErrorKind::Parser,
+                        ErrorCode::TrailingDocuments,
                         "expected a single YAML document, but found trailing documents",
                     )
-                    .with_span(span)
-                    .with_code(Code::TrailingDocuments));
+                    .with_span(span));
                 }
                 Some(event) => return Err(misplaced(&event)),
             }
@@ -834,7 +834,13 @@ impl<'de> MapAccess<'de> for MappingAccess<'de, '_> {
             .stream
             .key_slot()
             .and_then(Option::take)
-            .ok_or_else(|| Error::new(ErrorKind::Serde, "map value requested before key"))?;
+            .ok_or_else(|| {
+                Error::coded(
+                    ErrorKind::Serde,
+                    ErrorCode::MapValueBeforeKey,
+                    "map value requested before key",
+                )
+            })?;
         let span = self.stream.ahead()?.span();
         let value = self
             .stream

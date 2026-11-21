@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::error::{Error, ErrorKind};
+use crate::error::{Error, ErrorCode, ErrorKind};
 
 /// The block structure that owns a node, as far as the context-free scanner
 /// can tell from the text around it.
@@ -423,10 +423,15 @@ pub(super) fn strip_comment<'t>(line: &'t str, names: NameRules<'_, '_>) -> &'t 
 
 pub(super) fn non_printable_error(input: &str, index: usize) -> Error {
     let Some(ch) = input[index..].chars().next() else {
-        return Error::new(ErrorKind::Scanner, "invalid character boundary");
+        return Error::coded(
+            ErrorKind::Scanner,
+            ErrorCode::NonPrintableChar,
+            "invalid character boundary",
+        );
     };
-    Error::new(
+    Error::coded(
         ErrorKind::Scanner,
+        ErrorCode::NonPrintableChar,
         format!(
             "non-printable character U+{:04X} is not allowed in YAML",
             u32::from(ch)

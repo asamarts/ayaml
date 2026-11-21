@@ -4,7 +4,7 @@
 //! module resolves one scalar to a `Value`, and the event keeps the rest of
 //! its metadata.
 
-use crate::error::{Error, ErrorKind};
+use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::ScalarStyle;
 use crate::number::Number;
 use crate::tag::{Tag, TaggedValue};
@@ -68,17 +68,22 @@ pub(crate) fn resolve_explicit_core(text: &str, suffix: &str, tag: &Tag) -> Resu
         "str" => Ok(Value::String(text.to_owned())),
         "int" => parse_int_with(text, true)
             .map(Value::Number)
-            .ok_or_else(|| resolution_error("invalid !!int scalar")),
+            .ok_or_else(|| resolution_error(ErrorCode::InvalidIntScalar, "invalid !!int scalar")),
         // The core schema reads `!!float 01` as 1.0. Untagged, `01` stays a
         // string.
         "float" => parse_float_with(text, true)
             .map(Value::Number)
-            .ok_or_else(|| resolution_error("invalid !!float scalar")),
+            .ok_or_else(|| {
+                resolution_error(ErrorCode::InvalidFloatScalar, "invalid !!float scalar")
+            }),
         "bool" => parse_bool(text)
             .map(Value::Bool)
-            .ok_or_else(|| resolution_error("invalid !!bool scalar")),
+            .ok_or_else(|| resolution_error(ErrorCode::InvalidBoolScalar, "invalid !!bool scalar")),
         "null" if is_null(text) => Ok(Value::Null),
-        "null" => Err(resolution_error("invalid !!null scalar")),
+        "null" => Err(resolution_error(
+            ErrorCode::InvalidNullScalar,
+            "invalid !!null scalar",
+        )),
         // A core name this schema doesn't define is left for the application, like a custom tag.
         _ => Ok(Value::from(TaggedValue::new(
             tag.clone(),
@@ -87,8 +92,8 @@ pub(crate) fn resolve_explicit_core(text: &str, suffix: &str, tag: &Tag) -> Resu
     }
 }
 
-fn resolution_error(message: &str) -> Error {
-    Error::new(ErrorKind::Resolution, message)
+fn resolution_error(code: ErrorCode, message: &str) -> Error {
+    Error::coded(ErrorKind::Resolution, code, message)
 }
 
 fn is_null(text: &str) -> bool {
