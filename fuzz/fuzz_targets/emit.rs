@@ -65,10 +65,13 @@ fn without_directives(events: &[Event<'_>]) -> usize {
 /// read back with every event, by that reader or, where it wrote YAML that libyaml's reading
 /// refuses, by the default one; and it refuses nothing but a dangling alias.
 fn compat_events(input: &str, limits: &ayaml::Limits) {
-    let Ok(events) = ayaml::compat::parse_events_eager_with_limits(input, limits) else {
+    let parse_options = ayaml::compat::ParseOptions::new().with_limits(limits.clone());
+    let default_parse = ayaml::ParseOptions::new().with_limits(limits.clone());
+    let emit_options = ayaml::EmitOptions::new().with_limits(limits.clone());
+    let Ok(events) = ayaml::compat::parse_events_eager_with(input, &parse_options) else {
         return;
     };
-    match ayaml::to_string_events_with_limits(&events, limits) {
+    match ayaml::to_string_events_with(&events, &emit_options) {
         Ok(rendered) => {
             assert!(
                 first_dangling_alias(&events).is_none(),
@@ -79,10 +82,11 @@ fn compat_events(input: &str, limits: &ayaml::Limits) {
                 events.is_ok_and(|events| without_directives(&events) == wanted)
             };
             assert!(
-                read(ayaml::compat::parse_events_eager_with_limits(
-                    &rendered, limits
+                read(ayaml::compat::parse_events_eager_with(
+                    &rendered,
+                    &parse_options
                 )) || read(
-                    ayaml::parse_events_with_limits(&rendered, limits)
+                    ayaml::parse_events_with(&rendered, &default_parse)
                         .and_then(Iterator::collect::<Result<Vec<_>, _>>)
                 ),
                 "what was written of the compatibility reader's events isn't read back; \
@@ -102,8 +106,10 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let limits = ayaml::Limits::default().with_max_documents(64);
+    let parse_options = ayaml::ParseOptions::new().with_limits(limits.clone());
+    let emit_options = ayaml::EmitOptions::new().with_limits(limits.clone());
     compat_events(input, &limits);
-    let Ok(stream) = ayaml::parse_events_with_limits(input, &limits) else {
+    let Ok(stream) = ayaml::parse_events_with(input, &parse_options) else {
         return;
     };
     let Ok(events) = stream.collect::<Result<Vec<_>, _>>() else {
@@ -111,7 +117,7 @@ fuzz_target!(|data: &[u8]| {
     };
 
     let dangling = first_dangling_alias(&events);
-    let rendered = match ayaml::to_string_events_with_limits(&events, &limits) {
+    let rendered = match ayaml::to_string_events_with(&events, &emit_options) {
         Ok(rendered) => rendered,
         Err(error) => {
             // The refusal is of the first such alias, the lazy writer says the same, and no
@@ -119,12 +125,12 @@ fuzz_target!(|data: &[u8]| {
             let name = dangling
                 .unwrap_or_else(|| panic!("event emission failed: {error}; input={input:?}"));
             assert_eq!(error.to_string(), refusal_of(name), "input={input:?}");
-            let stream = ayaml::parse_events_with_limits(input, &limits).expect("parsed above");
-            let lazy = ayaml::to_writer_event_stream_with_limits(&mut Vec::new(), stream, &limits)
+            let stream = ayaml::parse_events_with(input, &parse_options).expect("parsed above");
+            let lazy = ayaml::to_writer_event_stream_with(&mut Vec::new(), stream, &emit_options)
                 .expect_err("the lazy writer wrote a dangling alias");
             assert_eq!(lazy.to_string(), refusal_of(name), "input={input:?}");
             assert!(
-                ayaml::parse_documents_with_limits(input, &limits).is_err(),
+                ayaml::parse_documents_with(input, &parse_options).is_err(),
                 "a value reader loads what the event writer refuses; input={input:?}"
             );
             return;
@@ -134,7 +140,7 @@ fuzz_target!(|data: &[u8]| {
         dangling.is_none(),
         "a dangling alias was written; input={input:?} rendered={rendered:?}"
     );
-    let reparsed = ayaml::parse_events_with_limits(&rendered, &limits)
+    let reparsed = ayaml::parse_events_with(&rendered, &parse_options)
         .and_then(Iterator::collect::<Result<Vec<_>, _>>)
         .unwrap_or_else(|error| {
             panic!("event output does not parse: {error}; input={input:?} rendered={rendered:?}")
@@ -145,9 +151,9 @@ fuzz_target!(|data: &[u8]| {
         "non-directive event count changed; input={input:?} rendered={rendered:?}"
     );
 
-    let stream = ayaml::parse_events_with_limits(input, &limits).expect("parsed above");
+    let stream = ayaml::parse_events_with(input, &parse_options).expect("parsed above");
     let mut lazy = Vec::new();
-    ayaml::to_writer_event_stream_with_limits(&mut lazy, stream, &limits)
+    ayaml::to_writer_event_stream_with(&mut lazy, stream, &emit_options)
         .unwrap_or_else(|error| panic!("lazy emission failed: {error}; input={input:?}"));
     assert_eq!(
         lazy,
@@ -155,19 +161,19 @@ fuzz_target!(|data: &[u8]| {
         "lazy and collected writers differ; input={input:?}"
     );
 
-    let Ok(documents) = ayaml::parse_documents_with_limits(input, &limits) else {
+    let Ok(documents) = ayaml::parse_documents_with(input, &parse_options) else {
         return;
     };
     assert_eq!(
-        ayaml::parse_documents_with_limits(&rendered, &limits)
+        ayaml::parse_documents_with(&rendered, &parse_options)
             .ok()
             .as_ref(),
         Some(&documents),
         "event output changes the documents; input={input:?} rendered={rendered:?}"
     );
-    let rendered = ayaml::to_string_documents_with_limits(&documents, &limits)
+    let rendered = ayaml::to_string_documents_with(&documents, &emit_options)
         .unwrap_or_else(|error| panic!("value emission failed: {error}; input={input:?}"));
-    let decoded = ayaml::parse_documents_with_limits(&rendered, &limits).unwrap_or_else(|error| {
+    let decoded = ayaml::parse_documents_with(&rendered, &parse_options).unwrap_or_else(|error| {
         panic!("value output does not parse: {error}; input={input:?} rendered={rendered:?}")
     });
     assert_eq!(

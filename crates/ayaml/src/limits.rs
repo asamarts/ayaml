@@ -197,6 +197,12 @@ impl Default for Limits {
 
 impl Limits {
     /// The default profile, usable in `const` contexts.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self::default_profile()
+    }
+
+    /// The default profile, usable in `const` contexts.
     pub(crate) const fn default_profile() -> Self {
         Self {
             max_documents: DEFAULT_MAX_DOCUMENTS,

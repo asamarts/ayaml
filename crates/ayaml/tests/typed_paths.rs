@@ -420,18 +420,16 @@ fn an_alias_reads_as_the_place_it_is_used() {
 #[cfg(feature = "libyaml-compat")]
 #[test]
 fn compat_typed_readers_accept_explicit_limits() {
-    let limits = ayaml::Limits::default();
+    let options = ayaml::compat::ParseOptions::new();
     assert_eq!(
-        ayaml::compat::from_str_with_limits::<Value>("a: 1\n", &limits)
-            .expect("compat from_str_with_limits"),
+        ayaml::compat::from_str_with::<Value>("a: 1\n", &options).expect("compat from_str_with"),
         ayaml::parse_value("a: 1\n").expect("value")
     );
-    let tight = ayaml::Limits::default().with_max_events(1);
-    assert!(ayaml::compat::from_str_with_limits::<Value>("a: 1\n", &tight).is_err());
-    assert!(
-        ayaml::compat::from_str_seed_with_limits("a: 1\n", &limits, PhantomData::<Value>,).is_ok()
-    );
-    assert!(ayaml::compat::deserialize_any_with_limits("a: 1\n", &limits, IgnoredAny).is_ok());
+    let tight =
+        ayaml::compat::ParseOptions::new().with_limits(ayaml::Limits::new().with_max_events(1));
+    assert!(ayaml::compat::from_str_with::<Value>("a: 1\n", &tight).is_err());
+    assert!(ayaml::compat::from_str_seed_with("a: 1\n", &options, PhantomData::<Value>).is_ok());
+    assert!(ayaml::compat::deserialize_any_with("a: 1\n", &options, IgnoredAny).is_ok());
 }
 
 #[test]

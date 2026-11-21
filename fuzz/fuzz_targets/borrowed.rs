@@ -49,9 +49,10 @@ fuzz_target!(|data: &[u8]| {
         same_by_tree_and_by_events!(serde_json::Value, input, compat);
     }
 
-    let limits = ayaml::Limits::default().with_max_documents(4);
-    let streamed = streamed_documents(input, &limits);
-    let composed = ayaml::parse_documents_with_limits(input, &limits);
+    let options =
+        ayaml::ParseOptions::new().with_limits(ayaml::Limits::new().with_max_documents(4));
+    let streamed = streamed_documents(input, &options);
+    let composed = ayaml::parse_documents_with(input, &options);
     match (streamed, composed) {
         (Ok(streamed), Ok(composed)) => assert_eq!(streamed, composed, "input={input:?}"),
         // The same deliberate typed-map duplicate-key difference applies to a stream.
@@ -65,9 +66,9 @@ fuzz_target!(|data: &[u8]| {
 
 fn streamed_documents(
     input: &str,
-    limits: &ayaml::Limits,
+    options: &ayaml::ParseOptions,
 ) -> Result<Vec<ayaml::Value>, ayaml::Error> {
-    let mut deserializer = ayaml::Deserializer::from_str_with_limits(input, limits)?;
+    let mut deserializer = ayaml::Deserializer::from_str_with(input, options)?;
     let mut documents = Vec::new();
     while let Some(document) = deserializer.next_borrowed::<ayaml::Value>()? {
         documents.push(document);

@@ -398,12 +398,14 @@ fn first_difference(actual: &[String], expected: &[String]) -> String {
 
 #[cfg(not(feature = "compat"))]
 fn events(input: &str) -> Result<Vec<Event<'_>>, ayaml::Error> {
-    ayaml::parse_events_with_limits(input, &suite_limits())?.collect()
+    let options = ayaml::ParseOptions::new().with_limits(suite_limits());
+    ayaml::parse_events_with(input, &options)?.collect()
 }
 
 #[cfg(feature = "compat")]
 fn events(input: &str) -> Result<Vec<Event<'_>>, ayaml::Error> {
-    ayaml::compat::parse_events_eager_with_limits(input, &suite_limits())
+    let options = ayaml::compat::ParseOptions::new().with_limits(suite_limits());
+    ayaml::compat::parse_events_eager_with(input, &options)
 }
 
 #[cfg(not(feature = "compat"))]
@@ -419,7 +421,8 @@ fn eager_events(_input: &str) -> Option<Result<Vec<Event<'_>>, ayaml::Error>> {
 
 #[cfg(not(feature = "compat"))]
 fn documents(input: &str) -> Option<Result<Vec<ayaml::Value>, ayaml::Error>> {
-    Some(ayaml::parse_documents_with_limits(input, &suite_limits()))
+    let options = ayaml::ParseOptions::new().with_limits(suite_limits());
+    Some(ayaml::parse_documents_with(input, &options))
 }
 
 #[cfg(feature = "compat")]
@@ -517,9 +520,11 @@ fn check_json(input: &str, expected: &str) -> Option<Result<(), String>> {
 
 fn check_emit_events(events: &[Event<'_>]) -> Result<(), String> {
     let limits = suite_limits();
-    let output = ayaml::to_string_events_with_limits(events, &limits)
+    let parse_options = ayaml::ParseOptions::new().with_limits(limits.clone());
+    let emit_options = ayaml::EmitOptions::new().with_limits(limits);
+    let output = ayaml::to_string_events_with(events, &emit_options)
         .map_err(|error| format!("emit failed: {error}"))?;
-    let reparsed = ayaml::parse_events_with_limits(&output, &limits)
+    let reparsed = ayaml::parse_events_with(&output, &parse_options)
         .and_then(Iterator::collect::<Result<Vec<_>, _>>)
         .map_err(|error| format!("output does not parse: {error}; output {output:?}"))?;
     let before = tree(events, Detail::Content);
@@ -536,12 +541,14 @@ fn check_emit_events(events: &[Event<'_>]) -> Result<(), String> {
 
 fn check_emit_stream(input: &str, events: &[Event<'_>]) -> Result<(), String> {
     let limits = suite_limits();
-    let collected = ayaml::to_string_events_with_limits(events, &limits)
+    let parse_options = ayaml::ParseOptions::new().with_limits(limits.clone());
+    let emit_options = ayaml::EmitOptions::new().with_limits(limits);
+    let collected = ayaml::to_string_events_with(events, &emit_options)
         .map_err(|error| format!("emit failed: {error}"))?;
-    let stream = ayaml::parse_events_with_limits(input, &limits)
+    let stream = ayaml::parse_events_with(input, &parse_options)
         .map_err(|error| format!("lazy parse failed: {error}"))?;
     let mut lazy = Vec::new();
-    ayaml::to_writer_event_stream_with_limits(&mut lazy, stream, &limits)
+    ayaml::to_writer_event_stream_with(&mut lazy, stream, &emit_options)
         .map_err(|error| format!("lazy emit failed: {error}"))?;
     if lazy == collected.as_bytes() {
         Ok(())
@@ -555,9 +562,11 @@ fn check_emit_stream(input: &str, events: &[Event<'_>]) -> Result<(), String> {
 
 fn check_emit_value(documents: &[ayaml::Value]) -> Result<(), String> {
     let limits = suite_limits();
-    let output = ayaml::to_string_documents_with_limits(documents, &limits)
+    let parse_options = ayaml::ParseOptions::new().with_limits(limits.clone());
+    let emit_options = ayaml::EmitOptions::new().with_limits(limits);
+    let output = ayaml::to_string_documents_with(documents, &emit_options)
         .map_err(|error| format!("emit failed: {error}"))?;
-    let reparsed = ayaml::parse_documents_with_limits(&output, &limits)
+    let reparsed = ayaml::parse_documents_with(&output, &parse_options)
         .map_err(|error| format!("output does not parse: {error}; output {output:?}"))?;
     if reparsed == documents {
         Ok(())

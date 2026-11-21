@@ -56,8 +56,8 @@ fn spans_keep_crlf_bom_and_multibyte_offsets() {
 
 #[test]
 fn spanned_tree_uses_normal_limits() {
-    let limits = ayaml::Limits::default().with_max_events(1);
-    assert!(SpannedTree::parse_with_limits("a: 1\n", &limits).is_err());
+    let options = ayaml::ParseOptions::new().with_limits(ayaml::Limits::new().with_max_events(1));
+    assert!(SpannedTree::parse_with("a: 1\n", &options).is_err());
 }
 
 #[cfg(feature = "libyaml-compat")]

@@ -93,9 +93,10 @@ fn stream(documents: Vec<Document>) -> Vec<Event<'static>> {
 /// Each way of writing collected events gives the same answer, within the same limits: the
 /// text, or the refusal's message.
 fn written(events: &[Event<'_>], limits: &Limits) -> Result<String, String> {
-    let collected = ayaml::to_string_events_with_limits(events, limits);
+    let options = ayaml::EmitOptions::new().with_limits(limits.clone());
+    let collected = ayaml::to_string_events_with(events, &options);
     let mut bytes = Vec::new();
-    let streamed = ayaml::to_writer_events_with_limits(&mut bytes, events, limits)
+    let streamed = ayaml::to_writer_events_with(&mut bytes, events, &options)
         .map(|()| String::from_utf8(bytes).expect("text"));
     match (collected, streamed) {
         (Ok(text), Ok(streamed)) => {
@@ -324,20 +325,22 @@ fn the_event_writer_keeps_within_the_anchor_limit() {
             ],
         ),
     )]);
-    let error = ayaml::to_string_events_with_limits(&three, &limits).expect_err("three names");
+    let emit_two = ayaml::EmitOptions::new().with_limits(limits.clone());
+    let error = ayaml::to_string_events_with(&three, &emit_two).expect_err("three names");
     assert_eq!(error.kind(), ErrorKind::Limit, "{error}");
     assert_eq!(
         error.limit().map(ayaml::LimitExceeded::kind),
         Some(LimitKind::Anchors)
     );
-    // Each way of writing collected events takes limits, so a caller that reads a document
+    // Each way of writing collected events takes options, so a caller that reads a document
     // of more anchors than the default allows can write its events back to a writer too.
     let mut bytes = Vec::new();
     let error =
-        ayaml::to_writer_events_with_limits(&mut bytes, &three, &limits).expect_err("three names");
+        ayaml::to_writer_events_with(&mut bytes, &three, &emit_two).expect_err("three names");
     assert_eq!(error.kind(), ErrorKind::Limit, "{error}");
     let mut bytes = Vec::new();
-    ayaml::to_writer_events_with_limits(&mut bytes, &three, &limits.clone().with_max_anchors(3))
+    let emit_three = ayaml::EmitOptions::new().with_limits(limits.with_max_anchors(3));
+    ayaml::to_writer_events_with(&mut bytes, &three, &emit_three)
         .expect("three names within a limit of three");
     assert_eq!(
         String::from_utf8(bytes).expect("text"),
@@ -456,7 +459,8 @@ fn the_event_writer_refuses_a_directive_that_no_reader_takes() {
         assert!(default.is_err(), "{text:?}");
         #[cfg(feature = "libyaml-compat")]
         {
-            let back = ayaml::compat::parse_events_eager_with_limits(&text, &limits)
+            let compat_options = ayaml::compat::ParseOptions::new().with_limits(limits.clone());
+            let back = ayaml::compat::parse_events_eager_with(&text, &compat_options)
                 .unwrap_or_else(|error| panic!("{text:?}: {error}"));
             assert_eq!(back.len(), 6, "{text:?}");
             assert!(
@@ -530,10 +534,12 @@ fn an_empty_collection_is_a_level_to_the_writers_as_to_the_parser() {
         let mut least = None;
         for depth in 1..=6 {
             let limits = Limits::default().with_max_depth(depth);
-            let read = ayaml::parse_value_with_limits(text, &limits).is_ok();
-            let from_value = ayaml::to_string_with_limits(&value, &limits).is_ok();
-            let from_events = ayaml::to_string_events_with_limits(&events, &limits).is_ok();
-            let reread = ayaml::parse_value_with_limits(&unlimited, &limits).is_ok();
+            let parse_options = ayaml::ParseOptions::new().with_limits(limits.clone());
+            let emit_options = ayaml::EmitOptions::new().with_limits(limits);
+            let read = ayaml::parse_value_with(text, &parse_options).is_ok();
+            let from_value = ayaml::to_string_with(&value, &emit_options).is_ok();
+            let from_events = ayaml::to_string_events_with(&events, &emit_options).is_ok();
+            let reread = ayaml::parse_value_with(&unlimited, &parse_options).is_ok();
             assert_eq!(
                 (from_value, from_events, reread),
                 (read, read, read),

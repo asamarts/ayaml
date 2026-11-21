@@ -62,7 +62,7 @@ fn a_block_collection_cannot_start_on_a_document_start_line() {
         "parse_documents",
         "Deserializer",
         "parse_events",
-        "compat::parse_events_eager_with_limits",
+        "compat::parse_events_eager_with",
     ];
     for input in ["a: 1\n--- b", "- a\n--- [b]", "a: 1\n...\n---\nb: c"] {
         for (entry, read) in entry_points(input) {

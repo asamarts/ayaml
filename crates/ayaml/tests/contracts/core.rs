@@ -175,8 +175,11 @@ fn parse_value_rejects_duplicate_keys_and_trailing_documents() {
     // A single-document entry point rejects a second document itself.
     assert_eq!(trailing.kind(), ErrorKind::Parser);
     // The compatibility profile stops the stream at its document limit first.
-    let limited = ayaml::parse_value_with_limits("a: 1\n---\nb: 2\n", &Limits::compat())
-        .expect_err("document limit");
+    let limited = ayaml::parse_value_with(
+        "a: 1\n---\nb: 2\n",
+        &ayaml::ParseOptions::new().with_limits(Limits::compat()),
+    )
+    .expect_err("document limit");
     assert_eq!(limited.kind(), ErrorKind::Limit);
 }
 
@@ -204,23 +207,23 @@ fn limit_errors_carry_a_source_span() {
         ),
     ];
     for (input, limits) in cases {
-        let error = ayaml::parse_value_with_limits(input, limits).expect_err(input);
+        let options = ayaml::ParseOptions::new().with_limits(limits.clone());
+        let error = ayaml::parse_value_with(input, &options).expect_err(input);
         assert_eq!(error.kind(), ErrorKind::Limit, "{input:?}: {error}");
         assert!(error.span().is_some(), "{input:?}: {error}");
         assert!(error.limit().is_some(), "{input:?}: {error}");
     }
 
-    let limits = Limits::default().with_max_documents(1);
-    let error = ayaml::parse_documents_with_limits("a\n---\nb\n", &limits).expect_err("docs");
+    let options = ayaml::ParseOptions::new().with_limits(Limits::new().with_max_documents(1));
+    let error = ayaml::parse_documents_with("a\n---\nb\n", &options).expect_err("docs");
     assert_eq!(error.kind(), ErrorKind::Limit);
     assert!(error.span().is_some(), "{error}");
 }
 
 #[test]
 fn parse_documents_returns_each_document() {
-    let limits = Limits::default().with_max_documents(2);
-    let documents =
-        ayaml::parse_documents_with_limits("a: 1\n---\nb: 2\n", &limits).expect("parse");
+    let options = ayaml::ParseOptions::new().with_limits(Limits::new().with_max_documents(2));
+    let documents = ayaml::parse_documents_with("a: 1\n---\nb: 2\n", &options).expect("parse");
     assert_eq!(documents.len(), 2);
     assert_eq!(documents[0]["a"].as_u64(), Some(1));
     assert_eq!(documents[1]["b"].as_u64(), Some(2));
@@ -280,15 +283,15 @@ fn public_event_stream_can_stop_early_and_reports_limits() {
     assert!(matches!(events.next(), Some(Ok(Event::StreamStart { .. }))));
     drop(events);
 
-    let limits = Limits::default().with_max_input_bytes(2);
-    let error = ayaml::parse_events_with_limits("a: 1\n", &limits).expect_err("limit");
+    let options = ayaml::ParseOptions::new().with_limits(Limits::new().with_max_input_bytes(2));
+    let error = ayaml::parse_events_with("a: 1\n", &options).expect_err("limit");
     assert_eq!(error.kind(), ErrorKind::Limit);
 }
 
 #[test]
 fn event_stream_spans_documents_lazily() {
-    let limits = Limits::default().with_max_documents(2);
-    let events: Vec<_> = ayaml::parse_events_with_limits("--- a\n--- b\n", &limits)
+    let options = ayaml::ParseOptions::new().with_limits(Limits::new().with_max_documents(2));
+    let events: Vec<_> = ayaml::parse_events_with("--- a\n--- b\n", &options)
         .expect("events")
         .collect::<Result<Vec<_>, _>>()
         .expect("event items");
@@ -325,8 +328,8 @@ fn event_places_match_their_offsets() {
                 .expect("events")
         }),
         #[cfg(feature = "libyaml-compat")]
-        ("compat::parse_events_eager_with_limits", |input| {
-            ayaml::compat::parse_events_eager_with_limits(input, &Limits::default())
+        ("compat::parse_events_eager_with", |input| {
+            ayaml::compat::parse_events_eager_with(input, &ayaml::compat::ParseOptions::new())
                 .expect("events")
         }),
     ];
@@ -356,8 +359,11 @@ fn event_stream_defers_syntax_errors_to_items_and_enforces_global_document_limit
     assert!(matches!(events.next(), Some(Err(_))));
     assert!(events.next().is_none());
 
-    let mut docs =
-        ayaml::parse_events_with_limits("--- a\n--- b\n", &Limits::compat()).expect("stream");
+    let mut docs = ayaml::parse_events_with(
+        "--- a\n--- b\n",
+        &ayaml::ParseOptions::new().with_limits(Limits::compat()),
+    )
+    .expect("stream");
     let error = docs.by_ref().find_map(Result::err).expect("document limit");
     assert_eq!(error.kind(), ErrorKind::Limit);
 }
@@ -691,7 +697,7 @@ fn compat_lazy_events_match_eager_and_yield_errors() {
         .expect("lazy stream")
         .collect::<Result<_, _>>()
         .expect("lazy events");
-    let eager = ayaml::compat::parse_events_eager_with_limits(input, &Limits::default())
+    let eager = ayaml::compat::parse_events_eager_with(input, &ayaml::compat::ParseOptions::new())
         .expect("eager events");
     assert_eq!(lazy, eager);
 
@@ -704,14 +710,15 @@ fn compat_lazy_events_match_eager_and_yield_errors() {
         }
     );
     let error = stream.find_map(Result::err).expect("an error item");
-    let eager_error = ayaml::compat::parse_events_eager_with_limits(invalid, &Limits::default())
-        .expect_err("eager error");
+    let eager_error =
+        ayaml::compat::parse_events_eager_with(invalid, &ayaml::compat::ParseOptions::new())
+            .expect_err("eager error");
     assert_eq!(error.kind(), eager_error.kind());
     assert_eq!(error.message(), eager_error.message());
     assert_eq!(error.location(), eager_error.location());
 
-    let limits = Limits::default().with_max_events(1);
-    let mut stream = ayaml::compat::parse_events_with_limits("a\n", &limits).expect("lazy stream");
+    let options = ayaml::compat::ParseOptions::new().with_limits(Limits::new().with_max_events(1));
+    let mut stream = ayaml::compat::parse_events_with("a\n", &options).expect("lazy stream");
     assert!(stream.next().expect("stream start").is_ok());
     assert!(stream.next().expect("event").is_err());
 

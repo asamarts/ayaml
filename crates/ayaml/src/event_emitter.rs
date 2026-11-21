@@ -29,11 +29,12 @@ use crate::EventStream;
 use crate::emitter::{
     MAX_IMPLICIT_KEY_CHARS, Output, RedefinedHandles, TagDirectives, block_scalar_ok, can_fold,
     emit_double_quoted, expand_folded, is_printable, looks_like_leading_zero_numeral,
-    needs_explicit_indent, plain_text_ok, single_quoted_ok,
+    needs_explicit_indent, plain_text_ok, single_quoted_ok, validate_options,
 };
 use crate::error::{Error, ErrorKind};
 use crate::event::{Anchor, CollectionStyle, Event, ScalarStyle};
 use crate::limits::Limits;
+use crate::options::EmitOptions;
 use crate::scanner::Scanner;
 use crate::tag::Tag;
 
@@ -54,7 +55,24 @@ const STEP: usize = 2;
 ///
 /// Returns an error when the events cannot be written, a configured limit is exceeded, or the writer fails.
 pub fn to_string_events(events: &[Event<'_>]) -> Result<String, Error> {
-    to_string_events_with_limits(events, &Limits::default())
+    to_string_events_with(events, &EmitOptions::new())
+}
+
+/// Emit a collected event stream as YAML text with explicit emitter options
+/// and limits.
+///
+/// Applies `options.limits` (`max_output_bytes`, `max_depth`, and
+/// `max_anchors` for the anchors of one document) and validates
+/// `options.indent`, while preserving each event's own layout, scalar styles,
+/// and explicit document markers.
+///
+/// # Errors
+///
+/// Returns an error when the events cannot be written, a configured limit is exceeded, or the writer fails.
+pub fn to_string_events_with(events: &[Event<'_>], options: &EmitOptions) -> Result<String, Error> {
+    options.limits.validate()?;
+    validate_options(&options.emitter_options())?;
+    emit_events_to_string(events, &options.limits)
 }
 
 /// Emit a collected event stream with an explicit output-size limit.
@@ -62,10 +80,17 @@ pub fn to_string_events(events: &[Event<'_>]) -> Result<String, Error> {
 /// # Errors
 ///
 /// Returns an error when the events cannot be written, a configured limit is exceeded, or the writer fails.
+#[deprecated(
+    note = "use `to_string_events_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn to_string_events_with_limits(
     events: &[Event<'_>],
     limits: &Limits,
 ) -> Result<String, Error> {
+    emit_events_to_string(events, limits)
+}
+
+fn emit_events_to_string(events: &[Event<'_>], limits: &Limits) -> Result<String, Error> {
     let mut output = Vec::new();
     write_events(
         Output::direct(&mut output, limits),
@@ -86,7 +111,32 @@ pub fn to_string_events_with_limits(
 ///
 /// Returns an error when the events cannot be written, a configured limit is exceeded, or the writer fails.
 pub fn to_writer_events<W: Write>(writer: &mut W, events: &[Event<'_>]) -> Result<(), Error> {
-    to_writer_events_with_limits(writer, events, &Limits::default())
+    to_writer_events_with(writer, events, &EmitOptions::new())
+}
+
+/// Write a collected event stream to a writer with explicit emitter options
+/// and limits.
+///
+/// Applies `options.limits` (`max_output_bytes` for all that is written,
+/// `max_depth`, and `max_anchors` for the anchors of one document) and
+/// validates `options.indent`, while preserving each event's own layout,
+/// scalar styles, and explicit document markers.
+///
+/// # Errors
+///
+/// Returns an error when the events cannot be written, a configured limit is exceeded, or the writer fails.
+pub fn to_writer_events_with<W: Write>(
+    writer: &mut W,
+    events: &[Event<'_>],
+    options: &EmitOptions,
+) -> Result<(), Error> {
+    options.limits.validate()?;
+    validate_options(&options.emitter_options())?;
+    write_events(
+        Output::new(writer, &options.limits),
+        events.iter().map(Ok::<_, Error>),
+        &options.limits,
+    )
 }
 
 /// Write a collected event stream to a writer, within `limits`: `max_output_bytes` for all that
@@ -95,6 +145,9 @@ pub fn to_writer_events<W: Write>(writer: &mut W, events: &[Event<'_>]) -> Resul
 /// # Errors
 ///
 /// Returns an error when the events cannot be written, a configured limit is exceeded, or the writer fails.
+#[deprecated(
+    note = "use `to_writer_events_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn to_writer_events_with_limits<W: Write>(
     writer: &mut W,
     events: &[Event<'_>],
@@ -123,7 +176,30 @@ pub fn to_writer_event_stream<W: Write>(
     writer: &mut W,
     stream: EventStream<'_>,
 ) -> Result<(), Error> {
-    to_writer_event_stream_with_limits(writer, stream, &Limits::default())
+    to_writer_event_stream_with(writer, stream, &EmitOptions::new())
+}
+
+/// Write a lazy event stream with explicit emitter options and limits.
+///
+/// Applies `options.limits` (`max_output_bytes`, `max_depth`, and
+/// `max_anchors`) and validates `options.indent`, while preserving each
+/// event's own layout, scalar styles, and explicit document markers.
+///
+/// # Errors
+///
+/// Returns an error when the events cannot be written, a configured limit is exceeded, or the writer fails.
+pub fn to_writer_event_stream_with<W: Write>(
+    writer: &mut W,
+    stream: EventStream<'_>,
+    options: &EmitOptions,
+) -> Result<(), Error> {
+    options.limits.validate()?;
+    validate_options(&options.emitter_options())?;
+    write_events(
+        Output::new(writer, &options.limits),
+        stream,
+        &options.limits,
+    )
 }
 
 /// Write a lazy event stream with a cumulative output limit.
@@ -131,6 +207,9 @@ pub fn to_writer_event_stream<W: Write>(
 /// # Errors
 ///
 /// Returns an error when the events cannot be written, a configured limit is exceeded, or the writer fails.
+#[deprecated(
+    note = "use `to_writer_event_stream_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn to_writer_event_stream_with_limits<W: Write>(
     writer: &mut W,
     stream: EventStream<'_>,
@@ -1072,32 +1151,31 @@ mod writer_tests {
 mod stream_writer_tests {
     #[test]
     fn lazy_event_writer_enforces_cumulative_output_limit() {
-        let limits = crate::Limits {
-            max_documents: 2,
-            max_output_bytes: 10,
-            ..crate::Limits::default()
-        };
+        let limits = crate::Limits::new()
+            .with_max_documents(2)
+            .with_max_output_bytes(10);
+        let parse_options = crate::ParseOptions::new().with_limits(limits.clone());
+        let emit_options = crate::EmitOptions::new().with_limits(limits);
         let stream =
-            crate::parse_events_with_limits("---\na: 1\n---\nb: 2\n", &limits).expect("stream");
+            crate::parse_events_with("---\na: 1\n---\nb: 2\n", &parse_options).expect("stream");
         let mut output = Vec::new();
-        let error = crate::to_writer_event_stream_with_limits(&mut output, stream, &limits)
+        let error = crate::to_writer_event_stream_with(&mut output, stream, &emit_options)
             .expect_err("cumulative limit");
         assert_eq!(error.kind(), crate::ErrorKind::Limit);
     }
 
     #[test]
     fn lazy_event_writer_emits_multiple_documents() {
-        let limits = crate::Limits {
-            max_documents: 2,
-            ..crate::Limits::default()
-        };
+        let limits = crate::Limits::new().with_max_documents(2);
+        let parse_options = crate::ParseOptions::new().with_limits(limits.clone());
+        let emit_options = crate::EmitOptions::new().with_limits(limits);
         let stream =
-            crate::parse_events_with_limits("---\na: 1\n---\nb: 2\n", &limits).expect("stream");
+            crate::parse_events_with("---\na: 1\n---\nb: 2\n", &parse_options).expect("stream");
         let mut output = Vec::new();
-        crate::to_writer_event_stream_with_limits(&mut output, stream, &limits).expect("write");
+        crate::to_writer_event_stream_with(&mut output, stream, &emit_options).expect("write");
         let text = std::str::from_utf8(&output).expect("utf8");
         assert!(text.contains("a: 1"), "{text:?}");
-        let documents = crate::parse_documents_with_limits(text, &limits).expect("reparse");
+        let documents = crate::parse_documents_with(text, &parse_options).expect("reparse");
         assert_eq!(documents.len(), 2);
         assert_eq!(documents[1]["b"].as_u64(), Some(2));
     }
@@ -1108,8 +1186,7 @@ mod stream_block_scalar_tests {
     #[test]
     fn per_event_writer_preserves_folded_blank_lines() {
         let input = "folded: >\n  a\n\n  b\n";
-        let limits = crate::Limits::default();
-        let stream = crate::parse_events_with_limits(input, &limits).expect("stream");
+        let stream = crate::parse_events_with(input, &crate::ParseOptions::new()).expect("stream");
         let mut output = Vec::new();
         crate::to_writer_event_stream(&mut output, stream).expect("write");
         let text = std::str::from_utf8(&output).expect("utf8");
@@ -1122,10 +1199,9 @@ mod stream_block_scalar_tests {
 
     #[test]
     fn per_event_writer_emits_block_scalars() {
-        let limits = crate::Limits::default();
-        let stream = crate::parse_events_with_limits(
+        let stream = crate::parse_events_with(
             "literal: |\n  one\n  two\nfolded: >\n  a b\n",
-            &limits,
+            &crate::ParseOptions::new(),
         )
         .expect("stream");
         let mut output = Vec::new();

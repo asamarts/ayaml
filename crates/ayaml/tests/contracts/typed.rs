@@ -80,10 +80,10 @@ fn serde_tags_untagged_enums_and_defaults_work() {
 
 #[test]
 fn document_deserializer_reads_documents_incrementally() {
-    let limits = Limits::default().with_max_documents(2);
+    let options = ayaml::ParseOptions::new().with_limits(Limits::new().with_max_documents(2));
     let input = "a: 1\n---\na: 2\n";
     let mut deserializer =
-        ayaml::Deserializer::from_str_with_limits(input, &limits).expect("deserializer");
+        ayaml::Deserializer::from_str_with(input, &options).expect("deserializer");
     let first: Strict = deserializer.next().expect("first").expect("first value");
     assert_eq!(first, Strict { a: 1 });
     let second: Strict = deserializer.next().expect("second").expect("second value");
@@ -366,9 +366,11 @@ fn borrowed_deserialization_rejects_duplicates_and_trailing_documents() {
     let trailing =
         ayaml::from_str_borrowed::<Value>("---\na: 1\n---\nb: 2\n").expect_err("trailing");
     assert_eq!(trailing.kind(), ErrorKind::Parser);
-    let trailing =
-        ayaml::from_str_borrowed_with_limits::<Value>("---\na: 1\n---\nb: 2\n", &Limits::compat())
-            .expect_err("document limit");
+    let trailing = ayaml::from_str_with::<Value>(
+        "---\na: 1\n---\nb: 2\n",
+        &ayaml::ParseOptions::new().with_limits(Limits::compat()),
+    )
+    .expect_err("document limit");
     assert_eq!(trailing.kind(), ErrorKind::Limit);
 }
 
@@ -419,10 +421,10 @@ fn borrowed_deserialization_preserves_nested_error_spans() {
 
 #[test]
 fn borrowed_deserializer_streams_documents() {
-    let limits = Limits::default().with_max_documents(2);
+    let options = ayaml::ParseOptions::new().with_limits(Limits::new().with_max_documents(2));
     let input = "name: one\n---\nname: two\n";
     let mut deserializer =
-        ayaml::Deserializer::from_str_with_limits(input, &limits).expect("deserializer");
+        ayaml::Deserializer::from_str_with(input, &options).expect("deserializer");
     let first: BorrowedDocument<'_> = deserializer
         .next_borrowed()
         .expect("first")
@@ -440,7 +442,7 @@ fn borrowed_deserializer_streams_documents() {
             .is_none()
     );
 
-    let mut deserializer = ayaml::Deserializer::from_str_with_limits("one\n---\ntwo\n", &limits)
+    let mut deserializer = ayaml::Deserializer::from_str_with("one\n---\ntwo\n", &options)
         .expect("seeded deserializer");
     let first: &str = deserializer
         .next_seed_borrowed(BorrowedScalarSeed)

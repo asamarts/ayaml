@@ -13,6 +13,7 @@ use std::io::Write;
 
 use crate::error::{Error, ErrorKind};
 use crate::limits::Limits;
+use crate::options::EmitOptions;
 use crate::value::Value;
 
 mod scalars;
@@ -53,6 +54,19 @@ pub struct EmitterOptions {
 }
 
 impl EmitterOptions {
+    /// Default block-style emitter options, usable in `const` contexts.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            flow: false,
+            explicit_start: false,
+            explicit_end: false,
+            scalar_style: None,
+            indent: 2,
+            indent_sequences: false,
+        }
+    }
+
     /// Use flow style for the complete document.
     #[must_use]
     pub const fn with_flow(mut self, value: bool) -> Self {
@@ -151,6 +165,16 @@ pub struct NodeStyle {
 }
 
 impl NodeStyle {
+    /// Empty per-node style override, usable in `const` contexts.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            scalar_style: None,
+            chomping: None,
+            flow: None,
+        }
+    }
+
     /// Set the preferred scalar style for this node.
     #[must_use]
     pub const fn with_scalar_style(mut self, value: Option<crate::event::ScalarStyle>) -> Self {
@@ -174,7 +198,7 @@ impl NodeStyle {
 }
 
 /// Per-node style overrides addressed by [`PathSegment`] paths.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EmitterStyles {
     styles: HashMap<Vec<PathSegment>, NodeStyle>,
 }
@@ -198,24 +222,32 @@ impl EmitterStyles {
 
 impl Default for EmitterOptions {
     fn default() -> Self {
-        Self {
-            flow: false,
-            explicit_start: false,
-            explicit_end: false,
-            scalar_style: None,
-            indent: 2,
-            indent_sequences: false,
-        }
+        Self::new()
     }
 }
 
-/// Serialize a value into YAML text with default limits.
+/// Serialize a value into YAML text with default options and limits.
 ///
 /// # Errors
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
 pub fn to_string<T: serde::Serialize + ?Sized>(value: &T) -> Result<String, Error> {
-    to_string_with_limits(value, &Limits::default())
+    to_string_with(value, &EmitOptions::new())
+}
+
+/// Serialize a value into YAML text with explicit emitter options and limits.
+///
+/// # Errors
+///
+/// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+pub fn to_string_with<T: serde::Serialize + ?Sized>(
+    value: &T,
+    options: &EmitOptions,
+) -> Result<String, Error> {
+    options.limits.validate()?;
+    validate_options(&options.emitter_options())?;
+    let value = crate::to_value(value)?;
+    to_string_value_with(&value, options)
 }
 
 /// Serialize a value into YAML text with explicit output limits.
@@ -223,12 +255,15 @@ pub fn to_string<T: serde::Serialize + ?Sized>(value: &T) -> Result<String, Erro
 /// # Errors
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+#[deprecated(
+    note = "use `to_string_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn to_string_with_limits<T: serde::Serialize + ?Sized>(
     value: &T,
     limits: &Limits,
 ) -> Result<String, Error> {
     let value = crate::to_value(value)?;
-    emit_value_with_limits(&value, limits, EmitterOptions::default())
+    emit_value_to_string(&value, limits, EmitterOptions::new(), None)
 }
 
 /// Serialize a value with explicit emitter options.
@@ -236,12 +271,15 @@ pub fn to_string_with_limits<T: serde::Serialize + ?Sized>(
 /// # Errors
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+#[deprecated(
+    note = "use `to_string_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn to_string_with_options<T: serde::Serialize + ?Sized>(
     value: &T,
     options: &EmitterOptions,
 ) -> Result<String, Error> {
     let value = crate::to_value(value)?;
-    emit_value_with_limits(&value, &Limits::default(), *options)
+    emit_value_to_string(&value, &Limits::default_profile(), *options, None)
 }
 
 /// Serialize an existing generic value as YAML, preserving its tags.
@@ -256,7 +294,22 @@ pub fn to_string_with_options<T: serde::Serialize + ?Sized>(
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
 pub fn to_string_value(value: &Value) -> Result<String, Error> {
-    to_string_value_with_limits(value, &Limits::default())
+    to_string_value_with(value, &EmitOptions::new())
+}
+
+/// Serialize an existing generic value as YAML with explicit emitter options
+/// and limits, preserving its tags.
+///
+/// # Errors
+///
+/// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+pub fn to_string_value_with(value: &Value, options: &EmitOptions) -> Result<String, Error> {
+    emit_value_to_string(
+        value,
+        &options.limits,
+        options.emitter_options(),
+        options.styles.as_ref(),
+    )
 }
 
 /// Serialize an existing generic value as YAML with explicit output limits.
@@ -264,8 +317,11 @@ pub fn to_string_value(value: &Value) -> Result<String, Error> {
 /// # Errors
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+#[deprecated(
+    note = "use `to_string_value_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn to_string_value_with_limits(value: &Value, limits: &Limits) -> Result<String, Error> {
-    emit_value_with_limits(value, limits, EmitterOptions::default())
+    emit_value_to_string(value, limits, EmitterOptions::new(), None)
 }
 
 /// Serialize an existing generic value with explicit emitter options.
@@ -273,11 +329,14 @@ pub fn to_string_value_with_limits(value: &Value, limits: &Limits) -> Result<Str
 /// # Errors
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+#[deprecated(
+    note = "use `to_string_value_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn to_string_value_with_options(
     value: &Value,
     options: &EmitterOptions,
 ) -> Result<String, Error> {
-    emit_value_with_limits(value, &Limits::default(), *options)
+    emit_value_to_string(value, &Limits::default_profile(), *options, None)
 }
 
 /// Serialize an existing generic value with per-node style overrides.
@@ -285,8 +344,16 @@ pub fn to_string_value_with_options(
 /// # Errors
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+#[deprecated(
+    note = "use `to_string_value_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn to_string_value_with_styles(value: &Value, styles: &EmitterStyles) -> Result<String, Error> {
-    emit_value_with_limits_and_styles(value, &Limits::default(), EmitterOptions::default(), styles)
+    emit_value_to_string(
+        value,
+        &Limits::default_profile(),
+        EmitterOptions::new(),
+        Some(styles),
+    )
 }
 
 /// Serialize an existing generic value with explicit limits and per-node styles.
@@ -294,12 +361,15 @@ pub fn to_string_value_with_styles(value: &Value, styles: &EmitterStyles) -> Res
 /// # Errors
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+#[deprecated(
+    note = "use `to_string_value_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn to_string_value_with_limits_and_styles(
     value: &Value,
     limits: &Limits,
     styles: &EmitterStyles,
 ) -> Result<String, Error> {
-    emit_value_with_limits_and_styles(value, limits, EmitterOptions::default(), styles)
+    emit_value_to_string(value, limits, EmitterOptions::new(), Some(styles))
 }
 
 /// Serialize an existing generic value with options and per-node styles.
@@ -307,12 +377,15 @@ pub fn to_string_value_with_limits_and_styles(
 /// # Errors
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+#[deprecated(
+    note = "use `to_string_value_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn to_string_value_with_options_and_styles(
     value: &Value,
     options: &EmitterOptions,
     styles: &EmitterStyles,
 ) -> Result<String, Error> {
-    emit_value_with_limits_and_styles(value, &Limits::default(), *options, styles)
+    emit_value_to_string(value, &Limits::default_profile(), *options, Some(styles))
 }
 
 /// Serialize an existing tagged value as YAML to a writer with per-node styles.
@@ -320,17 +393,20 @@ pub fn to_string_value_with_options_and_styles(
 /// # Errors
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+#[deprecated(
+    note = "use `to_writer_value_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn to_writer_value_with_styles<W: Write>(
     writer: &mut W,
     value: &Value,
     styles: &EmitterStyles,
 ) -> Result<(), Error> {
-    emit_value_to_with_styles(
+    emit_value_to(
         writer,
         value,
-        &Limits::default(),
-        EmitterOptions::default(),
-        styles,
+        &Limits::default_profile(),
+        EmitterOptions::new(),
+        Some(styles),
     )
 }
 
@@ -339,13 +415,22 @@ pub fn to_writer_value_with_styles<W: Write>(
 /// # Errors
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+#[deprecated(
+    note = "use `to_writer_value_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn to_writer_value_with_options_and_styles<W: Write>(
     writer: &mut W,
     value: &Value,
     options: &EmitterOptions,
     styles: &EmitterStyles,
 ) -> Result<(), Error> {
-    emit_value_to_with_styles(writer, value, &Limits::default(), *options, styles)
+    emit_value_to(
+        writer,
+        value,
+        &Limits::default_profile(),
+        *options,
+        Some(styles),
+    )
 }
 
 /// Serialize an existing tagged value to a writer with limits and styles.
@@ -353,13 +438,16 @@ pub fn to_writer_value_with_options_and_styles<W: Write>(
 /// # Errors
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+#[deprecated(
+    note = "use `to_writer_value_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn to_writer_value_with_limits_and_styles<W: Write>(
     writer: &mut W,
     value: &Value,
     limits: &Limits,
     styles: &EmitterStyles,
 ) -> Result<(), Error> {
-    emit_value_to_with_styles(writer, value, limits, EmitterOptions::default(), styles)
+    emit_value_to(writer, value, limits, EmitterOptions::new(), Some(styles))
 }
 
 /// Serialize a sequence of generic values as a multi-document stream.
@@ -368,7 +456,22 @@ pub fn to_writer_value_with_limits_and_styles<W: Write>(
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
 pub fn to_string_documents(values: &[Value]) -> Result<String, Error> {
-    to_string_documents_with_limits(values, &Limits::default())
+    to_string_documents_with(values, &EmitOptions::new())
+}
+
+/// Serialize a sequence of generic values as a multi-document stream with
+/// explicit emitter options and limits.
+///
+/// # Errors
+///
+/// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+pub fn to_string_documents_with(values: &[Value], options: &EmitOptions) -> Result<String, Error> {
+    emit_documents_to_string(
+        values,
+        &options.limits,
+        options.emitter_options(),
+        options.styles.as_ref(),
+    )
 }
 
 /// Serialize a sequence of values as a stream with an explicit output limit.
@@ -376,34 +479,37 @@ pub fn to_string_documents(values: &[Value]) -> Result<String, Error> {
 /// # Errors
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+#[deprecated(
+    note = "use `to_string_documents_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn to_string_documents_with_limits(values: &[Value], limits: &Limits) -> Result<String, Error> {
+    emit_documents_to_string(values, limits, EmitterOptions::new(), None)
+}
+
+fn emit_documents_to_string(
+    values: &[Value],
+    limits: &Limits,
+    options: EmitterOptions,
+    styles: Option<&EmitterStyles>,
+) -> Result<String, Error> {
     let mut output = Vec::new();
     emit_documents_to(
         Output::direct(&mut output, limits),
         values,
         limits,
-        EmitterOptions::default(),
-        &EmitterStyles::default(),
+        options,
+        styles,
     )?;
     String::from_utf8(output).map_err(|error| {
         Error::new(ErrorKind::Emitter, "emitter produced invalid UTF-8").with_source(error)
     })
 }
 
-fn emit_value_with_limits(
+fn emit_value_to_string(
     value: &Value,
     limits: &Limits,
     options: EmitterOptions,
-) -> Result<String, Error> {
-    let styles = EmitterStyles::default();
-    emit_value_with_limits_and_styles(value, limits, options, &styles)
-}
-
-fn emit_value_with_limits_and_styles(
-    value: &Value,
-    limits: &Limits,
-    options: EmitterOptions,
-    styles: &EmitterStyles,
+    styles: Option<&EmitterStyles>,
 ) -> Result<String, Error> {
     let mut output = Vec::new();
     emit_value_with(
@@ -423,17 +529,7 @@ fn emit_value_to<W: Write>(
     value: &Value,
     limits: &Limits,
     options: EmitterOptions,
-) -> Result<(), Error> {
-    let styles = EmitterStyles::default();
-    emit_value_to_with_styles(writer, value, limits, options, &styles)
-}
-
-fn emit_value_to_with_styles<W: Write>(
-    writer: &mut W,
-    value: &Value,
-    limits: &Limits,
-    options: EmitterOptions,
-    styles: &EmitterStyles,
+    styles: Option<&EmitterStyles>,
 ) -> Result<(), Error> {
     emit_value_with(Output::new(writer, limits), value, limits, options, styles)
 }
@@ -443,7 +539,7 @@ fn emit_value_with<W: Write>(
     value: &Value,
     limits: &Limits,
     options: EmitterOptions,
-    styles: &EmitterStyles,
+    styles: Option<&EmitterStyles>,
 ) -> Result<(), Error> {
     limits.validate()?;
     validate_options(&options)?;
@@ -458,7 +554,7 @@ fn emit_documents_to<W: Write>(
     values: &[Value],
     limits: &Limits,
     options: EmitterOptions,
-    styles: &EmitterStyles,
+    styles: Option<&EmitterStyles>,
 ) -> Result<(), Error> {
     limits.validate()?;
     validate_options(&options)?;
@@ -476,7 +572,7 @@ fn write_document<W: Write>(
     value: &Value,
     limits: &Limits,
     options: EmitterOptions,
-    styles: &EmitterStyles,
+    styles: Option<&EmitterStyles>,
     later: bool,
 ) -> Result<(), Error> {
     let mut directives = TagDirectives::default();
@@ -505,27 +601,41 @@ pub fn to_writer<T: serde::Serialize + ?Sized, W: Write>(
     writer: &mut W,
     value: &T,
 ) -> Result<(), Error> {
-    let value = crate::to_value(value)?;
-    emit_value_to(
-        writer,
-        &value,
-        &Limits::default(),
-        EmitterOptions::default(),
-    )
+    to_writer_with(writer, value, &EmitOptions::new())
 }
 
-/// Serialize a value as YAML to a writer with explicit emitter options.
+/// Serialize a value as YAML to a writer with explicit emitter options and
+/// limits.
 ///
 /// # Errors
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+pub fn to_writer_with<T: serde::Serialize + ?Sized, W: Write>(
+    writer: &mut W,
+    value: &T,
+    options: &EmitOptions,
+) -> Result<(), Error> {
+    options.limits.validate()?;
+    validate_options(&options.emitter_options())?;
+    let value = crate::to_value(value)?;
+    to_writer_value_with(writer, &value, options)
+}
+
+/// Serialize a value as YAML to a writer with explicit limits.
+///
+/// # Errors
+///
+/// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+#[deprecated(
+    note = "use `to_writer_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn to_writer_with_limits<T: serde::Serialize + ?Sized, W: Write>(
     writer: &mut W,
     value: &T,
     limits: &Limits,
 ) -> Result<(), Error> {
     let value = crate::to_value(value)?;
-    emit_value_to(writer, &value, limits, EmitterOptions::default())
+    emit_value_to(writer, &value, limits, EmitterOptions::new(), None)
 }
 
 /// Serialize a value as YAML to a writer with explicit emitter options.
@@ -533,13 +643,16 @@ pub fn to_writer_with_limits<T: serde::Serialize + ?Sized, W: Write>(
 /// # Errors
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+#[deprecated(
+    note = "use `to_writer_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn to_writer_with_options<T: serde::Serialize + ?Sized, W: Write>(
     writer: &mut W,
     value: &T,
     options: &EmitterOptions,
 ) -> Result<(), Error> {
     let value = crate::to_value(value)?;
-    emit_value_to(writer, &value, &Limits::default(), *options)
+    emit_value_to(writer, &value, &Limits::default_profile(), *options, None)
 }
 
 /// Serialize an existing tagged value as YAML to a writer.
@@ -548,20 +661,43 @@ pub fn to_writer_with_options<T: serde::Serialize + ?Sized, W: Write>(
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
 pub fn to_writer_value<W: Write>(writer: &mut W, value: &Value) -> Result<(), Error> {
-    emit_value_to(writer, value, &Limits::default(), EmitterOptions::default())
+    to_writer_value_with(writer, value, &EmitOptions::new())
 }
 
-/// Serialize an existing tagged value to a writer with emitter options.
+/// Serialize an existing tagged value as YAML to a writer with explicit emitter
+/// options and limits.
 ///
 /// # Errors
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+pub fn to_writer_value_with<W: Write>(
+    writer: &mut W,
+    value: &Value,
+    options: &EmitOptions,
+) -> Result<(), Error> {
+    emit_value_to(
+        writer,
+        value,
+        &options.limits,
+        options.emitter_options(),
+        options.styles.as_ref(),
+    )
+}
+
+/// Serialize an existing tagged value to a writer with explicit limits.
+///
+/// # Errors
+///
+/// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+#[deprecated(
+    note = "use `to_writer_value_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn to_writer_value_with_limits<W: Write>(
     writer: &mut W,
     value: &Value,
     limits: &Limits,
 ) -> Result<(), Error> {
-    emit_value_to(writer, value, limits, EmitterOptions::default())
+    emit_value_to(writer, value, limits, EmitterOptions::new(), None)
 }
 
 /// Serialize an existing value as YAML to a writer with emitter options.
@@ -569,12 +705,15 @@ pub fn to_writer_value_with_limits<W: Write>(
 /// # Errors
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+#[deprecated(
+    note = "use `to_writer_value_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn to_writer_value_with_options<W: Write>(
     writer: &mut W,
     value: &Value,
     options: &EmitterOptions,
 ) -> Result<(), Error> {
-    emit_value_to(writer, value, &Limits::default(), *options)
+    emit_value_to(writer, value, &Limits::default_profile(), *options, None)
 }
 
 /// Write a multi-document value stream one document at a time.
@@ -583,7 +722,27 @@ pub fn to_writer_value_with_options<W: Write>(
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
 pub fn to_writer_documents<W: Write>(writer: &mut W, values: &[Value]) -> Result<(), Error> {
-    to_writer_documents_with_limits(writer, values, &Limits::default())
+    to_writer_documents_with(writer, values, &EmitOptions::new())
+}
+
+/// Write a multi-document value stream one document at a time with explicit
+/// emitter options and limits.
+///
+/// # Errors
+///
+/// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+pub fn to_writer_documents_with<W: Write>(
+    writer: &mut W,
+    values: &[Value],
+    options: &EmitOptions,
+) -> Result<(), Error> {
+    emit_documents_to(
+        Output::new(writer, &options.limits),
+        values,
+        &options.limits,
+        options.emitter_options(),
+        options.styles.as_ref(),
+    )
 }
 
 /// Write a multi-document value stream with an explicit output limit.
@@ -591,6 +750,9 @@ pub fn to_writer_documents<W: Write>(writer: &mut W, values: &[Value]) -> Result
 /// # Errors
 ///
 /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
+#[deprecated(
+    note = "use `to_writer_documents_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn to_writer_documents_with_limits<W: Write>(
     writer: &mut W,
     values: &[Value],
@@ -600,8 +762,8 @@ pub fn to_writer_documents_with_limits<W: Write>(
         Output::new(writer, limits),
         values,
         limits,
-        EmitterOptions::default(),
-        &EmitterStyles::default(),
+        EmitterOptions::new(),
+        None,
     )
 }
 
@@ -679,12 +841,7 @@ impl<'a> Emitter<'a> {
     ///
     /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
     pub fn value_to_string(&self, value: &Value) -> Result<String, Error> {
-        match self.styles {
-            Some(styles) => {
-                emit_value_with_limits_and_styles(value, self.limits, *self.options, styles)
-            }
-            None => emit_value_with_limits(value, self.limits, *self.options),
-        }
+        emit_value_to_string(value, self.limits, *self.options, self.styles)
     }
 
     /// Serialize an existing generic value as YAML to a writer.
@@ -693,12 +850,7 @@ impl<'a> Emitter<'a> {
     ///
     /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
     pub fn value_to_writer<W: Write>(&self, writer: &mut W, value: &Value) -> Result<(), Error> {
-        match self.styles {
-            Some(styles) => {
-                emit_value_to_with_styles(writer, value, self.limits, *self.options, styles)
-            }
-            None => emit_value_to(writer, value, self.limits, *self.options),
-        }
+        emit_value_to(writer, value, self.limits, *self.options, self.styles)
     }
 
     /// Serialize a sequence of values as a multi-document stream.
@@ -707,18 +859,7 @@ impl<'a> Emitter<'a> {
     ///
     /// Returns an error when the value cannot be written, a configured limit is exceeded, or the writer fails.
     pub fn documents_to_string(&self, values: &[Value]) -> Result<String, Error> {
-        let mut output = Vec::new();
-        let styles = self.styles.cloned().unwrap_or_default();
-        emit_documents_to(
-            Output::direct(&mut output, self.limits),
-            values,
-            self.limits,
-            *self.options,
-            &styles,
-        )?;
-        String::from_utf8(output).map_err(|error| {
-            Error::new(ErrorKind::Emitter, "emitter produced invalid UTF-8").with_source(error)
-        })
+        emit_documents_to_string(values, self.limits, *self.options, self.styles)
     }
 
     /// Write a multi-document value stream.
@@ -731,13 +872,12 @@ impl<'a> Emitter<'a> {
         writer: &mut W,
         values: &[Value],
     ) -> Result<(), Error> {
-        let styles = self.styles.cloned().unwrap_or_default();
         emit_documents_to(
             Output::new(writer, self.limits),
             values,
             self.limits,
             *self.options,
-            &styles,
+            self.styles,
         )
     }
 }
@@ -864,10 +1004,7 @@ pub(crate) fn validate_options(options: &EmitterOptions) -> Result<(), Error> {
     } else {
         Err(Error::new(
             ErrorKind::Emitter,
-            format!(
-                "EmitterOptions::indent must be between 2 and 9, got {}",
-                options.indent
-            ),
+            format!("indent must be between 2 and 9, got {}", options.indent),
         ))
     }
 }
@@ -882,7 +1019,7 @@ fn nested_tag_error() -> Error {
 struct ValueWriter<'a, 'w, 's, W: Write> {
     output: &'a mut Output<'w, W>,
     options: EmitterOptions,
-    styles: &'s EmitterStyles,
+    styles: Option<&'s EmitterStyles>,
     path: Vec<PathSegment>,
     limits: Limits,
     depth: usize,
@@ -900,7 +1037,7 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
         output: &'a mut Output<'w, W>,
         limits: &Limits,
         options: EmitterOptions,
-        styles: &'s EmitterStyles,
+        styles: Option<&'s EmitterStyles>,
         directives: TagDirectives,
     ) -> Self {
         Self {
@@ -921,7 +1058,9 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
         if self.in_key {
             NodeStyle::default()
         } else {
-            self.styles.get(&self.path).unwrap_or_default()
+            self.styles
+                .and_then(|styles| styles.get(&self.path))
+                .unwrap_or_default()
         }
     }
 
@@ -930,7 +1069,7 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
     }
 
     fn styles_active(&self) -> bool {
-        !self.styles.styles.is_empty()
+        self.styles.is_some_and(|styles| !styles.styles.is_empty())
     }
 
     fn force_flow(&self) -> bool {
@@ -1683,163 +1822,9 @@ mod collection_tests {
 }
 
 #[cfg(test)]
-mod options_tests {
-    use super::EmitterOptions;
-    use crate::value::Value;
-
-    #[test]
-    fn flow_and_document_options_round_trip() {
-        let value = crate::parse_value("a:\n  - 1\n  - 2\n").expect("parse");
-        let flow = crate::to_string_value_with_options(
-            &value,
-            &EmitterOptions {
-                flow: true,
-                explicit_start: true,
-                explicit_end: true,
-                ..EmitterOptions::default()
-            },
-        )
-        .expect("flow emit");
-        assert!(flow.starts_with("---\n{"));
-        assert!(flow.ends_with("...\n"));
-        let decoded = crate::parse_value(&flow).expect("flow reparse");
-        assert_eq!(decoded, value);
-
-        let first = crate::parse_value("a: 1\n").expect("first");
-        let second = crate::parse_value("b: 2\n").expect("second");
-        let documents = crate::to_string_documents(&[first, second]).expect("documents");
-        let limits = crate::Limits {
-            max_documents: 2,
-            ..crate::Limits::default()
-        };
-        let decoded =
-            crate::parse_documents_with_limits(&documents, &limits).expect("reparse documents");
-        assert_eq!(decoded.len(), 2);
-        assert_eq!(decoded[1]["b"], Value::from(2_u64));
-    }
-}
-
-#[cfg(test)]
-mod ambiguity_tests {
-    use crate::value::Value;
-
-    #[test]
-    fn ambiguous_strings_round_trip() {
-        let strings = [
-            "",
-            "null",
-            "true",
-            "0123",
-            "0b11",
-            "1e3",
-            "a: b",
-            "a #b",
-            " leading",
-            "trailing ",
-            "-",
-            "?",
-            ":",
-            "---",
-            "...",
-            "yes",
-            "line\nbreak",
-            "quote\"slash\\",
-            "é",
-        ];
-        let value = Value::Sequence(strings.iter().map(|text| Value::from(*text)).collect());
-        let text = crate::to_string_value(&value).expect("emit");
-        let decoded = crate::parse_value(&text).expect("reparse");
-        assert_eq!(decoded, value, "output={text:?}");
-    }
-}
-
-#[cfg(test)]
-mod scalar_style_tests {
-    use crate::event::ScalarStyle;
-    use crate::value::Value;
-
-    #[test]
-    fn scalar_style_options_are_applied() {
-        let value = Value::from("plain text");
-        let text = crate::to_string_value_with_options(
-            &value,
-            &super::EmitterOptions {
-                scalar_style: Some(ScalarStyle::SingleQuoted),
-                ..super::EmitterOptions::default()
-            },
-        )
-        .expect("single quote");
-        assert_eq!(text, "'plain text'\n");
-
-        let text = crate::to_string_value_with_options(
-            &value,
-            &super::EmitterOptions {
-                scalar_style: Some(ScalarStyle::DoubleQuoted),
-                ..super::EmitterOptions::default()
-            },
-        )
-        .expect("double quote");
-        assert_eq!(text, "\"plain text\"\n");
-        assert_eq!(crate::parse_value(&text).unwrap(), value);
-    }
-}
-
-#[cfg(test)]
-mod output_limit_tests {
-    use crate::value::Value;
-
-    #[test]
-    fn output_limits_are_enforced_for_values_events_and_documents() {
-        let value = Value::from("long enough to exceed the limit");
-        let limits = crate::Limits {
-            max_output_bytes: 3,
-            ..crate::Limits::default()
-        };
-        let error = crate::to_string_value_with_limits(&value, &limits).expect_err("value limit");
-        assert_eq!(error.kind(), crate::ErrorKind::Limit);
-
-        let documents = crate::parse_documents_with_limits(
-            "a: 1\n---\nb: 2\n",
-            &crate::Limits {
-                max_documents: 2,
-                ..crate::Limits::default()
-            },
-        )
-        .expect("documents");
-        let error = crate::to_string_documents_with_limits(&documents, &limits)
-            .expect_err("document limit");
-        assert_eq!(error.kind(), crate::ErrorKind::Limit);
-
-        let events: Vec<crate::Event<'_>> = crate::parse_events("a: 1\n")
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        let error = crate::to_string_events_with_limits(&events, &limits).expect_err("event limit");
-        assert_eq!(error.kind(), crate::ErrorKind::Limit);
-    }
-}
-
-#[cfg(test)]
-mod tag_token_tests {
-    use crate::tag::{Tag, TaggedValue};
-    use crate::value::Value;
-
-    #[test]
-    fn expanded_tags_use_verbatim_syntax() {
-        let value = Value::from(TaggedValue::new(
-            Tag::new("tag:example.com,2026:", "foo"),
-            Value::from("x"),
-        ));
-        let text = crate::to_string_value(&value).expect("emit");
-        assert!(text.contains("!<tag:example.com,2026:foo>"), "{text:?}");
-        let decoded = crate::parse_value(&text).expect("reparse");
-        assert!(decoded.is_tagged());
-    }
-}
-
-#[cfg(test)]
 mod writer_tests {
     use crate::value::Value;
+    use crate::{Limits, ParseOptions};
 
     #[test]
     fn document_writer_streams_parseable_output() {
@@ -1849,63 +1834,12 @@ mod writer_tests {
         ];
         let mut output = Vec::new();
         crate::to_writer_documents(&mut output, &values).expect("write");
-        let limits = crate::Limits {
-            max_documents: 2,
-            ..crate::Limits::default()
-        };
-        let decoded = crate::parse_documents_with_limits(
-            std::str::from_utf8(&output).expect("utf8"),
-            &limits,
-        )
-        .expect("reparse");
+        let options = ParseOptions::new().with_limits(Limits::new().with_max_documents(2));
+        let decoded =
+            crate::parse_documents_with(std::str::from_utf8(&output).expect("utf8"), &options)
+                .expect("reparse");
         assert_eq!(decoded.len(), 2);
         assert_eq!(decoded[1]["b"], Value::from(2_u64));
-    }
-}
-
-#[cfg(test)]
-mod writer_option_tests {
-    #[test]
-    fn writer_options_apply_and_round_trip() {
-        let value = crate::parse_value("a: 1\n").expect("parse");
-        let mut output = Vec::new();
-        crate::to_writer_value_with_options(
-            &mut output,
-            &value,
-            &super::EmitterOptions {
-                flow: true,
-                explicit_start: true,
-                ..super::EmitterOptions::default()
-            },
-        )
-        .expect("write");
-        let text = std::str::from_utf8(&output).expect("utf8");
-        assert!(text.starts_with("---\n{"));
-        assert_eq!(crate::parse_value(text).expect("reparse"), value);
-    }
-}
-
-#[cfg(test)]
-mod streaming_writer_tests {
-    #[test]
-    fn value_writer_is_incremental_and_limits_output() {
-        let value = crate::parse_value("a: 1\n").expect("parse");
-        let mut output = Vec::new();
-        crate::to_writer_value(&mut output, &value).expect("write");
-        assert_eq!(
-            std::str::from_utf8(&output).expect("utf8"),
-            crate::to_string_value(&value).expect("string")
-        );
-
-        let limits = crate::Limits {
-            max_output_bytes: 2,
-            ..crate::Limits::default()
-        };
-        let mut limited = Vec::new();
-        let error =
-            crate::to_writer_value_with_limits(&mut limited, &value, &limits).expect_err("limit");
-        assert_eq!(error.kind(), crate::ErrorKind::Limit);
-        assert!(limited.len() <= 2);
     }
 }
 
@@ -1913,6 +1847,8 @@ mod streaming_writer_tests {
 mod builder_tests;
 #[cfg(test)]
 mod indent_tests;
+#[cfg(test)]
+mod options_tests;
 #[cfg(test)]
 mod tagged_block_scalar_tests;
 #[cfg(test)]

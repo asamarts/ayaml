@@ -20,8 +20,9 @@ fn parse(input: &str) -> Json {
 }
 
 fn parse_documents(input: &str) -> Vec<Json> {
-    let limits = ayaml::Limits::default().with_max_documents(16);
-    ayaml::parse_documents_with_limits(input, &limits)
+    let options =
+        ayaml::ParseOptions::new().with_limits(ayaml::Limits::new().with_max_documents(16));
+    ayaml::parse_documents_with(input, &options)
         .unwrap_or_else(|error| panic!("{input:?}: {error}"))
         .iter()
         .map(|value| serde_json::to_value(value).expect("JSON-compatible value"))
@@ -163,22 +164,31 @@ fn stream_limits() -> ayaml::Limits {
     ayaml::Limits::default().with_max_documents(16)
 }
 
+fn stream_parse_options() -> ayaml::ParseOptions {
+    ayaml::ParseOptions::new().with_limits(stream_limits())
+}
+
+fn stream_emit_options() -> ayaml::EmitOptions {
+    ayaml::EmitOptions::new().with_limits(stream_limits())
+}
+
 fn values(input: &str) -> Vec<ayaml::Value> {
-    ayaml::parse_documents_with_limits(input, &stream_limits())
+    ayaml::parse_documents_with(input, &stream_parse_options())
         .unwrap_or_else(|error| panic!("{input:?}: {error}"))
 }
 
 /// Emit the events of `input` with the collected and the lazy writer; both
 /// must agree, and the output must describe the same documents.
 fn emit_events(input: &str) -> String {
-    let limits = stream_limits();
-    let events = ayaml::parse_events_with_limits(input, &limits)
+    let parse_options = stream_parse_options();
+    let emit_options = stream_emit_options();
+    let events = ayaml::parse_events_with(input, &parse_options)
         .and_then(Iterator::collect::<Result<Vec<_>, _>>)
         .unwrap_or_else(|error| panic!("{input:?}: {error}"));
-    let output = ayaml::to_string_events_with_limits(&events, &limits).expect("emit events");
+    let output = ayaml::to_string_events_with(&events, &emit_options).expect("emit events");
     let mut lazy = Vec::new();
-    let stream = ayaml::parse_events_with_limits(input, &limits).expect("stream");
-    ayaml::to_writer_event_stream_with_limits(&mut lazy, stream, &limits).expect("lazy emit");
+    let stream = ayaml::parse_events_with(input, &parse_options).expect("stream");
+    ayaml::to_writer_event_stream_with(&mut lazy, stream, &emit_options).expect("lazy emit");
     assert_eq!(String::from_utf8(lazy).expect("utf8"), output);
     assert_eq!(
         values(&output),
@@ -225,10 +235,10 @@ fn entry_points(input: &str) -> Vec<(&'static str, Result<(), String>)> {
         ("parse_events", text(lazy())),
         #[cfg(feature = "libyaml-compat")]
         (
-            "compat::parse_events_eager_with_limits",
-            text(ayaml::compat::parse_events_eager_with_limits(
+            "compat::parse_events_eager_with",
+            text(ayaml::compat::parse_events_eager_with(
                 input,
-                &ayaml::Limits::default(),
+                &ayaml::compat::ParseOptions::new(),
             )),
         ),
         #[cfg(feature = "libyaml-compat")]

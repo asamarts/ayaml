@@ -4,6 +4,62 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `ParseOptions` (`#[non_exhaustive]`, `new`, `for_max_input`, `with_limits`, `Default`,
+  `From<Limits>`) and `EmitOptions` (`#[non_exhaustive]`, `new`, `flow`, `with_limits`,
+  `with_flow`, `with_explicit_start`, `with_explicit_end`, `with_scalar_style`, `with_indent`,
+  `with_indent_sequences`, `with_styles`, `Default`, `From<Limits>`, `From<EmitterOptions>`,
+  `From<EmitterStyles>`) at the crate root, unifying resource limits, emitter presentation
+  settings, and per-node style overrides into one options value per operation.
+- `const` constructors and additive conversions/traits: `Limits::new`, `EmitterOptions::new`,
+  `NodeStyle::new`, `PartialEq`/`Eq` for `EmitterStyles`, `compat::ParseOptions::for_max_input`,
+  and `From<Limits>` for `compat::ParseOptions`.
+- Unified `*_with` parsing and decoding entry points taking `&ParseOptions`: `parse_events_with`,
+  `parse_value_with`, `parse_documents_with`, `from_str_with`, `from_str_seed_with`,
+  `from_slice_with`, `Deserializer::from_str_with`, and `SpannedTree::parse_with`. Both
+  `from_str_with` and `from_slice_with` accept owned and borrowed `Deserialize<'de>` targets, and
+  `from_slice_with` checks `options.limits` before validating UTF-8.
+- Unified compatibility `*_with` entry points (behind `libyaml-compat`) taking
+  `&compat::ParseOptions`: `compat::parse_events_with`, `compat::parse_events_eager_with`, and
+  `SpannedTree::parse_compat_with`.
+- Unified `*_with` emitter entry points taking `&EmitOptions`: `to_string_with`, `to_writer_with`,
+  `to_string_value_with`, `to_writer_value_with`, `to_string_documents_with`,
+  `to_writer_documents_with`, `to_string_events_with`, `to_writer_events_with`, and
+  `to_writer_event_stream_with`.
+
+### Deprecated
+
+All older combination functions remain available through `0.x` and are scheduled for removal in
+`1.0`:
+
+- Root parsing and decoding: `parse_events_with_limits` (use `parse_events_with`),
+  `parse_value_with_limits` (use `parse_value_with`), `parse_documents_with_limits` (use
+  `parse_documents_with`), `from_str_borrowed_with_limits` (use `from_str_with`),
+  `from_str_seed_with_limits` (use `from_str_seed_with`), `Deserializer::from_str_with_limits`
+  (use `Deserializer::from_str_with`), and `SpannedTree::parse_with_limits` (use
+  `SpannedTree::parse_with`).
+- Compatibility (`libyaml-compat`): `compat::from_str_with_limits` (use `compat::from_str_with`),
+  `compat::from_str_seed_with_limits` (use `compat::from_str_seed_with`),
+  `compat::deserialize_any_with_limits` (use `compat::deserialize_any_with`),
+  `compat::parse_events_with_limits` (use `compat::parse_events_with`),
+  `compat::parse_events_eager_with_limits` (use `compat::parse_events_eager_with`), and
+  `SpannedTree::parse_compat_with_limits` (use `SpannedTree::parse_compat_with`).
+- Emitters: `to_string_with_limits` and `to_string_with_options` (use `to_string_with`);
+  `to_writer_with_limits` and `to_writer_with_options` (use `to_writer_with`);
+  `to_string_value_with_limits`, `to_string_value_with_options`, `to_string_value_with_styles`,
+  `to_string_value_with_limits_and_styles`, and `to_string_value_with_options_and_styles` (use
+  `to_string_value_with`); `to_writer_value_with_limits`, `to_writer_value_with_options`,
+  `to_writer_value_with_styles`, `to_writer_value_with_limits_and_styles`, and
+  `to_writer_value_with_options_and_styles` (use `to_writer_value_with`);
+  `to_string_documents_with_limits` (use `to_string_documents_with`);
+  `to_writer_documents_with_limits` (use `to_writer_documents_with`);
+  `to_string_events_with_limits` (use `to_string_events_with`);
+  `to_writer_events_with_limits` (use `to_writer_events_with`); and
+  `to_writer_event_stream_with_limits` (use `to_writer_event_stream_with`).
+
 ## [0.2.2] — 2026-11-20
 
 ### Added

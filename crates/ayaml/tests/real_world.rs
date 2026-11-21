@@ -45,8 +45,12 @@ fn fixture_dir() -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
-fn limits() -> ayaml::Limits {
-    ayaml::Limits::default().with_max_documents(16)
+fn parse_options() -> ayaml::ParseOptions {
+    ayaml::ParseOptions::new().with_limits(ayaml::Limits::new().with_max_documents(16))
+}
+
+fn emit_options() -> ayaml::EmitOptions {
+    ayaml::EmitOptions::new().with_limits(ayaml::Limits::new().with_max_documents(16))
 }
 
 fn json(documents: &impl serde::Serialize) -> String {
@@ -57,7 +61,7 @@ fn json(documents: &impl serde::Serialize) -> String {
 
 fn check(name: &str, dir: &Path) {
     let text = std::fs::read_to_string(dir.join(format!("{name}.yml"))).expect("fixture");
-    let documents = ayaml::parse_documents_with_limits(&text, &limits())
+    let documents = ayaml::parse_documents_with(&text, &parse_options())
         .unwrap_or_else(|error| panic!("{name}: {error}"));
 
     // Golden documents.
@@ -72,7 +76,7 @@ fn check(name: &str, dir: &Path) {
     assert_eq!(actual, golden, "{name}: documents differ from {name}.json");
 
     // The typed path and the document cursor.
-    let mut cursor = ayaml::Deserializer::from_str_with_limits(&text, &limits()).expect("cursor");
+    let mut cursor = ayaml::Deserializer::from_str_with(&text, &parse_options()).expect("cursor");
     let mut streamed = Vec::new();
     while let Some(document) = cursor.next_borrowed::<ayaml::Value>().expect("next") {
         streamed.push(document);
@@ -100,12 +104,12 @@ fn check(name: &str, dir: &Path) {
             "{name}: value round trip: {output:?}"
         );
     }
-    let events = ayaml::parse_events_with_limits(&text, &limits())
+    let events = ayaml::parse_events_with(&text, &parse_options())
         .and_then(Iterator::collect::<Result<Vec<_>, _>>)
         .expect("events");
-    let output = ayaml::to_string_events_with_limits(&events, &limits()).expect("emit events");
+    let output = ayaml::to_string_events_with(&events, &emit_options()).expect("emit events");
     assert_eq!(
-        ayaml::parse_documents_with_limits(&output, &limits()).expect("reparse events"),
+        ayaml::parse_documents_with(&output, &parse_options()).expect("reparse events"),
         documents,
         "{name}: event round trip: {output:?}"
     );

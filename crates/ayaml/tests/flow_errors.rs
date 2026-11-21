@@ -119,7 +119,6 @@ fn failure_is(input: &str, failure: At, opening: At, sequence: bool, kind: Failu
 #[cfg(feature = "libyaml-compat")]
 #[track_caller]
 fn compat_failure_is(input: &str, message: &str, failure: At) {
-    use ayaml::Limits;
     use serde::de::IgnoredAny;
 
     let errors = [
@@ -136,8 +135,9 @@ fn compat_failure_is(input: &str, message: &str, failure: At) {
             ayaml::compat::deserialize_any(input, IgnoredAny).map(drop),
         ),
         (
-            "parse_events_with_limits",
-            ayaml::compat::parse_events_eager_with_limits(input, &Limits::default()).map(drop),
+            "parse_events_eager_with",
+            ayaml::compat::parse_events_eager_with(input, &ayaml::compat::ParseOptions::new())
+                .map(drop),
         ),
     ];
     for (reader, result) in errors {
