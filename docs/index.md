@@ -12,14 +12,14 @@ and depend only on `serde` and `indexmap`.
 
 ```toml
 [dependencies]
-ayaml = "0.2.2"
+ayaml = "0.2.3"
 ```
 
 For derived Serde types, enable Serde's `derive` feature in your crate:
 
 ```toml
 [dependencies]
-ayaml = "0.2.2"
+ayaml = "0.2.3"
 serde = { version = "1", features = ["derive"] }
 ```
 
