@@ -8,7 +8,7 @@ resource limits, and safe error handling.
 
 ```toml
 [dependencies]
-ayaml = "0.2.2"
+ayaml = "0.2.3"
 serde = { version = "1", features = ["derive"] }
 ```
 

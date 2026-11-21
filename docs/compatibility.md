@@ -140,7 +140,7 @@ The additive `libyaml-compat` feature exposes `ayaml::compat`:
 
 ```toml
 [dependencies]
-ayaml = { version = "0.2.2", features = ["libyaml-compat"] }
+ayaml = { version = "0.2.3", features = ["libyaml-compat"] }
 ```
 
 ```rust
