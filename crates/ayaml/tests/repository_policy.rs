@@ -706,3 +706,62 @@ fn ci_runs_the_suite_with_every_typed_read_from_events() {
         Ok(0)
     );
 }
+
+/// CI compares the public API with the last released tag on every change, under no condition,
+/// and `tools/test_public_api.py` runs all of its tests.
+#[test]
+fn ci_compares_the_public_api_with_the_last_release() {
+    let Some(root) = repository_root() else {
+        return;
+    };
+    let text = read(&root, ".github/workflows/ci.yml");
+    let check = |workflow: &str| {
+        steps_that_run(workflow, &|step| {
+            step["run"].as_str().map(str::trim) == Some("python3 tools/check_public_api.py")
+        })
+    };
+    assert_eq!(
+        check(&text),
+        Ok(1),
+        "CI has to run the public API check, once, under no condition"
+    );
+    let regression = |workflow: &str| {
+        steps_that_run(workflow, &|step| {
+            step["run"].as_str().map(str::trim)
+                == Some("AYAML_TEST_PUBLIC_API_LIVE=1 python3 tools/test_public_api.py")
+        })
+    };
+    assert_eq!(
+        regression(&text),
+        Ok(1),
+        "CI has to run the 0.1.3-to-0.2.0 public API regression check, once, under no condition"
+    );
+    let workflow = parse_value(&text).expect("ci.yml parses");
+    let checkout = workflow["jobs"]["public-api"]["steps"]
+        .as_sequence()
+        .expect("public-api steps")
+        .first()
+        .expect("checkout step");
+    assert_eq!(
+        checkout["with"]["fetch-depth"].as_i64(),
+        Some(0),
+        "public-api checkout must fetch release tags (fetch-depth: 0)"
+    );
+    let local = read(&root, "tools/ci-local.sh");
+    assert!(local.contains("python3 tools/check_public_api.py"));
+    assert!(local.contains("AYAML_TEST_PUBLIC_API_LIVE=1 python3 tools/test_public_api.py"));
+    let tests = read(&root, "tools/test_public_api.py");
+    let (_, after) = tests
+        .split_once("if __name__ == \"__main__\":")
+        .expect("tools/test_public_api.py runs its tests when it is a script");
+    assert_eq!(
+        after.trim(),
+        "unittest.main()",
+        "nothing may follow the call that runs the public API tests"
+    );
+    assert_eq!(
+        tests.matches("unittest.main(").count(),
+        1,
+        "one call runs the public API tests"
+    );
+}
