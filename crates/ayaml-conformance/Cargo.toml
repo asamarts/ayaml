@@ -15,5 +15,8 @@ compat = ["ayaml/libyaml-compat"]
 ayaml = { path = "../ayaml", version = "=0.2.2", features = ["bench-internals"] }
 serde_json.workspace = true
 
+[dev-dependencies]
+serde = { workspace = true, features = ["derive"] }
+
 [lints]
 workspace = true

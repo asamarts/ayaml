@@ -76,9 +76,9 @@ These are done in the web interfaces by an owner. Each is recorded here once don
 ## Cutting a release
 
 1. In a pull request, set the workspace version in `Cargo.toml` and in each place that repeats
-   it: the current release and the two install lines in `README.md`, the install line in
-   `docs/compatibility.md`, and the exact `ayaml` requirement in
-   `crates/ayaml-bench/Cargo.toml`, `crates/ayaml-conformance/Cargo.toml`, and
+   it: the current release and the two install lines in `README.md`, the install lines in
+   `docs/index.md`, `docs/getting-started.md`, and `docs/compatibility.md`, and the exact `ayaml`
+   requirement in `crates/ayaml-bench/Cargo.toml`, `crates/ayaml-conformance/Cargo.toml`, and
    `fuzz/Cargo.toml`. A policy test fails while one of them disagrees. Rename the
    `CHANGELOG.md` and in its copy under `crates/ayaml`, and refresh `Cargo.lock` and
    `fuzz/Cargo.lock`. Make sure any breaking or signature change since the last release tag is

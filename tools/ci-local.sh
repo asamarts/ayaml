@@ -393,6 +393,20 @@ job_docs-lint() {
   else
     skip "npx not installed"
   fi
+  step "check documentation links and book coverage" python3 tools/check_docs.py
+  # Mirrors: python3 tools/check_docs.py
+  local mdbook_bin=""
+  if command -v mdbook >/dev/null 2>&1; then
+    mdbook_bin="mdbook"
+  elif [ -x "${CARGO_HOME:-$HOME/.cargo}/bin/mdbook" ]; then
+    mdbook_bin="${CARGO_HOME:-$HOME/.cargo}/bin/mdbook"
+  fi
+  if [ -n "$mdbook_bin" ]; then
+    step "mdbook build" "$mdbook_bin" build
+  else
+    skip "mdbook not installed"
+  fi
+  test_step "doctest every book page" cargo "+$STABLE" test --doc -p ayaml-conformance --all-features --locked
 }
 
 # cargo package plus a fresh downstream consumer built from the .crate.

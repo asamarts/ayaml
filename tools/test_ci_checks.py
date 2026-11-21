@@ -23,8 +23,9 @@ from unittest import mock
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import check_instructions
 import check_deps
+import check_docs
+import check_instructions
 import check_release
 import check_scheduled_runs
 import check_unsafe_census
@@ -1596,6 +1597,71 @@ class SharedVectors(unittest.TestCase):
     def test_the_source_names_a_commit(self) -> None:
         source = (self.DIRECTORY / "SOURCE.md").read_text(encoding="utf-8")
         self.assertRegex(source, r"commit `[0-9a-f]{40}`")
+
+
+class DocsCheck(unittest.TestCase):
+    """tools/check_docs.py checks book.toml, SUMMARY.md, book_doctests, links, and Rust fences."""
+
+    def make_tree(self) -> Path:
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        (root / "docs").mkdir()
+        (root / "crates/ayaml-conformance/src").mkdir(parents=True)
+        (root / "book.toml").write_text(
+            '[book]\nsrc = "docs"\n[build]\nbuild-dir = "target/book"\ncreate-missing = false\n',
+            encoding="utf-8",
+        )
+        (root / "README.md").write_text("# ayaml\n\nSee [Index](docs/index.md).\n", encoding="utf-8")
+        (root / "docs/SUMMARY.md").write_text(
+            "# Summary\n\n[Introduction](index.md)\n- [Security](security.md)\n",
+            encoding="utf-8",
+        )
+        (root / "docs/index.md").write_text(
+            "# Intro\n\nSee [Security](security.md).\n", encoding="utf-8"
+        )
+        (root / "docs/security.md").write_text(
+            "# Security\n\n```rust\nassert_eq!(1 + 1, 2);\n```\n", encoding="utf-8"
+        )
+        (root / "crates/ayaml-conformance/src/lib.rs").write_text(
+            '#[doc = include_str!("../../../README.md")]\n'
+            '#[doc = include_str!("../../../docs/index.md")]\n'
+            '#[doc = include_str!("../../../docs/security.md")]\n',
+            encoding="utf-8",
+        )
+        return root
+
+    def test_valid_tree_passes(self) -> None:
+        root = self.make_tree()
+        self.assertEqual(check_docs.problems(root), [])
+
+    def test_unlisted_page_fails_summary_and_doctests(self) -> None:
+        root = self.make_tree()
+        (root / "docs/extra.md").write_text("# Extra\n", encoding="utf-8")
+        found = check_docs.problems(root)
+        self.assertTrue(any("not listed in docs/SUMMARY.md" in msg for msg in found), found)
+        self.assertTrue(any("not included in" in msg for msg in found), found)
+
+    def test_broken_and_escaping_links_fail(self) -> None:
+        root = self.make_tree()
+        (root / "docs/index.md").write_text(
+            "# Intro\n\n[Missing](missing.md) and [Escape](../README.md)\n", encoding="utf-8"
+        )
+        found = check_docs.problems(root)
+        self.assertTrue(any("missing link target 'missing.md'" in msg for msg in found), found)
+        self.assertTrue(any("escapes docs/" in msg for msg in found), found)
+
+    def test_ignored_rust_fence_fails(self) -> None:
+        root = self.make_tree()
+        (root / "docs/security.md").write_text(
+            "# Security\n\n```rust,ignore\nlet x = 1;\n```\n", encoding="utf-8"
+        )
+        found = check_docs.problems(root)
+        self.assertTrue(any("uses 'ignore'" in msg for msg in found), found)
+
+    def test_repository_tree_passes(self) -> None:
+        repo = Path(__file__).resolve().parent.parent
+        self.assertEqual(check_docs.problems(repo), [])
 
 
 if __name__ == "__main__":

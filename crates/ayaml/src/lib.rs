@@ -101,9 +101,11 @@
 //! output on [`Error`] may include text from the document (such as scalar
 //! values, mapping keys, paths, tags, or directives); use [`Error::masked`]
 //! ([`MaskedError`]) when logging or returning errors from sensitive or
-//! untrusted documents. See `docs/error-codes.md` for the full code reference,
-//! its relation to [`ErrorKind`], and masked error formatting. Events carry
-//! their own spans for source-aware tooling.
+//! untrusted documents. See the documentation book
+//! (<https://asamarts.github.io/ayaml/>) — including `docs/error-codes.md`,
+//! `docs/security.md`, and `docs/stability.md` — for the full code reference,
+//! security and untrusted-input guidance, stability guarantees, and masked
+//! error formatting. Events carry their own spans for source-aware tooling.
 //!
 //! # Minimum supported Rust version
 //!

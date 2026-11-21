@@ -52,6 +52,7 @@ name = "ayaml-conformance"
 version = "0.2.2"
 dependencies = [
  "ayaml",
+ "serde",
  "serde_json",
 ]
 

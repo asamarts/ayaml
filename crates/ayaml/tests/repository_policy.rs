@@ -410,6 +410,18 @@ fn every_place_that_repeats_the_version_agrees_with_the_workspace() {
         [version, version],
         "README.md's install lines"
     );
+    let book_index = read(&root, "docs/index.md");
+    assert_eq!(
+        dependency_versions(&book_index),
+        [version, version],
+        "docs/index.md's install lines"
+    );
+    let getting_started = read(&root, "docs/getting-started.md");
+    assert_eq!(
+        dependency_versions(&getting_started),
+        [version],
+        "docs/getting-started.md's install line"
+    );
     let guide = read(&root, "docs/compatibility.md");
     assert_eq!(
         dependency_versions(&guide),
@@ -763,5 +775,102 @@ fn ci_compares_the_public_api_with_the_last_release() {
         tests.matches("unittest.main(").count(),
         1,
         "one call runs the public API tests"
+    );
+}
+
+/// The mdBook configuration, summary, security reference, stability reference, error-code
+/// reference, workspace book doctests, and docs/CI workflows stay wired together.
+#[test]
+fn docs_book_and_reference_pages_are_complete_and_doctested_in_ci() {
+    let Some(root) = repository_root() else {
+        return;
+    };
+    let book = read(&root, "book.toml");
+    assert!(book.contains("src = \"docs\""));
+    assert!(book.contains("build-dir = \"target/book\""));
+    assert!(book.contains("create-missing = false"));
+
+    let summary = read(&root, "docs/SUMMARY.md");
+    for required in [
+        "(index.md)",
+        "(getting-started.md)",
+        "(error-codes.md)",
+        "(security.md)",
+        "(stability.md)",
+        "(limits.md)",
+        "(compatibility.md)",
+    ] {
+        assert!(
+            summary.contains(required),
+            "docs/SUMMARY.md must list {required}"
+        );
+    }
+
+    let security = read(&root, "docs/security.md");
+    for topic in ["Limits", "untrusted", "Error::masked()", "MaskedError"] {
+        assert!(
+            security.contains(topic),
+            "docs/security.md must cover {topic:?}"
+        );
+    }
+
+    let stability = read(&root, "docs/stability.md");
+    for topic in [
+        "#[non_exhaustive]",
+        "libyaml-compat",
+        "bench-internals",
+        "Deprecated",
+        "ErrorCode",
+    ] {
+        assert!(
+            stability.contains(topic),
+            "docs/stability.md must cover {topic:?}"
+        );
+    }
+
+    let book_doctests = read(&root, "crates/ayaml-conformance/src/lib.rs");
+    for entry in std::fs::read_dir(root.join("docs")).expect("docs directory") {
+        let path = entry.expect("docs entry").path();
+        if path.extension().is_some_and(|ext| ext == "md")
+            && path.file_name().is_some_and(|name| name != "SUMMARY.md")
+        {
+            let name = path.file_name().expect("file name").to_string_lossy();
+            assert!(
+                summary.contains(&format!("({name})")),
+                "docs/{name} is missing from docs/SUMMARY.md"
+            );
+            assert!(
+                book_doctests.contains(&format!("../../../docs/{name}")),
+                "docs/{name} is missing from crates/ayaml-conformance/src/lib.rs book_doctests"
+            );
+        }
+    }
+    assert!(
+        book_doctests.contains("../../../README.md"),
+        "README.md is missing from book_doctests"
+    );
+
+    let docs_wf = read(&root, ".github/workflows/docs.yml");
+    for needle in [
+        "mdbook build",
+        "python3 tools/check_docs.py",
+        "cargo test --doc -p ayaml-conformance --all-features --locked",
+        "actions/upload-pages-artifact@",
+        "actions/deploy-pages@",
+    ] {
+        assert!(
+            docs_wf.contains(needle),
+            ".github/workflows/docs.yml must contain {needle:?}"
+        );
+    }
+
+    let ci_wf = read(&root, ".github/workflows/ci.yml");
+    let check_docs_steps = steps_that_run(&ci_wf, &|step| {
+        step["run"].as_str().map(str::trim) == Some("python3 tools/check_docs.py")
+    });
+    assert_eq!(
+        check_docs_steps,
+        Ok(1),
+        "CI must run python3 tools/check_docs.py unconditionally"
     );
 }

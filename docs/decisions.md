@@ -1055,3 +1055,29 @@ preserving `ErrorKind`, `ErrorCode`, and `Location` for triage.
 **Consequences.** Callers logging or surfacing errors from sensitive or untrusted documents can
 format `error.masked()` without leaking document contents, and `crates/ayaml/tests/masked_errors.rs`
 pins every error path in the crate that can interpolate document text against regressions.
+
+## D102 — Documentation book, reference pages, and workspace book doctests
+
+**Date:** 2026-11-21
+**Status:** Accepted
+
+**Decision.** Publish the existing `docs/` pages and new guide/reference pages (`index.md`,
+`getting-started.md`, `security.md`, `stability.md`) as an mdBook (`book.toml` + `docs/SUMMARY.md`)
+built and deployed to GitHub Pages by `.github/workflows/docs.yml`. Doctest `README.md` and every
+page under `docs/` through a `#[cfg(doctest)] pub mod book_doctests` module in the unpublished
+workspace crate `crates/ayaml-conformance/src/lib.rs`, enforced for completeness and link hygiene
+by `tools/check_docs.py` in CI.
+
+**Alternatives.** Put `#[doc = include_str!("../../../docs/...")]` directly inside
+`crates/ayaml/src/lib.rs`: breaks `cargo test` inside an unpacked `ayaml-*.crate` tarball because
+`tools/check_release.py` keeps the published package self-contained under `crates/ayaml/`. Run
+only `mdbook test` in `docs.yml`: skips book doctests on non-docs PRs, MSRV 1.88, macOS, Windows,
+and minimal-versions CI jobs.
+
+**Why.** Hosting `book_doctests` in `ayaml-conformance` compiles and executes every Rust example in
+`README.md` and the entire book on every `cargo test --workspace --locked --all-features` run
+(Linux 1.88, Linux stable, macOS, Windows, minimal versions, and `docs.yml`) without altering the
+published crate tarball or `ayaml`'s public API.
+
+**Consequences.** Every book page is covered by `docs/SUMMARY.md`, `book_doctests`, link checks,
+and `markdownlint`, and any broken or skipped example fails CI immediately.

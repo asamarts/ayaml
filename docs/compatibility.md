@@ -144,8 +144,7 @@ ayaml = { version = "0.2.2", features = ["libyaml-compat"] }
 ```
 
 ```rust
-# #[cfg(feature = "libyaml-compat")]
-# fn example() -> Result<(), ayaml::Error> {
+# fn main() -> Result<(), ayaml::Error> {
 let value: ayaml::Value = ayaml::compat::from_str("key: value\n")?;
 assert_eq!(value["key"].as_str(), Some("value"));
 # Ok(())
@@ -284,7 +283,7 @@ these places, on purpose:
 - A quoted scalar may hold any `nb-json` character, such as DEL.
 
 The maintained deviation list is
-[`tests/data/yaml-test-suite-deviations.txt`](../tests/data/yaml-test-suite-deviations.txt).
+[`tests/data/yaml-test-suite-deviations.txt`](https://github.com/asamarts/ayaml/blob/main/tests/data/yaml-test-suite-deviations.txt).
 Each entry names a YAML Test Suite case, the affected mode and check, and the
 reason. Compatibility-mode deviations are intentional; default-mode entries
 are treated as bugs.
