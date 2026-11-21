@@ -7,7 +7,14 @@ setup, no crates.io API token can publish the crate.
 
 ## What the workflow binds together
 
-1. **Gate.** The whole of `ci.yml` runs on the tag's commit, as it does on a pull request.
+1. **Gate.** The whole of `ci.yml` runs on the tag's commit, as it does on a pull request. That
+   includes the public API comparison (`tools/check_public_api.py`), which builds listings of the
+   public API for the default crate and for `libyaml-compat` with the pinned `public-api` tool
+   (`tools/install-public-api.sh`) and its paired nightly toolchain, and compares them against the
+   last released `vMAJOR.MINOR.PATCH` tag before `HEAD`. Any removed item or changed signature,
+   trait implementation, or associated type fails the gate unless the active `### Changed` section
+   of `CHANGELOG.md` names it. The `public-api` archive version/checksum and its nightly toolchain
+   move together by hand, like `cargo-semver-checks` and its toolchain.
 2. **Tag.** The package job scans the annotated tag message and name with the leak gate.
    `tools/check_release.py tag` checks that the tag is annotated and names
    `vMAJOR.MINOR.PATCH`, that the checkout is that commit and is clean, that the commit is on
@@ -73,10 +80,12 @@ These are done in the web interfaces by an owner. Each is recorded here once don
    `docs/compatibility.md`, and the exact `ayaml` requirement in
    `crates/ayaml-bench/Cargo.toml`, `crates/ayaml-conformance/Cargo.toml`, and
    `fuzz/Cargo.toml`. A policy test fails while one of them disagrees. Rename the
-   `## [Unreleased]` section to `## [X.Y.Z] — YYYY-MM-DD` in `CHANGELOG.md` and in its copy
-   under `crates/ayaml`, and refresh `Cargo.lock` and `fuzz/Cargo.lock`. For a minor release,
-   say in `SECURITY.md` which versions get fixes. CI is the gate, as for any change. Change
-   `RELEASE_TOOLCHAIN` only in this pull request, never between a tag and its rerun.
+   `CHANGELOG.md` and in its copy under `crates/ayaml`, and refresh `Cargo.lock` and
+   `fuzz/Cargo.lock`. Make sure any breaking or signature change since the last release tag is
+   named in that release's `### Changed` section so the public API gate passes both on the release
+   pull request and on the tag. For a minor release, say in `SECURITY.md` which versions get fixes.
+   CI is the gate, as for any change. Change `RELEASE_TOOLCHAIN` only in this pull request, never
+   between a tag and its rerun.
 2. After the squash merge, tag the merge commit on `main` and push the tag:
 
    ```sh

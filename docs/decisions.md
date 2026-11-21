@@ -937,3 +937,46 @@ pattern to the remaining entry points without deprecating or renaming AY-122's A
 `compat::deserialize_any_with` accept both custom `Limits` and `GlobalTags` in one value. When
 AY-048 adds root `ParseOptions` and `EmitOptions`, it uses the same `#[non_exhaustive]` struct,
 `const fn new()`, `with_*` builders, and `*_with` naming convention.
+
+## D99 — CI compares public API listings per feature set against the last release tag
+
+**Date:** 2026-11-20
+**Status:** Accepted
+
+**Decision.** CI builds rustdoc JSON listings of `ayaml`'s public API for every feature set that
+changes it (the default crate and `libyaml-compat`), verifies that every feature declared in
+`crates/ayaml/Cargo.toml` is classified and that `bench-internals` exposes no public items, and
+compares the listings with the last released `vMAJOR.MINOR.PATCH` tag strictly before `HEAD`
+(`tools/check_public_api.py`). Any removed item or changed signature, trait implementation, or
+associated type fails the check unless the active `### Changed` section of `CHANGELOG.md`
+(`## [Unreleased]` before a release pull request, or `## [X.Y.Z]` when the crate version is newer
+than the base tag) names the item. Purely additive changes pass without a `### Changed` entry.
+
+The listing tool (`tools/public-api-cli.rs`, installed by `tools/install-public-api.sh`) compiles
+directly against the pinned `public-api` library crate (`0.52.0`) downloaded from crates.io,
+verified by SHA-256 checksum, and built `--locked --no-default-features` using the `Cargo.lock`
+inside that archive and the paired nightly toolchain (`nightly-2026-05-21`, rustdoc JSON format
+version 57). `tools/ci-local.sh` runs the exact same check and regression test (`public-api` job).
+
+**Alternatives.** Rely on `cargo-semver-checks` alone: its pinned release missed all four breaking
+changes between `0.1.3` and `0.2.0` (changed return types on `Span::start`/`Span::end` and
+`compat::parse_events_with_limits`, changed parameter types on `Span::new`/`Span::empty`, and
+changed `IntoIterator::IntoIter` associated types on `Mapping`, `&Mapping`, and `&mut Mapping`).
+Build the `cargo-public-api` CLI crate instead of `public-api`: `cargo-public-api` publishes no
+prebuilt GitHub release binaries and its locked graph pulls in `curl-sys` and `openssl-sys 0.9.88`,
+which fails to build against OpenSSL 4.x on modern Linux hosts. Parse raw rustdoc JSON in Python:
+duplicates the rendering, re-export expansion, and trait-impl traversal that `public-api` already
+maintains.
+
+**Why.** The 0.2.x series promises additive-only evolution, and a whole-API listing diff catches
+every signature, trait implementation, and associated type change across both default and
+compatibility feature sets. Using `public-api` with `--no-default-features` keeps the pinned tool
+pure Rust (no C or OpenSSL dependencies), fast to build and cache, and identical between hosted CI
+and `tools/ci-local.sh`.
+
+**Consequences.** Every pull request and release tag runs `public-api` in CI, including a live
+regression test confirming that comparing `v0.2.0` against `v0.1.3` reports all four documented
+breaks unless named in `### Changed`. Compiler-internal unstable marker traits (`Freeze`,
+`StructuralPartialEq`, `StructuralEq`) are filtered out while stable auto traits (`Send`, `Sync`,
+`Unpin`, `UnwindSafe`, `RefUnwindSafe`) stay enforced. The `public-api` crate version/checksum and
+its paired nightly toolchain must move together by hand.

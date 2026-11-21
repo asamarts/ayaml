@@ -40,7 +40,7 @@ MSRV="1.88.0"
 STABLE="stable"
 TEST_ADDRESS_SPACE_KIB=8388608
 TEST_TIMEOUT_SECONDS=1800
-ALL_JOBS=(sync bounds release-mode quality-msrv quality-stable features policy harness instructions plan alint suite docs-lint package cross fuzz-smoke leak-gate scheduled)
+ALL_JOBS=(sync bounds release-mode quality-msrv quality-stable features policy public-api harness instructions plan alint suite docs-lint package cross fuzz-smoke leak-gate scheduled)
 
 release=0
 jobs=()
@@ -180,7 +180,7 @@ job_sync() {
     for wf in .github/workflows/ci.yml .github/workflows/fuzz.yml; do
       while IFS= read -r cmd; do
         case "$cmd" in
-          "cargo install cargo-geiger --version 0.14.0 --locked"|"cargo install cargo-fuzz --version 0.13.2 --locked"|"cargo install aplan --version 0.6.0 --locked"|"sudo rm -f /var/lib/man-db/auto-update && sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind"|"tools/install-semver-checks.sh \"\$TMPDIR/semver-checks\" >> \"\$GITHUB_PATH\""|"tools/install-cargo-deny.sh \"\$TMPDIR/cargo-deny\" >> \"\$GITHUB_PATH\"") continue ;;
+          "cargo install cargo-geiger --version 0.14.0 --locked"|"cargo install cargo-fuzz --version 0.13.2 --locked"|"cargo install aplan --version 0.6.0 --locked"|"sudo rm -f /var/lib/man-db/auto-update && sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind"|"tools/install-semver-checks.sh \"\$TMPDIR/semver-checks\" >> \"\$GITHUB_PATH\""|"tools/install-cargo-deny.sh \"\$TMPDIR/cargo-deny\" >> \"\$GITHUB_PATH\""|"tools/install-public-api.sh \"\$TMPDIR/public-api\" >> \"\$GITHUB_PATH\"") continue ;;
         esac
         if ! grep -qF -- "$cmd" tools/ci-local.sh; then
           echo "not mirrored ($wf): $cmd"; missing=1
@@ -294,6 +294,8 @@ job_features() {
 job_policy() {
   step "test the checks" python3 tools/test_ci_checks.py
   # Mirrors: python3 tools/test_ci_checks.py
+  step "test the public API check" python3 tools/test_public_api.py
+  # Mirrors: python3 tools/test_public_api.py
   step "classify dependencies" python3 tools/check_deps.py
   # Mirrors: python3 tools/check_deps.py
   # The pinned cargo-deny that CI installs, checked against its digest, in this checkout's target.
@@ -313,6 +315,20 @@ job_policy() {
     # Mirrors: python3 tools/check_unsafe_census.py "$TMPDIR/geiger.json"
   else
     skip "cargo-geiger not installed: unsafe census"
+  fi
+}
+
+job_public-api() {
+  local tc="nightly-2026-05-21"
+  if ! have_toolchain "$tc"; then skip "toolchain $tc missing"; return; fi
+  local api_dir
+  if api_dir="$(tools/install-public-api.sh "$PWD/target/ci-tools/public-api")"; then
+    step "public API diff against last release" env PATH="$api_dir:$PATH" python3 tools/check_public_api.py
+    # Mirrors: python3 tools/check_public_api.py
+    step "verify 0.1.3 to 0.2.0 break detection" env PATH="$api_dir:$PATH" AYAML_TEST_PUBLIC_API_LIVE=1 python3 tools/test_public_api.py
+    # Mirrors: AYAML_TEST_PUBLIC_API_LIVE=1 python3 tools/test_public_api.py
+  else
+    echo "  the pinned public-api tool could not be installed"; job_failed=1
   fi
 }
 
