@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Documentation book (`book.toml`, `docs/SUMMARY.md`, `docs/index.md`, `docs/getting-started.md`,
+  `docs/security.md`, `docs/stability.md`, and the error code reference) built and deployed by
+  `.github/workflows/docs.yml`, with every Rust example in `README.md` and `docs/` executed as a
+  doctest in CI.
 - `Error::masked()` and `MaskedError` (`Display`, `Debug`, `std::error::Error`, `Clone`, `Copy`,
   `PartialEq`, `Eq`, plus safe `kind`, `code`, `span`, `location`, and `limit` accessors), giving
   callers a document-text-free formatting view for logging or surfacing errors from sensitive or

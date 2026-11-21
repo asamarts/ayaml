@@ -10,7 +10,9 @@ both:
 
 Match on `Error::code()` or `Error::kind()` rather than `Error::message()` text. Message wording
 may be clarified across releases; `ErrorCode` variants and their `yaml.<kebab-name>` strings are
-part of the crate's stability contract.
+part of the crate's stability contract (see [Stability and versioning](stability.md)). For what
+unmasked errors may contain and guidance on untrusted input, see
+[Security and untrusted input](security.md).
 
 ## Masked error output
 

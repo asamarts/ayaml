@@ -6,7 +6,7 @@ public surfaces consistent through a
 no shared types, no shared trait, and no dependency between them. A crate offers the layers that
 its format supports, and where it offers one it uses the contract's names and rules. Conformance
 is checked by shared test data, which is vendored here under
-[`tests/vectors/`](../tests/vectors/SOURCE.md).
+[`tests/vectors/`](https://github.com/asamarts/ayaml/blob/main/tests/vectors/SOURCE.md).
 
 This page says what ayaml offers at each layer today, and which task holds what it doesn't.
 

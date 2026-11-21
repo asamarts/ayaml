@@ -27,7 +27,8 @@ with the default `Limits`, or with limits you've tightened:
 - a document that decodes to values it doesn't contain, without an error.
 
 Raising or removing limits is your choice, so resource use that results from doing
-so isn't a vulnerability. [`docs/limits.md`](docs/limits.md) describes each limit.
+so isn't a vulnerability. [`docs/limits.md`](docs/limits.md) describes each limit, and
+[`docs/security.md`](docs/security.md) covers untrusted input and what errors may contain.
 
-Error messages can include text from the document, so don't log them unfiltered
-when documents hold secrets.
+Normal error messages can include text from the document, so format `error.masked()`
+(`MaskedError`) rather than logging raw errors when documents hold secrets.

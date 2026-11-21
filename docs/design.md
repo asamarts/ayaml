@@ -94,11 +94,14 @@ none, and nor does a block entry whose removal the lines around it would make in
 the conditions. A value that the source doesn't write after its key's `:` has an empty span
 right after that `:`.
 
-Errors have an `ErrorKind` that names the layer that refused the input, an optional
-span and location, a message, and an optional source. Resource-limit errors additionally expose a structured
-`LimitExceeded` value through `Error::limit()`. Human-readable `Display` output
-includes the location when one is known without duplicating a location already
-present in the message.
+Errors have a coarse `ErrorKind` that names the layer that refused the input, a stable
+machine-readable `ErrorCode` (`yaml.<kebab-name>` via `Error::code()`), an optional span and
+location, a message, and an optional source. Resource-limit errors additionally expose a
+structured `LimitExceeded` value through `Error::limit()`. Human-readable `Display` output
+includes the location when one is known without duplicating a location already present in the
+message, and may contain text from the document; use `Error::masked()` (`MaskedError`) when
+formatting errors for logs or untrusted callers. See [error-codes.md](error-codes.md),
+[security.md](security.md), and [stability.md](stability.md).
 
 ## Determinism and concurrency
 

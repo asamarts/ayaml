@@ -252,8 +252,9 @@ construction.
 
 ## Errors
 
-A limit failure returns `ErrorKind::Limit`. `Error::limit()` returns the
-structured `LimitExceeded` value with:
+A limit failure returns `ErrorKind::Limit` and a specific `ErrorCode`
+(see [`error-codes.md`](error-codes.md#resource-limits) and [`security.md`](security.md)).
+`Error::limit()` returns the structured `LimitExceeded` value with:
 
 - the `LimitKind`;
 - the configured ceiling; and
