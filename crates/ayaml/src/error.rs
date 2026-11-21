@@ -1516,6 +1516,7 @@ mod tests {
         let masked = error.masked();
         let display = masked.to_string();
         let debug = format!("{masked:?}");
+        let pretty_debug = format!("{masked:#?}");
 
         assert_eq!(
             display,
@@ -1530,6 +1531,10 @@ mod tests {
         assert!(
             !debug.contains("secret_key_991"),
             "leaked key in debug: {debug}"
+        );
+        assert!(
+            !pretty_debug.contains(secret) && !pretty_debug.contains("secret_key_991"),
+            "leaked in pretty debug: {pretty_debug}"
         );
         assert!(debug.contains("Serde") && debug.contains("InvalidType"));
         assert!(masked.source().is_none());
@@ -1568,6 +1573,18 @@ mod tests {
             loc_without_span.masked().location(),
             Some(Location::new(2, 3))
         );
+
+        let span_without_loc =
+            Error::new(ErrorKind::Scanner, format!("bad {secret}")).with_span(Span::new(1, 5));
+        assert_eq!(
+            span_without_loc.masked().to_string(),
+            "scanner error (yaml.unexpected-token)"
+        );
+        assert_eq!(span_without_loc.masked().span(), Some(Span::new(1, 5)));
+        assert_eq!(span_without_loc.masked().location(), None);
+        assert!(!format!("{:?}", span_without_loc.masked()).contains(secret));
+        assert!(!format!("{:#?}", span_without_loc.masked()).contains(secret));
+
         assert_masked_traits(masked);
     }
 

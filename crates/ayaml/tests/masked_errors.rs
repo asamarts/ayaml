@@ -121,6 +121,7 @@ fn assert_masked_omits(error: &Error, expected_code: ErrorCode, markers: &[&str]
     let masked = error.masked();
     let masked_display = masked.to_string();
     let masked_debug = format!("{masked:?}");
+    let masked_pretty = format!("{masked:#?}");
 
     for &marker in markers {
         assert!(
@@ -130,6 +131,10 @@ fn assert_masked_omits(error: &Error, expected_code: ErrorCode, markers: &[&str]
         assert!(
             !masked_debug.contains(marker),
             "masked Debug leaked {marker:?}: {masked_debug:?}"
+        );
+        assert!(
+            !masked_pretty.contains(marker),
+            "masked pretty Debug leaked {marker:?}: {masked_pretty:?}"
         );
     }
 
@@ -357,6 +362,12 @@ fn serde_errors_carrying_keys_values_tags_variants_and_fields_are_masked() {
     let quoted_key = format!("\"has space {SECRET}\": \"{SECRET_VAL}\"\n");
     assert_masked_redacts(
         &from_str::<HashMap<String, u32>>(&quoted_key).unwrap_err(),
+        ErrorCode::InvalidType,
+        &[SECRET, SECRET_VAL],
+    );
+    let long_key = format!("k_{SECRET}_{}: \"{SECRET_VAL}\"\n", "z".repeat(70));
+    assert_masked_redacts(
+        &from_str::<HashMap<String, u32>>(&long_key).unwrap_err(),
         ErrorCode::InvalidType,
         &[SECRET, SECRET_VAL],
     );
@@ -605,6 +616,14 @@ fn emitter_event_emitter_and_io_errors_carrying_text_are_masked() {
 #[cfg(feature = "libyaml-compat")]
 #[test]
 fn compat_errors_carrying_document_text_are_masked() {
+    struct ExpectU32;
+    impl de::Visitor<'_> for ExpectU32 {
+        type Value = u32;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a u32")
+        }
+    }
+
     let nested = format!("{SECRET}: \"{SECRET_VAL}\"\n");
     assert_masked_redacts(
         &ayaml::compat::from_str::<HashMap<String, u32>>(&nested).unwrap_err(),
@@ -624,11 +643,23 @@ fn compat_errors_carrying_document_text_are_masked() {
         &[SECRET],
     );
 
-    // Compat duplicate key inside Value::deserialize carries the key text.
+    // Compat duplicate key inside Value::deserialize and Mapping::deserialize carries the key text.
     let dup = format!("{SECRET}: 1\n{SECRET}: 2\n");
     assert_masked_redacts(
         &ayaml::compat::from_str::<Value>(&dup).unwrap_err(),
         ErrorCode::SerdeCustom,
+        &[SECRET],
+    );
+    assert_masked_redacts(
+        &ayaml::compat::from_str::<ayaml::Mapping>(&dup).unwrap_err(),
+        ErrorCode::SerdeCustom,
+        &[SECRET],
+    );
+
+    // Compat deserialize_any carrying a secret value in a visitor rejection.
+    assert_masked_redacts(
+        &ayaml::compat::deserialize_any(&format!("\"{SECRET}\"\n"), ExpectU32).unwrap_err(),
+        ErrorCode::InvalidType,
         &[SECRET],
     );
 
@@ -653,4 +684,39 @@ fn compat_errors_carrying_document_text_are_masked() {
         ErrorCode::InvalidDirective,
         &[SECRET],
     );
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn internals_compose_events_key_without_value_is_masked() {
+    let events = vec![
+        Event::DocumentStart {
+            explicit: false,
+            span: Span::empty(0),
+        },
+        Event::MappingStart {
+            style: ayaml::CollectionStyle::Block,
+            tag: None,
+            anchor: None,
+            span: Span::empty(0),
+        },
+        Event::Scalar {
+            value: SECRET.into(),
+            raw: SECRET.into(),
+            style: ScalarStyle::Plain,
+            tag: None,
+            anchor: None,
+            span: Span::empty(0),
+        },
+        Event::MappingEnd {
+            span: Span::empty(0),
+        },
+        Event::DocumentEnd {
+            explicit: false,
+            span: Span::empty(0),
+        },
+    ];
+    let err =
+        ayaml::internals::compose_events(&events, SECRET.len(), &Limits::default()).unwrap_err();
+    assert_masked_redacts(&err, ErrorCode::MalformedEventStream, &[SECRET]);
 }
