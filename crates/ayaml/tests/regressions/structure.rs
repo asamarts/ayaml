@@ -1696,7 +1696,7 @@ fn plain_scalar_spans_and_raw_end_at_their_content() {
         .expect("default events");
     #[cfg(feature = "libyaml-compat")]
     let compat: Vec<ayaml::Event<'_>> =
-        ayaml::compat::parse_events_eager_with_limits(input, &ayaml::Limits::default())
+        ayaml::compat::parse_events_eager_with(input, &ayaml::compat::ParseOptions::new())
             .expect("compat events");
     #[cfg(feature = "libyaml-compat")]
     let readers = [("default", default), ("compat", compat)];
@@ -1753,9 +1753,10 @@ fn plain_scalar_spans_and_raw_end_at_their_content() {
 /// input can fill the token or event budget. Issue #165.
 #[test]
 fn a_deep_compact_sequence_fails_at_the_depth_limit_early() {
-    let limits = ayaml::Limits::default().with_max_events(1_000);
+    let options =
+        ayaml::ParseOptions::new().with_limits(ayaml::Limits::new().with_max_events(1_000));
     let input = "- ".repeat(1 << 20);
-    let error = ayaml::parse_value_with_limits(&input, &limits).unwrap_err();
+    let error = ayaml::parse_value_with(&input, &options).unwrap_err();
     assert_eq!(
         error.limit().map(ayaml::LimitExceeded::kind),
         Some(ayaml::LimitKind::Depth)

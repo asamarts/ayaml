@@ -147,9 +147,9 @@ fn every_document_reads_back_once_whatever_markers_the_writer_adds() {
             }
         }
     }
-    let limits = Limits::default();
+    let emit_options = ayaml::EmitOptions::new();
     let mut bytes = Vec::new();
-    ayaml::to_writer_documents_with_limits(&mut bytes, &values, &limits).unwrap();
+    ayaml::to_writer_documents_with(&mut bytes, &values, &emit_options).unwrap();
     for text in [
         String::from_utf8(bytes).unwrap(),
         ayaml::to_string_documents(&values).unwrap(),
@@ -377,8 +377,9 @@ fn a_tagged_key_too_long_to_be_implicit_reads_back() {
         Value::from(1_u64),
     );
     let value = Value::Mapping(mapping);
+    let compat = ayaml::ParseOptions::new().with_limits(Limits::compat());
     for (writer, text) in each_value_writer(&value) {
-        let read = ayaml::parse_value_with_limits(&text, &Limits::compat())
+        let read = ayaml::parse_value_with(&text, &compat)
             .unwrap_or_else(|error| panic!("{writer} wrote {text:?}, which compat fails: {error}"));
         assert_eq!(read, value, "{writer} wrote {text:?}");
     }
@@ -777,6 +778,7 @@ fn the_look_for_directives_stops_where_the_writer_does() {
         .spawn(|| {
             let limits = Limits::default().with_max_depth(8);
             let tagged = || Value::from(TaggedValue::new(Tag::new("tag:x:", "a b"), "v".into()));
+            let emit_options = ayaml::EmitOptions::new().with_limits(limits);
             for (mappings, written) in [
                 (false, "- - - - - - - - !t0!a%20b v\n"),
                 (
@@ -787,17 +789,17 @@ fn the_look_for_directives_stops_where_the_writer_does() {
             ] {
                 let at_the_limit = nested(tagged(), 8, mappings);
                 assert_eq!(
-                    ayaml::to_string_value_with_limits(&at_the_limit, &limits).unwrap(),
+                    ayaml::to_string_value_with(&at_the_limit, &emit_options).unwrap(),
                     format!("%TAG !t0! tag:x:\n---\n{written}")
                 );
                 reads_back(&at_the_limit);
 
                 let deep = nested(tagged(), 100_000, mappings);
-                let error = ayaml::to_string_value_with_limits(&deep, &limits).unwrap_err();
+                let error = ayaml::to_string_value_with(&deep, &emit_options).unwrap_err();
                 assert_eq!(error.kind(), ayaml::ErrorKind::Limit, "{error}");
                 let mut bytes = Vec::new();
                 let error =
-                    ayaml::to_writer_value_with_limits(&mut bytes, &deep, &limits).unwrap_err();
+                    ayaml::to_writer_value_with(&mut bytes, &deep, &emit_options).unwrap_err();
                 assert_eq!(error.kind(), ayaml::ErrorKind::Limit, "{error}");
                 take_apart(deep);
             }
@@ -853,42 +855,26 @@ fn every_writer_writes_the_whole_output_above_the_chunk_size() {
     let limits = Limits::default();
     let options = EmitterOptions::default();
     let styles = ayaml::EmitterStyles::default();
+    let emit_options = ayaml::EmitOptions::new();
+    let styled_emit = emit_options.clone().with_styles(styles.clone());
     let emitter = Emitter::new(&limits, &options);
     let styled = emitter.with_styles(&styles);
 
     check!("to_writer", expected, 2, |writer| {
         ayaml::to_writer(writer, &value)
     });
-    check!("to_writer_with_limits", expected, 2, |writer| {
-        ayaml::to_writer_with_limits(writer, &value, &limits)
-    });
-    check!("to_writer_with_options", expected, 2, |writer| {
-        ayaml::to_writer_with_options(writer, &value, &options)
+    check!("to_writer_with", expected, 2, |writer| {
+        ayaml::to_writer_with(writer, &value, &emit_options)
     });
     check!("to_writer_value", expected, 2, |writer| {
         ayaml::to_writer_value(writer, &value)
     });
-    check!("to_writer_value_with_limits", expected, 2, |writer| {
-        ayaml::to_writer_value_with_limits(writer, &value, &limits)
+    check!("to_writer_value_with", expected, 2, |writer| {
+        ayaml::to_writer_value_with(writer, &value, &emit_options)
     });
-    check!("to_writer_value_with_options", expected, 2, |writer| {
-        ayaml::to_writer_value_with_options(writer, &value, &options)
+    check!("to_writer_value_with (styles)", expected, 2, |writer| {
+        ayaml::to_writer_value_with(writer, &value, &styled_emit)
     });
-    check!("to_writer_value_with_styles", expected, 2, |writer| {
-        ayaml::to_writer_value_with_styles(writer, &value, &styles)
-    });
-    check!(
-        "to_writer_value_with_limits_and_styles",
-        expected,
-        2,
-        |writer| ayaml::to_writer_value_with_limits_and_styles(writer, &value, &limits, &styles)
-    );
-    check!(
-        "to_writer_value_with_options_and_styles",
-        expected,
-        2,
-        |writer| ayaml::to_writer_value_with_options_and_styles(writer, &value, &options, &styles)
-    );
     check!("Emitter::to_writer", expected, 2, |writer| {
         emitter.to_writer(writer, &value)
     });
@@ -913,10 +899,10 @@ fn every_writer_writes_the_whole_output_above_the_chunk_size() {
         ayaml::to_writer_documents(writer, &documents)
     });
     check!(
-        "to_writer_documents_with_limits",
+        "to_writer_documents_with",
         expected_documents,
         2,
-        |writer| ayaml::to_writer_documents_with_limits(writer, &documents, &limits)
+        |writer| ayaml::to_writer_documents_with(writer, &documents, &emit_options)
     );
     check!(
         "Emitter::documents_to_writer",
@@ -944,17 +930,20 @@ fn every_writer_writes_the_whole_output_above_the_chunk_size() {
     check!("to_writer_events", expected_events, 1, |writer| {
         ayaml::to_writer_events(writer, &events)
     });
+    check!("to_writer_events_with", expected_events, 1, |writer| {
+        ayaml::to_writer_events_with(writer, &events, &emit_options)
+    });
     check!("to_writer_event_stream", expected_events, 1, |writer| {
         ayaml::to_writer_event_stream(writer, ayaml::parse_events(&source).expect("events"))
     });
     check!(
-        "to_writer_event_stream_with_limits",
+        "to_writer_event_stream_with",
         expected_events,
         1,
-        |writer| ayaml::to_writer_event_stream_with_limits(
+        |writer| ayaml::to_writer_event_stream_with(
             writer,
             ayaml::parse_events(&source).expect("events"),
-            &limits
+            &emit_options
         )
     );
 }

@@ -12,6 +12,7 @@ use crate::error::{Error, ErrorKind};
 use crate::event::{Event, ScalarStyle};
 use crate::limits::Limits;
 use crate::mapping::Mapping;
+use crate::options::ParseOptions;
 use crate::resolver::resolve_scalar;
 use crate::span::Span;
 use crate::tag::Tag;
@@ -64,7 +65,19 @@ impl<'a> SpannedTree<'a> {
     ///
     /// Returns an error for the same syntax and limit failures as [`crate::parse_events`].
     pub fn parse(input: &'a str) -> Result<Self, Error> {
-        Self::parse_with_limits(input, &Limits::default())
+        Self::parse_with(input, &ParseOptions::new())
+    }
+
+    /// Parse one default-profile stream into a spanned tree with explicit
+    /// parse options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for the same syntax and limit failures as
+    /// [`crate::parse_events_with`].
+    pub fn parse_with(input: &'a str, options: &ParseOptions) -> Result<Self, Error> {
+        let events = crate::parse_events_with(input, options)?;
+        build(input, events)
     }
 
     /// Parse one default-profile stream with explicit limits.
@@ -72,10 +85,12 @@ impl<'a> SpannedTree<'a> {
     /// # Errors
     ///
     /// Returns an error for the same syntax and limit failures as
-    /// [`crate::parse_events_with_limits`].
+    /// [`crate::parse_events_with`].
+    #[deprecated(
+        note = "use `SpannedTree::parse_with` with `ParseOptions`; deprecated through 0.x and will be removed in 1.0"
+    )]
     pub fn parse_with_limits(input: &'a str, limits: &Limits) -> Result<Self, Error> {
-        let events = crate::parse_events_with_limits(input, limits)?;
-        build(input, events)
+        Self::parse_with(input, &ParseOptions::new().with_limits(limits.clone()))
     }
 
     /// Parse one compatibility-profile stream into a spanned tree.
@@ -85,8 +100,28 @@ impl<'a> SpannedTree<'a> {
     /// Returns an error for the same syntax and limit failures as
     /// [`crate::compat::parse_events`].
     #[cfg(feature = "libyaml-compat")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "libyaml-compat")))]
     pub fn parse_compat(input: &'a str) -> Result<Self, Error> {
-        Self::parse_compat_with_limits(input, &Limits::default())
+        Self::parse_compat_with(input, &crate::compat::ParseOptions::new())
+    }
+
+    /// Parse one compatibility-profile stream into a spanned tree with
+    /// explicit compatibility options.
+    ///
+    /// Applies `options.limits` and preserves syntax tags as written.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for the same syntax and limit failures as
+    /// [`crate::compat::parse_events_with`].
+    #[cfg(feature = "libyaml-compat")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "libyaml-compat")))]
+    pub fn parse_compat_with(
+        input: &'a str,
+        options: &crate::compat::ParseOptions,
+    ) -> Result<Self, Error> {
+        let events = crate::compat::parse_events_with(input, options)?;
+        build(input, events)
     }
 
     /// Parse one compatibility-profile stream with explicit limits.
@@ -94,11 +129,17 @@ impl<'a> SpannedTree<'a> {
     /// # Errors
     ///
     /// Returns an error for the same syntax and limit failures as
-    /// [`crate::compat::parse_events_with_limits`].
+    /// [`crate::compat::parse_events_with`].
     #[cfg(feature = "libyaml-compat")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "libyaml-compat")))]
+    #[deprecated(
+        note = "use `SpannedTree::parse_compat_with` with `compat::ParseOptions`; deprecated through 0.x and will be removed in 1.0"
+    )]
     pub fn parse_compat_with_limits(input: &'a str, limits: &Limits) -> Result<Self, Error> {
-        let events = crate::compat::parse_events_with_limits(input, limits)?;
-        build(input, events)
+        Self::parse_compat_with(
+            input,
+            &crate::compat::ParseOptions::new().with_limits(limits.clone()),
+        )
     }
 
     /// The documents in source order.

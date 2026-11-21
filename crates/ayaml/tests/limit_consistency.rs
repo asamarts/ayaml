@@ -15,7 +15,10 @@
 
 use std::marker::PhantomData;
 
-use ayaml::{Deserializer, Error, ErrorKind, LimitKind, Limits, Span, Value};
+use ayaml::{
+    Deserializer, EmitOptions, Error, ErrorKind, LimitKind, Limits, ParseOptions, Span,
+    SpannedTree, Value,
+};
 use serde::de::IgnoredAny;
 
 type Read = fn(&str, &Limits) -> Result<(), Error>;
@@ -31,12 +34,16 @@ struct Reader {
     stream: bool,
 }
 
+fn parse_options(limits: &Limits) -> ParseOptions {
+    ParseOptions::new().with_limits(limits.clone())
+}
+
 fn cursor(
     input: &str,
     limits: &Limits,
     next: fn(&mut Deserializer<'_>) -> Result<bool, Error>,
 ) -> Result<(), Error> {
-    let mut cursor = Deserializer::from_str_with_limits(input, limits)?;
+    let mut cursor = Deserializer::from_str_with(input, &parse_options(limits))?;
     while next(&mut cursor)? {}
     Ok(())
 }
@@ -48,9 +55,9 @@ fn readers() -> Vec<Reader> {
     )]
     let mut readers = vec![
         Reader {
-            name: "parse_events_with_limits",
+            name: "parse_events_with",
             read: |input, limits| {
-                for event in ayaml::parse_events_with_limits(input, limits)? {
+                for event in ayaml::parse_events_with(input, &parse_options(limits))? {
                     event?;
                 }
                 Ok(())
@@ -59,32 +66,66 @@ fn readers() -> Vec<Reader> {
             stream: true,
         },
         Reader {
-            name: "parse_value_with_limits",
-            read: |input, limits| ayaml::parse_value_with_limits(input, limits).map(drop),
+            name: "parse_value_with",
+            read: |input, limits| ayaml::parse_value_with(input, &parse_options(limits)).map(drop),
             values: true,
             stream: false,
         },
         Reader {
-            name: "parse_documents_with_limits",
-            read: |input, limits| ayaml::parse_documents_with_limits(input, limits).map(drop),
+            name: "parse_documents_with",
+            read: |input, limits| {
+                ayaml::parse_documents_with(input, &parse_options(limits)).map(drop)
+            },
             values: true,
             stream: true,
         },
         Reader {
-            name: "from_str_borrowed_with_limits (Value)",
+            name: "from_str_with (Value)",
             read: |input, limits| {
-                ayaml::from_str_borrowed_with_limits::<Value>(input, limits).map(drop)
+                ayaml::from_str_with::<Value>(input, &parse_options(limits)).map(drop)
             },
             values: true,
             stream: false,
         },
         Reader {
-            name: "from_str_borrowed_with_limits (IgnoredAny)",
+            name: "from_str_with (IgnoredAny)",
             read: |input, limits| {
-                ayaml::from_str_borrowed_with_limits::<IgnoredAny>(input, limits).map(drop)
+                ayaml::from_str_with::<IgnoredAny>(input, &parse_options(limits)).map(drop)
             },
             values: true,
             stream: false,
+        },
+        Reader {
+            name: "from_slice_with (Value)",
+            read: |input, limits| {
+                ayaml::from_slice_with::<Value>(input.as_bytes(), &parse_options(limits)).map(drop)
+            },
+            values: true,
+            stream: false,
+        },
+        Reader {
+            name: "from_slice_with (IgnoredAny)",
+            read: |input, limits| {
+                ayaml::from_slice_with::<IgnoredAny>(input.as_bytes(), &parse_options(limits))
+                    .map(drop)
+            },
+            values: true,
+            stream: false,
+        },
+        Reader {
+            name: "from_str_seed_with (Value)",
+            read: |input, limits| {
+                ayaml::from_str_seed_with(input, &parse_options(limits), PhantomData::<Value>)
+                    .map(drop)
+            },
+            values: true,
+            stream: false,
+        },
+        Reader {
+            name: "SpannedTree::parse_with",
+            read: |input, limits| SpannedTree::parse_with(input, &parse_options(limits)).map(drop),
+            values: false,
+            stream: true,
         },
         Reader {
             name: "Deserializer::next",
@@ -130,14 +171,38 @@ fn readers() -> Vec<Reader> {
         },
     ];
     #[cfg(feature = "libyaml-compat")]
-    readers.push(Reader {
-        name: "compat::parse_events_eager_with_limits",
-        read: |input, limits| {
-            ayaml::compat::parse_events_eager_with_limits(input, limits).map(drop)
+    readers.extend([
+        Reader {
+            name: "compat::parse_events_with",
+            read: |input, limits| {
+                let options = ayaml::compat::ParseOptions::new().with_limits(limits.clone());
+                for event in ayaml::compat::parse_events_with(input, &options)? {
+                    event?;
+                }
+                Ok(())
+            },
+            values: false,
+            stream: true,
         },
-        values: false,
-        stream: true,
-    });
+        Reader {
+            name: "compat::parse_events_eager_with",
+            read: |input, limits| {
+                let options = ayaml::compat::ParseOptions::new().with_limits(limits.clone());
+                ayaml::compat::parse_events_eager_with(input, &options).map(drop)
+            },
+            values: false,
+            stream: true,
+        },
+        Reader {
+            name: "SpannedTree::parse_compat_with",
+            read: |input, limits| {
+                let options = ayaml::compat::ParseOptions::new().with_limits(limits.clone());
+                SpannedTree::parse_compat_with(input, &options).map(drop)
+            },
+            values: false,
+            stream: true,
+        },
+    ]);
     #[cfg(feature = "bench-internals")]
     readers.extend([
         Reader {
@@ -694,37 +759,70 @@ fn every_emitter_gives_the_same_output_limit_answer() {
         .collect::<Result<_, _>>()
         .expect("events");
     let emitters: Vec<(&str, Emit)> = vec![
-        ("to_string_value_with_limits", |value, _, limits| {
-            ayaml::to_string_value_with_limits(value, limits).map(|text| text.len())
-        }),
-        ("to_string_with_limits", |value, _, limits| {
-            ayaml::to_string_with_limits(value, limits).map(|text| text.len())
-        }),
-        ("to_string_documents_with_limits", |value, _, limits| {
-            ayaml::to_string_documents_with_limits(std::slice::from_ref(value), limits)
+        ("to_string_value_with", |value, _, limits| {
+            ayaml::to_string_value_with(value, &EmitOptions::new().with_limits(limits.clone()))
                 .map(|text| text.len())
         }),
-        ("to_string_events_with_limits", |_, events, limits| {
-            ayaml::to_string_events_with_limits(events, limits).map(|text| text.len())
+        ("to_string_with", |value, _, limits| {
+            ayaml::to_string_with(value, &EmitOptions::new().with_limits(limits.clone()))
+                .map(|text| text.len())
         }),
-        ("to_writer_value_with_limits", |value, _, limits| {
+        ("to_string_documents_with", |value, _, limits| {
+            ayaml::to_string_documents_with(
+                std::slice::from_ref(value),
+                &EmitOptions::new().with_limits(limits.clone()),
+            )
+            .map(|text| text.len())
+        }),
+        ("to_string_events_with", |_, events, limits| {
+            ayaml::to_string_events_with(events, &EmitOptions::new().with_limits(limits.clone()))
+                .map(|text| text.len())
+        }),
+        ("to_writer_value_with", |value, _, limits| {
             let mut output = Vec::new();
-            ayaml::to_writer_value_with_limits(&mut output, value, limits).map(|()| output.len())
+            ayaml::to_writer_value_with(
+                &mut output,
+                value,
+                &EmitOptions::new().with_limits(limits.clone()),
+            )
+            .map(|()| output.len())
         }),
-        ("to_writer_documents_with_limits", |value, _, limits| {
+        ("to_writer_documents_with", |value, _, limits| {
             let mut output = Vec::new();
-            ayaml::to_writer_documents_with_limits(&mut output, std::slice::from_ref(value), limits)
-                .map(|()| output.len())
+            ayaml::to_writer_documents_with(
+                &mut output,
+                std::slice::from_ref(value),
+                &EmitOptions::new().with_limits(limits.clone()),
+            )
+            .map(|()| output.len())
         }),
-        ("to_writer_with_limits", |value, _, limits| {
+        ("to_writer_with", |value, _, limits| {
             let mut output = Vec::new();
-            ayaml::to_writer_with_limits(&mut output, value, limits).map(|()| output.len())
+            ayaml::to_writer_with(
+                &mut output,
+                value,
+                &EmitOptions::new().with_limits(limits.clone()),
+            )
+            .map(|()| output.len())
         }),
-        ("to_writer_event_stream_with_limits", |_, _, limits| {
+        ("to_writer_events_with", |_, events, limits| {
+            let mut output = Vec::new();
+            ayaml::to_writer_events_with(
+                &mut output,
+                events,
+                &EmitOptions::new().with_limits(limits.clone()),
+            )
+            .map(|()| output.len())
+        }),
+        ("to_writer_event_stream_with", |_, _, limits| {
             let mut output = Vec::new();
             let stream = ayaml::parse_events("a\n").expect("events");
-            ayaml::to_writer_event_stream_with_limits(&mut output, stream, limits)
-                .map(|()| output.len())
+            ayaml::to_writer_event_stream_with(
+                &mut output,
+                stream,
+                &EmitOptions::new().with_limits(limits.clone()),
+            )
+            .map(|()| output.len())
         }),
     ];
     for (name, emit) in emitters {
@@ -783,9 +881,9 @@ fn lazy_and_eager_events_match() {
         "a:\n---\n[\n",
         "a: 1\n---\nb: [\n",
     ] {
-        let limits = Limits::default();
-        let eager = ayaml::internals::parse_events(input, &limits);
-        let lazy = ayaml::parse_events_with_limits(input, &limits)
+        let options = ParseOptions::new();
+        let eager = ayaml::internals::parse_events(input, &options.limits);
+        let lazy = ayaml::parse_events_with(input, &options)
             .and_then(Iterator::collect::<Result<Vec<_>, _>>);
         match (lazy, eager) {
             (Ok(lazy), Ok(eager)) => assert_eq!(lazy, eager, "{input:?}"),
@@ -795,6 +893,58 @@ fn lazy_and_eager_events_match() {
                 "{input:?}"
             ),
             (lazy, eager) => panic!("{input:?}: lazy {lazy:?}, eager {eager:?}"),
+        }
+    }
+}
+
+/// Compatibility typed and visitor readers enforce the same single-document limit boundaries
+/// through `compat::ParseOptions` (mapping depth failures to `ErrorKind::Serde` as documented).
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_typed_readers_honor_every_single_document_limit() {
+    let readers: [(&str, Read); 3] = [
+        ("compat::from_str_with", |input, limits| {
+            let options = ayaml::compat::ParseOptions::new().with_limits(limits.clone());
+            ayaml::compat::from_str_with::<Value>(input, &options).map(drop)
+        }),
+        ("compat::from_str_seed_with", |input, limits| {
+            let options = ayaml::compat::ParseOptions::new().with_limits(limits.clone());
+            ayaml::compat::from_str_seed_with(input, &options, PhantomData::<Value>).map(drop)
+        }),
+        ("compat::deserialize_any_with", |input, limits| {
+            let options = ayaml::compat::ParseOptions::new().with_limits(limits.clone());
+            ayaml::compat::deserialize_any_with(input, &options, IgnoredAny).map(drop)
+        }),
+    ];
+    for case in cases().into_iter().filter(|case| !case.several) {
+        let boundary = case.least;
+        for (name, read) in readers {
+            let run = |value| read(case.input, &(case.set)(Limits::default(), value));
+            if case.decreasing {
+                assert!(run(boundary).is_ok(), "{name} {:?}: {boundary}", case.kind);
+                let error = run(boundary + 1).expect_err("above bound");
+                assert_eq!(error.kind(), ErrorKind::Limit, "{name}: {error}");
+                assert_eq!(
+                    error.limit().map(ayaml::LimitExceeded::kind),
+                    Some(case.kind),
+                    "{name}: {error}"
+                );
+            } else {
+                assert!(run(boundary).is_ok(), "{name} {:?}: {boundary}", case.kind);
+                if boundary > 0 {
+                    let error = run(boundary - 1).expect_err("below bound");
+                    if case.kind == LimitKind::Depth {
+                        assert_eq!(error.kind(), ErrorKind::Serde, "{name}: {error}");
+                    } else {
+                        assert_eq!(error.kind(), ErrorKind::Limit, "{name}: {error}");
+                        assert_eq!(
+                            error.limit().map(ayaml::LimitExceeded::kind),
+                            Some(case.kind),
+                            "{name}: {error}"
+                        );
+                    }
+                }
+            }
         }
     }
 }

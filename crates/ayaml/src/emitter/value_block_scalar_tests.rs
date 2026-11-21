@@ -18,23 +18,17 @@ fn multiline_value_strings_emit_as_block_scalars() {
 #[test]
 fn forced_block_scalar_style_round_trips() {
     let value = Value::from("plain text");
-    let output = crate::to_string_value_with_options(
+    let output = crate::to_string_value_with(
         &value,
-        &super::EmitterOptions {
-            scalar_style: Some(ScalarStyle::Literal),
-            ..super::EmitterOptions::default()
-        },
+        &crate::EmitOptions::new().with_scalar_style(Some(ScalarStyle::Literal)),
     )
     .expect("literal");
     assert!(output.starts_with("|-"));
     assert_eq!(crate::parse_value(&output).unwrap(), value);
 
-    let output = crate::to_string_value_with_options(
+    let output = crate::to_string_value_with(
         &value,
-        &super::EmitterOptions {
-            scalar_style: Some(ScalarStyle::Folded),
-            ..super::EmitterOptions::default()
-        },
+        &crate::EmitOptions::new().with_scalar_style(Some(ScalarStyle::Folded)),
     )
     .expect("folded");
     assert!(output.starts_with(">-"));

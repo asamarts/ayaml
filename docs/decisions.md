@@ -934,9 +934,15 @@ ignore it, or change default-mode semantics that keep non-core global tags.
 pattern to the remaining entry points without deprecating or renaming AY-122's API.
 
 **Consequences.** `compat::from_str_with`, `compat::from_str_seed_with`, and
-`compat::deserialize_any_with` accept both custom `Limits` and `GlobalTags` in one value. When
-AY-048 adds root `ParseOptions` and `EmitOptions`, it uses the same `#[non_exhaustive]` struct,
-`const fn new()`, `with_*` builders, and `*_with` naming convention.
+`compat::deserialize_any_with` accept both custom `Limits` and `GlobalTags` in one value. AY-048
+completes the pattern across the rest of the crate with root `ParseOptions` and `EmitOptions`
+(holding `Limits`, layout/indentation flags, and optional `EmitterStyles`), `const` presets
+(`Limits::new`, `ParseOptions::for_max_input`, `compat::ParseOptions::for_max_input`,
+`EmitOptions::flow`, `EmitterOptions::new`, `NodeStyle::new`), one `*_with` entry point per
+operation (including `from_str_with` and `from_slice_with`, both accepting owned and borrowed
+`Deserialize<'de>` targets, and `compat::parse_events_with` / `compat::parse_events_eager_with` /
+`SpannedTree::parse_compat_with`), and deprecates all 32 older `*_with_limits`, `*_with_options`,
+and `*_with_styles` combination functions through `0.x` for removal in `1.0`.
 
 ## D99 — CI compares public API listings per feature set against the last release tag
 

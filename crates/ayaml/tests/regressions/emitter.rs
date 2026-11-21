@@ -24,8 +24,8 @@ fn out_of_range_integers_are_quoted() {
 fn indent_is_validated() {
     let value = ayaml::parse_value("a:\n  b: 1\n").expect("parse");
     for indent in [0, 1, 10] {
-        let options = ayaml::EmitterOptions::default().with_indent(indent);
-        let error = ayaml::to_string_value_with_options(&value, &options).expect_err("indent");
+        let options = ayaml::EmitOptions::new().with_indent(indent);
+        let error = ayaml::to_string_value_with(&value, &options).expect_err("indent");
         assert_eq!(error.kind(), ayaml::ErrorKind::Emitter);
     }
 }
@@ -55,9 +55,9 @@ fn event_emitter_keeps_trailing_line_breaks() {
 fn single_quotes_never_hold_line_breaks() {
     assert_eq!(emit_events("'a\n\n  b'\n"), "\"a\\nb\"\n");
     let options =
-        ayaml::EmitterOptions::default().with_scalar_style(Some(ayaml::ScalarStyle::SingleQuoted));
+        ayaml::EmitOptions::new().with_scalar_style(Some(ayaml::ScalarStyle::SingleQuoted));
     let value = ayaml::Value::from("a\nb\u{1}");
-    let output = ayaml::to_string_value_with_options(&value, &options).expect("emit");
+    let output = ayaml::to_string_value_with(&value, &options).expect("emit");
     assert_eq!(output, "\"a\\nb\\x01\"\n");
     assert_eq!(ayaml::parse_value(&output).expect("reparse"), value);
 }
@@ -98,8 +98,8 @@ fn indentation_indicators_are_kept() {
 #[test]
 fn compact_entries_follow_the_indent() {
     let value = ayaml::parse_value("- a: 1\n  b: |\n    x\n- - c\n  - d\n").expect("parse");
-    let options = ayaml::EmitterOptions::default().with_indent(4);
-    let output = ayaml::to_string_value_with_options(&value, &options).expect("emit");
+    let options = ayaml::EmitOptions::new().with_indent(4);
+    let output = ayaml::to_string_value_with(&value, &options).expect("emit");
     assert_eq!(output, "-   a: 1\n    b: |\n        x\n-   - c\n    - d\n");
     assert_eq!(ayaml::parse_value(&output).expect("reparse"), value);
 }
@@ -130,7 +130,7 @@ fn directives_keep_nel_ls_and_ps() {
         );
     }
     let mut events: Vec<ayaml::event::Event<'_>> =
-        ayaml::parse_events_with_limits("&a x\n", &stream_limits())
+        ayaml::parse_events_with("&a x\n", &stream_parse_options())
             .and_then(Iterator::collect)
             .expect("events");
     for event in &mut events {
@@ -138,7 +138,7 @@ fn directives_keep_nel_ls_and_ps() {
             *anchor = Some(ayaml::event::Anchor::new("a\u{feff}"));
         }
     }
-    let error = ayaml::to_string_events_with_limits(&events, &stream_limits())
+    let error = ayaml::to_string_events_with(&events, &stream_emit_options())
         .expect_err("an anchor with a byte order mark");
     assert_eq!(error.kind(), ayaml::ErrorKind::Emitter);
 }
@@ -163,8 +163,8 @@ fn tagged_null_in_flow() {
         )),
         ayaml::Value::from("x"),
     ]);
-    let options = ayaml::EmitterOptions::default().with_flow(true);
-    let output = ayaml::to_string_value_with_options(&value, &options).expect("emit");
+    let options = ayaml::EmitOptions::flow();
+    let output = ayaml::to_string_value_with(&value, &options).expect("emit");
     assert_eq!(output, "[!t , x]\n");
     assert_eq!(ayaml::parse_value(&output).expect("reparse"), value);
     assert_eq!(emit_events("[!t , &a ]\n"), "[!t , &a ]\n");
@@ -208,8 +208,8 @@ fn long_keys_are_explicit() {
 #[test]
 fn colons_are_quoted_in_flow() {
     let value = ayaml::Value::Sequence(vec![ayaml::Value::from("a:?"), ayaml::Value::from("?x")]);
-    let options = ayaml::EmitterOptions::default().with_flow(true);
-    let output = ayaml::to_string_value_with_options(&value, &options).expect("emit");
+    let options = ayaml::EmitOptions::flow();
+    let output = ayaml::to_string_value_with(&value, &options).expect("emit");
     assert_eq!(output, "[\"a:?\", \"?x\"]\n");
 }
 
@@ -217,16 +217,16 @@ fn colons_are_quoted_in_flow() {
 #[test]
 fn document_streams_use_the_callers_limits() {
     let nested = ayaml::parse_value("a: [[1]]\n").expect("parse");
-    let shallow = ayaml::Limits::default().with_max_depth(2);
-    let error =
-        ayaml::to_string_documents_with_limits(&[nested], &shallow).expect_err("depth limit");
+    let shallow = ayaml::EmitOptions::new().with_limits(ayaml::Limits::new().with_max_depth(2));
+    let error = ayaml::to_string_documents_with(&[nested], &shallow).expect_err("depth limit");
     assert_eq!(error.kind(), ayaml::ErrorKind::Limit);
 
-    let small = ayaml::Limits::default().with_max_output_bytes(5);
+    let small =
+        ayaml::EmitOptions::new().with_limits(ayaml::Limits::new().with_max_output_bytes(5));
     let documents = [ayaml::Value::from("a"), ayaml::Value::from("b")];
     let mut output = Vec::new();
-    let error = ayaml::to_writer_documents_with_limits(&mut output, &documents, &small)
-        .expect_err("output limit");
+    let error =
+        ayaml::to_writer_documents_with(&mut output, &documents, &small).expect_err("output limit");
     assert_eq!(error.kind(), ayaml::ErrorKind::Limit);
     assert!(output.len() <= 5, "{output:?}");
 }
@@ -270,7 +270,8 @@ fn styles_do_not_leak_into_keys() {
         vec![ayaml::PathSegment::key("a")],
         ayaml::NodeStyle::default().with_scalar_style(Some(ayaml::ScalarStyle::DoubleQuoted)),
     );
-    let output = ayaml::to_string_value_with_styles(&value, &styles).expect("emit");
+    let output =
+        ayaml::to_string_value_with(&value, &ayaml::EmitOptions::from(styles)).expect("emit");
     assert_eq!(output, "a:\n  b: c\n");
 }
 
@@ -312,9 +313,9 @@ fn default_limits_read_document_streams() {
             "{error}"
         );
     }
-    let compat = ayaml::Limits::compat();
+    let compat = ayaml::ParseOptions::new().with_limits(ayaml::Limits::compat());
     assert_eq!(
-        ayaml::parse_documents_with_limits(stream, &compat)
+        ayaml::parse_documents_with(stream, &compat)
             .expect_err("compatibility profile")
             .kind(),
         ayaml::ErrorKind::Limit
@@ -326,16 +327,17 @@ fn default_limits_read_document_streams() {
 #[test]
 fn cursor_alias_budget_covers_the_stream() {
     let stream = "--- [&a 1, *a]\n--- [&b 2, *b]\n--- [&c 3, *c]\n";
-    let limits = ayaml::Limits::default().with_max_alias_dereferences(2);
+    let options =
+        ayaml::ParseOptions::new().with_limits(ayaml::Limits::new().with_max_alias_dereferences(2));
     assert_eq!(
-        ayaml::parse_documents_with_limits(stream, &limits)
+        ayaml::parse_documents_with(stream, &options)
             .expect_err("stream budget")
             .kind(),
         ayaml::ErrorKind::Limit
     );
 
-    let mut borrowed = ayaml::Deserializer::from_str_with_limits(stream, &limits).expect("cursor");
-    let mut owned = ayaml::Deserializer::from_str_with_limits(stream, &limits).expect("cursor");
+    let mut borrowed = ayaml::Deserializer::from_str_with(stream, &options).expect("cursor");
+    let mut owned = ayaml::Deserializer::from_str_with(stream, &options).expect("cursor");
     for _ in 0..2 {
         assert!(
             borrowed

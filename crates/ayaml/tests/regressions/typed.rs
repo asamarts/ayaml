@@ -86,9 +86,9 @@ fn compat_does_not_mistake_a_scalar_for_a_document_error() {
 #[cfg(feature = "libyaml-compat")]
 #[test]
 fn compat_reports_limits_as_the_docs_say() {
-    let limits = ayaml::Limits::default();
+    let options = ayaml::compat::ParseOptions::new();
     let deep = format!("{}{}", "[".repeat(129), "]".repeat(129));
-    let error = ayaml::compat::parse_events_eager_with_limits(&deep, &limits).unwrap_err();
+    let error = ayaml::compat::parse_events_eager_with(&deep, &options).unwrap_err();
     assert_eq!(error.kind(), ayaml::ErrorKind::Limit, "{error}");
     assert!(error.limit().is_some() && error.span().is_some(), "{error}");
     let error = ayaml::compat::from_str::<ayaml::Value>(&deep).unwrap_err();
@@ -459,7 +459,7 @@ fn the_typed_path_keeps_tags() {
         );
     }
     let mut documents =
-        ayaml::Deserializer::from_str_with_limits("--- !A 1\n--- !B 2\n", &stream_limits())
+        ayaml::Deserializer::from_str_with("--- !A 1\n--- !B 2\n", &stream_parse_options())
             .expect("stream");
     let first: ayaml::Value = documents.next_borrowed().expect("first").expect("document");
     assert_eq!(first, ayaml::parse_value("!A 1\n").expect("parse"));
@@ -698,7 +698,7 @@ fn core_tags_on_other_node_kinds_are_dropped() {
                 "{input:?}"
             );
             let events =
-                ayaml::compat::parse_events_eager_with_limits(input, &ayaml::Limits::default())
+                ayaml::compat::parse_events_eager_with(input, &ayaml::compat::ParseOptions::new())
                     .expect("compat events");
             for event in events {
                 match event {
@@ -1111,7 +1111,8 @@ fn an_alias_to_a_number_is_charged_for_its_text() {
     const ALIASES: usize = 400;
     let zeros = "0".repeat(64 << 10);
     // Without the charge, the aliases would copy 25 MiB under a budget of one.
-    let limits = Limits::default().with_max_alias_expansion_bytes(1 << 20);
+    let options = ayaml::ParseOptions::new()
+        .with_limits(Limits::default().with_max_alias_expansion_bytes(1 << 20));
     for number in [
         format!("1.{zeros}"),
         format!("!!int {zeros}1"),
@@ -1120,17 +1121,16 @@ fn an_alias_to_a_number_is_charged_for_its_text() {
         format!("x{zeros}"),
     ] {
         let input = format!("- &a {number}\n{}", "- *a\n".repeat(ALIASES));
-        let cursor = ayaml::Deserializer::from_str_with_limits(&input, &limits)
+        let cursor = ayaml::Deserializer::from_str_with(&input, &options)
             .and_then(|mut cursor| cursor.next_borrowed::<Vec<String>>().map(drop));
         let readers = [
             (
-                "from_str_borrowed",
-                ayaml::from_str_borrowed_with_limits::<Vec<String>>(&input, &limits).map(drop),
+                "from_str_with",
+                ayaml::from_str_with::<Vec<String>>(&input, &options).map(drop),
             ),
             (
-                "from_str_borrowed into Value",
-                ayaml::from_str_borrowed_with_limits::<Vec<ayaml::Value>>(&input, &limits)
-                    .map(drop),
+                "from_str_with into Value",
+                ayaml::from_str_with::<Vec<ayaml::Value>>(&input, &options).map(drop),
             ),
             ("Deserializer::next_borrowed", cursor),
         ];
@@ -1146,7 +1146,7 @@ fn an_alias_to_a_number_is_charged_for_its_text() {
     }
     // A number of ordinary length costs a node, so as many aliases to one are read.
     let input = format!("- &a 1.5\n{}", "- *a\n".repeat(ALIASES));
-    let read = ayaml::from_str_borrowed_with_limits::<Vec<String>>(&input, &limits);
+    let read = ayaml::from_str_with::<Vec<String>>(&input, &options);
     assert_eq!(read.expect("aliases to a short number").len(), ALIASES + 1);
 }
 
@@ -1460,8 +1460,8 @@ fn default_from_str_seed_reads_and_enforces_limits() {
     let trailing = ayaml::from_str_seed("a: 1\n---\nb: 2\n", PhantomData::<ayaml::Value>)
         .expect_err("trailing doc");
     assert_eq!(trailing.kind(), ayaml::ErrorKind::Parser);
-    let tight = ayaml::Limits::default().with_max_events(1);
-    let limited = ayaml::from_str_seed_with_limits("a: 1\n", &tight, PhantomData::<ayaml::Value>)
+    let tight = ayaml::ParseOptions::new().with_limits(ayaml::Limits::new().with_max_events(1));
+    let limited = ayaml::from_str_seed_with("a: 1\n", &tight, PhantomData::<ayaml::Value>)
         .expect_err("limit");
     assert_eq!(limited.kind(), ayaml::ErrorKind::Limit);
     // Global tags remain tagged on the default seed reader.

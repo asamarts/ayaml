@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use ayaml::{Error, ErrorKind, Event, Limits, Value, compat};
+use ayaml::{Error, ErrorKind, Event, Value, compat};
 use serde::Deserialize;
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde_json::json;
@@ -47,7 +47,7 @@ impl<'de> Visitor<'de> for Keys {
 }
 
 fn aliases(input: &str) -> Vec<String> {
-    compat::parse_events_eager_with_limits(input, &Limits::default())
+    compat::parse_events_eager_with(input, &compat::ParseOptions::new())
         .expect("events")
         .into_iter()
         .filter_map(|event| match event {

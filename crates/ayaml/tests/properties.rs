@@ -208,14 +208,14 @@ proptest! {
             ayaml::ScalarStyle::Folded,
         ])),
     ) {
-        let options = ayaml::EmitterOptions::default()
+        let options = ayaml::EmitOptions::new()
             .with_flow(flow)
             .with_explicit_start(true)
             .with_explicit_end(true)
             .with_scalar_style(style)
             .with_indent(indent)
             .with_indent_sequences(indent_sequences);
-        let output = ayaml::to_string_value_with_options(&value, &options).expect("emit");
+        let output = ayaml::to_string_value_with(&value, &options).expect("emit");
         prop_assert_eq!(reparse(&output), value, "output={:?}", output);
     }
 

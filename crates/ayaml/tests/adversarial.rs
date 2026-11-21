@@ -920,23 +920,19 @@ fn an_alias_cannot_multiply_a_long_tag() {
                 "- {<<: *x}\n".repeat(ALIASES)
             ),
         ];
+        let options = ayaml::ParseOptions::new().with_limits(limits);
         for input in &inputs {
-            let cursor = ayaml::Deserializer::from_str_with_limits(input, &limits)
+            let cursor = ayaml::Deserializer::from_str_with(input, &options)
                 .and_then(|mut cursor| cursor.next::<Value>().map(drop));
             for (entry_point, result) in [
-                (
-                    "parse_value",
-                    ok(ayaml::parse_value_with_limits(input, &limits)),
-                ),
+                ("parse_value", ok(ayaml::parse_value_with(input, &options))),
                 (
                     "parse_documents",
-                    ok(ayaml::parse_documents_with_limits(input, &limits)),
+                    ok(ayaml::parse_documents_with(input, &options)),
                 ),
                 (
-                    "from_str_borrowed",
-                    ok(ayaml::from_str_borrowed_with_limits::<Value>(
-                        input, &limits,
-                    )),
+                    "from_str_with",
+                    ok(ayaml::from_str_with::<Value>(input, &options)),
                 ),
                 ("Deserializer::next", cursor),
             ] {
@@ -1017,45 +1013,41 @@ fn on_small_stack(body: impl FnOnce() + Send + 'static) {
         .expect("no panic");
 }
 
-/// Every public entry point that takes explicit limits and reads YAML.
+/// Every public entry point that takes explicit options and reads YAML.
 fn limited_entry_points(
     input: &str,
     limits: &Limits,
 ) -> Vec<(&'static str, Result<(), ayaml::Error>)> {
+    let options = ayaml::ParseOptions::new().with_limits(limits.clone());
     let cursor = |next: fn(&mut ayaml::Deserializer<'_>) -> Result<(), ayaml::Error>| {
-        ayaml::Deserializer::from_str_with_limits(input, limits)
-            .and_then(|mut cursor| next(&mut cursor))
+        ayaml::Deserializer::from_str_with(input, &options).and_then(|mut cursor| next(&mut cursor))
     };
     vec![
         (
-            "parse_events_with_limits",
-            ayaml::parse_events_with_limits(input, limits)
+            "parse_events_with",
+            ayaml::parse_events_with(input, &options)
                 .and_then(Iterator::collect::<Result<Vec<_>, _>>)
                 .map(drop),
         ),
         (
-            "parse_value_with_limits",
-            ok(ayaml::parse_value_with_limits(input, limits)),
+            "parse_value_with",
+            ok(ayaml::parse_value_with(input, &options)),
         ),
         (
-            "parse_documents_with_limits",
-            ok(ayaml::parse_documents_with_limits(input, limits)),
+            "parse_documents_with",
+            ok(ayaml::parse_documents_with(input, &options)),
         ),
         (
-            "from_str_borrowed_with_limits",
-            ok(ayaml::from_str_borrowed_with_limits::<Value>(input, limits)),
+            "from_str_with",
+            ok(ayaml::from_str_with::<Value>(input, &options)),
         ),
         (
-            "from_str_borrowed_with_limits (serde_json)",
-            ok(ayaml::from_str_borrowed_with_limits::<serde_json::Value>(
-                input, limits,
-            )),
+            "from_str_with (serde_json)",
+            ok(ayaml::from_str_with::<serde_json::Value>(input, &options)),
         ),
         (
-            "from_str_borrowed_with_limits (IgnoredAny)",
-            ok(ayaml::from_str_borrowed_with_limits::<IgnoredAny>(
-                input, limits,
-            )),
+            "from_str_with (IgnoredAny)",
+            ok(ayaml::from_str_with::<IgnoredAny>(input, &options)),
         ),
         (
             "Deserializer::next",
@@ -1087,8 +1079,10 @@ fn limited_entry_points(
 /// Every public path that takes an already-parsed value or event stream:
 /// decoding, emitting, merging, and the `Value` trait implementations.
 fn value_paths(input: &str, limits: &Limits) -> Vec<(&'static str, Result<(), ayaml::Error>)> {
-    let value = ayaml::parse_value_with_limits(input, limits).expect("parse");
-    let events = ayaml::parse_events_with_limits(input, limits)
+    let parse_options = ayaml::ParseOptions::new().with_limits(limits.clone());
+    let emit_options = ayaml::EmitOptions::new().with_limits(limits.clone());
+    let value = ayaml::parse_value_with(input, &parse_options).expect("parse");
+    let events = ayaml::parse_events_with(input, &parse_options)
         .and_then(Iterator::collect::<Result<Vec<_>, _>>)
         .expect("events");
     let mut merged = value.clone();
@@ -1103,28 +1097,28 @@ fn value_paths(input: &str, limits: &Limits) -> Vec<(&'static str, Result<(), ay
         ),
         ("to_value", ok(ayaml::to_value(&value))),
         (
-            "to_string_value_with_limits",
-            ok(ayaml::to_string_value_with_limits(&value, limits)),
+            "to_string_value_with",
+            ok(ayaml::to_string_value_with(&value, &emit_options)),
         ),
         (
-            "to_string_with_limits",
-            ok(ayaml::to_string_with_limits(&value, limits)),
+            "to_string_with",
+            ok(ayaml::to_string_with(&value, &emit_options)),
         ),
         (
-            "to_string_documents_with_limits",
-            ok(ayaml::to_string_documents_with_limits(
+            "to_string_documents_with",
+            ok(ayaml::to_string_documents_with(
                 std::slice::from_ref(&value),
-                limits,
+                &emit_options,
             )),
         ),
         (
-            "to_string_events_with_limits",
-            ok(ayaml::to_string_events_with_limits(&events, limits)),
+            "to_string_events_with",
+            ok(ayaml::to_string_events_with(&events, &emit_options)),
         ),
         (
-            "to_writer_event_stream_with_limits",
-            ayaml::parse_events_with_limits(input, limits).and_then(|stream| {
-                ayaml::to_writer_event_stream_with_limits(&mut Vec::new(), stream, limits)
+            "to_writer_event_stream_with",
+            ayaml::parse_events_with(input, &parse_options).and_then(|stream| {
+                ayaml::to_writer_event_stream_with(&mut Vec::new(), stream, &emit_options)
             }),
         ),
         ("apply_merge_keys", merged.apply_merge_keys()),
@@ -1136,7 +1130,7 @@ fn value_paths(input: &str, limits: &Limits) -> Vec<(&'static str, Result<(), ay
     ]
 }
 
-/// Every public path that takes explicit limits and writes YAML. What they write is `input`, read
+/// Every public path that takes explicit options and writes YAML. What they write is `input`, read
 /// under the default limits.
 fn limited_emitters(input: &str, limits: &Limits) -> Vec<(&'static str, Result<(), ayaml::Error>)> {
     let value = ayaml::parse_value(input).expect("parse");
@@ -1145,51 +1139,51 @@ fn limited_emitters(input: &str, limits: &Limits) -> Vec<(&'static str, Result<(
         .and_then(Iterator::collect::<Result<Vec<_>, _>>)
         .expect("events");
     let options = ayaml::EmitterOptions::default();
-    let styles = ayaml::EmitterStyles::default();
+    let emit = ayaml::EmitOptions::new().with_limits(limits.clone());
+    let styled = emit.clone().with_styles(ayaml::EmitterStyles::default());
     let emitter = ayaml::Emitter::new(limits, &options);
     vec![
         (
-            "to_string_value_with_limits",
-            ok(ayaml::to_string_value_with_limits(&value, limits)),
+            "to_string_value_with",
+            ok(ayaml::to_string_value_with(&value, &emit)),
         ),
         (
-            "to_string_value_with_limits_and_styles",
-            ok(ayaml::to_string_value_with_limits_and_styles(
-                &value, limits, &styles,
-            )),
+            "to_string_value_with (styles)",
+            ok(ayaml::to_string_value_with(&value, &styled)),
         ),
         (
-            "to_writer_value_with_limits",
-            ayaml::to_writer_value_with_limits(&mut Vec::new(), &value, limits),
+            "to_writer_value_with",
+            ayaml::to_writer_value_with(&mut Vec::new(), &value, &emit),
         ),
         (
-            "to_writer_value_with_limits_and_styles",
-            ayaml::to_writer_value_with_limits_and_styles(&mut Vec::new(), &value, limits, &styles),
+            "to_writer_value_with (styles)",
+            ayaml::to_writer_value_with(&mut Vec::new(), &value, &styled),
+        ),
+        ("to_string_with", ok(ayaml::to_string_with(&value, &emit))),
+        (
+            "to_writer_with",
+            ayaml::to_writer_with(&mut Vec::new(), &value, &emit),
         ),
         (
-            "to_string_with_limits",
-            ok(ayaml::to_string_with_limits(&value, limits)),
+            "to_string_documents_with",
+            ok(ayaml::to_string_documents_with(documents, &emit)),
         ),
         (
-            "to_writer_with_limits",
-            ayaml::to_writer_with_limits(&mut Vec::new(), &value, limits),
+            "to_writer_documents_with",
+            ayaml::to_writer_documents_with(&mut Vec::new(), documents, &emit),
         ),
         (
-            "to_string_documents_with_limits",
-            ok(ayaml::to_string_documents_with_limits(documents, limits)),
+            "to_string_events_with",
+            ok(ayaml::to_string_events_with(&events, &emit)),
         ),
         (
-            "to_writer_documents_with_limits",
-            ayaml::to_writer_documents_with_limits(&mut Vec::new(), documents, limits),
+            "to_writer_events_with",
+            ayaml::to_writer_events_with(&mut Vec::new(), &events, &emit),
         ),
         (
-            "to_string_events_with_limits",
-            ok(ayaml::to_string_events_with_limits(&events, limits)),
-        ),
-        (
-            "to_writer_event_stream_with_limits",
-            ayaml::parse_events_with_limits(input, &Limits::default()).and_then(|stream| {
-                ayaml::to_writer_event_stream_with_limits(&mut Vec::new(), stream, limits)
+            "to_writer_event_stream_with",
+            ayaml::parse_events(input).and_then(|stream| {
+                ayaml::to_writer_event_stream_with(&mut Vec::new(), stream, &emit)
             }),
         ),
         ("Emitter::to_string", ok(emitter.to_string(&value))),
@@ -1204,7 +1198,7 @@ fn limited_emitters(input: &str, limits: &Limits) -> Vec<(&'static str, Result<(
     ]
 }
 
-/// Every public path that takes explicit limits and reads YAML, compat's included.
+/// Every public path that takes explicit options and reads YAML, compat's included.
 fn limited_readers(input: &str, limits: &Limits) -> Vec<(&'static str, Result<(), ayaml::Error>)> {
     #[cfg_attr(
         not(feature = "libyaml-compat"),
@@ -1216,8 +1210,11 @@ fn limited_readers(input: &str, limits: &Limits) -> Vec<(&'static str, Result<()
     let mut readers = limited_entry_points(input, limits);
     #[cfg(feature = "libyaml-compat")]
     readers.push((
-        "compat::parse_events_eager_with_limits",
-        ok(ayaml::compat::parse_events_eager_with_limits(input, limits)),
+        "compat::parse_events_eager_with",
+        ok(ayaml::compat::parse_events_eager_with(
+            input,
+            &ayaml::compat::ParseOptions::new().with_limits(limits.clone()),
+        )),
     ));
     readers
 }
@@ -1230,8 +1227,7 @@ fn assert_depth_error(shape: &str, name: &str, result: Result<(), ayaml::Error>)
         return;
     }
     if shape == "alias chain"
-        && (name.ends_with("parse_events_with_limits")
-            || name.ends_with("parse_events_eager_with_limits"))
+        && (name.ends_with("parse_events_with") || name.ends_with("parse_events_eager_with"))
     {
         result.unwrap_or_else(|error| panic!("{shape}, {name}: {error}"));
         return;
@@ -1450,10 +1446,12 @@ fn wide_collections_fit_a_small_stack() {
                     10_000
                 };
                 let input = wide(shape, entries);
-                let events = ayaml::parse_events_with_limits(&input, &limits)
+                let parse_options = ayaml::ParseOptions::new().with_limits(limits.clone());
+                let emit_options = ayaml::EmitOptions::new().with_limits(limits.clone());
+                let events = ayaml::parse_events_with(&input, &parse_options)
                     .and_then(Iterator::collect::<Result<Vec<_>, _>>)
                     .unwrap_or_else(|error| panic!("{shape}: {error}"));
-                ayaml::to_string_events_with_limits(&events, &limits)
+                ayaml::to_string_events_with(&events, &emit_options)
                     .unwrap_or_else(|error| panic!("{shape}, to_string_events: {error}"));
                 for (name, result) in limited_entry_points(&input, &limits)
                     .into_iter()
@@ -1531,9 +1529,7 @@ fn a_node_cost_of_zero_is_rejected_on_every_entry_point() {
             .with_max_alias_expansion_bytes(256 << 10)
             .with_alias_bytes_per_input_byte(0);
         for (name, result) in limited_readers(&empty_node_bomb(), &small) {
-            if name.ends_with("parse_events_with_limits")
-                || name.ends_with("parse_events_eager_with_limits")
-            {
+            if name.ends_with("parse_events_with") || name.ends_with("parse_events_eager_with") {
                 result.unwrap_or_else(|error| panic!("{name}: {error}"));
                 continue;
             }
@@ -1559,18 +1555,19 @@ fn tag_expansion_is_accepted_up_to_its_limit() {
             "%TAG !e! tag:ab:\n---\n- !!str a\n- !e!x b\n- !y c\n- ! d\n- !<tag:z> e\n";
         let two_documents = "--- !!str a\n--- !!str b\n";
         let streams = |input: &str, limits: &Limits| {
-            let cursor = ayaml::Deserializer::from_str_with_limits(input, limits)
+            let options = ayaml::ParseOptions::new().with_limits(limits.clone());
+            let cursor = ayaml::Deserializer::from_str_with(input, &options)
                 .and_then(|mut cursor| cursor.next::<Value>().map(drop));
             vec![
                 (
-                    "parse_events_with_limits",
-                    ayaml::parse_events_with_limits(input, limits)
+                    "parse_events_with",
+                    ayaml::parse_events_with(input, &options)
                         .and_then(Iterator::collect::<Result<Vec<_>, _>>)
                         .map(drop),
                 ),
                 (
-                    "parse_documents_with_limits",
-                    ok(ayaml::parse_documents_with_limits(input, limits)),
+                    "parse_documents_with",
+                    ok(ayaml::parse_documents_with(input, &options)),
                 ),
                 ("Deserializer::next", cursor),
             ]

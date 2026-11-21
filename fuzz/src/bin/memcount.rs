@@ -333,9 +333,9 @@ fn measure_json(
     allocation_limit: Option<usize>,
     total_limit: Option<usize>,
 ) {
-    let limits = ayaml::Limits::for_max_input();
+    let options = ayaml::compat::ParseOptions::for_max_input();
     let decode = |text: &str| -> serde_json::Value {
-        ayaml::compat::from_str_seed_with_limits(text, &limits, PhantomData)
+        ayaml::compat::from_str_seed_with(text, &options, PhantomData)
             .expect("ayaml decodes the document")
     };
     // Whatever a decode allocates once in a process, before the counts.
@@ -404,8 +404,11 @@ fn main() {
     let bytes_before_parse = ALLOCATED_BYTES.load(Ordering::Relaxed);
     reset_peak();
     let value = if typed {
-        ayaml::compat::from_str_with_limits::<ayaml::Value>(&input, &ayaml::Limits::for_max_input())
-            .expect("ayaml typed parse")
+        ayaml::compat::from_str_with::<ayaml::Value>(
+            &input,
+            &ayaml::compat::ParseOptions::for_max_input(),
+        )
+        .expect("ayaml typed parse")
     } else {
         ayaml::parse_value(&input).expect("ayaml parse")
     };

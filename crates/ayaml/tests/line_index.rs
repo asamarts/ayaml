@@ -453,7 +453,7 @@ fn a_reader_s_error_is_as_many_columns_from_the_index_as_the_rule_says() {
         "\u{feff}", "---", "...", " ", "\n", "x", ":", "[", "\"", "*a", "\t",
     ];
     #[cfg(feature = "libyaml-compat")]
-    let limits = ayaml::Limits::default();
+    let compat_options = ayaml::compat::ParseOptions::new();
     let (mut placed, mut apart) = (0_usize, 0_usize);
     for text in texts(&pieces, 5) {
         let errors = [
@@ -471,7 +471,7 @@ fn a_reader_s_error_is_as_many_columns_from_the_index_as_the_rule_says() {
             #[cfg(feature = "libyaml-compat")]
             (
                 true,
-                ayaml::compat::parse_events_eager_with_limits(&text, &limits).err(),
+                ayaml::compat::parse_events_eager_with(&text, &compat_options).err(),
             ),
         ];
         for (compat, error) in errors {

@@ -128,7 +128,8 @@ fn per_node_scalar_styles_apply_by_path() {
         vec![PathSegment::key("c"), PathSegment::key("d")],
         NodeStyle::default().with_scalar_style(Some(ScalarStyle::SingleQuoted)),
     );
-    let rendered = ayaml::to_string_value_with_styles(&value, &styles).expect("emit");
+    let rendered =
+        ayaml::to_string_value_with(&value, &ayaml::EmitOptions::from(styles)).expect("emit");
     assert!(rendered.contains("a: 'plain'"), "{rendered:?}");
     assert!(rendered.contains("- one"), "{rendered:?}");
     assert!(rendered.contains("- \"two\""), "{rendered:?}");
@@ -138,19 +139,15 @@ fn per_node_scalar_styles_apply_by_path() {
 
 #[test]
 fn per_node_styles_apply_in_flow_and_at_the_root() {
-    use ayaml::{EmitterOptions, EmitterStyles, NodeStyle, PathSegment};
+    use ayaml::{EmitOptions, EmitterStyles, NodeStyle, PathSegment};
     let value = ayaml::parse_value("b: [one, two]\n").expect("parse");
     let mut styles = EmitterStyles::new();
     styles.set(
         vec![PathSegment::key("b"), PathSegment::index(1)],
         NodeStyle::default().with_scalar_style(Some(ScalarStyle::SingleQuoted)),
     );
-    let rendered = ayaml::to_string_value_with_options_and_styles(
-        &value,
-        &EmitterOptions::default().with_flow(true),
-        &styles,
-    )
-    .expect("flow");
+    let rendered = ayaml::to_string_value_with(&value, &EmitOptions::flow().with_styles(styles))
+        .expect("flow");
     assert!(rendered.contains("'two'"), "{rendered:?}");
     assert_eq!(ayaml::parse_value(&rendered).expect("reparse"), value);
 
@@ -160,13 +157,13 @@ fn per_node_styles_apply_in_flow_and_at_the_root() {
         Vec::new(),
         NodeStyle::default().with_scalar_style(Some(ScalarStyle::DoubleQuoted)),
     );
-    let rendered = ayaml::to_string_value_with_styles(&root, &styles).expect("root");
+    let rendered = ayaml::to_string_value_with(&root, &EmitOptions::from(styles)).expect("root");
     assert_eq!(rendered, "\"root\"\n");
 }
 
 #[test]
 fn per_node_flow_overrides_apply_to_collections() {
-    use ayaml::{EmitterStyles, NodeStyle, PathSegment};
+    use ayaml::{EmitOptions, EmitterStyles, NodeStyle, PathSegment};
     let value = ayaml::parse_value("a:\n  b: 1\n  c: 2\nlist:\n  - x\n  - y\n").unwrap();
     let mut styles = EmitterStyles::new();
     styles.set(
@@ -177,28 +174,29 @@ fn per_node_flow_overrides_apply_to_collections() {
         vec![PathSegment::key("list")],
         NodeStyle::default().with_flow(Some(true)),
     );
-    let rendered = ayaml::to_string_value_with_styles(&value, &styles).expect("emit");
+    let rendered = ayaml::to_string_value_with(&value, &EmitOptions::from(styles)).expect("emit");
     assert!(rendered.contains("a: {b: 1, c: 2}"), "{rendered:?}");
     assert!(rendered.contains("list: [x, y]"), "{rendered:?}");
     assert_eq!(ayaml::parse_value(&rendered).unwrap(), value);
 
     let mut styles = EmitterStyles::new();
     styles.set(Vec::new(), NodeStyle::default().with_flow(Some(true)));
-    let rendered = ayaml::to_string_value_with_styles(&value, &styles).expect("root flow");
+    let rendered =
+        ayaml::to_string_value_with(&value, &EmitOptions::from(styles)).expect("root flow");
     assert!(rendered.starts_with('{'), "{rendered:?}");
     assert_eq!(ayaml::parse_value(&rendered).unwrap(), value);
 }
 
 #[test]
 fn per_node_chomping_overrides_are_best_effort_and_lossless() {
-    use ayaml::{Chomping, EmitterStyles, NodeStyle, PathSegment};
+    use ayaml::{Chomping, EmitOptions, EmitterStyles, NodeStyle, PathSegment};
     let value = ayaml::parse_value("a: |\n  line\n").unwrap();
     let mut styles = EmitterStyles::new();
     styles.set(
         vec![PathSegment::key("a")],
         NodeStyle::default().with_chomping(Some(Chomping::Keep)),
     );
-    let rendered = ayaml::to_string_value_with_styles(&value, &styles).expect("keep");
+    let rendered = ayaml::to_string_value_with(&value, &EmitOptions::from(styles)).expect("keep");
     assert!(rendered.contains("|+"), "{rendered:?}");
     assert_eq!(ayaml::parse_value(&rendered).unwrap(), value);
 
@@ -210,7 +208,7 @@ fn per_node_chomping_overrides_are_best_effort_and_lossless() {
             .with_chomping(Some(Chomping::Strip))
             .with_scalar_style(Some(ScalarStyle::Literal)),
     );
-    let rendered = ayaml::to_string_value_with_styles(&value, &styles).expect("strip");
+    let rendered = ayaml::to_string_value_with(&value, &EmitOptions::from(styles)).expect("strip");
     assert!(rendered.starts_with("|-"), "{rendered:?}");
     assert_eq!(ayaml::parse_value(&rendered).unwrap(), value);
 
@@ -221,20 +219,18 @@ fn per_node_chomping_overrides_are_best_effort_and_lossless() {
             .with_chomping(Some(Chomping::Clip))
             .with_scalar_style(Some(ScalarStyle::Literal)),
     );
-    let rendered = ayaml::to_string_value_with_styles(&Value::from("line"), &styles).expect("clip");
+    let rendered = ayaml::to_string_value_with(&Value::from("line"), &EmitOptions::from(styles))
+        .expect("clip");
     assert!(rendered.starts_with("|-"), "{rendered:?}");
 }
 
 #[test]
 fn complex_folded_scalars_round_trip_when_folding_is_lossless() {
-    use ayaml::EmitterOptions;
+    use ayaml::EmitOptions;
+    let folded = EmitOptions::new().with_scalar_style(Some(ScalarStyle::Folded));
     for text in ["a\nb", "a\nb\n", "a\n\nb", "a\nb\n\n", "a\n"] {
         let value = Value::from(text);
-        let rendered = ayaml::to_string_value_with_options(
-            &value,
-            &EmitterOptions::default().with_scalar_style(Some(ScalarStyle::Folded)),
-        )
-        .expect("folded emit");
+        let rendered = ayaml::to_string_value_with(&value, &folded).expect("folded emit");
         assert!(rendered.starts_with('>'), "rendered={rendered:?}");
         assert_eq!(
             ayaml::parse_value(&rendered).expect("reparse"),
@@ -244,11 +240,7 @@ fn complex_folded_scalars_round_trip_when_folding_is_lossless() {
     }
 
     let value = Value::from("a\n b");
-    let rendered = ayaml::to_string_value_with_options(
-        &value,
-        &EmitterOptions::default().with_scalar_style(Some(ScalarStyle::Folded)),
-    )
-    .expect("fallback emit");
+    let rendered = ayaml::to_string_value_with(&value, &folded).expect("fallback emit");
     assert!(rendered.starts_with('|'), "rendered={rendered:?}");
     assert_eq!(ayaml::parse_value(&rendered).expect("reparse"), value);
 }
@@ -413,9 +405,9 @@ fn boms_may_only_start_a_document() {
     );
     assert_eq!(ayaml::parse_value("\u{feff}\u{feff}").unwrap(), Value::Null);
     assert_eq!(
-        ayaml::parse_documents_with_limits(
+        ayaml::parse_documents_with(
             "a\n\u{feff}# next\n---\nb\n\u{feff}\n",
-            &Limits::default().with_max_documents(4)
+            &ayaml::ParseOptions::new().with_limits(Limits::new().with_max_documents(4)),
         )
         .unwrap(),
         vec![Value::from("a"), Value::from("b")]
@@ -882,8 +874,8 @@ fn an_explicit_key_with_properties_may_hold_an_indentless_sequence() {
 /// starts a document. libyaml counts a column for it, so compat reads `---` as text there.
 #[test]
 fn a_bom_before_a_marker_or_directive_starts_a_document() {
-    let limits = Limits::default().with_max_documents(8);
-    let documents = |input| ayaml::parse_documents_with_limits(input, &limits);
+    let options = ayaml::ParseOptions::new().with_limits(Limits::new().with_max_documents(8));
+    let documents = |input| ayaml::parse_documents_with(input, &options);
     let a = Value::from("a");
     let b = Value::from("b");
     let cases = [
@@ -1081,9 +1073,9 @@ fn compat_counts_that_column_for_block_structure() {
 #[cfg(feature = "libyaml-compat")]
 #[test]
 fn compat_reads_a_marker_after_a_bom_as_text() {
-    let events = ayaml::compat::parse_events_eager_with_limits(
+    let events = ayaml::compat::parse_events_eager_with(
         "a\n...\n\u{feff}---\nb\n",
-        &Limits::default(),
+        &ayaml::compat::ParseOptions::new(),
     )
     .unwrap();
     let scalars: Vec<&str> = events
@@ -1177,7 +1169,9 @@ fn a_handle_expanding_to_a_core_name_is_that_core_tag() {
 fn tag_handles_count_against_their_limit_at_each_use() {
     let prefix = "tag:e.com,2000:";
     let tags = |count: usize| format!("%TAG !e! {prefix}\n---\n{}", "- !e!x a\n".repeat(count));
-    let at_most = |bytes: usize| Limits::default().with_max_tag_expansion_bytes(bytes);
+    let at_most = |bytes: usize| {
+        ayaml::ParseOptions::new().with_limits(Limits::new().with_max_tag_expansion_bytes(bytes))
+    };
     let limit_of = |error: Error| {
         assert_eq!(error.kind(), ErrorKind::Limit, "{error}");
         assert!(error.span().is_some(), "{error}");
@@ -1185,14 +1179,14 @@ fn tag_handles_count_against_their_limit_at_each_use() {
         assert_eq!(limit.kind(), LimitKind::TagExpansion);
         (limit.limit(), limit.observed())
     };
-    let over = |input: &str, limits: &Limits| {
-        limit_of(ayaml::parse_value_with_limits(input, limits).expect_err(input))
+    let over = |input: &str, options: &ayaml::ParseOptions| {
+        limit_of(ayaml::parse_value_with(input, options).expect_err(input))
     };
 
     // Below and at the limit, then one use above it.
     let three = 3 * prefix.len();
-    ayaml::parse_value_with_limits(&tags(3), &at_most(three + 1)).expect("below");
-    ayaml::parse_value_with_limits(&tags(3), &at_most(three)).expect("at");
+    ayaml::parse_value_with(&tags(3), &at_most(three + 1)).expect("below");
+    ayaml::parse_value_with(&tags(3), &at_most(three)).expect("at");
     assert_eq!(
         over(&tags(4), &at_most(three)),
         (three as u64, (three + prefix.len()) as u64)
@@ -1201,23 +1195,22 @@ fn tag_handles_count_against_their_limit_at_each_use() {
     // The built-in handles count too, and a verbatim tag doesn't.
     let core = "tag:yaml.org,2002:".len();
     over("!!str a\n", &at_most(core - 1));
-    ayaml::parse_value_with_limits("!!str a\n", &at_most(core)).expect("at");
+    ayaml::parse_value_with("!!str a\n", &at_most(core)).expect("at");
     over("!x a\n", &at_most(0));
-    ayaml::parse_value_with_limits("!<tag:e.com,2000:x> a\n", &at_most(0)).expect("verbatim");
-    ayaml::parse_value_with_limits("! a\n", &at_most(0)).expect("non-specific");
+    ayaml::parse_value_with("!<tag:e.com,2000:x> a\n", &at_most(0)).expect("verbatim");
+    ayaml::parse_value_with("! a\n", &at_most(0)).expect("non-specific");
 
     // The count covers the stream, not one document.
     let stream = format!("%TAG !e! {prefix}\n--- !e!x a\n...\n%TAG !e! {prefix}\n--- !e!x a\n");
-    ayaml::parse_documents_with_limits(&stream, &at_most(2 * prefix.len())).expect("at");
+    ayaml::parse_documents_with(&stream, &at_most(2 * prefix.len())).expect("at");
     limit_of(
-        ayaml::parse_documents_with_limits(&stream, &at_most(2 * prefix.len() - 1))
+        ayaml::parse_documents_with(&stream, &at_most(2 * prefix.len() - 1))
             .expect_err("over the limit"),
     );
 
     // The typed cursor sees it too, and the default leaves room for ordinary use.
     let input = tags(4);
-    let mut cursor =
-        ayaml::Deserializer::from_str_with_limits(&input, &at_most(three)).expect("start");
+    let mut cursor = ayaml::Deserializer::from_str_with(&input, &at_most(three)).expect("start");
     limit_of(cursor.next::<Value>().expect_err("over the limit"));
     ayaml::parse_value(&tags(10_000)).expect("default");
 }
@@ -1241,9 +1234,11 @@ fn compat_reports_a_scanner_error_as_itself() {
 #[test]
 fn an_alias_is_charged_for_the_tags_it_copies() {
     let long = "e".repeat(1_000);
-    let tight = Limits::default()
-        .with_max_alias_expansion_bytes(100)
-        .with_alias_bytes_per_input_byte(0);
+    let tight = ayaml::ParseOptions::new().with_limits(
+        Limits::default()
+            .with_max_alias_expansion_bytes(100)
+            .with_alias_bytes_per_input_byte(0),
+    );
     for input in [
         format!("%TAG !e! tag:{long}:\n---\n- &x !e!v a\n- *x\n"),
         format!("- &x !<tag:{long}:v> a\n- *x\n"),
@@ -1253,11 +1248,11 @@ fn an_alias_is_charged_for_the_tags_it_copies() {
         format!("- &x [!<tag:{long}:v> [a]]\n- *x\n"),
         format!("- &x {{!<tag:{long}:v> k: v}}\n- {{<<: *x}}\n"),
     ] {
-        let cursor = ayaml::Deserializer::from_str_with_limits(&input, &tight)
+        let cursor = ayaml::Deserializer::from_str_with(&input, &tight)
             .and_then(|mut cursor| cursor.next::<Value>().map(drop));
         for error in [
-            ayaml::parse_value_with_limits(&input, &tight).map(drop),
-            ayaml::from_str_borrowed_with_limits::<Value>(&input, &tight).map(drop),
+            ayaml::parse_value_with(&input, &tight).map(drop),
+            ayaml::from_str_with::<Value>(&input, &tight).map(drop),
             cursor,
         ]
         .map(|result| result.expect_err(&input))

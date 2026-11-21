@@ -99,15 +99,20 @@ A span is a byte range. When a line and column are needed, `LineIndex::new(input
 offset to a zero-based `Position` in UTF-8, scalar, or UTF-16 columns, and back;
 `Location::from(position)` is the one-based place that a person reads.
 
-Apply stricter limits:
+Apply stricter limits or emit options with `ParseOptions` and `EmitOptions`:
 
 ```rust
-use ayaml::{parse_value_with_limits, Limits};
+use ayaml::{EmitOptions, Limits, ParseOptions, parse_value_with, to_string_value_with};
+
+const PARSE: ParseOptions =
+    ParseOptions::new().with_limits(Limits::new().with_max_depth(64));
 
 fn main() -> Result<(), ayaml::Error> {
-    let limits = Limits::default().with_max_depth(64);
-    let value = parse_value_with_limits("a: [1, 2, 3]\n", &limits)?;
+    let value = parse_value_with("a: [1, 2, 3]\n", &PARSE)?;
     assert_eq!(value["a"][1].as_u64(), Some(2));
+
+    let flow = to_string_value_with(&value, &EmitOptions::flow())?;
+    assert_eq!(flow, "{a: [1, 2, 3]}\n");
     Ok(())
 }
 ```
@@ -116,20 +121,24 @@ fn main() -> Result<(), ayaml::Error> {
 
 | Need | Entry points |
 | --- | --- |
-| One document as a value | `parse_value`, `parse_value_with_limits` |
-| A document stream as values | `parse_documents`, `parse_documents_with_limits` |
-| Spanned events | `parse_events`, `parse_events_with_limits`, `EventStream` |
-| Compatibility events | `compat::parse_events`, its `_with_limits` form, and the eager `compat::parse_events_eager_with_limits` |
-| Spanned tree | `SpannedTree`, `SpannedNode`, path lookup, entry spans, and scalar source text |
-| Typed decoding | `from_str`, `from_slice`, `from_str_borrowed`, `Deserializer` |
+| One document as a value | `parse_value`, `parse_value_with` |
+| A document stream as values | `parse_documents`, `parse_documents_with` |
+| Spanned events | `parse_events`, `parse_events_with`, `EventStream` |
+| Compatibility events | `compat::parse_events`, `compat::parse_events_with`, and the eager `compat::parse_events_eager_with` |
+| Spanned tree | `SpannedTree::parse`, `SpannedTree::parse_with`, `SpannedNode`, path lookup, entry spans, and scalar source text |
+| Typed decoding | `from_str`, `from_str_with`, `from_slice`, `from_slice_with`, `from_str_borrowed`, `from_str_seed`, `from_str_seed_with`, `Deserializer` |
 | Value/Serde conversion | `from_value`, `from_value_seed`, `to_value` |
-| Emission | `to_string`, `to_writer`, `Emitter`, `to_string_events` |
-| Compatibility | `ayaml::compat` with the `libyaml-compat` feature |
+| Emission | `to_string`, `to_string_with`, `to_writer`, `to_writer_with`, `to_string_value_with`, `to_string_documents_with`, `to_string_events_with`, `Emitter` |
+| Compatibility | `ayaml::compat` with `compat::ParseOptions` and the `libyaml-compat` feature |
 
-`Limits` is `#[non_exhaustive]`; configure it with `Limits::default()`,
-`Limits::compat()`, and the `with_*` builder methods. `EmitterOptions`,
-`NodeStyle`, and `EmitterStyles` provide presentation control. `Emitter`
-borrows a limits value and a set of options so one configuration can be reused.
+`ParseOptions`, `compat::ParseOptions`, `EmitOptions`, and `Limits` are
+`#[non_exhaustive]` structs with `const` presets (`new()`, `for_max_input()`,
+`EmitOptions::flow()`) and `with_*` builders. `EmitOptions` combines resource
+limits, layout and indentation settings, and optional per-node `EmitterStyles`
+in one value. `Emitter` remains available to reuse borrowed `Limits` and
+`EmitterOptions` across calls. The older `*_with_limits`, `*_with_options`, and
+`*_with_styles` combination functions remain available and deprecated through
+`0.x` until removal in `1.0`.
 
 ## Compatibility profile
 
@@ -153,13 +162,14 @@ See [docs/compatibility.md](https://github.com/asamarts/ayaml/blob/main/docs/com
 
 ## Limits
 
-`Limits` can be passed to the parser and document readers, the borrowed typed
-decoder, the `Deserializer`, and the emitters that support an explicit limit, through
-their `_with_limits` forms. The convenience `from_str` and `from_slice` typed readers
-use the defaults. The defaults allow 32 MiB of input, depth 128, 10,000 documents per
+Every parse, decode, and emit entry point accepts explicit `Limits` through its
+`_with` form taking `&ParseOptions`, `&compat::ParseOptions`, or `&EmitOptions`
+(the in-memory `from_value`, `from_value_seed`, and `to_value` conversions do
+not take limits). The defaults allow 32 MiB of input, depth 128, 10,000 documents per
 stream, and a byte-weighted alias budget; the single-document APIs still reject a
 second document. The default count limits are intentionally lower than the input
-limit, to bound memory for untrusted input; use `Limits::for_max_input()` when a
+limit, to bound memory for untrusted input; use `ParseOptions::for_max_input()`
+(or `Limits::for_max_input()`) when a
 dense document within the input limit is refused by a count limit, at the cost of
 much larger memory use. Exceeding a limit returns `ErrorKind::Limit`, and
 `Error::limit()` exposes the limit kind, ceiling, and observed value. Limit errors
@@ -172,7 +182,7 @@ budget formula.
 
 | Feature | Default | Purpose |
 | --- | --- | --- |
-| `libyaml-compat` | no | Adds the additive `ayaml::compat` decoding module, and `SpannedTree::parse_compat` with its `_with_limits` form. |
+| `libyaml-compat` | no | Adds the additive `ayaml::compat` decoding module, and `SpannedTree::parse_compat` with its `_with` form. |
 | `bench-internals` | no | Unstable hooks for ayaml's benchmark and conformance harnesses; outside SemVer. |
 
 ## Documentation

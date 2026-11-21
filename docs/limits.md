@@ -35,14 +35,15 @@ document can therefore reach `max_events`, `max_collection_entries`, `max_anchor
 hostile input.
 
 When a caller needs the four count limits not to refuse a valid document within
-`MAX_INPUT_BYTES`, start from `Limits::for_max_input()`:
+`MAX_INPUT_BYTES`, start from `ParseOptions::for_max_input()` (or
+`Limits::for_max_input()`):
 
 ```rust
-use ayaml::{parse_value_with_limits, Limits};
+use ayaml::{ParseOptions, parse_value_with};
 
 # fn main() -> Result<(), ayaml::Error> {
-let limits = Limits::for_max_input();
-let value = parse_value_with_limits("[1, 2, 3]\n", &limits)?;
+let options = ParseOptions::for_max_input();
+let value = parse_value_with("[1, 2, 3]\n", &options)?;
 # let _ = value;
 # Ok(())
 # }
@@ -225,18 +226,22 @@ second document even when `max_documents` would allow one. Use
 
 ## Configuring limits
 
-`Limits` is `#[non_exhaustive]`. Start with `Limits::default()` or
-`Limits::compat()` and use the `with_*` methods:
+`Limits`, `ParseOptions`, `compat::ParseOptions`, and `EmitOptions` are
+`#[non_exhaustive]`. Start with `Limits::new()` (or `Limits::default()` /
+`Limits::compat()`), wrap it in `ParseOptions` or `EmitOptions`, and pass it to
+the operation's `_with` function:
 
 ```rust
-use ayaml::{parse_value_with_limits, Limits};
+use ayaml::{Limits, ParseOptions, parse_value_with};
 
 # fn main() -> Result<(), ayaml::Error> {
-let limits = Limits::default()
-    .with_max_input_bytes(1024 * 1024)
-    .with_max_depth(64)
-    .with_max_documents(100);
-let value = parse_value_with_limits("a: [1, 2, 3]\n", &limits)?;
+let options = ParseOptions::new().with_limits(
+    Limits::new()
+        .with_max_input_bytes(1024 * 1024)
+        .with_max_depth(64)
+        .with_max_documents(100),
+);
+let value = parse_value_with("a: [1, 2, 3]\n", &options)?;
 assert_eq!(value["a"][2].as_u64(), Some(3));
 # Ok(())
 # }
@@ -261,7 +266,7 @@ reader does. A depth failure is `ErrorKind::Serde`, with the message `recursion 
 exceeded` and the span of the collection that went over. Going over `max_documents`
 is `ErrorKind::Parser`, with the message `more than one document in stream` and the
 span of the second document's start. The compatibility event readers don't map these:
-`compat::parse_events`, its `_with_limits` form, and `compat::parse_events_eager_with_limits`
+`compat::parse_events`, `compat::parse_events_with`, and `compat::parse_events_eager_with`
 report `ErrorKind::Limit` with the value and the span.
 
 Parser, scanner, composer, typed-builder, document-count, and alias-budget
