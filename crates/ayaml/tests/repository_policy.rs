@@ -736,6 +736,20 @@ fn ci_compares_the_public_api_with_the_last_release() {
         Ok(1),
         "CI has to run the 0.1.3-to-0.2.0 public API regression check, once, under no condition"
     );
+    let workflow = parse_value(&text).expect("ci.yml parses");
+    let checkout = workflow["jobs"]["public-api"]["steps"]
+        .as_sequence()
+        .expect("public-api steps")
+        .first()
+        .expect("checkout step");
+    assert_eq!(
+        checkout["with"]["fetch-depth"].as_i64(),
+        Some(0),
+        "public-api checkout must fetch release tags (fetch-depth: 0)"
+    );
+    let local = read(&root, "tools/ci-local.sh");
+    assert!(local.contains("python3 tools/check_public_api.py"));
+    assert!(local.contains("AYAML_TEST_PUBLIC_API_LIVE=1 python3 tools/test_public_api.py"));
     let tests = read(&root, "tools/test_public_api.py");
     let (_, after) = tests
         .split_once("if __name__ == \"__main__\":")

@@ -77,18 +77,20 @@ path = "src/bin_cli.rs"
 [workspace]
 EOF
 
-RUSTFLAGS="" CARGO_TARGET_DIR="$work/target" cargo "+$TOOLCHAIN" build \
+env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
+    CARGO_TARGET_DIR="$work/target" cargo "+$TOOLCHAIN" build \
     --quiet --release --locked --no-default-features \
     --bin ayaml-public-api \
     --manifest-path "$crate_dir/Cargo.toml"
 
-install -m 0755 "$work/target/release/ayaml-public-api" "$binary"
-mv -f "$work/$archive" "$kept"
-
-if [[ "$("$binary" --version)" != "ayaml-public-api $VERSION" ]]; then
-    echo "error: the installed binary does not report version $VERSION" >&2
+built="$work/target/release/ayaml-public-api"
+if [[ "$("$built" --version)" != "ayaml-public-api $VERSION" ]]; then
+    echo "error: the built binary does not report version $VERSION" >&2
     exit 1
 fi
+
+install -m 0755 "$built" "$binary"
+mv -f "$work/$archive" "$kept"
 
 bin_sha256="$(sha256sum "$binary" | awk '{print $1}')"
 printf 'version=%s\ntoolchain=%s\ncrate=%s\ncli=%s\nbin=%s\n' \

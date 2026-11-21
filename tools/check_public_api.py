@@ -32,6 +32,7 @@ from typing import Iterable
 
 TOOLCHAIN = "nightly-2026-05-21"
 TOOL_BIN = "ayaml-public-api"
+TOOL_VERSION = "0.52.0"
 PACKAGE = "ayaml"
 PACKAGE_DIR = "crates/ayaml"
 ROOT = Path(__file__).resolve().parent.parent
@@ -165,11 +166,15 @@ def parse_semver_tag(tag: str) -> tuple[int, int, int] | None:
 def run(
     *command: str | Path,
     cwd: Path | None = None,
-    env: dict[str, str] | None = None,
+    env: dict[str, str | None] | None = None,
 ) -> str:
     merged_env = os.environ.copy()
     if env:
-        merged_env.update(env)
+        for key, value in env.items():
+            if value is None:
+                merged_env.pop(key, None)
+            else:
+                merged_env[key] = value
     completed = subprocess.run(
         [str(part) for part in command],
         cwd=cwd,
@@ -341,22 +346,39 @@ def diff_listings(base: set[str], head: set[str]) -> ApiDiff:
     only_head = sorted(head - base)
 
     trait_paths = collect_traits(base) | collect_traits(head)
+
+    # First pass: cancel semantically identical non-trait methods that differ only in `Self` vs
+    # their concrete owner type (e.g. `#[derive(PartialEq)]` vs manual `impl PartialEq`).
+    head_by_canon: dict[str, list[int]] = {}
+    for idx, item in enumerate(only_head):
+        canon = canonicalize_self_for_method(item, trait_paths)
+        if canon is not None:
+            head_by_canon.setdefault(canon, []).append(idx)
+
+    matched_head: set[int] = set()
+    remaining_base: list[str] = []
+    for old in only_base:
+        canon = canonicalize_self_for_method(old, trait_paths)
+        if canon is not None and head_by_canon.get(canon):
+            matched_head.add(head_by_canon[canon].pop(0))
+        else:
+            remaining_base.append(old)
+
+    remaining_head = [item for idx, item in enumerate(only_head) if idx not in matched_head]
+
+    # Second pass: pair remaining base/head items sharing the same structural item_key.
     head_by_key: dict[tuple[str, ...], list[str]] = {}
-    for item in only_head:
+    for item in remaining_head:
         head_by_key.setdefault(item_key(item), []).append(item)
 
     removed: list[str] = []
     changed: list[tuple[str, str]] = []
 
-    for old in only_base:
+    for old in remaining_base:
         key = item_key(old)
         candidates = head_by_key.get(key)
         if candidates:
             new = candidates.pop(0)
-            old_canon = canonicalize_self_for_method(old, trait_paths)
-            new_canon = canonicalize_self_for_method(new, trait_paths)
-            if old_canon is not None and old_canon == new_canon:
-                continue
             changed.append((old, new))
         else:
             removed.append(old)
@@ -478,22 +500,30 @@ def path_aliases(full_path: str, root_reexports: set[str]) -> list[str]:
     return list(dict.fromkeys(aliases))
 
 
+_REF_BEFORE_RE = re.compile(r"&(?:'[A-Za-z0-9_]+\s+)?(?:mut\s+)?$")
+
+
 def text_names_identifier(text: str, name: str) -> bool:
-    """Whether `text` names Rust path `name` with clean token boundaries."""
+    """Whether `text` names Rust path `name` with clean token boundaries (not as `&T`/`&mut T`)."""
     escaped = re.escape(name)
-    # Require that `name` is not part of a longer path/identifier, nor a `&T`/`&mut T` ref,
-    # nor followed by `::` (which names a child item rather than the item itself).
-    pattern = rf"(?<![A-Za-z0-9_:])(?<!&)(?<!&mut ){escaped}(?!::)(?![A-Za-z0-9_])"
-    return re.search(pattern, text) is not None
+    # Require that `name` is not part of a longer path/identifier, nor preceded by any
+    # `&` / `&'a ` / `&mut ` / `&'a mut ` reference prefix, nor followed by `::`.
+    pattern = rf"(?<![A-Za-z0-9_:])({escaped})(?!::)(?![A-Za-z0-9_])"
+    for match in re.finditer(pattern, text):
+        if _REF_BEFORE_RE.search(text[: match.start()]) is None:
+            return True
+    return False
 
 
 def text_names_target(text: str, ref_kind: str, aliases: list[str]) -> bool:
     """Whether `text` names a type target, distinguishing owned `T`, `&T`, and `&mut T`."""
     for alias in aliases:
-        escaped = re.escape(alias)
         if ref_kind == "":
-            pattern = rf"(?<![A-Za-z0-9_:])(?<!&)(?<!&mut ){escaped}(?!::)(?![A-Za-z0-9_])"
-        elif ref_kind == "&":
+            if text_names_identifier(text, alias):
+                return True
+            continue
+        escaped = re.escape(alias)
+        if ref_kind == "&":
             pattern = rf"(?<![A-Za-z0-9_&])&(?:'[A-Za-z0-9_]+\s+)?{escaped}(?!::)(?![A-Za-z0-9_])"
         else:
             pattern = (
@@ -659,7 +689,14 @@ def generate_listing(
     if features:
         cmd.extend(["--features", ",".join(features)])
     cmd.extend(["--", "-Z", "unstable-options", "--output-format", "json"])
-    env = {"CARGO_TARGET_DIR": str(target_dir), "RUSTFLAGS": "", "RUSTDOCFLAGS": ""}
+    env: dict[str, str | None] = {
+        "CARGO_TARGET_DIR": str(target_dir),
+        "RUSTFLAGS": None,
+        "RUSTDOCFLAGS": None,
+        "CARGO_ENCODED_RUSTFLAGS": None,
+        "CARGO_BUILD_RUSTFLAGS": None,
+        "CARGO_ENCODED_RUSTDOCFLAGS": None,
+    }
     run(*cmd, env=env)
     json_path = target_dir / "doc" / f"{PACKAGE}.json"
     if not json_path.is_file():
@@ -736,6 +773,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
+        reported_version = run(tool_bin, "--version").strip()
+        expected_version = f"{TOOL_BIN} {TOOL_VERSION}"
+        if reported_version != expected_version:
+            raise RuntimeError(
+                f"expected `{expected_version}` on PATH, found `{reported_version}`; "
+                "reinstall with tools/install-public-api.sh"
+            )
+
         head_ref = args.head or "HEAD"
         base_rev = args.base or last_release_tag(ROOT, head_ref)
         base_sv = parse_semver_tag(base_rev)
@@ -771,15 +816,18 @@ def main(argv: list[str] | None = None) -> int:
                 head_tree, WORK / f"target-{head_key}-{label}", features, tool_bin
             )
 
-        # Verify bench-internals stays doc(hidden) and adds nothing to the public API.
+        # Verify bench-internals stays doc(hidden) and neither adds nor removes public API items.
         bench_listing = generate_listing(
             head_tree, WORK / f"target-{head_key}-bench-internals", ("bench-internals",), tool_bin
         )
         leaked = sorted(bench_listing - head_listings["default"])
-        if leaked:
-            print("error: feature `bench-internals` exposes public API items:", file=sys.stderr)
+        dropped = sorted(head_listings["default"] - bench_listing)
+        if leaked or dropped:
+            print("error: feature `bench-internals` changes the public API:", file=sys.stderr)
             for item in leaked:
                 print(f"  + {item}", file=sys.stderr)
+            for item in dropped:
+                print(f"  - {item}", file=sys.stderr)
             return 1
 
         undocumented, documented, diffs = check_comparison(

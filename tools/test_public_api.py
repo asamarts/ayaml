@@ -121,6 +121,47 @@ class PublicApiDiffing(unittest.TestCase):
         self.assertEqual(diff.removed, ())
         self.assertEqual(diff.changed, ())
 
+    def test_self_equivalence_cancels_before_key_pairing_with_multiple_overloads(self) -> None:
+        base = {
+            "pub struct ayaml::value::Value",
+            "pub fn ayaml::value::Value::from(bool) -> ayaml::value::Value",
+            "pub fn ayaml::value::Value::from(i64) -> ayaml::value::Value",
+        }
+        head = {
+            "pub struct ayaml::value::Value",
+            "pub fn ayaml::value::Value::from(i64) -> Self",
+            "pub fn ayaml::value::Value::from(u16) -> Self",
+        }
+        diff = cpa.diff_listings(base, head)
+        # `from(i64) -> Value` cancels cleanly with `from(i64) -> Self`, leaving only the real
+        # change between `from(bool)` and `from(u16)`.
+        self.assertEqual(diff.removed, ())
+        self.assertEqual(
+            diff.changed,
+            (
+                (
+                    "pub fn ayaml::value::Value::from(bool) -> ayaml::value::Value",
+                    "pub fn ayaml::value::Value::from(u16) -> Self",
+                ),
+            ),
+        )
+
+    def test_lifetime_ref_in_changelog_does_not_match_owned_target(self) -> None:
+        reexports = {"Mapping"}
+        owned = cpa.ApiBreak(
+            kind="changed",
+            feature_set="default",
+            old="pub type ayaml::mapping::Mapping::IntoIter = indexmap::map::iter::IntoIter<ayaml::value::Value, ayaml::value::Value>",
+            new="pub type ayaml::mapping::Mapping::IntoIter = ayaml::mapping::IntoIter",
+        )
+        for text in (
+            "- `&'a Mapping` `IntoIterator` changed.",
+            "- `&'a mut Mapping` `IntoIterator` changed.",
+            "- `&mut  Mapping` `IntoIterator` changed.",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(cpa.is_documented(owned, [text], reexports, set()))
+
     def test_self_equivalence_does_not_ignore_trait_method_changes(self) -> None:
         base = {
             "pub trait ayaml::MyTrait",
@@ -386,7 +427,10 @@ class PinConsistencyAndInstaller(unittest.TestCase):
         m_inst = re.search(r'^TOOLCHAIN="([^"]+)"', installer, re.M)
         self.assertIsNotNone(m_inst)
         pinned = m_inst.group(1)
+        m_ver = re.search(r'^VERSION="([^"]+)"', installer, re.M)
+        self.assertIsNotNone(m_ver)
         self.assertEqual(cpa.TOOLCHAIN, pinned)
+        self.assertEqual(cpa.TOOL_VERSION, m_ver.group(1))
         self.assertRegex(installer, r'(?m)^VERSION="[0-9]+\.[0-9]+\.[0-9]+"', "pinned version")
         self.assertRegex(installer, r'(?m)^CRATE_SHA256="[0-9a-f]{64}"', "pinned sha256")
         self.assertIn(f"toolchain: {pinned}", workflow)
@@ -497,6 +541,17 @@ class PinConsistencyAndInstaller(unittest.TestCase):
             res = subprocess.run([str(script), str(install_dir)], capture_output=True, text=True, env=env)
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertEqual(calls.read_text().splitlines(), ["cargo-build"])
+
+            # 5. A built binary reporting the wrong version fails before overwriting $binary.
+            bad_dir = root / "bad-version"
+            res = subprocess.run(
+                [str(script), str(bad_dir)],
+                capture_output=True,
+                text=True,
+                env={**env, "FAKE_VER": "0.0.0"},
+            )
+            self.assertNotEqual(res.returncode, 0)
+            self.assertFalse((bad_dir / "ayaml-public-api").exists())
 
 
 @unittest.skipUnless(
