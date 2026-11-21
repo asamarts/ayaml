@@ -1651,13 +1651,30 @@ class DocsCheck(unittest.TestCase):
         self.assertTrue(any("missing link target 'missing.md'" in msg for msg in found), found)
         self.assertTrue(any("escapes docs/" in msg for msg in found), found)
 
-    def test_ignored_rust_fence_fails(self) -> None:
+    def test_ignored_or_no_run_or_untagged_fence_fails(self) -> None:
+        for fence, expected in (
+            ("```rust,ignore\nlet x = 1;\n```\n", "uses 'ignore'"),
+            ("```rust,no_run\nlet x = 1;\n```\n", "uses 'no_run'"),
+            ("```\nplain block\n```\n", "no language tag"),
+        ):
+            with self.subTest(expected=expected):
+                root = self.make_tree()
+                (root / "docs/security.md").write_text(f"# Security\n\n{fence}", encoding="utf-8")
+                found = check_docs.problems(root)
+                self.assertTrue(any(expected in msg for msg in found), found)
+
+    def test_missing_anchor_and_duplicate_summary_fail(self) -> None:
         root = self.make_tree()
-        (root / "docs/security.md").write_text(
-            "# Security\n\n```rust,ignore\nlet x = 1;\n```\n", encoding="utf-8"
+        (root / "docs/index.md").write_text(
+            "# Intro\n\nSee [Missing anchor](security.md#does-not-exist).\n", encoding="utf-8"
+        )
+        (root / "docs/SUMMARY.md").write_text(
+            "# Summary\n\n[Introduction](index.md)\n- [Security](security.md)\n- [Again](security.md)\n",
+            encoding="utf-8",
         )
         found = check_docs.problems(root)
-        self.assertTrue(any("uses 'ignore'" in msg for msg in found), found)
+        self.assertTrue(any("missing heading anchor #does-not-exist" in msg for msg in found), found)
+        self.assertTrue(any("duplicate entry for 'security.md'" in msg for msg in found), found)
 
     def test_repository_tree_passes(self) -> None:
         repo = Path(__file__).resolve().parent.parent

@@ -782,6 +782,17 @@ fn ci_compares_the_public_api_with_the_last_release() {
 /// reference, workspace book doctests, and docs/CI workflows stay wired together.
 #[test]
 fn docs_book_and_reference_pages_are_complete_and_doctested_in_ci() {
+    fn markdown_files(dir: &Path, found: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("docs directory") {
+            let path = entry.expect("docs entry").path();
+            if path.is_dir() {
+                markdown_files(&path, found);
+            } else if path.extension().is_some_and(|ext| ext == "md") {
+                found.push(path);
+            }
+        }
+    }
+
     let Some(root) = repository_root() else {
         return;
     };
@@ -828,22 +839,27 @@ fn docs_book_and_reference_pages_are_complete_and_doctested_in_ci() {
         );
     }
 
+    let docs_root = root.join("docs");
+    let mut doc_pages = Vec::new();
+    markdown_files(&docs_root, &mut doc_pages);
     let book_doctests = read(&root, "crates/ayaml-conformance/src/lib.rs");
-    for entry in std::fs::read_dir(root.join("docs")).expect("docs directory") {
-        let path = entry.expect("docs entry").path();
-        if path.extension().is_some_and(|ext| ext == "md")
-            && path.file_name().is_some_and(|name| name != "SUMMARY.md")
-        {
-            let name = path.file_name().expect("file name").to_string_lossy();
-            assert!(
-                summary.contains(&format!("({name})")),
-                "docs/{name} is missing from docs/SUMMARY.md"
-            );
-            assert!(
-                book_doctests.contains(&format!("../../../docs/{name}")),
-                "docs/{name} is missing from crates/ayaml-conformance/src/lib.rs book_doctests"
-            );
+    for path in doc_pages {
+        if path.file_name().is_some_and(|name| name == "SUMMARY.md") {
+            continue;
         }
+        let rel = path
+            .strip_prefix(&docs_root)
+            .expect("under docs/")
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert!(
+            summary.contains(&format!("({rel})")),
+            "docs/{rel} is missing from docs/SUMMARY.md"
+        );
+        assert!(
+            book_doctests.contains(&format!("../../../docs/{rel}")),
+            "docs/{rel} is missing from crates/ayaml-conformance/src/lib.rs book_doctests"
+        );
     }
     assert!(
         book_doctests.contains("../../../README.md"),
@@ -872,5 +888,14 @@ fn docs_book_and_reference_pages_are_complete_and_doctested_in_ci() {
         check_docs_steps,
         Ok(1),
         "CI must run python3 tools/check_docs.py unconditionally"
+    );
+    let workspace_test_steps = steps_that_run(&ci_wf, &|step| {
+        step["run"].as_str().map(str::trim)
+            == Some("cargo test --workspace --locked --all-features")
+    });
+    assert_eq!(
+        workspace_test_steps,
+        Ok(2),
+        "CI must run workspace tests (including book_doctests) unconditionally on Linux and cross-platform jobs"
     );
 }

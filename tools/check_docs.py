@@ -11,11 +11,11 @@ import tomllib
 LINK_PATTERN = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 HTML_HREF_PATTERN = re.compile(r'href="([^"]+)"')
 INCLUDE_DOC_PATTERN = re.compile(r'include_str!\("\.\./\.\./\.\./([^"]+)"\)')
-RUST_FENCE_PATTERN = re.compile(r"^```([^\n]*)$", re.MULTILINE)
+HEADING_PATTERN = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
 
 
 def strip_fenced_code_blocks(text: str) -> str:
-    """Remove fenced code block bodies so link checks ignore example snippets."""
+    """Remove fenced code block bodies so link and heading checks ignore example snippets."""
     lines = text.splitlines(keepends=True)
     out: list[str] = []
     in_fence = False
@@ -41,6 +41,27 @@ def strip_fenced_code_blocks(text: str) -> str:
     return "".join(out)
 
 
+def heading_slugs(text: str) -> set[str]:
+    """Compute GitHub/mdBook-style heading anchors from Markdown prose."""
+    prose = strip_fenced_code_blocks(text)
+    counts: dict[str, int] = {}
+    slugs: set[str] = set()
+    for match in HEADING_PATTERN.finditer(prose):
+        heading = match.group(1)
+        # Strip inline markdown formatting characters while keeping code text.
+        heading = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", heading)
+        heading = heading.replace("`", "")
+        raw = heading.strip().lower()
+        slug = re.sub(r"[^a-z0-9 _-]", "", raw)
+        slug = re.sub(r"\s+", "-", slug).strip("-")
+        if not slug:
+            continue
+        seen = counts.get(slug, 0)
+        counts[slug] = seen + 1
+        slugs.add(slug if seen == 0 else f"{slug}-{seen}")
+    return slugs
+
+
 def check_book_toml(root: Path) -> list[str]:
     errors: list[str] = []
     book_toml = root / "book.toml"
@@ -63,9 +84,10 @@ def check_book_toml(root: Path) -> list[str]:
     return errors
 
 
-def check_rust_fences(path: Path, text: str) -> list[str]:
-    """Ensure Rust examples in the book and README are not skipped with `ignore`."""
+def check_rust_fences(root: Path, path: Path, text: str) -> list[str]:
+    """Ensure every code fence in book pages and README is tagged and no Rust block is skipped."""
     errors: list[str] = []
+    rel = path.relative_to(root)
     in_fence = False
     for line_no, line in enumerate(text.splitlines(), 1):
         stripped = line.lstrip()
@@ -73,12 +95,20 @@ def check_rust_fences(path: Path, text: str) -> list[str]:
             if stripped.startswith("```"):
                 info = stripped[3:].strip()
                 in_fence = True
-                tokens = [tok.strip().lower() for tok in re.split(r"[,\s]+", info) if tok.strip()]
-                if "rust" in tokens and "ignore" in tokens:
+                if not info:
                     errors.append(
-                        f"{path}:{line_no}: Rust example uses 'ignore' ({info!r}); "
-                        "book examples must run as doctests"
+                        f"{rel}:{line_no}: fenced code block has no language tag "
+                        "(rustdoc treats untagged fences as Rust)"
                     )
+                    continue
+                tokens = [tok.strip().lower() for tok in re.split(r"[,\s]+", info) if tok.strip()]
+                if "rust" in tokens:
+                    for forbidden in ("ignore", "no_run"):
+                        if forbidden in tokens:
+                            errors.append(
+                                f"{rel}:{line_no}: Rust example uses '{forbidden}' ({info!r}); "
+                                "book examples must compile and run as doctests"
+                            )
         elif stripped.startswith("```"):
             in_fence = False
     return errors
@@ -87,12 +117,23 @@ def check_rust_fences(path: Path, text: str) -> list[str]:
 def check_links(root: Path, docs_dir: Path, files: list[Path]) -> list[str]:
     errors: list[str] = []
     docs_resolved = docs_dir.resolve()
+    slug_cache: dict[Path, set[str]] = {}
+    check_fences_in = {docs_resolved, (root / "README.md").resolve()}
+
+    def slugs_for(target_path: Path) -> set[str]:
+        resolved = target_path.resolve()
+        if resolved not in slug_cache:
+            slug_cache[resolved] = heading_slugs(resolved.read_text(encoding="utf-8"))
+        return slug_cache[resolved]
+
     for path in files:
         text = path.read_text(encoding="utf-8")
-        errors.extend(check_rust_fences(path, text))
+        resolved_path = path.resolve()
+        in_docs = docs_resolved in resolved_path.parents
+        if in_docs or resolved_path in check_fences_in:
+            errors.extend(check_rust_fences(root, path, text))
         prose = strip_fenced_code_blocks(text)
         targets = [match.group(1) for match in LINK_PATTERN.finditer(prose)]
-        in_docs = docs_resolved in path.resolve().parents
         if in_docs:
             targets += [
                 re.sub(r"\.html(?=$|#)", ".md", match.group(1))
@@ -100,19 +141,35 @@ def check_links(root: Path, docs_dir: Path, files: list[Path]) -> list[str]:
             ]
         for raw_target in targets:
             target = raw_target.strip()
-            if not target or target.startswith(("http://", "https://", "#", "mailto:")):
+            if not target or target.startswith(("http://", "https://", "mailto:")):
                 continue
-            target = target.split("#", 1)[0].strip()
-            if not target:
-                continue
-            resolved = (path.parent / target).resolve()
+            if "#" in target:
+                file_part, fragment = target.split("#", 1)
+                file_part = file_part.strip()
+                fragment = fragment.strip()
+            else:
+                file_part, fragment = target, ""
+            resolved = resolved_path if not file_part else (path.parent / file_part).resolve()
             if not resolved.exists():
                 errors.append(f"{path.relative_to(root)}: missing link target {raw_target!r}")
-            elif in_docs and docs_resolved not in resolved.parents and resolved != docs_resolved:
+                continue
+            if (
+                file_part
+                and in_docs
+                and docs_resolved not in resolved.parents
+                and resolved != docs_resolved
+            ):
                 errors.append(
                     f"{path.relative_to(root)}: relative link {raw_target!r} escapes docs/; "
                     "use a full GitHub URL for links outside the book"
                 )
+                continue
+            if fragment and resolved.is_file() and resolved.suffix == ".md":
+                if fragment.lower() not in slugs_for(resolved):
+                    errors.append(
+                        f"{path.relative_to(root)}: missing heading anchor #{fragment} "
+                        f"in {resolved.relative_to(root.resolve())}"
+                    )
     return errors
 
 
@@ -137,6 +194,8 @@ def check_summary_and_doctests(root: Path, docs_dir: Path) -> list[str]:
             errors.append(f"docs/SUMMARY.md: listed page does not exist: {target!r}")
         elif docs_resolved not in resolved.parents:
             errors.append(f"docs/SUMMARY.md: listed page escapes docs/: {target!r}")
+        elif resolved in listed:
+            errors.append(f"docs/SUMMARY.md: duplicate entry for {target!r}")
         else:
             listed.add(resolved)
 

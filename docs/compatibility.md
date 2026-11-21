@@ -304,7 +304,10 @@ Parsing errors use stable categories:
 - emitter or I/O error.
 
 When input provides a location, the error carries a span and `Error::location()`
-returns the one-based line and column. Resource-limit failures expose the
+returns the one-based line and column. `Error::code()` returns a stable `ErrorCode`
+(`yaml.<kebab-name>`) preserved across compatibility kind remappings, and
+`Error::masked()` formats kind, code, and location without document text; see
+[`error-codes.md`](error-codes.md). Resource-limit failures expose the
 configured ceiling and observed value through `Error::limit()`, with the exceptions
 in [`limits.md`](limits.md#errors).
 
