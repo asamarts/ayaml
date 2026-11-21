@@ -153,7 +153,7 @@ All limit-exceeded errors also attach a structured `LimitExceeded` value accessi
 
 | Variant | Code | Usual `ErrorKind` | Meaning |
 | --- | --- | --- | --- |
-| `InvalidEmitterOptions` | `yaml.invalid-emitter-options` | `Emitter` | Emitter options failed validation (for example, `indent` outside `1..=9`). |
+| `InvalidEmitterOptions` | `yaml.invalid-emitter-options` | `Emitter` | Emitter options failed validation (for example, `indent` outside `2..=9`). |
 | `UnsupportedTag` | `yaml.unsupported-tag` | `Emitter` | A tag cannot be written as valid YAML, wraps an already-tagged payload, or conflicts with the scalar value's YAML 1.2 Core Schema rule. |
 | `InvalidEmitEvent` | `yaml.invalid-emit-event` | `Emitter` | An event stream handed to `to_string_events*`, `to_writer_events*`, or `to_writer_event_stream*` is malformed, has an unwritable anchor/alias/directive, or references an undefined alias. Also the default code for `ErrorKind::Emitter`. |
 | `Io` | `yaml.io` | `Io` | Writing YAML output to a `std::io::Write` sink returned an I/O error. |

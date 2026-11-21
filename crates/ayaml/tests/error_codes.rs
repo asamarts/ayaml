@@ -64,6 +64,11 @@ fn scanner_error_codes_are_pinned() {
             "yaml.reserved-indicator",
         ),
         (
+            "a: %foo",
+            ErrorCode::ReservedIndicator,
+            "yaml.reserved-indicator",
+        ),
+        (
             "-\t- a\n",
             ErrorCode::InvalidTabIndentation,
             "yaml.invalid-tab-indentation",
@@ -908,6 +913,19 @@ fn emitter_and_io_error_codes_are_pinned() {
         ErrorCode::InvalidEmitterOptions,
         "yaml.invalid-emitter-options",
     );
+    for invalid_indent in [1, 10] {
+        let err = to_string_value_with(
+            &Value::Null,
+            &EmitOptions::new().with_indent(invalid_indent),
+        )
+        .unwrap_err();
+        assert_code(
+            &err,
+            ErrorKind::Emitter,
+            ErrorCode::InvalidEmitterOptions,
+            "yaml.invalid-emitter-options",
+        );
+    }
 
     let bad_tag = to_string_value(&Value::Tagged(Box::new(ayaml::TaggedValue::new(
         Tag::new("tag:yaml.org,2002:", "int"),
@@ -928,6 +946,21 @@ fn emitter_and_io_error_codes_are_pinned() {
     .unwrap_err();
     assert_code(
         &unwriteable_tag,
+        ErrorKind::Emitter,
+        ErrorCode::UnsupportedTag,
+        "yaml.unsupported-tag",
+    );
+
+    let nested_tag = to_string_value(&Value::Tagged(Box::new(ayaml::TaggedValue::new(
+        Tag::new("!", "outer"),
+        Value::Tagged(Box::new(ayaml::TaggedValue::new(
+            Tag::new("!", "inner"),
+            Value::Null,
+        ))),
+    ))))
+    .unwrap_err();
+    assert_code(
+        &nested_tag,
         ErrorKind::Emitter,
         ErrorCode::UnsupportedTag,
         "yaml.unsupported-tag",
@@ -1075,11 +1108,60 @@ fn streaming_typed_reader_preserves_error_codes() {
         ErrorCode::InvalidType,
         "yaml.invalid-type",
     );
+
+    // Multi-document Deserializer preserves Serde and limit error codes.
+    let mut docs = ayaml::Deserializer::from_str("1\n---\n\"bad\"\n").unwrap();
+    assert_eq!(docs.next::<u32>().unwrap(), Some(1));
+    let second_err = docs.next::<u32>().unwrap_err();
+    assert_code(
+        &second_err,
+        ErrorKind::Serde,
+        ErrorCode::InvalidType,
+        "yaml.invalid-type",
+    );
+    let mut limited_docs = ayaml::Deserializer::from_str_with(
+        "1\n---\n2\n",
+        &ParseOptions::new().with_limits(Limits::new().with_max_documents(1)),
+    )
+    .unwrap();
+    assert_eq!(limited_docs.next::<u32>().unwrap(), Some(1));
+    let doc_limit_err = limited_docs.next::<u32>().unwrap_err();
+    assert_code(
+        &doc_limit_err,
+        ErrorKind::Limit,
+        ErrorCode::DocumentCountLimit,
+        "yaml.document-count-limit",
+    );
+
+    // Serialization depth limit produces DepthLimit.
+    let mut deep = Value::Null;
+    for _ in 0..=128 {
+        deep = Value::Sequence(vec![deep]);
+    }
+    let ser_depth = to_value(&deep).unwrap_err();
+    assert_code(
+        &ser_depth,
+        ErrorKind::Limit,
+        ErrorCode::DepthLimit,
+        "yaml.depth-limit",
+    );
 }
 
 #[test]
 fn every_documented_error_code_is_pinned_by_this_suite() {
-    let doc = include_str!("../../../docs/error-codes.md");
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest.join("../..");
+    let path = root.join("docs/error-codes.md");
+    if !path.is_file() {
+        assert!(
+            manifest.join("Cargo.toml.orig").is_file(),
+            "{} is neither in the repository nor an unpacked package",
+            manifest.display()
+        );
+        return;
+    }
+    let doc = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
     let mut documented = HashSet::new();
     for line in doc.lines() {
         let trimmed = line.trim();
@@ -1091,7 +1173,7 @@ fn every_documented_error_code_is_pinned_by_this_suite() {
             && let Some(code_str) = cells[2].strip_prefix('`').and_then(|s| s.strip_suffix('`'))
             && code_str.starts_with("yaml.")
         {
-            documented.insert(code_str);
+            documented.insert(code_str.to_owned());
         }
     }
 
@@ -1113,8 +1195,7 @@ fn every_documented_error_code_is_pinned_by_this_suite() {
 
     let missing: Vec<_> = documented
         .iter()
-        .filter(|code| !pinned.contains(**code))
-        .copied()
+        .filter(|code| !pinned.contains(*code))
         .collect();
     assert!(
         missing.is_empty(),

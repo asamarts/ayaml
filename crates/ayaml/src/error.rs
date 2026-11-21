@@ -95,7 +95,8 @@ pub enum ErrorCode {
     NonPrintableChar,
     /// Byte order mark in a position where YAML forbids one (`yaml.invalid-bom`).
     InvalidBom,
-    /// Reserved indicator (`@` or `` ` ``) starting a plain scalar (`yaml.reserved-indicator`).
+    /// Reserved indicator (`%`, `@`, or `` ` ``) starting a plain scalar
+    /// (`yaml.reserved-indicator`).
     ReservedIndicator,
     /// Tab used where YAML forbids tabs as indentation or structural separation
     /// (`yaml.invalid-tab-indentation`).
@@ -1060,7 +1061,19 @@ mod tests {
 
     #[test]
     fn every_error_code_is_documented_in_reference_page() {
-        let doc = include_str!("../../../docs/error-codes.md");
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = manifest.join("../..");
+        let path = root.join("docs/error-codes.md");
+        if !path.is_file() {
+            assert!(
+                manifest.join("Cargo.toml.orig").is_file(),
+                "{} is neither in the repository nor an unpacked package",
+                manifest.display()
+            );
+            return;
+        }
+        let doc = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
         let mut documented = HashSet::new();
         for line in doc.lines() {
             let trimmed = line.trim();
@@ -1069,18 +1082,22 @@ mod tests {
             }
             let cells: Vec<&str> = trimmed.split('|').map(str::trim).collect();
             if cells.len() >= 4
+                && let Some(variant) = cells[1].strip_prefix('`').and_then(|s| s.strip_suffix('`'))
                 && let Some(code_str) = cells[2].strip_prefix('`').and_then(|s| s.strip_suffix('`'))
                 && code_str.starts_with("yaml.")
             {
                 assert!(
-                    documented.insert(code_str),
-                    "duplicate code in docs/error-codes.md: {code_str}"
+                    documented.insert((variant.to_owned(), code_str.to_owned())),
+                    "duplicate code in docs/error-codes.md: ({variant}, {code_str})"
                 );
             }
         }
-        let expected: HashSet<&str> = ALL_CODES.iter().map(|code| code.as_str()).collect();
-        let missing: Vec<_> = expected.difference(&documented).copied().collect();
-        let extra: Vec<_> = documented.difference(&expected).copied().collect();
+        let expected: HashSet<(String, String)> = ALL_CODES
+            .iter()
+            .map(|code| (format!("{code:?}"), code.as_str().to_owned()))
+            .collect();
+        let missing: Vec<_> = expected.difference(&documented).collect();
+        let extra: Vec<_> = documented.difference(&expected).collect();
         assert!(
             missing.is_empty() && extra.is_empty(),
             "docs/error-codes.md drift: missing={missing:?}, extra={extra:?}"
