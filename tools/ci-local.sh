@@ -257,6 +257,7 @@ quality() {
   step "fuzz workspace format ($tc)" cargo "+$tc" fmt --manifest-path fuzz/Cargo.toml --all -- --check
   step "fuzz workspace clippy ($tc)" cargo "+$tc" clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
   test_step "fuzz workspace harness tests ($tc)" cargo "+$tc" test --manifest-path fuzz/Cargo.toml --lib --locked
+  test_step "counting allocator tests ($tc)" cargo "+$tc" test --manifest-path fuzz/Cargo.toml --bin memcount --locked
   step "production library panic profile ($tc)" cargo "+$tc" clippy -p ayaml --lib --locked --all-features -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
   test_step "test ($tc)" cargo "+$tc" test --workspace --locked --all-features
   test_step "test default features ($tc)" cargo "+$tc" test -p ayaml --locked
@@ -270,6 +271,7 @@ quality() {
   # Mirrors: cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
   # Mirrors: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
   # Mirrors: cargo test --manifest-path fuzz/Cargo.toml --lib --locked
+  # Mirrors: cargo test --manifest-path fuzz/Cargo.toml --bin memcount --locked
   # Mirrors: cargo clippy -p ayaml --lib --locked --all-features -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
   # Mirrors: cargo test --workspace --locked --all-features
   # Mirrors: cargo test -p ayaml --locked

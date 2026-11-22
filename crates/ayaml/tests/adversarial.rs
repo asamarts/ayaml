@@ -1907,5 +1907,8 @@ fn nested_mapping_duplicate_keys_are_found_in_every_reader() {
     }
 }
 
+#[path = "adversarial/dos.rs"]
+mod dos;
+
 #[path = "adversarial/merge.rs"]
 mod merge;
