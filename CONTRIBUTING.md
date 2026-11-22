@@ -145,6 +145,22 @@ a sealed file. Close that issue by hand after reading what the run sealed, since
 doesn't read it, and closing it doesn't file the same problem again. GitHub turns off every schedule in a repository after 60 days with no activity, the check's own included,
 so run `tools/ci-local.sh scheduled` before a release.
 
+### Mutation testing triage
+
+`.github/workflows/mutants.yml` runs `cargo-mutants` weekly across four shards on hosted runners
+under an 8 GiB virtual-memory ceiling (`ulimit -v 8388608`) and per-mutant timeout. Never run
+limit-disabling mutants on a shared host: `.cargo/mutants.toml` excludes `limits.rs` and
+resource-limit guards so no mutant can turn adversarial tests into memory exhaustion.
+
+Each shard writes caught, missed, timeout, and unviable counts plus a kill-rate summary to the
+workflow step summary and uploads `mutants.out/` (including `summary.json` and `missed.txt`) for
+90 days to track trends over time. When triaging a survivor from `missed.txt`:
+
+1. **Real gap:** add a targeted regression test (for example in
+   `crates/ayaml/tests/mutation_targets.rs`) that fails when the mutation is applied.
+2. **Equivalent or intentionally non-behavioral mutant:** document the reason and exclude the
+   narrowest function or pattern in `.cargo/mutants.toml`.
+
 ## Checks that run before a release
 
 Maintainers run `tools/ci-local.sh --release`, which fails if any of its checks had to be

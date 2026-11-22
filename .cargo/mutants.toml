@@ -1,0 +1,36 @@
+# Bounded mutation testing defaults for hosted CI (AY-037).
+#
+# Never run limit-disabling mutants on a shared host: turning off an alias,
+# depth, or expansion guard can turn adversarial tests into real memory
+# exhaustion. Limit enforcement lives in `limits.rs` and is excluded below,
+# alongside the benchmark and conformance harness crates.
+
+gitignore = true
+additional_cargo_args = ["--locked", "--jobs", "2"]
+additional_cargo_test_args = ["--", "--test-threads=1"]
+
+exclude_globs = [
+    "crates/ayaml/src/limits.rs",
+    "crates/ayaml-bench/**",
+    "crates/ayaml-conformance/**",
+]
+
+exclude_re = [
+    "check_depth",
+    "check_input",
+    "check_documents",
+    "check_scalar_bytes",
+    "check_collection_entries",
+    "check_events",
+    "check_anchors",
+    "check_alias_dereferences",
+    "check_alias_expansion",
+    "check_output_bytes",
+    "check_tag_expansion",
+    "expansion_budget",
+    "AliasBudget::charge",
+    "Limits::validate",
+    "Limits::is_valid",
+    "LimitExceeded",
+    "kani_proofs",
+]

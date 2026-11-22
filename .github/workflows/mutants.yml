@@ -1,0 +1,112 @@
+name: mutants
+
+# Weekly bounded mutation testing on hosted runners only (AY-037).
+# Limit-disabling mutants are excluded in `.cargo/mutants.toml`, and every
+# shard runs inside a strict virtual-memory and wall-clock bound.
+on:
+  schedule:
+    - cron: "41 3 * * 2"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: mutants-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mutants:
+    name: mutants (${{ matrix.shard }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["0/4", "1/4", "2/4", "3/4"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Run bounded mutation shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set +e
+          (
+            ulimit -v 8388608
+            timeout -k 10 2700 nice -n 10 cargo mutants \
+              --package ayaml \
+              --file crates/ayaml/src/span.rs \
+              --file crates/ayaml/src/position.rs \
+              --file crates/ayaml/src/options.rs \
+              --file crates/ayaml/src/spanned.rs \
+              --file crates/ayaml/src/emitter.rs \
+              --shard "$SHARD" \
+              --timeout 90 \
+              --jobs 2 \
+              --gitignore=true
+          )
+          status=$?
+          case "$status" in
+            0) exit 0 ;;
+            2) echo "::warning::mutation survivors recorded in mutants.out"; exit 0 ;;
+            *) exit "$status" ;;
+          esac
+      - name: Summarize shard trend
+        if: always()
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          out = Path("mutants.out")
+          out.mkdir(exist_ok=True)
+          counts = {}
+          for name in ("caught", "missed", "timeout", "unviable"):
+              path = out / f"{name}.txt"
+              lines = [l for l in path.read_text().splitlines() if l.strip()] if path.exists() else []
+              counts[name] = len(lines)
+          total = sum(counts.values())
+          tested = counts["caught"] + counts["missed"] + counts["timeout"]
+          kill_rate = (counts["caught"] / tested * 100.0) if tested else 100.0
+          summary = {
+              "shard": os.environ["SHARD"],
+              "counts": counts,
+              "total": total,
+              "kill_rate_pct": round(kill_rate, 2),
+          }
+          (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+          md = (
+              f"### Mutation shard `{summary['shard']}`\n\n"
+              f"- Caught: **{counts['caught']}**\n"
+              f"- Missed (survivors): **{counts['missed']}**\n"
+              f"- Timeout: **{counts['timeout']}**\n"
+              f"- Unviable: **{counts['unviable']}**\n"
+              f"- Kill rate: **{summary['kill_rate_pct']}%**\n"
+          )
+          (out / "summary.md").write_text(md)
+          step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if step_summary:
+              with open(step_summary, "a", encoding="utf-8") as handle:
+                  handle.write(md + "\n")
+          print(md)
+          PY
+      - name: Upload mutation outcomes and trend summary
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-shard-${{ strategy.job-index }}
+          path: mutants.out/
+          if-no-files-found: ignore
+          retention-days: 90
