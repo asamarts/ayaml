@@ -152,7 +152,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Lint the repository structure
-        uses: asamarts/alint@8d7a60f6642cb1b59537202ae81df7d951a078ad # v0.22.0
+        uses: asamarts/alint@5054852d00d47affc9ea71440240147d9999f4d3 # v0.22.1
         with:
           fail-on-warning: "true"
       - name: Show the alint version
@@ -352,7 +352,7 @@ jobs:
           echo "$reported"
           test "$reported" = "trufflehog $SCANNER_TAG"
       - name: TruffleHog
-        uses: trufflesecurity/trufflehog@ea68ca03c865c5f324e86e849ced20ed3cf9dbbb # v3.99.8
+        uses: trufflesecurity/trufflehog@3bd2b5887eb0efb8fa18bfd1d296032924e4ffdc # v3.99.9
         with:
           path: ./
           version: ${{ env.SCANNER_TAG }}@${{ env.SCANNER_DIGEST }}
