@@ -157,6 +157,23 @@ mod tests {
         }
     }
 
+    fn nested_sequence(depth: usize) -> Value {
+        let mut value = Value::from(1_u64);
+        for _ in 0..depth {
+            value = Value::Sequence(vec![value]);
+        }
+        value
+    }
+
+    fn dismantle_nested_sequence(mut value: Value) {
+        while let Value::Sequence(mut seq) = value {
+            let Some(next) = seq.pop() else {
+                break;
+            };
+            value = next;
+        }
+    }
+
     #[test]
     fn mapping_operand_merges_and_explicit_keys_win() {
         let value = merged("base: &b {x: 1, y: 1}\nmerged:\n  <<: *b\n  x: 2\n");
@@ -232,11 +249,30 @@ mod tests {
             .apply_merge_keys()
             .expect_err("over default max depth");
         assert_eq!(error.kind(), ErrorKind::Limit);
+        assert_eq!(error.code(), ErrorCode::DepthLimit);
         let exceeded = error.limit().expect("structured limit");
         assert_eq!(exceeded.kind(), LimitKind::Depth);
         assert_eq!(exceeded.limit(), MAX_DEPTH as u64);
         assert_eq!(exceeded.observed(), (MAX_DEPTH + 1) as u64);
         dismantle_nested_mapping(over_limit);
+
+        let mut seq_at_limit = nested_sequence(MAX_DEPTH);
+        seq_at_limit
+            .apply_merge_keys()
+            .expect("sequence at default max depth");
+        dismantle_nested_sequence(seq_at_limit);
+
+        let mut seq_over_limit = nested_sequence(MAX_DEPTH + 1);
+        let error = seq_over_limit
+            .apply_merge_keys()
+            .expect_err("sequence over default max depth");
+        assert_eq!(error.kind(), ErrorKind::Limit);
+        assert_eq!(error.code(), ErrorCode::DepthLimit);
+        assert_eq!(
+            error.limit().map(crate::LimitExceeded::kind),
+            Some(LimitKind::Depth)
+        );
+        dismantle_nested_sequence(seq_over_limit);
 
         let mut deep_custom = nested_mapping(5);
         let tight = Limits::default().with_max_depth(4);
@@ -244,6 +280,7 @@ mod tests {
             .apply_merge_keys_with_limits(&tight)
             .expect_err("over custom max depth");
         assert_eq!(error.kind(), ErrorKind::Limit);
+        assert_eq!(error.code(), ErrorCode::DepthLimit);
         assert_eq!(
             error.limit().map(crate::LimitExceeded::kind),
             Some(LimitKind::Depth)
@@ -273,10 +310,21 @@ mod tests {
             .apply_merge_keys_with_limits(&Limits::default().with_max_collection_entries(3))
             .expect_err("fourth entry exceeds limit");
         assert_eq!(error.kind(), ErrorKind::Limit);
+        assert_eq!(error.code(), ErrorCode::CollectionEntriesLimit);
         let exceeded = error.limit().expect("structured limit");
         assert_eq!(exceeded.kind(), LimitKind::CollectionEntries);
         assert_eq!(exceeded.limit(), 3);
         assert_eq!(exceeded.observed(), 4);
+
+        // When every merged key already exists on the target, merging adds zero entries.
+        let mut overlap_only =
+            crate::parse_value("base: &b {a: 1, b: 2}\nm:\n  a: 10\n  b: 20\n  <<: *b\n")
+                .expect("parse");
+        overlap_only
+            .apply_merge_keys_with_limits(&Limits::default().with_max_collection_entries(2))
+            .expect("overlapping keys do not grow the mapping");
+        assert_eq!(overlap_only["m"]["a"].as_u64(), Some(10));
+        assert_eq!(overlap_only["m"]["b"].as_u64(), Some(20));
     }
 
     #[test]
@@ -287,6 +335,7 @@ mod tests {
             .apply_merge_keys_with_limits(&over_cap)
             .expect_err("max_depth above cap");
         assert_eq!(error.kind(), ErrorKind::Limit);
+        assert_eq!(error.code(), ErrorCode::InvalidLimits);
         assert!(error.limit().is_none());
 
         let zero_cost = Limits::default().with_node_cost_bytes(0);
@@ -294,6 +343,7 @@ mod tests {
             .apply_merge_keys_with_limits(&zero_cost)
             .expect_err("zero node cost");
         assert_eq!(error.kind(), ErrorKind::Limit);
+        assert_eq!(error.code(), ErrorCode::InvalidLimits);
         assert!(error.limit().is_none());
     }
 
