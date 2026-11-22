@@ -20,12 +20,17 @@
 
 use std::hash::Hash;
 use std::io::{Read, Write};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use ayaml::{ErrorKind, LimitExceeded, LimitKind, Limits, MAX_DEPTH, MAX_DEPTH_CAP, Value};
 use serde::de::IgnoredAny;
+
+#[path = "adversarial/runner.rs"]
+mod runner;
+
+use runner::{
+    child_command, read_all, run_child, run_child_ending_itself, run_command, wait_or_kill,
+};
 
 /// Set in a child process, where a test runs its body instead of starting another child. The
 /// value is how many seconds the child may run before it ends itself.
@@ -72,100 +77,6 @@ macro_rules! in_child {
             .map_or(path, |(_, test)| test);
         in_child_named(test, $body);
     }};
-}
-
-/// How one child ended.
-struct ChildRun {
-    /// `None` if the deadline passed and the child was killed.
-    status: Option<ExitStatus>,
-    output: String,
-    elapsed: Duration,
-}
-
-impl ChildRun {
-    /// libtest exits 0 when `--exact` matches nothing, so the test has to be seen passing.
-    fn passed(&self) -> bool {
-        self.status.is_some_and(|status| status.success())
-            && self.output.contains("test result: ok. 1 passed;")
-    }
-}
-
-/// Read a child's output stream to its end, keeping only the start of it. Reading on keeps a
-/// flooding child from stalling on a full pipe, where it would look like a hang.
-fn read_all(mut pipe: impl Read + Send + 'static) -> JoinHandle<String> {
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        // A read error only shortens the output that a failure reports.
-        let _ = pipe
-            .by_ref()
-            .take(OUTPUT_KEPT_BYTES)
-            .read_to_end(&mut bytes);
-        let _ = std::io::copy(&mut pipe, &mut std::io::sink());
-        String::from_utf8_lossy(&bytes).into_owned()
-    })
-}
-
-/// Run one test of this binary in a child process and wait for it, up to `deadline`.
-fn run_child(test: &str, deadline: Duration) -> ChildRun {
-    run_child_ending_itself(test, deadline, deadline + CHILD_GRACE)
-}
-
-/// Like [`run_child`], with the time after which the child ends itself.
-fn run_child_ending_itself(test: &str, deadline: Duration, own_deadline: Duration) -> ChildRun {
-    run_command(child_command(test, own_deadline), deadline)
-}
-
-/// Run a child from [`child_command`] and wait for it, up to `deadline`.
-fn run_command(mut command: Command, deadline: Duration) -> ChildRun {
-    let started = Instant::now();
-    let mut child = command.spawn().expect("start the child");
-    let stdout = read_all(child.stdout.take().expect("piped stdout"));
-    let stderr = read_all(child.stderr.take().expect("piped stderr"));
-    let status = wait_or_kill(&mut child, started, deadline);
-    let elapsed = started.elapsed();
-    let output = stdout.join().expect("stdout reader") + &stderr.join().expect("stderr reader");
-    ChildRun {
-        status,
-        output,
-        elapsed,
-    }
-}
-
-/// The command that runs one test of this binary as a child, under its limits.
-fn child_command(test: &str, own_deadline: Duration) -> Command {
-    let binary = std::env::current_exe().expect("the test binary's path");
-    let mut command = if cfg!(target_os = "linux") {
-        let mut command = Command::new("sh");
-        command
-            .args(["-c", LIMIT_THEN_RUN])
-            .arg(binary)
-            .arg(ADDRESS_SPACE_KIB.to_string());
-        command
-    } else {
-        Command::new(binary)
-    };
-    command
-        .args([test, "--exact", "--nocapture", "--include-ignored"])
-        .env(CHILD, own_deadline.as_secs().to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    command
-}
-
-/// Wait for a child that started at `started`, and kill it once `deadline` has passed.
-fn wait_or_kill(child: &mut Child, started: Instant, deadline: Duration) -> Option<ExitStatus> {
-    loop {
-        if let Some(status) = child.try_wait().expect("wait for the child") {
-            return Some(status);
-        }
-        if started.elapsed() > deadline {
-            child.kill().expect("kill the child");
-            child.wait().expect("wait for the killed child");
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
 }
 
 /// The first number after `label` in a file under `/proc/self`.
@@ -1996,120 +1907,5 @@ fn nested_mapping_duplicate_keys_are_found_in_every_reader() {
     }
 }
 
-/// `Value::apply_merge_keys` stops at `max_depth` on deep programmatic `Value` trees instead of
-/// overflowing the stack.
-#[test]
-fn apply_merge_keys_rejects_deep_programmatic_trees() {
-    in_child!(|| {
-        let mut value = Value::from(1_u64);
-        for _ in 0..4_000 {
-            let mut mapping = ayaml::Mapping::new();
-            mapping.insert(Value::from("k"), value);
-            value = Value::Mapping(mapping);
-        }
-        let error = value
-            .apply_merge_keys()
-            .expect_err("4000-deep programmatic mapping must fail with depth limit");
-        assert_eq!(error.kind(), ErrorKind::Limit);
-        assert_eq!(
-            error.limit(),
-            Some(LimitExceeded::new(
-                LimitKind::Depth,
-                MAX_DEPTH as u64,
-                (MAX_DEPTH + 1) as u64,
-            ))
-        );
-        while let Value::Mapping(mut mapping) = value {
-            let Some(next) = mapping.remove("k") else {
-                break;
-            };
-            value = next;
-        }
-    });
-}
-
-/// Chained merge-and-alias amplification stays bounded across parsing and `apply_merge_keys`.
-#[test]
-fn chained_merge_and_alias_amplification_is_bounded() {
-    in_child!(|| {
-        let mut yaml = String::from("l0: &l0 {k0: 0, k1: 1, k2: 2, k3: 3}\n");
-        for level in 1..=20 {
-            yaml.push_str(&format!(
-                "l{level}: &l{level}\n  <<: [*l{}, *l{}]\n  extra{level}: {level}\n",
-                level - 1,
-                level - 1,
-            ));
-        }
-        let limits = Limits::default().with_max_alias_expansion_bytes(64 * 1024);
-        let parsed =
-            ayaml::parse_value_with(&yaml, &ayaml::ParseOptions::new().with_limits(limits));
-        let error = parsed.expect_err("exponential alias+merge chain must hit alias budget");
-        assert_eq!(error.kind(), ErrorKind::Limit);
-        assert_eq!(
-            error.limit().map(LimitExceeded::kind),
-            Some(LimitKind::AliasExpansion)
-        );
-    });
-}
-
-/// Wide overlapping merge sequences preserve precedence, stay linear, and enforce
-/// `max_collection_entries`.
-#[test]
-fn wide_merge_sequences_stay_linear_and_enforce_entry_limits() {
-    in_child!(|| {
-        let operands = 10_usize;
-        let keys_per_operand = 2_000_usize;
-        let mut yaml = String::new();
-        for op in 0..operands {
-            yaml.push_str(&format!("b{op}: &b{op}\n"));
-            let base = op * (keys_per_operand / 2);
-            for offset in 0..keys_per_operand {
-                let key = base + offset;
-                yaml.push_str(&format!("  k{key}: {op}\n"));
-            }
-        }
-        yaml.push_str("merged:\n  own: 99\n  k0: 777\n  <<: [");
-        for op in 0..operands {
-            if op != 0 {
-                yaml.push_str(", ");
-            }
-            yaml.push_str(&format!("*b{op}"));
-        }
-        yaml.push_str("]\n");
-
-        let expected_keys = 1 + (operands - 1) * (keys_per_operand / 2) + keys_per_operand;
-        let mut value = ayaml::parse_value(&yaml).expect("wide merge fixture parses");
-        value
-            .apply_merge_keys_with_limits(
-                &Limits::default().with_max_collection_entries(expected_keys),
-            )
-            .expect("exact collection entry count fits");
-        let merged = value["merged"].as_mapping().expect("merged mapping");
-        assert_eq!(merged.len(), expected_keys);
-        assert_eq!(merged.get("own").and_then(Value::as_u64), Some(99));
-        assert_eq!(merged.get("k0").and_then(Value::as_u64), Some(777));
-        assert_eq!(merged.get("k1000").and_then(Value::as_u64), Some(0));
-        assert_eq!(
-            merged
-                .get(&*format!("k{}", expected_keys - 2))
-                .and_then(Value::as_u64),
-            Some((operands - 1) as u64)
-        );
-
-        let mut tight = ayaml::parse_value(&yaml).expect("wide merge fixture parses");
-        let error = tight
-            .apply_merge_keys_with_limits(
-                &Limits::default().with_max_collection_entries(expected_keys - 1),
-            )
-            .expect_err("one entry below merged size must fail");
-        assert_eq!(error.kind(), ErrorKind::Limit);
-        assert_eq!(
-            error.limit(),
-            Some(LimitExceeded::new(
-                LimitKind::CollectionEntries,
-                (expected_keys - 1) as u64,
-                expected_keys as u64,
-            ))
-        );
-    });
-}
+#[path = "adversarial/merge.rs"]
+mod merge;
