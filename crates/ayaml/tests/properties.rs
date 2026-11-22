@@ -457,6 +457,8 @@ proptest! {
 // Structured YAML property suites (AY-036)
 // ---------------------------------------------------------------------------
 
+#[path = "properties/invariants.rs"]
+mod invariants;
 #[path = "properties/structured.rs"]
 mod structured;
 
