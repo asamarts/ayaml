@@ -1,0 +1,50 @@
+{
+  "fixture": "quoted-delete-character",
+  "json_golden_origin": "independent_with_documented_profile_notes",
+  "independent_event_oracle": "YAML 1.2.2 specification (§5.1 Character Set [2] nb-json, §7.3.1 Double-Quoted Style [109] c-double-quoted); libyaml rejects U+007F DEL",
+  "cannot_use_independent_json_reason": "libyaml cannot parse this fixture because it rejects U+007F (DEL) anywhere in the stream with ReaderError (unacceptable character #x007f: control characters are not allowed), whereas YAML 1.2.2 §5.1 ([2] nb-json) permits U+007F inside quoted scalars. In addition, JSON has no native tag syntax, so the .json golden encodes the local !COFF tag using ayaml's single-entry wrapper mapping ({\"!COFF\": ...}). The expected event stream and value are derived independently from YAML 1.2.2 and the upstream llvm-dlltool COFF symbol fixture.",
+  "source_provenance": "Reduced from llvm-project, llvm/test/tools/llvm-dlltool/Inputs/llvm_foo_dll_1.yaml (Apache-2.0 WITH LLVM-exception)",
+  "yaml_1_2_2_refs": [
+    "§5.1 Character Set ([1] c-printable, [2] nb-json permits #x7F inside quoted scalars)",
+    "§7.3.1 Double-Quoted Style ([109] c-double-quoted)",
+    "§6.9.1 Node Tags (local tag !COFF)"
+  ],
+  "yaml_test_suite_refs": [
+    "RTP8",
+    "UT92"
+  ],
+  "expected_events": [
+    "+STR",
+    "+DOC ---",
+    "+MAP <!COFF>",
+    "=VAL :header",
+    "+MAP",
+    "=VAL :Machine",
+    "=VAL :IMAGE_FILE_MACHINE_AMD64",
+    "-MAP",
+    "=VAL :symbols",
+    "+SEQ",
+    "+MAP",
+    "=VAL :Name",
+    "=VAL :__imp_foo",
+    "=VAL :Value",
+    "=VAL :0",
+    "-MAP",
+    "+MAP",
+    "=VAL :Name",
+    "=VAL :__NULL_IMPORT_DESCRIPTOR",
+    "=VAL :Value",
+    "=VAL :0",
+    "-MAP",
+    "+MAP",
+    "=VAL :Name",
+    "=VAL \"\\x7ffoo_NULL_THUNK_DATA",
+    "=VAL :Value",
+    "=VAL :0",
+    "-MAP",
+    "-SEQ",
+    "-MAP",
+    "-DOC",
+    "-STR"
+  ]
+}

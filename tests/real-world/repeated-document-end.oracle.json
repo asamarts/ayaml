@@ -1,0 +1,44 @@
+{
+  "fixture": "repeated-document-end",
+  "json_golden_origin": "independent_with_documented_profile_notes",
+  "independent_event_oracle": "YAML 1.2.2 specification (§9.2 Streams [211] l-yaml-stream, §10.3.2 Core Schema hex integers) cross-checked against libyaml event stream",
+  "cannot_use_independent_json_reason": "JSON has no native tag syntax, so the .json golden encodes each local !mach-o tag using ayaml's single-entry wrapper mapping ({\"!mach-o\": ...}), and libyaml emits untyped scalar strings (\"0xFEEDFACF\", \"1\", \"2\") without Core Schema numeric resolution. Both the two-document event structure (confirming repeated ... markers do not emit a null document) and the resolved integer values (0xFEEDFACF = 4277009103, 1, 2) are independently derived from libyaml and YAML 1.2.2 §9.2 / §10.3.2.",
+  "source_provenance": "Reduced from llvm-project, llvm/test/ObjectYAML/MachO/DWARF-debug_info.yaml (Apache-2.0 WITH LLVM-exception)",
+  "yaml_1_2_2_refs": [
+    "§9.1.2 Document Markers ([203] c-document-end, [205] l-document-suffix)",
+    "§9.2 Streams ([211] l-yaml-stream permits repeated document-end suffixes without creating an extra document)",
+    "§10.3.2 Tag Resolution (0x[0-9a-fA-F]+ hexadecimal integer)"
+  ],
+  "yaml_test_suite_refs": [
+    "RTP8",
+    "UT92",
+    "6ZKB",
+    "7Z25"
+  ],
+  "expected_events": [
+    "+STR",
+    "+DOC ---",
+    "+MAP <!mach-o>",
+    "=VAL :FileHeader",
+    "+MAP",
+    "=VAL :magic",
+    "=VAL :0xFEEDFACF",
+    "=VAL :ncmds",
+    "=VAL :1",
+    "-MAP",
+    "-MAP",
+    "-DOC ...",
+    "+DOC ---",
+    "+MAP <!mach-o>",
+    "=VAL :FileHeader",
+    "+MAP",
+    "=VAL :magic",
+    "=VAL :0xFEEDFACF",
+    "=VAL :ncmds",
+    "=VAL :2",
+    "-MAP",
+    "-MAP",
+    "-DOC ...",
+    "-STR"
+  ]
+}
