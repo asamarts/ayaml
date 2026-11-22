@@ -375,7 +375,15 @@ impl Limits {
     /// Reject settings no entry point can honour, a `max_depth` above [`MAX_DEPTH_CAP`], and
     /// settings that would turn a budget off: a `node_cost_bytes` of 0 makes every node an alias
     /// copies free, so a nest of aliases to collections of nulls could grow without bound.
+    pub(crate) const fn is_valid(&self) -> bool {
+        self.max_depth <= MAX_DEPTH_CAP && self.node_cost_bytes > 0
+    }
+
+    /// Reject settings no entry point can honour, returning a descriptive [`Error`].
     pub(crate) fn validate(&self) -> Result<(), Error> {
+        if self.is_valid() {
+            return Ok(());
+        }
         if self.max_depth > MAX_DEPTH_CAP {
             return Err(Error::coded(
                 ErrorKind::Limit,
@@ -527,6 +535,19 @@ pub(crate) struct AliasBudget {
 }
 
 impl AliasBudget {
+    /// Charge one alias against `limits`, returning the structured [`LimitExceeded`] on overflow.
+    pub(crate) fn charge_limits(
+        &mut self,
+        limits: &Limits,
+        input_len: usize,
+        size: usize,
+    ) -> Result<(), LimitExceeded> {
+        self.dereferences = self.dereferences.saturating_add(1);
+        limits.check_alias_dereferences(self.dereferences)?;
+        self.bytes = self.bytes.saturating_add(size);
+        limits.check_alias_expansion(input_len, self.bytes)
+    }
+
     /// Charge one alias to a node estimated at `size` bytes, before
     /// anything is materialized for it.
     pub(crate) fn charge(
@@ -535,13 +556,7 @@ impl AliasBudget {
         input_len: usize,
         size: usize,
     ) -> Result<(), Error> {
-        self.dereferences = self.dereferences.saturating_add(1);
-        limits
-            .check_alias_dereferences(self.dereferences)
-            .map_err(Error::from)?;
-        self.bytes = self.bytes.saturating_add(size);
-        limits
-            .check_alias_expansion(input_len, self.bytes)
+        self.charge_limits(limits, input_len, size)
             .map_err(Error::from)
     }
 }
@@ -648,5 +663,148 @@ mod tests {
                 .kind(),
             LimitKind::AliasExpansion
         );
+    }
+
+    #[test]
+    fn limits_and_alias_budget_saturate_without_overflow() {
+        let huge = Limits::default()
+            .with_max_input_bytes(usize::MAX)
+            .with_max_alias_expansion_bytes(usize::MAX - 10)
+            .with_alias_bytes_per_input_byte(usize::MAX);
+        assert_eq!(huge.expansion_budget(usize::MAX), usize::MAX);
+        assert_eq!(huge.expansion_budget(1), usize::MAX);
+        assert_eq!(huge.expansion_budget(0), usize::MAX - 10);
+
+        let capped = Limits::default().with_max_input_bytes(16);
+        assert_eq!(
+            capped.expansion_budget(16),
+            capped.expansion_budget(usize::MAX)
+        );
+
+        assert!(
+            Limits::default()
+                .with_max_depth(super::MAX_DEPTH_CAP)
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            Limits::default()
+                .with_max_depth(super::MAX_DEPTH_CAP + 1)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            Limits::default()
+                .with_node_cost_bytes(0)
+                .validate()
+                .is_err()
+        );
+        assert!(Limits::default().with_node_cost_bytes(1).validate().is_ok());
+
+        let mut budget = super::AliasBudget {
+            dereferences: usize::MAX - 1,
+            bytes: usize::MAX - 4,
+        };
+        let limits = Limits::default()
+            .with_max_alias_dereferences(usize::MAX)
+            .with_max_alias_expansion_bytes(usize::MAX);
+        assert!(budget.charge(&limits, 0, 16).is_ok());
+        assert_eq!(budget.dereferences, usize::MAX);
+        assert_eq!(budget.bytes, usize::MAX);
+
+        let tight = Limits::default()
+            .with_max_alias_dereferences(2)
+            .with_max_alias_expansion_bytes(10)
+            .with_alias_bytes_per_input_byte(0);
+        let mut fresh = super::AliasBudget::default();
+        assert!(fresh.charge(&tight, 100, 6).is_ok());
+        assert!(fresh.charge(&tight, 100, 4).is_ok());
+        assert!(fresh.charge(&tight, 100, 1).is_err());
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::{AliasBudget, LimitKind, Limits, MAX_DEPTH_CAP, check};
+
+    #[kani::proof]
+    fn verify_expansion_budget_overflow_free_and_capped() {
+        let max_input: usize = kani::any();
+        let fixed_cap: usize = kani::any();
+        let len_a: usize = kani::any();
+        let len_b: usize = kani::any();
+        kani::assume(len_a <= len_b);
+
+        // Default multiplier (16), zero multiplier, unit multiplier, and saturating MAX.
+        for per_byte in [0_usize, 1, 16, usize::MAX] {
+            let limits = Limits::default()
+                .with_max_input_bytes(max_input)
+                .with_max_alias_expansion_bytes(fixed_cap)
+                .with_alias_bytes_per_input_byte(per_byte);
+
+            let b_a = limits.expansion_budget(len_a);
+            let b_b = limits.expansion_budget(len_b);
+            let b_cap = limits.expansion_budget(max_input);
+            assert!(b_a >= fixed_cap);
+            assert!(b_a <= b_b);
+            assert!(b_b <= b_cap);
+            if len_b >= max_input {
+                assert_eq!(b_b, b_cap);
+            }
+        }
+    }
+
+    #[kani::proof]
+    fn verify_check_and_validate_boundaries() {
+        let limit: usize = kani::any();
+        let observed: usize = kani::any();
+        match check(LimitKind::Events, limit, observed) {
+            Ok(()) => assert!(observed <= limit),
+            Err(err) => {
+                assert!(observed > limit);
+                assert_eq!(err.kind(), LimitKind::Events);
+                assert_eq!(err.limit(), limit as u64);
+                assert_eq!(err.observed(), observed as u64);
+            }
+        }
+
+        let max_depth: usize = kani::any();
+        let node_cost: usize = kani::any();
+        let limits = Limits::default()
+            .with_max_depth(max_depth)
+            .with_node_cost_bytes(node_cost);
+        assert_eq!(
+            limits.is_valid(),
+            max_depth <= MAX_DEPTH_CAP && node_cost > 0
+        );
+    }
+
+    #[kani::proof]
+    fn verify_alias_budget_charge_saturating_and_monotonic() {
+        let start_derefs: usize = kani::any();
+        let start_bytes: usize = kani::any();
+        let max_derefs: usize = kani::any();
+        let fixed_bytes: usize = kani::any();
+        let max_input: usize = kani::any();
+        let input_len: usize = kani::any();
+        let charge_size: usize = kani::any();
+
+        let limits = Limits::default()
+            .with_max_input_bytes(max_input)
+            .with_max_alias_dereferences(max_derefs)
+            .with_max_alias_expansion_bytes(fixed_bytes)
+            .with_alias_bytes_per_input_byte(16);
+
+        let mut budget = AliasBudget {
+            dereferences: start_derefs,
+            bytes: start_bytes,
+        };
+        let result = budget.charge_limits(&limits, input_len, charge_size);
+        assert!(budget.dereferences >= start_derefs);
+        if result.is_ok() {
+            assert!(budget.dereferences <= max_derefs);
+            assert!(budget.bytes >= start_bytes);
+            assert!(budget.bytes <= limits.expansion_budget(input_len));
+        }
     }
 }

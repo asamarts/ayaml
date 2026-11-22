@@ -7,7 +7,19 @@
 
 gitignore = true
 additional_cargo_args = ["--locked", "--jobs", "2"]
-additional_cargo_test_args = ["--", "--test-threads=1"]
+# Run the fast library unit tests and targeted integration tests (skipping the 60s
+# child-process `adversarial` and `properties` suites; limit guards are excluded below).
+additional_cargo_test_args = [
+    "--lib",
+    "--test", "mutation_targets",
+    "--test", "line_index",
+    "--test", "options",
+    "--test", "spanned",
+    "--test", "round_trips",
+    "--test", "writer_refusals",
+    "--test", "contracts",
+    "--test", "regressions",
+]
 
 exclude_globs = [
     "crates/ayaml/src/limits.rs",

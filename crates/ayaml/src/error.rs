@@ -713,27 +713,42 @@ impl Error {
         if path_len == 0 {
             self.message.insert_str(0, ": ");
             self.message.insert_str(0, step);
-            self.path_len = path_bytes(step.len() + 2);
+            self.path_len = path_bytes(step.len().saturating_add(2));
             return self;
         }
         if self.message.starts_with(ELIDED) {
             return self;
         }
-        let separator = if self.message.starts_with('[') {
-            ""
-        } else {
-            "."
-        };
-        let step = if path_len + step.len() + separator.len() > MAX_PATH_BYTES {
-            ELIDED
-        } else {
-            step
-        };
+        let (chosen, separator, next_len) =
+            resolve_path_step(path_len, self.message.starts_with('['), step);
         self.message.insert_str(0, separator);
-        self.message.insert_str(0, step);
-        self.path_len = path_bytes(path_len + step.len() + separator.len());
+        self.message.insert_str(0, chosen);
+        self.path_len = next_len;
         self
     }
+}
+
+/// Decide the step text, separator, and updated saturating path byte length for one outer path step.
+fn resolve_path_step(
+    path_len: usize,
+    starts_with_bracket: bool,
+    step: &str,
+) -> (&str, &'static str, u16) {
+    let separator = if starts_with_bracket { "" } else { "." };
+    let candidate = path_len
+        .saturating_add(step.len())
+        .saturating_add(separator.len());
+    let chosen = if candidate > MAX_PATH_BYTES {
+        ELIDED
+    } else {
+        step
+    };
+    let next_len = path_bytes(
+        path_len
+            .saturating_add(chosen.len())
+            .saturating_add(separator.len()),
+    );
+    (chosen, separator, next_len)
 }
 
 /// A path's length as kept. One past `MAX_PATH_BYTES` has the same effect as any more: the next
@@ -752,23 +767,65 @@ fn is_short_name(key: &str) -> bool {
         && chars.all(|next| next.is_ascii_alphanumeric() || next == '_' || next == '-')
 }
 
+/// Format `\u{<hex>}` for a Unicode scalar value into a fixed stack buffer (max 10 ASCII bytes).
+const fn format_unicode_escape(ch: char) -> ([u8; 10], usize) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut buf = [0_u8; 10];
+    buf[0] = b'\\';
+    buf[1] = b'u';
+    buf[2] = b'{';
+    let mut len = 3;
+    let code = ch as u32;
+    if code == 0 {
+        buf[len] = b'0';
+        len += 1;
+    } else {
+        let mut started = false;
+        let mut shift = 20_u32;
+        loop {
+            let nibble = ((code >> shift) & 0xf) as usize;
+            if nibble != 0 || started {
+                started = true;
+                buf[len] = HEX[nibble];
+                len += 1;
+            }
+            if shift == 0 {
+                break;
+            }
+            shift -= 4;
+        }
+    }
+    buf[len] = b'}';
+    len += 1;
+    (buf, len)
+}
+
+/// Append `\u{<hex>}` for a Unicode scalar value without allocating an intermediate `String`.
+fn push_unicode_escape(out: &mut String, ch: char) {
+    let (buf, len) = format_unicode_escape(ch);
+    for &byte in &buf[..len] {
+        out.push(char::from(byte));
+    }
+}
+
 /// A key in brackets and quotes, with anything that could change how a terminal shows it escaped.
-#[allow(
-    clippy::format_push_string,
-    reason = "one small escaped code point appended to an already-owned string"
-)]
 fn quoted_key(key: &str) -> String {
-    let mut quoted = String::from("[\"");
+    let mut quoted = String::with_capacity(key.len().min(MAX_KEY_CHARS * 4) + 8);
+    push_quoted_key(&mut quoted, key, MAX_KEY_CHARS);
+    quoted
+}
+
+/// Append `key` in brackets and quotes to `quoted`, keeping at most `max_chars` Unicode scalars.
+fn push_quoted_key(quoted: &mut String, key: &str, max_chars: usize) {
+    quoted.push_str("[\"");
     let mut chars = key.chars();
-    for next in chars.by_ref().take(MAX_KEY_CHARS) {
+    for next in chars.by_ref().take(max_chars) {
         match next {
             '"' | '\\' => {
                 quoted.push('\\');
                 quoted.push(next);
             }
-            _ if hides_text(next) => {
-                quoted.push_str(&format!("\\u{{{:x}}}", u32::from(next)));
-            }
+            _ if hides_text(next) => push_unicode_escape(quoted, next),
             _ => quoted.push(next),
         }
     }
@@ -776,7 +833,6 @@ fn quoted_key(key: &str) -> String {
         quoted.push_str(ELIDED);
     }
     quoted.push_str("\"]");
-    quoted
 }
 
 /// Control characters, line separators, the byte order mark, and the marks that reorder text.
@@ -1608,5 +1664,261 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(a.masked(), b.masked());
         assert_ne!(a.masked(), c.masked());
+    }
+
+    #[test]
+    fn path_truncation_and_key_quoting_preserve_utf8_and_bounds() {
+        assert_eq!(super::path_bytes(0), 0);
+        assert_eq!(super::path_bytes(usize::MAX), u16::MAX);
+
+        // Long 4-byte emoji key truncates at MAX_KEY_CHARS without splitting UTF-8.
+        let emoji_key = "🚀".repeat(super::MAX_KEY_CHARS + 10);
+        let quoted = super::quoted_key(&emoji_key);
+        assert!(quoted.starts_with("[\""));
+        assert!(
+            quoted.ends_with(&format!("{}]", super::ELIDED))
+                || quoted.ends_with(&format!("{}\"]", super::ELIDED))
+        );
+        assert!(quoted.ends_with(&format!("{}\"]", super::ELIDED)));
+        assert_eq!(
+            quoted.chars().filter(|&c| c == '🚀').count(),
+            super::MAX_KEY_CHARS
+        );
+
+        // Control chars and BiDi override characters are always escaped in quoted keys.
+        let hostile = "a\u{0000}\u{202e}\u{feff}\"\\z";
+        let quoted_hostile = super::quoted_key(hostile);
+        assert!(quoted_hostile.chars().all(|c| !super::hides_text(c)));
+        assert!(quoted_hostile.contains("\\u{0}"));
+        assert!(quoted_hostile.contains("\\u{202e}"));
+        assert!(quoted_hostile.contains("\\u{feff}"));
+        assert!(quoted_hostile.contains("\\\""));
+        assert!(quoted_hostile.contains("\\\\"));
+
+        // Repeated `inside_key` calls cap path length and become idempotent once elided.
+        let mut err = Error::new(ErrorKind::Serde, "bad value");
+        for i in 0..40 {
+            err = err.inside_key(&format!("segment_with_long_name_{i:02}"));
+        }
+        assert!(err.message().starts_with(super::ELIDED));
+        let once_elided = err.message().to_owned();
+        let after_more = err.inside_key("outer_ignored");
+        assert_eq!(after_more.message(), once_elided);
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::{
+        ELIDED, Error, ErrorKind, MAX_KEY_CHARS, MAX_PATH_BYTES, format_unicode_escape, hides_text,
+        is_short_name, path_bytes, push_quoted_key, resolve_path_step,
+    };
+
+    #[kani::proof]
+    fn verify_path_bytes_saturates() {
+        let len: usize = kani::any();
+        let kept = path_bytes(len);
+        if len <= usize::from(u16::MAX) {
+            assert_eq!(usize::from(kept), len);
+        } else {
+            assert_eq!(kept, u16::MAX);
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn verify_is_short_name_ascii_sound() {
+        let bytes: [u8; 4] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= bytes.len());
+        // Restrict to ASCII bytes to keep UTF-8 validation symbolic-free; non-ASCII is also
+        // rejected immediately by `is_short_name`.
+        let mut i = 0;
+        while i < len {
+            kani::assume(bytes[i] < 0x80);
+            i += 1;
+        }
+        let text = std::str::from_utf8(&bytes[..len]).unwrap();
+        if is_short_name(text) {
+            assert!(!text.is_empty());
+            assert!(text.len() <= MAX_KEY_CHARS);
+            let first = bytes[0];
+            assert!(first.is_ascii_alphabetic() || first == b'_');
+            let mut j = 1;
+            while j < len {
+                let b = bytes[j];
+                assert!(b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+                j += 1;
+            }
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn verify_quoted_key_escapes_control_and_valid_utf8() {
+        // Exhaustively verify `hides_text` and `format_unicode_escape` over ALL Unicode scalar
+        // values U+0000..=U+10FFFF: escaped output is pure printable ASCII without hidden chars.
+        let ch: char = kani::any();
+        if ch.is_control()
+            || matches!(
+                ch,
+                '\u{61c}'
+                    | '\u{200e}'
+                    | '\u{200f}'
+                    | '\u{2028}'
+                    | '\u{2029}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+                    | '\u{feff}'
+            )
+        {
+            assert!(hides_text(ch));
+            let (buf, len) = format_unicode_escape(ch);
+            assert!(len >= 5 && len <= 10);
+            assert!(buf[0] == b'\\' && buf[1] == b'u' && buf[2] == b'{');
+            assert!(buf[len - 1] == b'}');
+            let mut i = 3;
+            while i + 1 < len {
+                let b = buf[i];
+                assert!(b.is_ascii_hexdigit());
+                assert!(!hides_text(char::from(b)));
+                i += 1;
+            }
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn verify_quoted_key_truncation_keeps_utf8_boundaries() {
+        // Symbolically verify across EVERY Unicode scalar U+0000..=U+10FFFF that taking at most
+        // `cap` scalars from a multi-byte UTF-8 key always stops on a valid char boundary.
+        let mut buf = [0_u8; 5];
+        let ch: char = kani::any();
+        let first_len = ch.encode_utf8(&mut buf).len();
+        buf[first_len] = b'z';
+        let text = std::str::from_utf8(&buf[..first_len + 1]).unwrap();
+        let cap: usize = kani::any();
+        kani::assume(cap <= 2);
+        let mut kept_bytes = 0_usize;
+        let mut kept_chars = 0_usize;
+        for c in text.chars().take(cap) {
+            kept_bytes += c.len_utf8();
+            kept_chars += 1;
+        }
+        assert!(kept_bytes <= text.len());
+        assert!(text.is_char_boundary(kept_bytes));
+        assert_eq!(kept_chars, cap);
+        if cap < 2 {
+            assert!(kept_bytes < text.len());
+        } else {
+            assert_eq!(kept_bytes, text.len());
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(24)]
+    fn verify_push_quoted_key_escapes_and_truncates() {
+        // Verify real `push_quoted_key` across 1-, 2-, 3-, and 4-byte UTF-8 scalars, quotes,
+        // backslashes, control chars, BiDi overrides, and BOM across concrete truncation caps.
+        for (sample, cap, expect_elided) in [
+            ("é\u{202e}🚀", 2_usize, true),
+            ("é\u{202e}🚀", 3_usize, false),
+            ("a\"\\\0\u{feff}", 4_usize, true),
+        ] {
+            let mut quoted = String::with_capacity(64);
+            push_quoted_key(&mut quoted, sample, cap);
+            let qbytes = quoted.as_bytes();
+            assert!(qbytes.len() >= 4);
+            assert_eq!(qbytes[0], b'[');
+            assert_eq!(qbytes[1], b'"');
+            assert_eq!(qbytes[qbytes.len() - 2], b'"');
+            assert_eq!(qbytes[qbytes.len() - 1], b']');
+            if expect_elided {
+                let tail = &qbytes[qbytes.len() - 2 - ELIDED.len()..qbytes.len() - 2];
+                assert_eq!(tail, ELIDED.as_bytes());
+            }
+            for out_ch in quoted.chars() {
+                assert!(!hides_text(out_ch));
+            }
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn verify_inside_path_truncation_bounds_and_idempotence() {
+        // 1. Exhaustively verify `resolve_path_step` over all path lengths (0..=usize::MAX),
+        //    bracket/non-bracket separators, and representative step lengths: zero overflow,
+        //    exact transition to `ELIDED` past `MAX_PATH_BYTES`, and saturating `u16` length.
+        let path_len: usize = kani::any();
+        let starts_with_bracket: bool = kani::any();
+        let step_choice: u8 = kani::any();
+        let step = match step_choice % 4 {
+            0 => "",
+            1 => "a",
+            2 => "[0]",
+            _ => "segment_step",
+        };
+        let (chosen, sep, next_len) = resolve_path_step(path_len, starts_with_bracket, step);
+        if starts_with_bracket {
+            assert_eq!(sep.len(), 0);
+        } else {
+            assert_eq!(sep.as_bytes(), b".");
+        }
+        let candidate = path_len
+            .saturating_add(step.len())
+            .saturating_add(sep.len());
+        if candidate > MAX_PATH_BYTES {
+            assert_eq!(chosen.as_ptr(), ELIDED.as_ptr());
+            assert_eq!(chosen.len(), ELIDED.len());
+        } else {
+            assert_eq!(chosen.as_ptr(), step.as_ptr());
+            assert_eq!(chosen.len(), step.len());
+            assert!(usize::from(next_len) <= MAX_PATH_BYTES);
+        }
+        let expected_len = path_bytes(
+            path_len
+                .saturating_add(chosen.len())
+                .saturating_add(sep.len()),
+        );
+        assert_eq!(next_len, expected_len);
+
+        // 2. Verify `Error::inside` directly at concrete lengths straddling `MAX_PATH_BYTES`,
+        //    using pre-sized small buffers so `String::insert_str` never hits symbolic heap
+        //    reallocation: covers initial attachment, exact elision transition, and idempotence
+        //    of subsequent `inside` calls once elided.
+        let mut fresh_msg = String::with_capacity(16);
+        fresh_msg.push_str("bad");
+        let fresh = Error::new(ErrorKind::Serde, fresh_msg).inside("k");
+        assert_eq!(fresh.path_len, 3);
+        assert_eq!(fresh.message.as_bytes(), b"k: bad");
+
+        for cap in (MAX_PATH_BYTES - 4)..=MAX_PATH_BYTES {
+            let mut msg = String::with_capacity(48);
+            msg.push_str("a: b");
+            let mut err = Error::new(ErrorKind::Serde, msg);
+            err.path_len = cap as u16;
+            // Step "xy" + "." = 3 bytes: fits when cap <= MAX_PATH_BYTES - 3, elides above.
+            let stepped = err.inside("xy");
+            if cap + 3 > MAX_PATH_BYTES {
+                assert!(stepped.message.starts_with(ELIDED));
+                let elided_len = stepped.message.len();
+                let elided_path_len = stepped.path_len;
+                let again = stepped.inside("outer_ignored");
+                assert_eq!(again.message.len(), elided_len);
+                assert_eq!(again.path_len, elided_path_len);
+                assert!(again.message.starts_with(ELIDED));
+            } else {
+                assert!(stepped.message.starts_with("xy."));
+                assert_eq!(usize::from(stepped.path_len), cap + 3);
+                // One more 10-byte step pushes every remaining cap over MAX_PATH_BYTES and elides.
+                let over = stepped.inside("over_limit");
+                assert!(over.message.starts_with(ELIDED));
+                let elided_len = over.message.len();
+                let elided_path_len = over.path_len;
+                let again = over.inside("outer_ignored");
+                assert_eq!(again.message.len(), elided_len);
+                assert_eq!(again.path_len, elided_path_len);
+            }
+        }
     }
 }

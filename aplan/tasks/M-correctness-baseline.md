@@ -2,7 +2,7 @@
 id: M-correctness-baseline
 title: Establish a thorough, multi-layered correctness baseline
 phase: 5
-status: todo
+status: done
 blocked_by:
 - AY-129
 - AY-130
@@ -11,9 +11,19 @@ blocked_by:
 - AY-133
 - AY-134
 - AY-135
+- AY-156
 tags:
 - milestone
 - testing
+evidence:
+- kind: commit
+  ref: 3dad058
+- kind: commit
+  ref: 42be965
+- kind: test
+  ref: error::tests::path_truncation_and_key_quoting_preserve_utf8_and_bounds
+- kind: test
+  ref: dos::deep_flow_collections_stay_bounded
 ---
 
 ## Why
@@ -26,5 +36,5 @@ and scheduled mutation testing.
 
 ## Acceptance criteria
 
-- [ ] every member is closed with the evidence its tags require
-- [ ] all CI correctness, property, adversarial, and fuzz compilation checks pass cleanly
+- [x] every member is closed with the evidence its tags require
+- [x] all CI correctness, property, adversarial, and fuzz compilation checks pass cleanly

@@ -38,8 +38,8 @@ unused_qualifications = "warn"
 trivial_casts = "warn"
 trivial_numeric_casts = "warn"
 let_underscore_drop = "warn"
-# Set by the test run that reads every typed input from its events (see `typed.rs`).
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(ayaml_typed_from_events)'] }
+# Set by the test run that reads every typed input from its events (see `typed.rs`) and by Kani.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(ayaml_typed_from_events)', 'cfg(kani)'] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

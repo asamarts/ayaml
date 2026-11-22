@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -29,6 +30,7 @@ import check_instructions
 import check_release
 import check_scheduled_runs
 import check_unsafe_census
+import run_kani
 
 NO_UNSAFE = {
     kind: {"safe": 1, "unsafe_": 0}
@@ -1697,6 +1699,134 @@ class DocsCheck(unittest.TestCase):
     def test_repository_tree_passes(self) -> None:
         repo = Path(__file__).resolve().parent.parent
         self.assertEqual(check_docs.problems(repo), [])
+
+
+class RunKaniTests(unittest.TestCase):
+    """Bounds enforcement in `tools/run_kani.py` (AY-156)."""
+
+    def test_extract_harnesses_sorts_and_deduplicates(self) -> None:
+        raw = {
+            "standard-harnesses": {
+                "b.rs": ["b::two", "b::one"],
+                "a.rs": ["a::alpha", "b::one"],
+            }
+        }
+        self.assertEqual(run_kani.extract_harnesses(raw), ["a::alpha", "b::one", "b::two"])
+        self.assertEqual(run_kani.extract_harnesses({}), [])
+
+    def test_rlimit_as_stops_over_budget_allocation(self) -> None:
+        # Allocate 256 MiB inside a 128 MiB RLIMIT_AS cap; the child must fail cleanly.
+        rc, _dt, _rss, _out, _err, timed_out = run_kani.run_bounded(
+            [sys.executable, "-c", "bytearray(256 * 1024 * 1024)"],
+            cwd=Path.cwd(),
+            env=os.environ.copy(),
+            vmem_mib=128,
+            timeout_s=10.0,
+            nice_inc=0,
+        )
+        self.assertFalse(timed_out)
+        self.assertNotEqual(rc, 0)
+
+    def test_timeout_kills_whole_process_group(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "grandchild.pid"
+            script = (
+                f"sleep 60 & echo $! > {shlex.quote(str(pid_file))}; wait"
+            )
+            rc, _dt, _rss, _out, _err, timed_out = run_kani.run_bounded(
+                ["bash", "-c", script],
+                cwd=Path(tmp),
+                env=os.environ.copy(),
+                vmem_mib=1024,
+                timeout_s=0.6,
+                nice_inc=0,
+            )
+            self.assertTrue(timed_out)
+            self.assertEqual(rc, 124)
+            child_pid = int(pid_file.read_text(encoding="utf-8").strip())
+            # Give the kernel a brief moment to reap the killed grandchild.
+            time.sleep(0.1)
+            alive = True
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                alive = False
+            self.assertFalse(alive, f"grandchild {child_pid} survived timeout")
+
+    def test_main_enforces_rss_budget_and_cleans_kani_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_tool(
+                fake_bin,
+                "cargo",
+                """\
+if [ "$1" != "kani" ]; then exit 2; fi
+case " $* " in
+  *" list "*)
+    printf '{"standard-harnesses":{"src/a.rs":["a::h1","a::h2"]}}\\n' > kani-list.json
+    exit 0
+    ;;
+  *" --only-codegen "*)
+    exit 0
+    ;;
+  *" --harness a::h1 "*)
+    exit 0
+    ;;
+  *" --harness a::h2 "*)
+    exit 0
+    ;;
+esac
+exit 2
+""",
+            )
+            env_patch = {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"}
+            json_out = root / "summary.json"
+            with mock.patch.dict(os.environ, env_patch, clear=False), mock.patch("builtins.print"):
+                rc = run_kani.main(
+                    [
+                        "--repo-root",
+                        str(root),
+                        "--package",
+                        "ayaml",
+                        "--all-features",
+                        "--codegen-vmem-mib",
+                        "1024",
+                        "--harness-vmem-mib",
+                        "1024",
+                        "--max-rss-mib",
+                        "1024",
+                        "--harness-timeout",
+                        "15",
+                        "--json-out",
+                        str(json_out),
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            self.assertFalse((root / "kani-list.json").exists())
+            summary = json.loads(json_out.read_text(encoding="utf-8"))
+            self.assertEqual([h["harness"] for h in summary["harnesses"]], ["a::h1", "a::h2"])
+
+            # A tiny RSS ceiling must fail the run even when the harness exits 0.
+            with mock.patch.dict(os.environ, env_patch, clear=False), mock.patch("builtins.print"):
+                rc_over = run_kani.main(
+                    [
+                        "--repo-root",
+                        str(root),
+                        "--package",
+                        "ayaml",
+                        "--codegen-vmem-mib",
+                        "1024",
+                        "--harness-vmem-mib",
+                        "1024",
+                        "--max-rss-mib",
+                        "0.001",
+                        "--harness-timeout",
+                        "15",
+                    ]
+                )
+            self.assertEqual(rc_over, 1)
 
 
 if __name__ == "__main__":

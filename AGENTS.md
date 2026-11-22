@@ -68,6 +68,15 @@ limit regresses, so always bound them:
   `nice`.
 - Never run a mutant or experiment that disables or zeroes an alias, depth, or
   expansion limit on a shared machine.
+- Never run bare, unbounded `cargo kani` (or parallel `cbmc` jobs) on a shared machine.
+  A single symbolic heap-length proof can push CBMC past tens of GiB during CNF conversion.
+  Always invoke Kani through `python3 tools/run_kani.py --package ayaml --all-features`,
+  which runs harnesses sequentially under a kernel `RLIMIT_AS` ceiling (3 GiB per harness),
+  a 2 GiB peak-RSS budget, and a per-harness process-group timeout. When writing a Kani
+  harness, never pass symbolic lengths or capacities into heap-allocating `String`/`Vec`
+  mutations; verify pure arithmetic helpers symbolically and test heap/string transitions
+  with concrete lengths or pre-sized buffers.
+- Always bound local Miri runs with `ulimit -v 8388608`, `timeout`, and `nice -n 10`.
 - If an adversarial test's memory passes a few GiB on unmodified code, stop it and
   file a task. Don't let it run to completion.
 - When a machine is slow, look for the process with the largest resident memory,
