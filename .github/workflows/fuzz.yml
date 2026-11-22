@@ -15,7 +15,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [parse, emit, borrowed]
+        target:
+          - parse
+          - emit
+          - borrowed
+          - structured
+          - spanned
+          - merge_keys
+          - masked_errors
+          - event_emit
+          - typed_equiv
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
