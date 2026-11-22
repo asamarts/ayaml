@@ -9,13 +9,17 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
+# Structure-aware generation for the fuzz harnesses. Version matches `libfuzzer-sys`'s own dep.
+arbitrary = "=1.5.0"
 # `libyaml-compat` is only used by compatibility checks; the default parser is
-# unchanged. `bench-internals` gives `borrowed` the typed reader that builds a tree first, to
-# compare with the one that reads events.
+# unchanged. `bench-internals` gives typed-equivalence targets the tree-backed reader to compare
+# with the event-stream reader.
 ayaml = { path = "../crates/ayaml", version = "=0.2.3", features = ["bench-internals", "libyaml-compat"] }
 libfuzzer-sys = "=0.4.13"
-# `memcount` uses this for the JSON tree that its untyped decode builds, and `borrowed` for a
-# target that isn't ayaml's own. The version is the workspace's.
+# Typed deserialization targets in `typed_equiv` and `masked_errors`.
+serde = { version = "=1.0.229", features = ["derive"] }
+# `memcount` uses this for the JSON tree that its untyped decode builds, and `borrowed` /
+# `typed_equiv` for a target that isn't ayaml's own. The version is the workspace's.
 serde_json = "=1.0.154"
 
 [[bin]]
@@ -35,6 +39,48 @@ bench = false
 [[bin]]
 name = "emit"
 path = "fuzz_targets/emit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "structured"
+path = "fuzz_targets/structured.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "spanned"
+path = "fuzz_targets/spanned.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "merge_keys"
+path = "fuzz_targets/merge_keys.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "masked_errors"
+path = "fuzz_targets/masked_errors.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "event_emit"
+path = "fuzz_targets/event_emit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "typed_equiv"
+path = "fuzz_targets/typed_equiv.rs"
 test = false
 doc = false
 bench = false

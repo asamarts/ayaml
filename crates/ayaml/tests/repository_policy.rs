@@ -900,3 +900,68 @@ fn docs_book_and_reference_pages_are_complete_and_doctested_in_ci() {
         "CI must run workspace tests (including book_doctests) unconditionally on Linux and cross-platform jobs"
     );
 }
+
+/// Every fuzz target in `fuzz/fuzz_targets/` is declared in `fuzz/Cargo.toml`, scheduled in
+/// `.github/workflows/fuzz.yml`, and the fuzz harness unit tests run unconditionally in CI.
+#[test]
+fn fuzz_targets_and_harness_unit_tests_are_wired_in_ci() {
+    let Some(root) = repository_root() else {
+        return;
+    };
+    let mut disk_targets: Vec<String> = std::fs::read_dir(root.join("fuzz/fuzz_targets"))
+        .expect("fuzz/fuzz_targets")
+        .filter_map(|entry| {
+            let path = entry.expect("entry").path();
+            (path.extension()? == "rs").then(|| path.file_stem()?.to_str().map(str::to_owned))?
+        })
+        .collect();
+    disk_targets.sort();
+
+    let expected = [
+        "borrowed",
+        "emit",
+        "event_emit",
+        "masked_errors",
+        "merge_keys",
+        "parse",
+        "spanned",
+        "structured",
+        "typed_equiv",
+    ];
+    assert_eq!(disk_targets, expected, "fuzz/fuzz_targets/*.rs mismatch");
+
+    let fuzz_manifest = read(&root, "fuzz/Cargo.toml");
+    for target in &expected {
+        assert!(
+            fuzz_manifest.contains(&format!("name = \"{target}\"")),
+            "fuzz/Cargo.toml missing [[bin]] for {target}"
+        );
+        assert!(
+            fuzz_manifest.contains(&format!("path = \"fuzz_targets/{target}.rs\"")),
+            "fuzz/Cargo.toml missing path for {target}"
+        );
+    }
+
+    let fuzz_wf = parse_value(&read(&root, ".github/workflows/fuzz.yml")).expect("fuzz.yml parses");
+    let mut matrix_targets: Vec<String> =
+        strings(&fuzz_wf["jobs"]["fuzz"]["strategy"]["matrix"]["target"])
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+    matrix_targets.sort();
+    assert_eq!(
+        matrix_targets, expected,
+        ".github/workflows/fuzz.yml matrix must cover every fuzz target"
+    );
+
+    let ci_wf = read(&root, ".github/workflows/ci.yml");
+    let harness_test_steps = steps_that_run(&ci_wf, &|step| {
+        step["run"].as_str().map(str::trim)
+            == Some("cargo test --manifest-path fuzz/Cargo.toml --lib --locked")
+    });
+    assert_eq!(
+        harness_test_steps,
+        Ok(1),
+        "CI must run fuzz harness unit tests unconditionally"
+    );
+}
