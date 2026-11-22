@@ -203,7 +203,7 @@ class ScheduledRuns(unittest.TestCase):
             run(5) | {"databaseId": 13, "event": "workflow_dispatch"},
             run(37) | {"databaseId": 14},
         ]
-        replies = [json.dumps(runs), json.dumps({"total_count": 2}), "[]", "[]", ""]
+        replies = [json.dumps(runs), json.dumps({"total_count": 2}), "[]", "[]", "[]", ""]
         status, calls = self.with_gh(*replies, arguments=["--open-issue"])
         self.assertEqual(status, 1)
         asked = [call[1] for call in calls if call[0] == "api"]
@@ -212,16 +212,17 @@ class ScheduledRuns(unittest.TestCase):
         self.assertIn("fuzz.yml passed and left sealed files", calls[-1][-1])
 
     def test_main_does_not_touch_issues_unless_asked(self) -> None:
-        status, calls = self.with_gh("[]", "[]")
+        status, calls = self.with_gh("[]", "[]", "[]")
         self.assertEqual(status, 1)
-        self.assertEqual([call[0] for call in calls], ["run", "run"])
+        self.assertEqual([call[0] for call in calls], ["run", "run", "run"])
 
     def test_a_problem_opens_one_issue(self) -> None:
-        status, calls = self.with_gh("[]", "[]", "[]", "", arguments=["--open-issue"])
+        status, calls = self.with_gh("[]", "[]", "[]", "[]", "", arguments=["--open-issue"])
         self.assertEqual(status, 1)
         self.assertEqual(calls[-1][:2], ["issue", "create"])
         self.assertIn("fuzz.yml has had no run", calls[-1][-1])
         self.assertIn("advisories.yml has had no run", calls[-1][-1])
+        self.assertIn("proptest.yml has had no run", calls[-1][-1])
 
     @staticmethod
     def issues(body: str, comment: str = "", state: str = "OPEN") -> str:
@@ -246,15 +247,19 @@ class ScheduledRuns(unittest.TestCase):
 
     def test_a_problem_already_in_the_open_issue_is_not_repeated(self) -> None:
         body = "- fuzz.yml has had no run in the last 36 hours"
-        comment = "- advisories.yml has had no run in the last 36 hours"
+        comment = (
+            "- advisories.yml has had no run in the last 36 hours\n"
+            "- proptest.yml has had no run in the last 36 hours"
+        )
         status, calls = self.with_gh(
-            "[]", "[]", self.issues(body, comment), arguments=["--open-issue"]
+            "[]", "[]", "[]", self.issues(body, comment), arguments=["--open-issue"]
         )
         self.assertEqual(status, 1)
         self.assertEqual(calls[-1][:2], ["issue", "list"])
 
     def test_a_new_problem_adds_to_the_open_issue(self) -> None:
         status, calls = self.with_gh(
+            "[]",
             "[]",
             "[]",
             self.issues("- fuzz.yml has had no run in the last 36 hours"),
@@ -264,12 +269,14 @@ class ScheduledRuns(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertEqual(calls[-1][:3], ["issue", "comment", "7"])
         self.assertIn("advisories.yml has had no run", calls[-1][-1])
+        self.assertIn("proptest.yml has had no run", calls[-1][-1])
         self.assertNotIn("fuzz.yml", calls[-1][-1])
 
     def test_a_problem_that_an_earlier_one_starts_with_is_still_filed(self) -> None:
         # The first text is a prefix of the second, and it's the shorter one that's new.
         earlier = "- fuzz.yml has had no run in the last 36 hours, and the last was at 2026-01-01T00:00:00+00:00"
         status, calls = self.with_gh(
+            "[]",
             "[]",
             "[]",
             self.issues(earlier),
@@ -281,21 +288,26 @@ class ScheduledRuns(unittest.TestCase):
         self.assertIn("- fuzz.yml has had no run in the last 36 hours", calls[-1][-1].splitlines())
 
     def test_closed_issues_are_read_too(self) -> None:
-        _, calls = self.with_gh("[]", "[]", self.issues("- x"), "", arguments=["--open-issue"])
+        _, calls = self.with_gh("[]", "[]", "[]", self.issues("- x"), "", arguments=["--open-issue"])
         listed = next(call for call in calls if call[:2] == ["issue", "list"])
         self.assertEqual(listed[listed.index("--state") + 1], "all")
 
     def test_a_problem_in_a_closed_issue_is_not_filed_again(self) -> None:
         # Someone read it and closed the issue, and that run is still inside the window.
-        body = "- fuzz.yml has had no run in the last 36 hours\n- advisories.yml has had no run in the last 36 hours"
+        body = (
+            "- fuzz.yml has had no run in the last 36 hours\n"
+            "- advisories.yml has had no run in the last 36 hours\n"
+            "- proptest.yml has had no run in the last 36 hours"
+        )
         status, calls = self.with_gh(
-            "[]", "[]", self.issues(body, state="CLOSED"), arguments=["--open-issue"]
+            "[]", "[]", "[]", self.issues(body, state="CLOSED"), arguments=["--open-issue"]
         )
         self.assertEqual(status, 1)
         self.assertEqual(calls[-1][:2], ["issue", "list"])
 
     def test_a_new_problem_after_a_closed_issue_opens_another(self) -> None:
         status, calls = self.with_gh(
+            "[]",
             "[]",
             "[]",
             self.issues("- fuzz.yml has had no run in the last 36 hours", state="CLOSED"),
@@ -305,15 +317,21 @@ class ScheduledRuns(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertEqual(calls[-1][:2], ["issue", "create"])
         self.assertIn("advisories.yml has had no run", calls[-1][-1])
+        self.assertIn("proptest.yml has had no run", calls[-1][-1])
         self.assertNotIn("fuzz.yml", calls[-1][-1])
 
     def test_a_green_check_leaves_an_open_issue_for_a_person_to_close(self) -> None:
         # What the failed run found stays sealed until someone reads it.
         good = json.dumps([run(3)])
         none = json.dumps({"total_count": 0})
-        status, calls = self.with_gh(good, none, good, none, arguments=["--open-issue"])
+        status, calls = self.with_gh(
+            good, none, good, none, good, none, arguments=["--open-issue"]
+        )
         self.assertEqual(status, 0)
-        self.assertEqual([call[0] for call in calls], ["run", "api", "run", "api"])
+        self.assertEqual(
+            [call[0] for call in calls],
+            ["run", "api", "run", "api", "run", "api"],
+        )
 
     def test_a_check_that_cannot_run_says_so(self) -> None:
         with mock.patch("subprocess.run", side_effect=FileNotFoundError("gh")), mock.patch("builtins.print"):

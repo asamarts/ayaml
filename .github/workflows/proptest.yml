@@ -1,0 +1,30 @@
+name: proptest
+
+# Deep property-test run over structured YAML generators under an address-space cap (AY-036).
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  proptest:
+    name: deep property tests
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - name: Run deep property tests (default profile)
+        run: |
+          set -euo pipefail
+          ( ulimit -v 8388608; timeout -k 5 900 nice -n 10 env PROPTEST_CASES=16384 cargo test -p ayaml --locked --release --all-features --test properties -- --nocapture )
+      - name: Run deep property tests (typed reads from events at every size)
+        run: |
+          set -euo pipefail
+          ( ulimit -v 8388608; timeout -k 5 900 nice -n 10 env RUSTFLAGS="--cfg ayaml_typed_from_events" CARGO_TARGET_DIR="target/typed-from-events" PROPTEST_CASES=8192 cargo test -p ayaml --locked --release --all-features --test properties )

@@ -27,7 +27,7 @@ import json
 import subprocess
 import sys
 
-WATCHED = ("fuzz.yml", "advisories.yml")
+WATCHED = ("fuzz.yml", "advisories.yml", "proptest.yml")
 # A daily schedule has run up to 8 hours late, so a shorter window would report a late run, and
 # this one still reports a single missed run.
 WINDOW_HOURS = 36

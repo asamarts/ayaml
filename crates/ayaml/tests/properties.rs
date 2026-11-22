@@ -452,3 +452,337 @@ proptest! {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Structured YAML property suites (AY-036)
+// ---------------------------------------------------------------------------
+
+#[path = "properties/structured.rs"]
+mod structured;
+
+use structured::{mutated_structured_yaml, structured_yaml_document, structured_yaml_stream};
+
+#[derive(Default, Debug)]
+struct ConstructCoverage {
+    samples: usize,
+    parsed_ok: usize,
+    block_mappings: usize,
+    flow_mappings: usize,
+    block_sequences: usize,
+    flow_sequences: usize,
+    anchors: usize,
+    aliases: usize,
+    local_tags: usize,
+    core_tags: usize,
+    verbatim_or_handle_tags: usize,
+    literal_block_scalars: usize,
+    folded_block_scalars: usize,
+    single_quoted_scalars: usize,
+    double_quoted_scalars: usize,
+    empty_plain_scalars: usize,
+    directives: usize,
+    bom_docs: usize,
+    crlf_docs: usize,
+    comment_docs: usize,
+    multi_doc_streams: usize,
+}
+
+#[test]
+fn structured_yaml_generator_covers_all_constructs() {
+    use ayaml::{CollectionStyle, Event, ScalarStyle};
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
+
+    let mut runner = TestRunner::deterministic();
+    let doc_strategy = structured_yaml_document();
+    let stream_strategy = structured_yaml_stream();
+    let mut cov = ConstructCoverage::default();
+
+    for _ in 0..256 {
+        let input = doc_strategy
+            .new_tree(&mut runner)
+            .expect("generate doc")
+            .current();
+        cov.samples += 1;
+        if input.starts_with('\u{feff}') {
+            cov.bom_docs += 1;
+        }
+        if input.contains("\r\n") {
+            cov.crlf_docs += 1;
+        }
+        if input.contains('#') {
+            cov.comment_docs += 1;
+        }
+        let events: Vec<Event<'_>> = ayaml::parse_events(&input)
+            .and_then(Iterator::collect)
+            .unwrap_or_else(|error| panic!("generated invalid YAML: {error}\ninput:\n{input}"));
+        let _value = ayaml::parse_value(&input).unwrap_or_else(|error| {
+            panic!("generated uncomposable YAML: {error}\ninput:\n{input}")
+        });
+        cov.parsed_ok += 1;
+
+        for event in events {
+            match event {
+                Event::MappingStart {
+                    style, anchor, tag, ..
+                } => {
+                    match style {
+                        CollectionStyle::Block => cov.block_mappings += 1,
+                        CollectionStyle::Flow => cov.flow_mappings += 1,
+                        _ => {}
+                    }
+                    if anchor.is_some() {
+                        cov.anchors += 1;
+                    }
+                    if let Some(tag) = tag {
+                        record_tag(&mut cov, &tag);
+                    }
+                }
+                Event::SequenceStart {
+                    style, anchor, tag, ..
+                } => {
+                    match style {
+                        CollectionStyle::Block => cov.block_sequences += 1,
+                        CollectionStyle::Flow => cov.flow_sequences += 1,
+                        _ => {}
+                    }
+                    if anchor.is_some() {
+                        cov.anchors += 1;
+                    }
+                    if let Some(tag) = tag {
+                        record_tag(&mut cov, &tag);
+                    }
+                }
+                Event::Scalar {
+                    value,
+                    style,
+                    anchor,
+                    tag,
+                    ..
+                } => {
+                    match style {
+                        ScalarStyle::Literal => cov.literal_block_scalars += 1,
+                        ScalarStyle::Folded => cov.folded_block_scalars += 1,
+                        ScalarStyle::SingleQuoted => cov.single_quoted_scalars += 1,
+                        ScalarStyle::DoubleQuoted => cov.double_quoted_scalars += 1,
+                        ScalarStyle::Plain if value.is_empty() => {
+                            cov.empty_plain_scalars += 1;
+                        }
+                        _ => {}
+                    }
+                    if anchor.is_some() {
+                        cov.anchors += 1;
+                    }
+                    if let Some(tag) = tag {
+                        record_tag(&mut cov, &tag);
+                    }
+                }
+                Event::Alias { .. } => cov.aliases += 1,
+                Event::Directive { .. } => cov.directives += 1,
+                _ => {}
+            }
+        }
+    }
+
+    for _ in 0..64 {
+        let input = stream_strategy
+            .new_tree(&mut runner)
+            .expect("generate stream")
+            .current();
+        let docs = ayaml::parse_documents(&input)
+            .unwrap_or_else(|error| panic!("generated invalid stream: {error}\ninput:\n{input}"));
+        if docs.len() >= 2 {
+            cov.multi_doc_streams += 1;
+        }
+    }
+
+    eprintln!(
+        "structured YAML coverage ({} docs, {} parsed ok): block_map={} flow_map={} block_seq={} flow_seq={} anchors={} aliases={} local_tags={} core_tags={} verbatim_or_handle_tags={} literal_block={} folded_block={} single_quoted={} double_quoted={} empty_plain={} directives={} bom={} crlf={} comments={} multi_doc_streams={}",
+        cov.samples,
+        cov.parsed_ok,
+        cov.block_mappings,
+        cov.flow_mappings,
+        cov.block_sequences,
+        cov.flow_sequences,
+        cov.anchors,
+        cov.aliases,
+        cov.local_tags,
+        cov.core_tags,
+        cov.verbatim_or_handle_tags,
+        cov.literal_block_scalars,
+        cov.folded_block_scalars,
+        cov.single_quoted_scalars,
+        cov.double_quoted_scalars,
+        cov.empty_plain_scalars,
+        cov.directives,
+        cov.bom_docs,
+        cov.crlf_docs,
+        cov.comment_docs,
+        cov.multi_doc_streams,
+    );
+
+    assert_eq!(cov.parsed_ok, cov.samples, "all generated docs must parse");
+    assert!(cov.block_mappings >= 20, "{cov:?}");
+    assert!(cov.flow_mappings >= 20, "{cov:?}");
+    assert!(cov.block_sequences >= 20, "{cov:?}");
+    assert!(cov.flow_sequences >= 20, "{cov:?}");
+    assert!(cov.anchors >= 20, "{cov:?}");
+    assert!(cov.aliases >= 20, "{cov:?}");
+    assert!(cov.local_tags >= 20, "{cov:?}");
+    assert!(cov.core_tags >= 10, "{cov:?}");
+    assert!(cov.verbatim_or_handle_tags >= 10, "{cov:?}");
+    assert!(cov.literal_block_scalars >= 15, "{cov:?}");
+    assert!(cov.folded_block_scalars >= 15, "{cov:?}");
+    assert!(cov.single_quoted_scalars >= 20, "{cov:?}");
+    assert!(cov.double_quoted_scalars >= 20, "{cov:?}");
+    assert!(cov.empty_plain_scalars >= 5, "{cov:?}");
+    assert!(cov.directives >= 20, "{cov:?}");
+    assert!(cov.bom_docs >= 10, "{cov:?}");
+    assert!(cov.crlf_docs >= 15, "{cov:?}");
+    assert!(cov.comment_docs >= 30, "{cov:?}");
+    assert_eq!(cov.multi_doc_streams, 64, "{cov:?}");
+}
+
+fn record_tag(cov: &mut ConstructCoverage, tag: &ayaml::Tag) {
+    let text = tag.to_string();
+    if tag.is_core() {
+        cov.core_tags += 1;
+    } else if text.starts_with('!') && !text.starts_with("!<") {
+        cov.local_tags += 1;
+    } else {
+        cov.verbatim_or_handle_tags += 1;
+    }
+}
+
+proptest! {
+    /// Structured valid YAML parses identically across every default value and typed reader.
+    #[test]
+    fn structured_yaml_readers_agree(input in structured_yaml_document()) {
+        let composed = ayaml::parse_value(&input)
+            .unwrap_or_else(|error| panic!("parse_value failed: {error}\ninput:\n{input}"));
+        let typed = ayaml::from_str::<Value>(&input)
+            .unwrap_or_else(|error| panic!("from_str failed: {error}\ninput:\n{input}"));
+        let borrowed = ayaml::from_str_borrowed::<Value>(&input)
+            .unwrap_or_else(|error| panic!("from_str_borrowed failed: {error}\ninput:\n{input}"));
+        let mut cursor = ayaml::Deserializer::from_str(&input)
+            .unwrap_or_else(|error| panic!("Deserializer::from_str failed: {error}\ninput:\n{input}"));
+        let cursor_borrowed = cursor
+            .next_borrowed::<Value>()
+            .unwrap_or_else(|error| panic!("next_borrowed failed: {error}\ninput:\n{input}"))
+            .expect("one document");
+        prop_assert!(
+            cursor
+                .next_borrowed::<Value>()
+                .expect("eof check")
+                .is_none()
+        );
+        let mut owned_cursor = ayaml::Deserializer::from_str(&input)
+            .unwrap_or_else(|error| panic!("Deserializer::from_str failed: {error}\ninput:\n{input}"));
+        let cursor_owned = owned_cursor
+            .next::<Value>()
+            .unwrap_or_else(|error| panic!("next failed: {error}\ninput:\n{input}"))
+            .expect("one document");
+        prop_assert!(owned_cursor.next::<Value>().expect("eof check").is_none());
+
+        prop_assert_eq!(&composed, &typed, "input:\n{}", input);
+        prop_assert_eq!(&composed, &borrowed, "input:\n{}", input);
+        prop_assert_eq!(&composed, &cursor_borrowed, "input:\n{}", input);
+        prop_assert_eq!(&composed, &cursor_owned, "input:\n{}", input);
+
+        #[cfg(feature = "libyaml-compat")]
+        {
+            let _ = ayaml::compat::from_str::<Value>(&input);
+        }
+    }
+
+    /// Structured valid YAML round-trips through value emission, event emission, and lazy stream
+    /// event emission.
+    #[test]
+    fn structured_yaml_events_and_values_round_trip(input in structured_yaml_document()) {
+        let value = ayaml::parse_value(&input)
+            .unwrap_or_else(|error| panic!("parse_value failed: {error}\ninput:\n{input}"));
+        let emitted_value = ayaml::to_string_value(&value).expect("emit value");
+        prop_assert_eq!(
+            reparse(&emitted_value),
+            value.clone(),
+            "input:\n{}\nemitted_value:\n{}",
+            input,
+            emitted_value
+        );
+
+        let events = ayaml::parse_events(&input)
+            .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+            .expect("parse events");
+        let emitted_events = ayaml::to_string_events(&events)
+            .unwrap_or_else(|error| panic!("emit events failed: {error}\ninput:\n{input}"));
+        let mut lazy = Vec::new();
+        ayaml::to_writer_event_stream(&mut lazy, ayaml::parse_events(&input).expect("stream"))
+            .expect("lazy event emit");
+        prop_assert_eq!(
+            String::from_utf8(lazy).expect("utf8"),
+            emitted_events.clone(),
+            "input:\n{}",
+            input
+        );
+        prop_assert_eq!(
+            reparse(&emitted_events),
+            value,
+            "input:\n{}\nemitted_events:\n{}",
+            input,
+            emitted_events
+        );
+    }
+
+    /// Generated multi-document structured streams agree across `parse_documents`, `Deserializer`,
+    /// `to_string_documents`, and `to_string_events`.
+    #[test]
+    fn structured_yaml_stream_round_trips(input in structured_yaml_stream()) {
+        let docs = ayaml::parse_documents(&input)
+            .unwrap_or_else(|error| panic!("parse_documents failed: {error}\ninput:\n{input}"));
+        let mut cursor = ayaml::Deserializer::from_str(&input).expect("cursor");
+        let mut streamed = Vec::new();
+        while let Some(doc) = cursor.next_borrowed::<Value>().expect("next_borrowed") {
+            streamed.push(doc);
+        }
+        prop_assert_eq!(&streamed, &docs, "input:\n{}", input);
+
+        let emitted_docs = ayaml::to_string_documents(&docs).expect("emit documents");
+        let reparsed_docs = ayaml::parse_documents(&emitted_docs).unwrap_or_else(|error| {
+            panic!("reparse documents failed: {error}\ninput:\n{input}\nemitted:\n{emitted_docs}")
+        });
+        prop_assert_eq!(reparsed_docs, docs.clone(), "input:\n{}", input);
+
+        let events = ayaml::parse_events(&input)
+            .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+            .expect("events");
+        let emitted_events = ayaml::to_string_events(&events).expect("emit stream events");
+        let reparsed_from_events = ayaml::parse_documents(&emitted_events).unwrap_or_else(|error| {
+            panic!("reparse event stream failed: {error}\ninput:\n{input}\nemitted:\n{emitted_events}")
+        });
+        prop_assert_eq!(reparsed_from_events, docs, "input:\n{}", input);
+    }
+
+    /// Near-valid mutated structured YAML never panics and agrees between composed and borrowed
+    /// value readers.
+    #[test]
+    fn mutated_structured_yaml_readers_agree(input in mutated_structured_yaml()) {
+        let composed = ayaml::parse_value(&input);
+        let borrowed = ayaml::from_str_borrowed::<Value>(&input);
+        match (composed, borrowed) {
+            (Ok(composed), Ok(borrowed)) => prop_assert_eq!(composed, borrowed),
+            (Err(_), Err(_)) => {}
+            (Ok(value), Err(error)) => {
+                prop_assert!(
+                    false,
+                    "composed {value:?}, borrowed error {error:?}\ninput:\n{input}"
+                );
+            }
+            (Err(error), Ok(value)) => {
+                prop_assert!(
+                    false,
+                    "composed error {error:?}, borrowed {value:?}\ninput:\n{input}"
+                );
+            }
+        }
+    }
+}
