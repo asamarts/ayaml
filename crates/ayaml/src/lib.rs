@@ -82,7 +82,9 @@
 //!
 //! Every parse, decode, and emit operation has a `_with` form taking one
 //! options value ([`ParseOptions`], `compat::ParseOptions`, or
-//! [`EmitOptions`]), which carries its [`Limits`]; `from_value`,
+//! [`EmitOptions`]), which carries its [`Limits`]; [`Value::apply_merge_keys`]
+//! and [`Value::apply_merge_keys_with_limits`] bound merge depth and merged
+//! mapping sizes; `from_value`,
 //! `from_value_seed`, and `to_value` operate on an in-memory [`Value`] and do
 //! not take limits. Exceeding a limit
 //! returns [`ErrorKind::Limit`]; [`Error::limit`] exposes the structured

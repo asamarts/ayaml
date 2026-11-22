@@ -67,7 +67,10 @@ entries: block and flow mappings, block and flow sequences, explicit keys, and t
 fast paths. `max_output_bytes` applies to emitters rather than readers, and the same file checks
 it on every emitter that takes limits. The event writers also hold to `max_anchors`, for the
 names of one document's anchors, and every writer to `max_depth`; no limit on what is read
-applies to a writer. A limit that cannot apply is stated as such: an event
+applies to a writer. `Value::apply_merge_keys` and `Value::apply_merge_keys_with_limits`
+enforce `max_depth` on collection nesting (traversing `Value::Tagged` wrappers without adding
+collection depth) and `max_collection_entries` when merging adds new keys to a mapping, and
+validate `Limits` in the same way as the readers and emitters. A limit that cannot apply is stated as such: an event
 reader does not copy an alias's target, so the alias-budget limits are asked only of readers that
 build values.
 

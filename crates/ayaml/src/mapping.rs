@@ -149,6 +149,26 @@ impl Mapping {
         }
     }
 
+    /// Insert a key only when the mapping does not already hold it, checking
+    /// `limits.max_collection_entries` before growing the mapping.
+    pub(crate) fn insert_if_absent_with_limit(
+        &mut self,
+        key: Value,
+        value: Value,
+        limits: &crate::limits::Limits,
+    ) -> Result<bool, crate::Error> {
+        let next_len = self.map.len().saturating_add(1);
+        match self.map.entry(key) {
+            indexmap::map::Entry::Vacant(entry) => {
+                limits.check_collection_entries(next_len)?;
+                entry.insert(value);
+                self.hash.take();
+                Ok(true)
+            }
+            indexmap::map::Entry::Occupied(_) => Ok(false),
+        }
+    }
+
     /// Get a mutable entry for `key`, inserting lazily through [`Entry`].
     pub fn entry(&mut self, key: Value) -> Entry<'_> {
         let Self { map, hash } = self;
