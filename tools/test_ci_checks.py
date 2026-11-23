@@ -24,6 +24,7 @@ from unittest import mock
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import check_alloc_baseline
 import check_deps
 import check_docs
 import check_instructions
@@ -1827,6 +1828,44 @@ exit 2
                     ]
                 )
             self.assertEqual(rc_over, 1)
+
+
+class AllocBaselineGateTests(unittest.TestCase):
+    """Structured JSONL `memcount` baseline parser and regression gate (AY-138)."""
+
+    def test_parse_and_compare_detects_metric_and_hash_regressions(self) -> None:
+        gate = check_alloc_baseline
+        sha = "1835e9e70495561c218b4649b15837452ced87973b2a1494d81847b4eeba2c4b"
+        base_row = (
+            '{"schema_version":1,"scenario":"openapi-spec","bytes":10000,'
+            f'"fixture_sha256":"{sha}","operation":"parse_value",'
+            '"peak_bytes":40000,"live_bytes":20000,"allocations":500,'
+            '"total_allocated_bytes":60000,"peak_to_input_ratio":4.000}\n'
+        )
+        base = gate.parse_jsonl(base_row, "base")
+        self.assertEqual(gate.compare_baselines(base, base), [])
+
+        # Within tolerance passes.
+        within = gate.parse_jsonl(base_row.replace("40000", "43000").replace("500", "520"), "within")
+        self.assertEqual(gate.compare_baselines(base, within), [])
+
+        # Peak bytes and allocation regressions fail with clear per-metric diagnostics.
+        regressed = gate.parse_jsonl(
+            base_row.replace("40000", "50000").replace("500", "600"), "regressed"
+        )
+        errs = gate.compare_baselines(base, regressed)
+        self.assertEqual(len(errs), 2)
+        self.assertTrue(any("peak_bytes regressed" in e for e in errs))
+        self.assertTrue(any("allocations regressed" in e for e in errs))
+
+        # Fixture SHA-256 drift fails immediately.
+        drifted = gate.parse_jsonl(base_row.replace(sha, "0" * 64), "drifted")
+        self.assertTrue(any("fixture_sha256 changed" in e for e in gate.compare_baselines(base, drifted)))
+
+        # Missing row fails; invalid JSONL raises ValueError.
+        self.assertTrue(any("missing from current run" in e for e in gate.compare_baselines(base, {})))
+        with self.assertRaises(ValueError):
+            gate.parse_jsonl('{"schema_version":99}\n', "bad")
 
 
 if __name__ == "__main__":

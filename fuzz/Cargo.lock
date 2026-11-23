@@ -17,11 +17,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ayaml-fixtures"
+version = "0.2.3"
+
+[[package]]
 name = "ayaml-fuzz"
 version = "0.1.0"
 dependencies = [
  "arbitrary",
  "ayaml",
+ "ayaml-fixtures",
  "libfuzzer-sys",
  "serde",
  "serde_json",

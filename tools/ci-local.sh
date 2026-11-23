@@ -340,6 +340,7 @@ job_harness() {
   test_step "conformance fixtures and pinned suite" cargo run --locked -p ayaml-conformance -- tests/fixtures tests/data/yaml-test-suite/src
   step "fuzz targets compile" cargo check --manifest-path fuzz/Cargo.toml --locked --bins
   test_step "allocation budgets" tools/check_alloc_corpus.sh
+  test_step "structured allocation baseline" python3 tools/check_alloc_baseline.py
   step "benchmarks compile" cargo bench --locked -p ayaml-bench --no-run
 }
 
