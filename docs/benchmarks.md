@@ -179,8 +179,8 @@ sequence that is a mapping's value peaks at 131 MB with an anchor or a tag, and
 at 106 MB with neither, where a read that built the whole tree first peaked at
 99 MB; one that is a key peaks at 152 MB against 114 MB. A document whose nodes
 mostly have anchors peaks about a quarter above such a read as a JSON tree,
-95 MB against 76 MB for 50,000 anchored flow mappings of two entries by issue
-#178's measure, and about a third above it as a `Value` (AY-119). A root with
+95 MB against 76 MB for 50,000 anchored flow mappings of two entries by
+issue #178's measure, and about a third above it as a `Value` (AY-119). A root with
 an anchor peaks as it did.
 
 Issue #178 gives a reference for each of its nine shapes, the peak of a

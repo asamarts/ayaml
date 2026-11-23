@@ -399,7 +399,10 @@ mod tests {
         faster[0].median_ns = 1_500_000.0;
         let diff = format_speed_diff(&base_speed, &faster).expect("speed diff");
         assert!(diff.contains("-25.00%"));
-        assert!(evaluate_speed_gate(&base_speed, &faster, GateThresholds::default()).is_empty());
+        assert_eq!(
+            evaluate_speed_gate(&base_speed, &faster, GateThresholds::default()),
+            Vec::<String>::new()
+        );
 
         let mut slower = base_speed.clone();
         slower[0].median_ns = 2_400_000.0;
@@ -428,7 +431,10 @@ mod tests {
         better_mem[0].peak_bytes = 900_000;
         let mem_diff = format_memory_diff(&base_mem, &better_mem).expect("mem diff");
         assert!(mem_diff.contains("-10.00%"));
-        assert!(evaluate_memory_gate(&base_mem, &better_mem, GateThresholds::default()).is_empty());
+        assert_eq!(
+            evaluate_memory_gate(&base_mem, &better_mem, GateThresholds::default()),
+            Vec::<String>::new()
+        );
 
         let mut worse_mem = base_mem.clone();
         worse_mem[0].peak_bytes = 1_250_000;
