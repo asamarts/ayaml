@@ -10,23 +10,86 @@ use super::{
     starts_with_document_marker,
 };
 
+const PLAIN_STOP_BLOCK: [bool; 256] = {
+    let mut table = [false; 256];
+    table[b'\n' as usize] = true;
+    table[b'\r' as usize] = true;
+    table[b'#' as usize] = true;
+    table[b':' as usize] = true;
+    table[BOM_FIRST_BYTE as usize] = true;
+    table
+};
+
+const PLAIN_STOP_FLOW: [bool; 256] = {
+    let mut table = PLAIN_STOP_BLOCK;
+    table[b'[' as usize] = true;
+    table[b']' as usize] = true;
+    table[b'{' as usize] = true;
+    table[b'}' as usize] = true;
+    table[b',' as usize] = true;
+    table
+};
+
 impl<'a> Scanner<'a> {
     pub(super) fn scan_single_quoted(&mut self) -> Result<Option<Token<'a>>, Error> {
         let start = self.pos;
-        let mut held = None;
         self.pos += 1;
-        let mut value = String::new();
+        let content_start = self.pos;
+        let bytes = self.input.as_bytes();
+        let mut index = content_start;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\'' => {
+                    if bytes.get(index + 1) == Some(&b'\'') {
+                        break;
+                    }
+                    self.pos = index + 1;
+                    return self.make(
+                        TokenKind::Scalar(Box::new(ScalarToken {
+                            value: Cow::Borrowed(&self.input[content_start..index]),
+                            style: ScalarStyle::SingleQuoted,
+                        })),
+                        start,
+                        self.pos,
+                    );
+                }
+                b'\n' | b'\r' => break,
+                _ => index += 1,
+            }
+        }
+        if index >= bytes.len() {
+            self.pos = index;
+            return Err(self.error_at(
+                start,
+                ErrorCode::UnterminatedQuotedScalar,
+                "unterminated single-quoted scalar",
+            ));
+        }
+
+        let mut held = None;
+        let mut value = String::with_capacity((index - content_start).saturating_add(16));
+        value.push_str(&self.input[content_start..index]);
+        self.pos = index;
         loop {
-            let Some(ch) = self.peek() else {
+            let run_start = self.pos;
+            let mut i = run_start;
+            while i < bytes.len() && !matches!(bytes[i], b'\'' | b'\n' | b'\r') {
+                i += 1;
+            }
+            if i > run_start {
+                value.push_str(&self.input[run_start..i]);
+                self.pos = i;
+            }
+            let Some(&byte) = bytes.get(self.pos) else {
                 return Err(self.error_at(
                     start,
                     ErrorCode::UnterminatedQuotedScalar,
                     "unterminated single-quoted scalar",
                 ));
             };
-            match ch {
-                '\'' => {
-                    if self.peek_second() == Some('\'') {
+            match byte {
+                b'\'' => {
+                    if bytes.get(self.pos + 1) == Some(&b'\'') {
                         value.push('\'');
                         self.pos += 2;
                     } else {
@@ -34,13 +97,10 @@ impl<'a> Scanner<'a> {
                         break;
                     }
                 }
-                ch if is_line_break(ch) => {
+                b'\n' | b'\r' => {
                     self.scan_quoted_line_break(&mut value, '\'', start, &mut held, 0, false)?;
                 }
-                ch => {
-                    value.push(ch);
-                    self.pos += ch.len_utf8();
-                }
+                _ => unreachable!("loop stops only on quote or line break"),
             }
         }
         let raw_text = &self.input[start..self.pos];
@@ -300,27 +360,67 @@ impl<'a> Scanner<'a> {
 
     pub(super) fn scan_double_quoted(&mut self) -> Result<Option<Token<'a>>, Error> {
         let start = self.pos;
-        let mut held = None;
         self.pos += 1;
-        let mut value = String::new();
+        let content_start = self.pos;
+        let bytes = self.input.as_bytes();
+        let mut index = content_start;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'"' => {
+                    self.pos = index + 1;
+                    return self.make(
+                        TokenKind::Scalar(Box::new(ScalarToken {
+                            value: Cow::Borrowed(&self.input[content_start..index]),
+                            style: ScalarStyle::DoubleQuoted,
+                        })),
+                        start,
+                        self.pos,
+                    );
+                }
+                b'\\' | b'\n' | b'\r' => break,
+                _ => index += 1,
+            }
+        }
+        if index >= bytes.len() {
+            self.pos = index;
+            return Err(self.error_at(
+                start,
+                ErrorCode::UnterminatedQuotedScalar,
+                "unterminated double-quoted scalar",
+            ));
+        }
+
+        let mut held = None;
+        let mut value = String::with_capacity((index - content_start).saturating_add(16));
+        value.push_str(&self.input[content_start..index]);
+        self.pos = index;
         let mut protected_len = 0;
         loop {
-            let Some(ch) = self.peek() else {
+            let run_start = self.pos;
+            let mut i = run_start;
+            while i < bytes.len() && !matches!(bytes[i], b'"' | b'\\' | b'\n' | b'\r') {
+                i += 1;
+            }
+            if i > run_start {
+                value.push_str(&self.input[run_start..i]);
+                self.pos = i;
+            }
+            let Some(&byte) = bytes.get(self.pos) else {
                 return Err(self.error_at(
                     start,
                     ErrorCode::UnterminatedQuotedScalar,
                     "unterminated double-quoted scalar",
                 ));
             };
-            match ch {
-                '"' => {
+            match byte {
+                b'"' => {
                     self.pos += 1;
                     break;
                 }
-                '\\' => {
+                b'\\' => {
                     let escape_start = self.pos;
                     self.pos += 1;
-                    if self.peek().is_some_and(is_line_break) {
+                    if matches!(bytes.get(self.pos), Some(b'\n' | b'\r')) {
                         self.scan_quoted_line_break(
                             &mut value,
                             '"',
@@ -373,7 +473,7 @@ impl<'a> Scanner<'a> {
                         protected_len = value.len();
                     }
                 }
-                ch if is_line_break(ch) => {
+                b'\n' | b'\r' => {
                     self.scan_quoted_line_break(
                         &mut value,
                         '"',
@@ -383,10 +483,7 @@ impl<'a> Scanner<'a> {
                         false,
                     )?;
                 }
-                ch => {
-                    value.push(ch);
-                    self.pos += ch.len_utf8();
-                }
+                _ => unreachable!("loop stops only on quote, escape, or line break"),
             }
         }
         let raw_text = &self.input[start..self.pos];
@@ -745,22 +842,31 @@ impl<'a> Scanner<'a> {
             }
             self.pos = line_start + indent;
             let text_start = self.pos;
-            while let Some(ch) = self.peek() {
-                if is_line_break(ch) {
-                    break;
+            let bytes = self.input.as_bytes();
+            let check_bom = !self.compat_flow;
+            let mut position = text_start;
+            while position < bytes.len() {
+                match bytes[position] {
+                    b'\n' | b'\r' => break,
+                    BOM_FIRST_BYTE
+                        if check_bom
+                            && bytes.get(position + 1) == Some(&0xBB)
+                            && bytes.get(position + 2) == Some(&0xBF) =>
+                    {
+                        self.pos = position;
+                        return Err(self.error_at(
+                            position,
+                            ErrorCode::InvalidBom,
+                            "a byte order mark can only start a document",
+                        ));
+                    }
+                    _ => position += 1,
                 }
-                if ch == '\u{feff}' && !self.compat_flow {
-                    return Err(self.error_at(
-                        self.pos,
-                        ErrorCode::InvalidBom,
-                        "a byte order mark can only start a document",
-                    ));
-                }
-                self.pos += ch.len_utf8();
             }
+            self.pos = position;
             // A content line holds at least the character that made it one.
             text.push_str(&self.input[text_start..self.pos]);
-            let had_break = self.peek().is_some_and(is_line_break);
+            let had_break = matches!(bytes.get(self.pos), Some(b'\n' | b'\r'));
             if had_break {
                 self.consume_line_break();
                 text.push('\n');
@@ -954,9 +1060,9 @@ impl<'a> Scanner<'a> {
     }
 
     pub(super) fn count_spaces(&self, position: usize) -> usize {
-        self.input[position..]
-            .chars()
-            .take_while(|ch| *ch == ' ')
+        self.input.as_bytes()[position..]
+            .iter()
+            .take_while(|&&byte| byte == b' ')
             .count()
     }
 
@@ -1011,31 +1117,55 @@ impl<'a> Scanner<'a> {
         let mut value: Option<String> = None;
         loop {
             let content_start = self.pos;
-            // This loop runs for every character of a plain scalar, so it walks the text once
-            // rather than slicing the input again for each character.
-            let text = &self.input[content_start..];
-            let in_flow = self.flow_level > 0;
-            let mut content_end = self.input.len();
-            for (offset, ch) in text.char_indices() {
-                let position = content_start + offset;
-                if is_line_break(ch)
-                    || (ch == '#' && self.is_blank_before(position))
-                    || (in_flow && matches!(ch, '[' | ']' | '{' | '}' | ','))
-                    || (ch == ':' && self.colon_indicator(position))
-                {
-                    content_end = position;
+            // This loop runs for every byte of a plain scalar, using a 256-byte stop table so
+            // ordinary ASCII and multibyte UTF-8 pass through without per-character decoding.
+            let bytes = self.input.as_bytes();
+            let stop = if self.flow_level > 0 {
+                &PLAIN_STOP_FLOW
+            } else {
+                &PLAIN_STOP_BLOCK
+            };
+            let check_bom = !self.compat_flow;
+            let mut position = content_start;
+            while position < bytes.len() {
+                while position < bytes.len() && !stop[bytes[position] as usize] {
+                    position += 1;
+                }
+                if position >= bytes.len() {
                     break;
                 }
-                if ch == '\u{feff}' && !self.compat_flow {
-                    self.pos = position;
-                    return Err(self.error_at(
-                        position,
-                        ErrorCode::InvalidBom,
-                        "a byte order mark can only start a document",
-                    ));
+                match bytes[position] {
+                    b'\n' | b'\r' | b'[' | b']' | b'{' | b'}' | b',' => break,
+                    b'#' => {
+                        if self.is_blank_before(position) {
+                            break;
+                        }
+                        position += 1;
+                    }
+                    b':' => {
+                        if self.colon_indicator(position) {
+                            break;
+                        }
+                        position += 1;
+                    }
+                    BOM_FIRST_BYTE => {
+                        if check_bom
+                            && bytes.get(position + 1) == Some(&0xBB)
+                            && bytes.get(position + 2) == Some(&0xBF)
+                        {
+                            self.pos = position;
+                            return Err(self.error_at(
+                                position,
+                                ErrorCode::InvalidBom,
+                                "a byte order mark can only start a document",
+                            ));
+                        }
+                        position += 1;
+                    }
+                    _ => position += 1,
                 }
             }
-            self.pos = content_end;
+            self.pos = position;
             if let Some(value) = value.as_mut() {
                 value.push_str(&self.input[content_start..self.pos]);
                 while value.ends_with([' ', '\t']) {
@@ -1358,16 +1488,10 @@ impl<'a> Scanner<'a> {
     }
 
     pub(super) fn trim_trailing_whitespace(&self, start: usize, end: usize) -> usize {
+        let bytes = self.input.as_bytes();
         let mut trimmed = end;
-        while trimmed > start {
-            let Some(ch) = self.input[..trimmed].chars().next_back() else {
-                break;
-            };
-            if ch == ' ' || ch == '\t' {
-                trimmed -= ch.len_utf8();
-            } else {
-                break;
-            }
+        while trimmed > start && matches!(bytes[trimmed - 1], b' ' | b'\t') {
+            trimmed -= 1;
         }
         trimmed
     }

@@ -602,6 +602,37 @@ fn input_limit_is_enforced_before_scanning() {
     assert_eq!(error.kind(), crate::error::ErrorKind::Limit);
 }
 
+#[test]
+fn quoted_scalars_borrow_without_escapes_and_decode_escapes_and_breaks() {
+    let input = "s1: 'plain café'\ns2: 'it''s\n  fine'\nd1: \"plain café\"\nd2: \"a\\nb\\u0041\"\n";
+    let mut scanner = Scanner::new(input, Limits::default()).expect("scanner");
+    let mut scalars = Vec::new();
+    while let Some(token) = scanner.next_token().expect("token") {
+        if let TokenKind::Scalar(scalar) = token.kind {
+            scalars.push((
+                scalar.style,
+                matches!(scalar.value, std::borrow::Cow::Borrowed(_)),
+                scalar.value.into_owned(),
+            ));
+        }
+    }
+    assert_eq!(
+        scalars,
+        vec![
+            (ScalarStyle::SingleQuoted, true, "plain café".to_owned()),
+            (ScalarStyle::SingleQuoted, false, "it's fine".to_owned()),
+            (ScalarStyle::DoubleQuoted, true, "plain café".to_owned()),
+            (ScalarStyle::DoubleQuoted, false, "a\nbA".to_owned()),
+        ]
+    );
+    for bad in ["'unterminated", "\"unterminated", "\"unterminated\\"] {
+        let mut scanner = Scanner::new(bad, Limits::default()).expect("scanner");
+        let mut err = None;
+        while let Ok(Some(_)) = scanner.next_token().map_err(|e| err = Some(e)) {}
+        assert!(err.is_some(), "expected error for {bad:?}");
+    }
+}
+
 fn scan_all(input: &str, fast: bool) -> Result<Vec<Token<'_>>, String> {
     let mut scanner = Scanner::new(input, Limits::default()).map_err(|error| error.to_string())?;
     scanner.fast_continuation = fast;

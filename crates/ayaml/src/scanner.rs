@@ -821,51 +821,38 @@ impl<'a> Scanner<'a> {
         if self.pos == 0 || self.pos == self.after_line_bom {
             return true;
         }
-        let previous = self.input.as_bytes().get(self.pos - 1).copied();
-        if matches!(previous, Some(b'\n' | b'\r')) {
-            return true;
-        }
-        if previous.is_some_and(|byte| byte < 0x80) {
-            return false;
-        }
-        self.input[..self.pos]
-            .chars()
-            .next_back()
-            .is_some_and(is_line_break)
+        matches!(self.input.as_bytes().get(self.pos - 1), Some(b'\n' | b'\r'))
     }
 
     fn indicator_follows(&self, start: usize, offset: usize) -> bool {
-        let after = start + offset;
-        let Some(rest) = self.input.get(after..) else {
+        let Some(&byte) = self.input.as_bytes().get(start + offset) else {
             return true;
         };
         // A flow indicator only ends `-` or `?` inside a flow collection; in
         // block context `-,` and `?]` are plain scalars.
-        match rest.chars().next() {
-            None => true,
-            Some(ch) => is_blank(ch) || (self.flow_level > 0 && matches!(ch, ',' | ']' | '}')),
-        }
+        matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
+            || (self.flow_level > 0 && matches!(byte, b',' | b']' | b'}'))
     }
 
     fn colon_indicator(&self, start: usize) -> bool {
-        let after = start + 1;
-        match self.input.get(after..).and_then(|rest| rest.chars().next()) {
-            None => true,
-            Some(ch) => is_blank(ch) || (self.flow_level > 0 && matches!(ch, ',' | ']' | '}')),
-        }
+        let Some(&byte) = self.input.as_bytes().get(start + 1) else {
+            return true;
+        };
+        matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
+            || (self.flow_level > 0 && matches!(byte, b',' | b']' | b'}'))
     }
 
     fn skip_insignificant(&mut self) -> Result<(), Error> {
-        loop {
-            if self.pos >= self.input.len() {
-                return Ok(());
-            }
-            let Some(ch) = self.peek() else {
-                return Ok(());
-            };
-            match ch {
-                ' ' => self.pos += 1,
-                '\t' => {
+        let bytes = self.input.as_bytes();
+        while self.pos < bytes.len() {
+            match bytes[self.pos] {
+                b' ' => {
+                    self.pos += 1;
+                    while self.pos < bytes.len() && bytes[self.pos] == b' ' {
+                        self.pos += 1;
+                    }
+                }
+                b'\t' => {
                     if self.flow_level == 0 && self.pos >= self.tab_run_end {
                         self.tab_run_end = self.end_of_blanks(self.pos);
                         if self.tab_indents_block_collection(self.pos, self.tab_run_end) {
@@ -888,25 +875,33 @@ impl<'a> Scanner<'a> {
                     }
                     self.pos += 1;
                 }
-                '#' if self.comment_is_legal() => {
-                    while let Some(ch) = self.peek() {
-                        if is_line_break(ch) {
-                            break;
+                b'#' if self.comment_is_legal() => {
+                    let check_bom = !self.compat_flow;
+                    let mut i = self.pos + 1;
+                    while i < bytes.len() {
+                        match bytes[i] {
+                            b'\n' | b'\r' => break,
+                            BOM_FIRST_BYTE
+                                if check_bom
+                                    && bytes.get(i + 1) == Some(&0xBB)
+                                    && bytes.get(i + 2) == Some(&0xBF) =>
+                            {
+                                self.pos = i;
+                                return Err(self.error_at(
+                                    i,
+                                    ErrorCode::InvalidBom,
+                                    "a byte order mark can only start a document",
+                                ));
+                            }
+                            _ => i += 1,
                         }
-                        if ch == '\u{feff}' && !self.compat_flow {
-                            return Err(self.error_at(
-                                self.pos,
-                                ErrorCode::InvalidBom,
-                                "a byte order mark can only start a document",
-                            ));
-                        }
-                        self.pos += ch.len_utf8();
                     }
+                    self.pos = i;
                 }
-                _ if is_line_break(ch) => return Ok(()),
                 _ => return Ok(()),
             }
         }
+        Ok(())
     }
 
     /// Whether the tab here is a line's first character with only blanks before its content.
@@ -969,12 +964,16 @@ impl<'a> Scanner<'a> {
     }
 
     fn consume_line_break(&mut self) {
-        let Some(ch) = self.peek() else {
+        let bytes = self.input.as_bytes();
+        let Some(&byte) = bytes.get(self.pos) else {
             return;
         };
-        self.pos += ch.len_utf8();
-        if ch == '\r' && self.peek() == Some('\n') {
+        if byte == b'\r' && bytes.get(self.pos + 1) == Some(&b'\n') {
+            self.pos += 2;
+        } else if byte == b'\n' || byte == b'\r' {
             self.pos += 1;
+        } else if let Some(ch) = self.peek() {
+            self.pos += ch.len_utf8();
         }
     }
 
