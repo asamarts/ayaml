@@ -9,7 +9,7 @@ description = "Benchmarks and pre-timing semantic validation for ayaml"
 
 [dependencies]
 ayaml = { path = "../ayaml", version = "=0.2.3", features = ["bench-internals"] }
-ayaml-fixtures = { path = "../ayaml-fixtures" }
+ayaml-fixtures = { path = "../ayaml-fixtures", version = "=0.2.3" }
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
