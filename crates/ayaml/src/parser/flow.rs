@@ -126,7 +126,7 @@ impl<'a> Parser<'a> {
             span: start_span,
         })?;
         let key_start = start + 1;
-        let key_end = self.find_flow_value(self.tokens(tokens), key_start);
+        let key_end = self.find_flow_value(tokens, key_start);
         let key = tokens.slice(key_start, key_end);
         if key.is_empty() {
             self.emit(self.null_scalar(Span::empty(start_span.end())))?;
@@ -158,7 +158,7 @@ impl<'a> Parser<'a> {
         let mut index = key_end;
         if index < tokens.len() && matches!(self.token(tokens, index).kind, TokenKind::Value) {
             index += 1;
-            let value_end = self.find_flow_item_end(self.tokens(tokens), index);
+            let value_end = self.find_flow_item_end(tokens, index);
             if index == value_end {
                 let span = Span::empty(self.token(tokens, index - 1).span.end());
                 self.emit(self.null_scalar(span))?;
@@ -250,7 +250,7 @@ impl<'a> Parser<'a> {
         stack: &mut Vec<Cont>,
     ) -> Result<Step<'a>, Error> {
         let value_start = colon + 1;
-        let value_end = self.find_flow_item_end(self.tokens(tokens), value_start);
+        let value_end = self.find_flow_item_end(tokens, value_start);
         if value_start >= tokens.len() || value_start == value_end {
             let span = Span::empty(self.token(tokens, colon).span.end());
             self.emit(self.null_scalar(span))?;
@@ -334,7 +334,7 @@ impl<'a> Parser<'a> {
         if matches!(token.kind, TokenKind::Key) {
             index += 1;
         }
-        let key_end = self.find_flow_value(self.tokens(tokens), index);
+        let key_end = self.find_flow_value(tokens, index);
         let key = tokens.slice(index, key_end);
         state.index = key_end;
         if key.is_empty() {
@@ -417,7 +417,7 @@ impl<'a> Parser<'a> {
             stack.push(Cont::FlowMappingNext(state));
             return Ok(Step::Return(0));
         }
-        let value_end = self.find_flow_item_end(self.tokens(tokens), index);
+        let value_end = self.find_flow_item_end(tokens, index);
         // Only a `]` ends a value before it starts, since the other closers returned above.
         if value_end == index {
             return Err(self.flow_error(
@@ -509,15 +509,22 @@ impl<'a> Parser<'a> {
         clippy::match_same_arms,
         reason = "the arms stay separate to document each representation or state"
     )]
-    #[allow(
-        clippy::unused_self,
-        reason = "the method is part of a uniform grammar or diagnostic surface"
-    )]
-    pub(super) fn find_flow_value(&self, tokens: &[Token<'a>], start: usize) -> usize {
+    pub(super) fn find_flow_value(&self, run: Run, start: usize) -> usize {
+        let tokens = self.tokens(run);
+        let base = self.lines[run.line].start + run.start;
         let mut depth = 0usize;
-        for (index, token) in tokens.iter().enumerate().skip(start) {
-            match token.kind {
-                TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart => depth += 1,
+        let mut index = start;
+        while index < tokens.len() {
+            match tokens[index].kind {
+                TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart => {
+                    if let Some(&close) = self.flow_ends.get(&(base + index))
+                        && close < base + tokens.len()
+                    {
+                        index = close - base + 1;
+                        continue;
+                    }
+                    depth += 1;
+                }
                 TokenKind::FlowSequenceEnd | TokenKind::FlowMappingEnd => {
                     if depth == 0 {
                         return index;
@@ -528,20 +535,28 @@ impl<'a> Parser<'a> {
                 TokenKind::FlowEntry if depth == 0 => return index,
                 _ => {}
             }
+            index += 1;
         }
         tokens.len()
     }
 
     /// Where the flow item from `start` ends, on the same terms as [`Self::find_flow_value`].
-    #[allow(
-        clippy::unused_self,
-        reason = "the method is part of a uniform grammar or diagnostic surface"
-    )]
-    pub(super) fn find_flow_item_end(&self, tokens: &[Token<'a>], start: usize) -> usize {
+    pub(super) fn find_flow_item_end(&self, run: Run, start: usize) -> usize {
+        let tokens = self.tokens(run);
+        let base = self.lines[run.line].start + run.start;
         let mut depth = 0usize;
-        for (index, token) in tokens.iter().enumerate().skip(start) {
-            match token.kind {
-                TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart => depth += 1,
+        let mut index = start;
+        while index < tokens.len() {
+            match tokens[index].kind {
+                TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart => {
+                    if let Some(&close) = self.flow_ends.get(&(base + index))
+                        && close < base + tokens.len()
+                    {
+                        index = close - base + 1;
+                        continue;
+                    }
+                    depth += 1;
+                }
                 TokenKind::FlowSequenceEnd | TokenKind::FlowMappingEnd => {
                     if depth == 0 {
                         return index;
@@ -551,6 +566,7 @@ impl<'a> Parser<'a> {
                 TokenKind::FlowEntry if depth == 0 => return index,
                 _ => {}
             }
+            index += 1;
         }
         tokens.len()
     }
