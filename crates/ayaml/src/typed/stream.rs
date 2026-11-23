@@ -27,8 +27,9 @@ use serde::Deserializer;
 use serde::de::{Deserialize, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
 use super::{
-    Builder, Node, NodeDeserializer, NodeOptions, SeenKey, check_consumed, collection_drops,
-    inside_key, node_key_text, parse_document, plain_scalar, with_span,
+    Builder, Node, NodeDeserializer, NodeOptions, SeenKey, SeenNodeKeys, check_consumed,
+    collection_drops, inside_key, node_key_text, parse_document, plain_scalar, scalar_key_text,
+    with_span,
 };
 use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::Event;
@@ -140,8 +141,10 @@ enum Open<'de> {
         read: usize,
     },
     Mapping {
-        /// The keys of the entries read so far, where a duplicate is refused.
+        /// The scalar keys of the entries read so far, where a duplicate is refused.
         seen: HashSet<SeenKey<'de>>,
+        /// Non-scalar keys of the entries read so far, moved in by cached node hash without cloning.
+        seen_nodes: Option<Box<SeenNodeKeys<'de>>>,
         /// The key whose value is still to be read.
         key: Option<Node<'de>>,
         /// The entries whose keys a visitor has asked for.
@@ -392,6 +395,7 @@ impl<'de> Stream<'de> {
         } else {
             Open::Mapping {
                 seen: HashSet::new(),
+                seen_nodes: None,
                 key: None,
                 read: 0,
             }
@@ -522,7 +526,7 @@ impl<'de> Stream<'de> {
     fn key(&mut self) -> Result<Option<Node<'de>>, Error> {
         if let Some(key) = self.key_slot().and_then(Option::take) {
             self.skip()?;
-            self.entered(&key)?;
+            self.entered(key)?;
         }
         if self.entry()?.is_none() {
             return Ok(None);
@@ -532,22 +536,33 @@ impl<'de> Stream<'de> {
 
     /// Record a complete entry of the innermost open mapping. The tree's builder refuses a
     /// duplicate key once the entry's value is built, and this does at the same point.
-    fn entered(&mut self, key: &Node<'de>) -> Result<(), Error> {
+    fn entered(&mut self, key: Node<'de>) -> Result<(), Error> {
         if self.builder.options.allow_duplicates || self.fault.is_some() {
             return Ok(());
         }
-        let Some(Open::Mapping { seen, .. }) = self.open.last_mut() else {
+        let Some(Open::Mapping {
+            seen, seen_nodes, ..
+        }) = self.open.last_mut()
+        else {
             return Ok(());
         };
-        if seen.insert(SeenKey::new(key)) {
-            return Ok(());
-        }
+        let duplicate = if let Some(text) = scalar_key_text(&key) {
+            if seen.insert(text) {
+                return Ok(());
+            }
+            key
+        } else {
+            match seen_nodes.get_or_insert_with(Box::default).insert(key) {
+                Ok(()) => return Ok(()),
+                Err(duplicate) => duplicate,
+            }
+        };
         Err(self.faulted(
             Error::new(
                 ErrorKind::DuplicateKey,
-                format!("duplicate mapping key: {}", node_key_text(key)),
+                format!("duplicate mapping key: {}", node_key_text(&duplicate)),
             )
-            .with_span(key.span),
+            .with_span(duplicate.span),
         ))
     }
 
@@ -846,7 +861,7 @@ impl<'de> MapAccess<'de> for MappingAccess<'de, '_> {
             .stream
             .read_with(seed)
             .map_err(|error| inside_key(with_span(error, span), &key));
-        self.stream.entered(&key)?;
+        self.stream.entered(key)?;
         value
     }
 

@@ -37,7 +37,7 @@ use crate::value::Value;
 mod key_text;
 mod stream;
 
-use key_text::{node_key_text, scalar_key_text};
+use key_text::{SeenNodeIndices, SeenNodeKeys, node_key_text, scalar_key_text};
 
 #[derive(Debug)]
 struct Node<'de> {
@@ -474,48 +474,10 @@ struct Built<'de> {
     height: usize,
 }
 
-/// A key already seen in an open mapping. A scalar key is compared by its text alone, so `1` and
-/// `"1"` are one key to a target whose key type would keep only one of them; any other key keeps
-/// its node equality.
-#[derive(Clone, Debug)]
-enum SeenKey<'de> {
-    Scalar(Cow<'de, str>),
-    /// Boxed: nearly every key is a scalar, and a node here would make each slot of the set
-    /// as large as a node, more than three times a scalar key's.
-    Node(Box<Node<'de>>),
-}
-
-impl PartialEq for SeenKey<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Scalar(left), Self::Scalar(right)) => left == right,
-            (Self::Node(left), Self::Node(right)) => left == right,
-            _ => false,
-        }
-    }
-}
-
-impl Eq for SeenKey<'_> {}
-
-impl Hash for SeenKey<'_> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            Self::Scalar(text) => text.hash(state),
-            Self::Node(node) => node.hash(state),
-        }
-    }
-}
-
-impl<'de> SeenKey<'de> {
-    fn new(node: &Node<'de>) -> Self {
-        if let Some(text) = scalar_key_text(node) {
-            Self::Scalar(text)
-        } else {
-            node.cached_hash();
-            Self::Node(Box::new(node.clone()))
-        }
-    }
-}
+/// A scalar key already seen in an open mapping, compared by its text alone so `1` and `"1"` are
+/// one key to a target whose key type would keep only one of them. Non-scalar (collection) keys
+/// are indexed separately by their cached node hash without cloning.
+type SeenKey<'de> = Cow<'de, str>;
 
 /// An open collection. The builder keeps these on an explicit stack, so
 /// nesting depth costs heap, not native stack. The mapping frame is the larger variant because it
@@ -539,6 +501,8 @@ enum Frame<'de> {
         span: Span,
         entries: Vec<(Node<'de>, Node<'de>)>,
         seen: HashSet<SeenKey<'de>>,
+        /// Non-scalar keys indexed by cached node hash, referring into `entries` without cloning.
+        seen_nodes: Option<Box<SeenNodeIndices>>,
         key: Option<Node<'de>>,
         size: usize,
         height: usize,
@@ -803,6 +767,7 @@ impl<'de> Builder<'de> {
                     span,
                     entries: Vec::with_capacity(capacity),
                     seen: HashSet::new(),
+                    seen_nodes: None,
                     key: None,
                     size: self.limits.node_cost_bytes,
                     height: 0,
@@ -866,6 +831,7 @@ impl<'de> Builder<'de> {
             Some(Frame::Mapping {
                 entries,
                 seen,
+                seen_nodes,
                 key,
                 size,
                 height,
@@ -877,15 +843,20 @@ impl<'de> Builder<'de> {
                     None => *key = Some(built.node),
                     Some(entry_key) => {
                         if !self.options.allow_duplicates {
-                            let seen_key = SeenKey::new(&entry_key);
-                            if seen.contains(&seen_key) {
+                            let duplicate = if let Some(text) = scalar_key_text(&entry_key) {
+                                !seen.insert(text)
+                            } else {
+                                seen_nodes
+                                    .get_or_insert_with(Box::default)
+                                    .insert_is_duplicate(entries, &entry_key, entries.len())
+                            };
+                            if duplicate {
                                 return Err(Error::new(
                                     ErrorKind::DuplicateKey,
                                     format!("duplicate mapping key: {}", node_key_text(&entry_key)),
                                 )
                                 .with_span(entry_key.span));
                             }
-                            seen.insert(seen_key);
                         }
                         entries.push((entry_key, built.node));
                     }
