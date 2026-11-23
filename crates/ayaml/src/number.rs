@@ -555,4 +555,184 @@ mod tests {
         assert_eq!(Number::from(3.5_f64).as_f64(), Some(3.5));
         assert_eq!(Number::from(3.5_f64).as_i64(), None);
     }
+
+    #[test]
+    fn numeric_boundaries_preserve_canonical_eq_ord_and_hash() {
+        let ints = [
+            Number::from_i128(i128::MIN),
+            Number::from_i128(i128::from(i64::MIN) - 1),
+            Number::from_i64(i64::MIN),
+            Number::from_i64(-1),
+            Number::from_i64(0),
+            Number::from_u64(0),
+            Number::from_i128(0),
+            Number::from_u128(0),
+            Number::from_i64(i64::MAX),
+            Number::from_u64(u64::MAX),
+            Number::from_u128(u128::from(u64::MAX) + 1),
+            Number::from_i128(i128::MAX),
+            Number::from_u128(u128::MAX),
+        ];
+        for &a in &ints {
+            for &b in &ints {
+                assert_eq!(a == b, a.cmp(&b) == std::cmp::Ordering::Equal);
+                assert_eq!(a.cmp(&b), b.cmp(&a).reverse());
+                if a == b {
+                    assert_eq!(hash(a), hash(b));
+                }
+            }
+        }
+        let floats = [
+            Number::from_f64(f64::NEG_INFINITY),
+            Number::from_f64(-1.0),
+            Number::from_f64(-0.0),
+            Number::from_f64(0.0),
+            Number::from_f64(1.0),
+            Number::from_f64(f64::INFINITY),
+            Number::from_f64(f64::NAN),
+            Number::from_f64(f64::from_bits(0x7ff8_0000_0000_0001)),
+            Number::from_f64(f64::from_bits(0xfff8_0000_0000_0002)),
+        ];
+        for &a in &floats {
+            for &b in &floats {
+                assert_eq!(a == b, a.cmp(&b) == std::cmp::Ordering::Equal);
+                assert_eq!(a.cmp(&b), b.cmp(&a).reverse());
+                if a == b {
+                    assert_eq!(hash(a), hash(b));
+                }
+            }
+            for &int in &ints {
+                assert_ne!(a, int);
+                assert_eq!(int.cmp(&a), std::cmp::Ordering::Less);
+            }
+        }
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use std::cmp::Ordering;
+    use std::hash::{Hash, Hasher};
+
+    use super::Number;
+
+    /// Records the exact byte stream fed to `Hash::hash`, proving equality of hash feeds
+    /// across EVERY possible `Hasher` implementation without bit-blasted multiplication.
+    struct ProofHasher {
+        bytes: [u8; 24],
+        len: usize,
+    }
+
+    impl ProofHasher {
+        const fn new() -> Self {
+            Self {
+                bytes: [0; 24],
+                len: 0,
+            }
+        }
+    }
+
+    impl Hasher for ProofHasher {
+        fn finish(&self) -> u64 {
+            0
+        }
+
+        fn write(&mut self, data: &[u8]) {
+            let mut i = 0;
+            while i < data.len() {
+                assert!(self.len < self.bytes.len());
+                self.bytes[self.len] = data[i];
+                self.len += 1;
+                i += 1;
+            }
+        }
+    }
+
+    fn proof_hash(number: Number) -> ([u8; 24], usize) {
+        let mut h = ProofHasher::new();
+        number.hash(&mut h);
+        (h.bytes, h.len)
+    }
+
+    #[kani::proof]
+    fn verify_integer_conversions_canonical() {
+        let s64: i64 = kani::any();
+        let n_s64 = Number::from_i64(s64);
+        assert_eq!(n_s64.as_i64(), Some(s64));
+        assert_eq!(n_s64.as_i128(), Some(i128::from(s64)));
+        assert_eq!(n_s64, Number::from_i128(i128::from(s64)));
+        assert!(!n_s64.is_wide());
+        if s64 >= 0 {
+            let u = s64 as u64;
+            assert_eq!(n_s64, Number::from_u64(u));
+            assert_eq!(n_s64.as_u64(), Some(u));
+            assert_eq!(proof_hash(n_s64), proof_hash(Number::from_u64(u)));
+        } else {
+            assert_eq!(n_s64.as_u64(), None);
+            assert_eq!(n_s64.as_u128(), None);
+        }
+
+        let u128_val: u128 = kani::any();
+        let n_u128 = Number::from_u128(u128_val);
+        assert_eq!(n_u128.as_u128(), Some(u128_val));
+        assert_eq!(n_u128.is_wide(), u128_val > u128::from(u64::MAX));
+        if let Ok(u) = u64::try_from(u128_val) {
+            assert_eq!(n_u128, Number::from_u64(u));
+            assert_eq!(n_u128.as_u64(), Some(u));
+        } else {
+            assert_eq!(n_u128.as_u64(), None);
+        }
+
+        let i128_val: i128 = kani::any();
+        let n_i128 = Number::from_i128(i128_val);
+        assert_eq!(n_i128.as_i128(), Some(i128_val));
+        assert_eq!(
+            n_i128.is_wide(),
+            i128_val < i128::from(i64::MIN) || i128_val > i128::from(u64::MAX)
+        );
+        if i128_val >= 0 {
+            let as_u = i128_val as u128;
+            assert_eq!(n_i128, Number::from_u128(as_u));
+            assert_eq!(proof_hash(n_i128), proof_hash(Number::from_u128(as_u)));
+        }
+    }
+
+    #[kani::proof]
+    fn verify_eq_ord_hash_coherence_integers() {
+        let a = if kani::any() {
+            Number::from_i128(kani::any())
+        } else {
+            Number::from_u128(kani::any())
+        };
+        let b = if kani::any() {
+            Number::from_i128(kani::any())
+        } else {
+            Number::from_u128(kani::any())
+        };
+        assert_eq!(a == b, a.cmp(&b) == Ordering::Equal);
+        assert_eq!(a.cmp(&b), b.cmp(&a).reverse());
+        if a == b {
+            assert_eq!(proof_hash(a), proof_hash(b));
+        }
+    }
+
+    #[kani::proof]
+    fn verify_eq_ord_hash_coherence_floats() {
+        let bits_a: u64 = kani::any();
+        let bits_b: u64 = kani::any();
+        let a = Number::from_f64(f64::from_bits(bits_a));
+        let b = Number::from_f64(f64::from_bits(bits_b));
+
+        assert_eq!(a, a);
+        assert_eq!(a == b, b == a);
+        assert_eq!(a == b, a.cmp(&b) == Ordering::Equal);
+        assert_eq!(a.cmp(&b), b.cmp(&a).reverse());
+        if a == b {
+            assert_eq!(proof_hash(a), proof_hash(b));
+        }
+
+        let int_val = Number::from_i64(kani::any());
+        assert_ne!(a, int_val);
+        assert_eq!(int_val.cmp(&a), Ordering::Less);
+    }
 }

@@ -55,7 +55,10 @@ parser, so bound them on a shared machine:
 ```
 
 Don't run an experiment that disables or zeroes an alias, depth, or expansion limit
-without a memory bound. It can turn those tests into real memory exhaustion.
+without a memory bound. It can turn those tests into real memory exhaustion. Similarly,
+always run Kani model checking sequentially through `python3 tools/run_kani.py --package ayaml --all-features`
+rather than bare `cargo kani`, so every CBMC harness is bounded by `RLIMIT_AS`, a peak-RSS
+budget, and a per-harness process-group timeout.
 
 Two bounds also apply on their own:
 

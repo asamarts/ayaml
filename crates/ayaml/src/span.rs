@@ -249,4 +249,80 @@ mod tests {
         assert!(span.is_empty());
         assert_eq!(span.len(), 0);
     }
+
+    #[test]
+    fn inverted_and_max_spans_are_overflow_free() {
+        let inverted = Span::new(10, 4);
+        assert_eq!(inverted.len(), 0);
+        assert!(inverted.is_empty());
+        assert!(!inverted.contains(4));
+        assert!(!inverted.contains(7));
+        assert!(!inverted.contains(10));
+        assert_eq!(inverted.slice("0123456789abcdef"), None);
+
+        let max_span = Span::new(usize::MAX, usize::MAX);
+        assert_eq!(max_span.len(), 0);
+        assert!(max_span.is_empty());
+        assert!(!max_span.contains(usize::MAX));
+        assert_eq!(max_span.slice("abc"), None);
+
+        let text = "aé🚀";
+        assert_eq!(Span::new(0, 1).slice(text), Some("a"));
+        assert_eq!(Span::new(1, 3).slice(text), Some("é"));
+        assert_eq!(Span::new(3, 7).slice(text), Some("🚀"));
+        assert_eq!(Span::new(3, 5).slice(text), None);
+        assert_eq!(Span::new(0, 8).slice(text), None);
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::{Location, Position, Span};
+
+    #[kani::proof]
+    fn verify_span_invariants_and_slice_safety() {
+        let start: usize = kani::any();
+        let end: usize = kani::any();
+        let index: usize = kani::any();
+        let span = Span::new(start, end);
+
+        assert_eq!(span.start(), start);
+        assert_eq!(span.end(), end);
+        assert_eq!(Span::from(span.range()), span);
+        assert_eq!(span.is_empty(), start >= end);
+        assert_eq!(span.len(), end.saturating_sub(start));
+        assert_eq!(span.contains(index), index >= start && index < end);
+        if span.is_empty() {
+            assert!(!span.contains(index));
+        }
+
+        // Fixed UTF-8 sample exercising 1-, 2-, 3-, and 4-byte UTF-8 sequences.
+        let sample = "aé€🚀";
+        match span.slice(sample) {
+            Some(sub) => {
+                assert!(start <= end && end <= sample.len());
+                assert!(sample.is_char_boundary(start));
+                assert!(sample.is_char_boundary(end));
+                assert_eq!(sub.len(), span.len());
+            }
+            None => {
+                assert!(
+                    start > end
+                        || end > sample.len()
+                        || !sample.is_char_boundary(start)
+                        || !sample.is_char_boundary(end)
+                );
+            }
+        }
+    }
+
+    #[kani::proof]
+    fn verify_location_from_position_saturates() {
+        let line: usize = kani::any();
+        let column: usize = kani::any();
+        let loc = Location::from(Position::new(line, column));
+        assert_eq!(loc.line(), line.saturating_add(1));
+        assert_eq!(loc.column(), column.saturating_add(1));
+        assert!(loc.line() >= 1 && loc.column() >= 1);
+    }
 }

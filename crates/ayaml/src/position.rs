@@ -498,12 +498,17 @@ impl<'a> LineIndex<'a> {
         let column = match encoding {
             ColumnEncoding::Utf8 => offset - start,
             ColumnEncoding::Scalar | ColumnEncoding::Utf16 => {
-                if !self.input.is_char_boundary(offset) {
+                let Some(before) = self.input.get(start..offset) else {
                     return Err(PositionError::InvalidUtf8Boundary);
-                }
-                let before = &self.input[start..offset];
+                };
                 // The standard count of characters reads whole words of bytes at a time.
+                // Under Kani, use `characters_begun` (separately proven equivalent to
+                // `chars().count()` in `verify_utf8_block_counters`) to avoid unwinding stdlib's
+                // pointer-aligned SWAR loop.
+                #[cfg(not(kani))]
                 let scalars = before.chars().count();
+                #[cfg(kani)]
+                let scalars = characters_begun(before.as_bytes());
                 if encoding == ColumnEncoding::Utf16 {
                     scalars + four_byte_characters(before.as_bytes())
                 } else {
@@ -537,7 +542,9 @@ impl<'a> LineIndex<'a> {
         }
         let start = self.column_start(position.line);
         let end = self.line_end(position.line);
-        let content = &self.input[start..end];
+        let Some(content) = self.input.get(start..end) else {
+            return Err(PositionError::OutOfBounds);
+        };
         if position.column > content.len() {
             return Err(PositionError::OutOfBounds);
         }
@@ -566,7 +573,10 @@ impl<'a> LineIndex<'a> {
         while bytes.get(at).is_some_and(|&byte| is_continuation(byte)) {
             at += 1;
         }
-        for (offset, character) in content[at..].char_indices() {
+        let Some(tail) = content.get(at..) else {
+            return Err(PositionError::OutOfBounds);
+        };
+        for (offset, character) in tail.char_indices() {
             if column == position.column {
                 return Ok(start + at + offset);
             }
@@ -852,6 +862,218 @@ mod tests {
                 checked_compat.marker(input, at),
                 "{at}"
             );
+        }
+    }
+
+    #[test]
+    fn line_index_and_block_counters_cover_unicode_and_error_boundaries() {
+        use super::{
+            ColumnEncoding, LineIndex, Position, PositionError, characters_begun,
+            four_byte_characters,
+        };
+
+        let sample = "\u{feff}aé€🚀\r\nb\nc";
+        assert_eq!(characters_begun(sample.as_bytes()), sample.chars().count());
+        assert_eq!(
+            characters_begun(sample.as_bytes()) + four_byte_characters(sample.as_bytes()),
+            sample.encode_utf16().count()
+        );
+
+        let idx = LineIndex::new(sample);
+        assert_eq!(idx.line_count(), 3);
+        let cr = sample.find('\r').unwrap();
+        let rocket = sample.find('🚀').unwrap();
+        for encoding in [
+            ColumnEncoding::Utf8,
+            ColumnEncoding::Scalar,
+            ColumnEncoding::Utf16,
+        ] {
+            assert_eq!(idx.to_position(0, encoding), Ok(Position::new(0, 0)));
+            assert_eq!(idx.to_offset(Position::new(0, 0), encoding), Ok(3));
+            assert_eq!(
+                idx.to_position(cr + 1, encoding),
+                Err(PositionError::InsideCrLf)
+            );
+            assert_eq!(
+                idx.to_position(sample.len() + 1, encoding),
+                Err(PositionError::OutOfBounds)
+            );
+            assert_eq!(
+                idx.to_offset(Position::new(3, 0), encoding),
+                Err(PositionError::OutOfBounds)
+            );
+        }
+        assert_eq!(
+            idx.to_position(rocket + 1, ColumnEncoding::Scalar),
+            Err(PositionError::InvalidUtf8Boundary)
+        );
+        assert_eq!(
+            idx.to_position(rocket + 1, ColumnEncoding::Utf16),
+            Err(PositionError::InvalidUtf8Boundary)
+        );
+        let rocket_utf16 = idx.to_position(rocket, ColumnEncoding::Utf16).unwrap();
+        assert_eq!(
+            idx.to_offset(
+                Position::new(rocket_utf16.line, rocket_utf16.column + 1),
+                ColumnEncoding::Utf16
+            ),
+            Err(PositionError::SplitSurrogate)
+        );
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::{
+        ColumnEncoding, LineIndex, Position, PositionError, characters_begun, four_byte_characters,
+        lines_at_most,
+    };
+
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn verify_lines_at_most_bounds() {
+        let buf: [u8; 8] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= buf.len());
+        let slice = &buf[..len];
+
+        let mut breaks = 0_usize;
+        let mut i = 0;
+        while i < len {
+            if slice[i] == b'\n' || slice[i] == b'\r' {
+                breaks += 1;
+            }
+            i += 1;
+        }
+        let est = lines_at_most(slice);
+        assert_eq!(est, 1 + breaks);
+        assert!(est >= 1 && est <= len + 1);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(18)]
+    fn verify_utf8_block_counters() {
+        // Symbolically check ALL valid Unicode scalar values across 1..=4 UTF-8 byte widths.
+        let mut buf = [0_u8; 16];
+        let mut byte_len = 0_usize;
+        let mut expected_scalars = 0_usize;
+        let mut expected_utf16 = 0_usize;
+
+        let count: usize = kani::any();
+        kani::assume(count <= 4);
+        let mut i = 0;
+        while i < count {
+            let ch: char = kani::any();
+            let encoded = ch.encode_utf8(&mut buf[byte_len..]);
+            byte_len += encoded.len();
+            expected_scalars += 1;
+            expected_utf16 += ch.len_utf16();
+            i += 1;
+        }
+
+        let slice = &buf[..byte_len];
+        let scalars = characters_begun(slice);
+        let utf16 = scalars + four_byte_characters(slice);
+        assert_eq!(scalars, expected_scalars);
+        assert_eq!(utf16, expected_utf16);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn verify_line_index_to_position_and_to_offset_roundtrip() {
+        // Exact byte layout of "\u{feff}aé🚀\r\nb" (len 13):
+        //   0..3 = BOM, 3 = 'a', 4..6 = 'é', 6..10 = '🚀', 10 = '\r', 11 = '\n', 12 = 'b', 13 = EOF
+        let sample = "\u{feff}aé🚀\r\nb";
+        let index = LineIndex {
+            input: sample,
+            starts: vec![0, 12],
+            first_column: 3,
+        };
+        let encoding = match kani::any::<u8>() % 3 {
+            0 => ColumnEncoding::Utf8,
+            1 => ColumnEncoding::Scalar,
+            _ => ColumnEncoding::Utf16,
+        };
+        let offset: usize = kani::any();
+        kani::assume(offset <= 15);
+
+        let actual = index.to_position(offset, encoding);
+        let expected = match offset {
+            0..=3 => Ok(Position::new(0, 0)),
+            4 => Ok(Position::new(0, 1)),
+            5 => match encoding {
+                ColumnEncoding::Utf8 => Ok(Position::new(0, 2)),
+                ColumnEncoding::Scalar | ColumnEncoding::Utf16 => {
+                    Err(PositionError::InvalidUtf8Boundary)
+                }
+            },
+            6 => Ok(Position::new(
+                0,
+                match encoding {
+                    ColumnEncoding::Utf8 => 3,
+                    ColumnEncoding::Scalar | ColumnEncoding::Utf16 => 2,
+                },
+            )),
+            7..=9 => match encoding {
+                ColumnEncoding::Utf8 => Ok(Position::new(0, offset - 3)),
+                ColumnEncoding::Scalar | ColumnEncoding::Utf16 => {
+                    Err(PositionError::InvalidUtf8Boundary)
+                }
+            },
+            10 => Ok(Position::new(
+                0,
+                match encoding {
+                    ColumnEncoding::Utf8 => 7,
+                    ColumnEncoding::Scalar => 3,
+                    ColumnEncoding::Utf16 => 4,
+                },
+            )),
+            11 => Err(PositionError::InsideCrLf),
+            12 => Ok(Position::new(1, 0)),
+            13 => Ok(Position::new(1, 1)),
+            _ => Err(PositionError::OutOfBounds),
+        };
+        assert_eq!(actual, expected);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn verify_line_index_to_offset_bounds_and_surrogates() {
+        let sample = "\u{feff}aé🚀\r\nb";
+        let index = LineIndex {
+            input: sample,
+            starts: vec![0, 12],
+            first_column: 3,
+        };
+        let encoding = match kani::any::<u8>() % 3 {
+            0 => ColumnEncoding::Utf8,
+            1 => ColumnEncoding::Scalar,
+            _ => ColumnEncoding::Utf16,
+        };
+        let col: usize = kani::any();
+        kani::assume(col <= 8);
+
+        // Concrete outer loop over lines 0..=2 keeps slice start/end concrete per iteration so
+        // CBMC constant-folds `bytes.len() < BLOCK`, cutting peak solver memory dramatically
+        // while still covering every `(line, col, encoding)` triple exhaustively.
+        for line in 0..=2_usize {
+            let actual = index.to_offset(Position::new(line, col), encoding);
+            let expected = match (line, encoding, col) {
+                (0, ColumnEncoding::Utf8, 0..=7) => Ok(3 + col),
+                (0, ColumnEncoding::Scalar, 0) => Ok(3),
+                (0, ColumnEncoding::Scalar, 1) => Ok(4),
+                (0, ColumnEncoding::Scalar, 2) => Ok(6),
+                (0, ColumnEncoding::Scalar, 3) => Ok(10),
+                (0, ColumnEncoding::Utf16, 0) => Ok(3),
+                (0, ColumnEncoding::Utf16, 1) => Ok(4),
+                (0, ColumnEncoding::Utf16, 2) => Ok(6),
+                (0, ColumnEncoding::Utf16, 3) => Err(PositionError::SplitSurrogate),
+                (0, ColumnEncoding::Utf16, 4) => Ok(10),
+                (1, _, 0) => Ok(12),
+                (1, _, 1) => Ok(13),
+                _ => Err(PositionError::OutOfBounds),
+            };
+            assert_eq!(actual, expected);
         }
     }
 }
