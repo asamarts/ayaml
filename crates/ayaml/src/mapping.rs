@@ -112,6 +112,11 @@ impl Mapping {
         self.map.capacity()
     }
 
+    /// Position of `key` in insertion order, if present.
+    pub(crate) fn get_index_of(&self, key: &Value) -> Option<usize> {
+        self.map.get_index_of(key)
+    }
+
     /// Number of entries.
     #[must_use]
     pub fn len(&self) -> usize {
