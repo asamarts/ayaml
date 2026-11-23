@@ -11,36 +11,38 @@
 //! value. `from_value` continues to use the owned value deserializer.
 
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
-use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde::de::{DeserializeSeed, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor};
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
+#[cfg(feature = "libyaml-compat")]
+use serde::Deserializer;
+use serde::de::DeserializeSeed;
+#[cfg(feature = "libyaml-compat")]
+use serde::de::Visitor;
 
 use crate::composer::Anchors;
 use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::{Anchor, Event, ScalarStyle};
 use crate::limits::{AliasBudget, Limits};
 use crate::number::Number;
-use crate::parser::{self, EventConsumer};
-use crate::resolver::{
-    float_from_text, parse_bool, parse_int, plain_resolves_to_string, resolve_scalar,
-};
+use crate::parser;
+use crate::resolver::{plain_resolves_to_string, resolve_scalar};
 use crate::span::{Location, Span};
 use crate::tag::Tag;
 use crate::value::Value;
 
 mod key_text;
+mod node_de;
 mod stream;
 
 use key_text::{SeenNodeIndices, SeenNodeKeys, node_key_text, scalar_key_text};
+use node_de::{NodeDeserializer, check_consumed, inside_key, with_span};
 
 #[derive(Debug)]
-struct Node<'de> {
+pub(crate) struct Node<'de> {
     kind: NodeKind<'de>,
     text: Text<'de>,
     span: Span,
@@ -323,12 +325,25 @@ pub(crate) fn from_events_seed<'de, T: DeserializeSeed<'de>>(
     seed.deserialize(NodeDeserializer::new(&node))
 }
 
+/// Decode one document from an already-collected event slice with a seed whose lifetime is
+/// independent of the input, preserving per-node source spans without materializing a `Value`.
+pub(crate) fn from_events_seed_owned<'a, 'de, T: DeserializeSeed<'de>>(
+    events: Vec<Event<'a>>,
+    input_len: usize,
+    limits: &Limits,
+    budget: &mut AliasBudget,
+    seed: T,
+) -> Result<T::Value, Error> {
+    let node = build(events, input_len, limits, NodeOptions::default(), budget)?;
+    seed.deserialize(NodeDeserializer::owned(&node))
+}
+
 /// Inputs above this size are read from their events, and built as a tree only to report an
-/// error. Smaller reads build the tree with the eager builder, whose lower per-event overhead
-/// matters more to them than the tree's size or the spare capacity of one small vector.
+/// error. Smaller reads build the tree directly from the parser without collecting an intermediate
+/// event vector.
 const SMALL_INPUT_BYTES: usize = 4 * 1024;
 
-/// Parse one document and build its node tree.
+/// Parse one document and build its node tree directly as events arrive.
 fn parse_document<'de>(
     input: &'de str,
     limits: &Limits,
@@ -341,48 +356,8 @@ fn parse_document<'de>(
             .with_span(Span::empty(0))
             .with_location(Location::new(1, 1))
     })?;
-    // A larger input is built as its events arrive, which is the answer for every size.
-    if input.len() > SMALL_INPUT_BYTES {
-        return parse_streaming(input, limits, options);
-    }
-    let built = parser::parse_document_events(input, limits, options.compat_flow).map(|events| {
-        build(
-            events,
-            input.len(),
-            limits,
-            options,
-            &mut AliasBudget::default(),
-        )
-    });
-    match built {
-        Ok(built) => built,
-        // A small input is parsed whole and then built, so a syntax error would come before an
-        // earlier problem in what its events build, such as a duplicate key. A larger input is
-        // built as it is parsed and reports whichever comes first. Reading the input again that
-        // way gives a small input the same answer, at a cost that only a refused input pays.
-        Err(error) => Err(parse_streaming(input, limits, options)
-            .err()
-            .unwrap_or(error)),
-    }
-}
-
-/// Parse one document, building its node tree as the events arrive.
-fn parse_streaming<'de>(
-    input: &'de str,
-    limits: &Limits,
-    options: NodeOptions,
-) -> Result<Node<'de>, Error> {
-    let result = Rc::new(RefCell::new(None));
-    let builder = Builder::streaming(input.len(), limits, options, Some(Rc::clone(&result)));
-    parser::parse_document_with_consumer(input, limits, options.compat_flow, Box::new(builder))?;
-    result.borrow_mut().take().ok_or_else(|| {
-        Error::coded(
-            ErrorKind::Composition,
-            ErrorCode::MalformedEventStream,
-            "the event stream ended without a document",
-        )
-        .with_span(Span::empty(input.len()))
-    })
+    let builder = Builder::streaming(input.len(), limits, options);
+    parser::parse_document_typed(input, limits, options.compat_flow, builder)
 }
 
 fn build<'de>(
@@ -403,7 +378,6 @@ fn build<'de>(
         document: None,
         root: None,
         in_document: false,
-        result: None,
         pending_capacity: None,
         base: 0,
     };
@@ -412,7 +386,7 @@ fn build<'de>(
     result
 }
 
-struct Builder<'de> {
+pub(crate) struct Builder<'de> {
     /// A document's events, where they were collected before the builder was made.
     events: Option<std::vec::IntoIter<Event<'de>>>,
     limits: Limits,
@@ -424,21 +398,15 @@ struct Builder<'de> {
     document: Option<Node<'de>>,
     root: Option<Node<'de>>,
     in_document: bool,
-    result: Option<Rc<RefCell<Option<Node<'de>>>>>,
     pending_capacity: Option<usize>,
     /// The collections open around what this builder builds, which count toward its depth.
     /// `stream` reads those itself and builds only the nodes inside them that it keeps whole.
     base: usize,
 }
 
-impl<'de> Builder<'de> {
-    /// A builder that is fed events. It leaves a document in `result`, if it has one.
-    fn streaming(
-        input_len: usize,
-        limits: &Limits,
-        options: NodeOptions,
-        result: Option<Rc<RefCell<Option<Node<'de>>>>>,
-    ) -> Self {
+impl Builder<'_> {
+    /// A builder that is fed events directly from the parser.
+    pub(super) fn streaming(input_len: usize, limits: &Limits, options: NodeOptions) -> Self {
         Self {
             events: None,
             limits: limits.clone(),
@@ -450,10 +418,14 @@ impl<'de> Builder<'de> {
             document: None,
             root: None,
             in_document: false,
-            result,
             pending_capacity: None,
             base: 0,
         }
+    }
+
+    pub(crate) fn reserve_collection(&mut self, entries: usize) {
+        // A collection with more entries than the limit is refused, so it needs no more room.
+        self.pending_capacity = Some(entries.min(self.limits.max_collection_entries));
     }
 }
 
@@ -509,22 +481,13 @@ enum Frame<'de> {
     },
 }
 
-impl<'de> EventConsumer<'de> for Builder<'de> {
-    fn event(&mut self, event: Event<'de>) -> Result<(), Error> {
+impl<'de> Builder<'de> {
+    pub(crate) fn push_event(&mut self, event: Event<'de>) -> Result<(), Error> {
         self.push(event)
     }
 
-    fn reserve_collection(&mut self, entries: usize) {
-        // A collection with more entries than the limit is refused, so it needs no more room.
-        self.pending_capacity = Some(entries.min(self.limits.max_collection_entries));
-    }
-
-    fn finish(&mut self) -> Result<(), Error> {
-        let node = self.finish_document()?;
-        if let Some(result) = &self.result {
-            *result.borrow_mut() = Some(node);
-        }
-        Ok(())
+    pub(crate) fn finish_document_node(&mut self) -> Result<Node<'de>, Error> {
+        self.finish_document()
     }
 }
 
@@ -1192,759 +1155,6 @@ fn estimate_size(node: &Node<'_>, node_cost: usize) -> usize {
             .saturating_add(tag.text_len())
             .saturating_add(estimate_size(value, node_cost)),
         NodeKind::Alias(target) => estimate_size(target, node_cost),
-    }
-}
-
-fn enum_error(message: &'static str, span: Span) -> Error {
-    Error::coded(
-        ErrorKind::Serde,
-        ErrorCode::InvalidEnumRepresentation,
-        message,
-    )
-    .with_span(span)
-}
-
-fn with_span(error: Error, span: Span) -> Error {
-    if error.span().is_none() {
-        error.with_span(span)
-    } else {
-        error
-    }
-}
-
-struct NodeDeserializer<'de, 'a> {
-    node: &'a Node<'de>,
-}
-
-/// Deserializer methods for integer targets, parsing a plain scalar whose global tag was dropped.
-macro_rules! int_targets {
-    ($($method:ident)*) => {
-        $(
-            fn $method<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-                let node = untagged(self.node);
-                if matches!(node.text, Text::DroppedTag) {
-                    return deserialize_dropped_tag_int(node, visitor);
-                }
-                NodeDeserializer::new(node).deserialize_any(visitor)
-            }
-        )*
-    };
-}
-
-#[cold]
-fn deserialize_dropped_tag_bool<'de, V: Visitor<'de>>(
-    node: &Node<'de>,
-    visitor: V,
-) -> Result<V::Value, Error> {
-    if let NodeKind::String(text) = &node.kind
-        && let Some(value) = parse_bool(text)
-    {
-        return visitor
-            .visit_bool(value)
-            .map_err(|error| with_span(error, node.span));
-    }
-    NodeDeserializer::new(node).deserialize_any(visitor)
-}
-
-#[cold]
-fn deserialize_dropped_tag_int<'de, V: Visitor<'de>>(
-    node: &Node<'de>,
-    visitor: V,
-) -> Result<V::Value, Error> {
-    if let NodeKind::String(text) = &node.kind
-        && let Some(value) = parse_int(text)
-    {
-        return value
-            .visit(visitor)
-            .map_err(|error| with_span(error, node.span));
-    }
-    NodeDeserializer::new(node).deserialize_any(visitor)
-}
-
-/// Deserializer methods for targets that read a node as `deserialize_any` does, past an
-/// application tag (see `untagged`).
-macro_rules! plain_targets {
-    ($($method:ident)*) => {
-        $(
-            fn $method<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-                NodeDeserializer::new(untagged(self.node)).deserialize_any(visitor)
-            }
-        )*
-    };
-}
-
-impl<'de, 'a> NodeDeserializer<'de, 'a> {
-    fn new(node: &'a Node<'de>) -> Self {
-        Self { node }
-    }
-
-    /// The node to read. Aliases form no cycles: an anchor is defined only
-    /// once its node is complete, so an alias cannot reach itself.
-    fn target(&self) -> &'a Node<'de> {
-        resolve(self.node)
-    }
-}
-
-impl<'de> Deserializer<'de> for NodeDeserializer<'de, '_> {
-    type Error = Error;
-
-    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        let node = self.target();
-        let span = node.span;
-        let result = match &node.kind {
-            NodeKind::Null => visitor.visit_unit(),
-            NodeKind::Bool(value) => visitor.visit_bool(*value),
-            NodeKind::Number(value) => value.visit(visitor),
-            NodeKind::String(Cow::Borrowed(value)) => visitor.visit_borrowed_str(value),
-            NodeKind::String(Cow::Owned(value)) => visitor.visit_str(value),
-            NodeKind::Sequence(sequence) => {
-                let mut access = NodeSeqAccess {
-                    iter: sequence.iter(),
-                    len: sequence.len(),
-                };
-                visitor.visit_seq(&mut access).and_then(|value| {
-                    // A visitor that stops early, such as a tuple's, leaves
-                    // elements behind.
-                    check_consumed(access.iter.len(), sequence.len(), "sequence").map(|()| value)
-                })
-            }
-            NodeKind::Mapping(entries) => {
-                let mut access = NodeMapAccess {
-                    iter: entries.iter(),
-                    entry: None,
-                };
-                visitor.visit_map(&mut access).and_then(|value| {
-                    check_consumed(access.iter.len(), entries.len(), "map").map(|()| value)
-                })
-            }
-            // A tagged node is an enum whose variant names the tag, so a
-            // `Value` keeps the tag.
-            NodeKind::Tagged(tag, value) => {
-                let mut entered = false;
-                return visitor
-                    .visit_enum(NodeEnumAccess {
-                        variant: tag.serde_name(),
-                        variant_span: span,
-                        value: NodeValue::Ref(value),
-                        in_path: false,
-                        entered: Some(&mut entered),
-                    })
-                    .map_err(|error| {
-                        with_span(crate::serde_impl::tag_refused(error, tag, entered), span)
-                    });
-            }
-            NodeKind::Alias(_) => unreachable!("aliases are resolved by target"),
-        };
-        result.map_err(|error| with_span(error, span))
-    }
-
-    fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        let node = self.target();
-        let span = node.span;
-        if matches!(&node.kind, NodeKind::Null) {
-            visitor.visit_none()
-        } else {
-            visitor
-                .visit_some(NodeDeserializer::new(node))
-                .map_err(|error| with_span(error, span))
-        }
-    }
-
-    fn deserialize_newtype_struct<V: Visitor<'de>>(
-        self,
-        _name: &'static str,
-        visitor: V,
-    ) -> Result<V::Value, Self::Error> {
-        let span = self.target().span;
-        visitor
-            .visit_newtype_struct(self)
-            .map_err(|error| with_span(error, span))
-    }
-
-    fn deserialize_str<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.deserialize_string(visitor)
-    }
-
-    fn deserialize_string<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        let node = self.target();
-        let span = node.span;
-        let result = match &node.kind {
-            NodeKind::String(Cow::Borrowed(value)) => visitor.visit_borrowed_str(value),
-            NodeKind::String(Cow::Owned(value)) => visitor.visit_str(value),
-            NodeKind::Tagged(_, value) => {
-                return NodeDeserializer::new(value)
-                    .deserialize_string(visitor)
-                    .map_err(|error| with_span(error, span));
-            }
-            _ => match &node.text {
-                Text::Plain(value) | Text::Spelled(value) => visitor.visit_borrowed_str(value),
-                Text::Decoded(value) => visitor.visit_str(value),
-                Text::None | Text::Nothing | Text::DroppedTag => {
-                    return NodeDeserializer::new(node)
-                        .deserialize_any(visitor)
-                        .map_err(|error| with_span(error, span));
-                }
-            },
-        };
-        result.map_err(|error| with_span(error, span))
-    }
-
-    fn deserialize_bytes<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        let node = self.target();
-        let span = node.span;
-        let result = match &node.kind {
-            NodeKind::String(Cow::Borrowed(value)) => {
-                visitor.visit_borrowed_bytes(value.as_bytes())
-            }
-            NodeKind::String(Cow::Owned(value)) => visitor.visit_bytes(value.as_bytes()),
-            NodeKind::Tagged(_, value) => {
-                return NodeDeserializer::new(value)
-                    .deserialize_bytes(visitor)
-                    .map_err(|error| with_span(error, span));
-            }
-            _ => {
-                return NodeDeserializer::new(node)
-                    .deserialize_any(visitor)
-                    .map_err(|error| with_span(error, span));
-            }
-        };
-        result.map_err(|error| with_span(error, span))
-    }
-
-    fn deserialize_byte_buf<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.deserialize_bytes(visitor)
-    }
-
-    fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        let node = untagged(self.node);
-        let span = node.span;
-        if is_empty_scalar(node) {
-            return visitor
-                .visit_seq(EmptySeqAccess)
-                .map_err(|error| with_span(error, span));
-        }
-        null_is_not_a_collection(node, &visitor)?;
-        NodeDeserializer::new(node)
-            .deserialize_any(visitor)
-            .map_err(|error| with_span(error, span))
-    }
-
-    fn deserialize_struct<V: Visitor<'de>>(
-        self,
-        _name: &'static str,
-        _fields: &'static [&'static str],
-        visitor: V,
-    ) -> Result<V::Value, Self::Error> {
-        let node = untagged(self.node);
-        let span = node.span;
-        if is_empty_scalar(node) {
-            return visitor
-                .visit_map(EmptyMapAccess)
-                .map_err(|error| with_span(error, span));
-        }
-        null_is_not_a_collection(node, &visitor)?;
-        if matches!(node.kind, NodeKind::Mapping(_) | NodeKind::Tagged(_, _)) {
-            return NodeDeserializer::new(node)
-                .deserialize_any(visitor)
-                .map_err(|error| with_span(error, span));
-        }
-        Err(with_span(
-            serde::de::Error::invalid_type(unexpected_node(node), &visitor),
-            span,
-        ))
-    }
-
-    fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        let node = untagged(self.node);
-        let span = node.span;
-        if is_empty_scalar(node) {
-            return visitor
-                .visit_map(EmptyMapAccess)
-                .map_err(|error| with_span(error, span));
-        }
-        null_is_not_a_collection(node, &visitor)?;
-        NodeDeserializer::new(node)
-            .deserialize_any(visitor)
-            .map_err(|error| with_span(error, span))
-    }
-
-    /// A field name is the key's text: `1: x` names the field `"1"`, not the
-    /// second field.
-    fn deserialize_identifier<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.deserialize_string(visitor)
-    }
-
-    /// A character is read from the scalar's text, so `5` is `'5'`.
-    fn deserialize_char<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.deserialize_string(visitor)
-    }
-
-    fn deserialize_enum<V: Visitor<'de>>(
-        self,
-        _name: &'static str,
-        _variants: &'static [&'static str],
-        visitor: V,
-    ) -> Result<V::Value, Self::Error> {
-        let node = self.target();
-        let span = node.span;
-        if !matches!(
-            &node.kind,
-            NodeKind::Tagged(_, _) | NodeKind::String(_) | NodeKind::Mapping(_)
-        ) {
-            return Err(with_span(
-                serde::de::Error::invalid_type(unexpected_node(node), &visitor),
-                span,
-            ));
-        }
-        let (variant, variant_span, value) = match &node.kind {
-            // A tag names the variant by its whole name (`Tag::variant_name`), so `!<tag:x:B>`
-            // and `!e!B` under `%TAG !e! tag:x:` select the same variant.
-            NodeKind::Tagged(tag, value) => (tag.variant_name(), span, NodeValue::Ref(value)),
-            // A bare name holds nothing. That is a unit variant, and it is not an empty
-            // collection for a variant that holds one: `List` is not `List: []`.
-            NodeKind::String(variant) => (
-                variant.as_ref().to_owned(),
-                span,
-                NodeValue::Null(Node::scalar(NodeKind::Null, Text::Nothing, span)),
-            ),
-            NodeKind::Mapping(entries) => {
-                let mut iter = entries.iter();
-                let Some((key, value)) = iter.next() else {
-                    return Err(enum_error("enum mapping must contain one variant", span));
-                };
-                if iter.next().is_some() {
-                    return Err(enum_error("enum mapping must contain one variant", span));
-                }
-                let variant_span = key.span;
-                let key = match &resolve(key).kind {
-                    // The non-specific tag makes a scalar a string, so `! B: 5` names `B`.
-                    NodeKind::Tagged(tag, inner) if tag.is_non_specific() => resolve(inner),
-                    _ => resolve(key),
-                };
-                let NodeKind::String(variant) = &key.kind else {
-                    return Err(enum_error(
-                        "enum variant key must be a string",
-                        variant_span,
-                    ));
-                };
-                (
-                    variant.as_ref().to_owned(),
-                    variant_span,
-                    NodeValue::Ref(value),
-                )
-            }
-            _ => {
-                return Err(enum_error(
-                    "enum value must be tagged or a single-entry mapping",
-                    span,
-                ));
-            }
-        };
-        visitor
-            .visit_enum(NodeEnumAccess {
-                variant,
-                variant_span,
-                value,
-                in_path: true,
-                entered: None,
-            })
-            .map_err(|error| with_span(error, span))
-    }
-
-    /// A float target parses a plain scalar from its source text, so `01` is
-    /// 1.0 and a radix integer such as `0x1F` is rejected. Quoted scalars are
-    /// strings and are not parsed this way.
-    fn deserialize_f64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        let node = untagged(self.node);
-        if let NodeKind::Number(number) = &node.kind
-            && number.is_f64()
-        {
-            return visitor
-                .visit_f64(number.as_f64().unwrap_or(f64::NAN))
-                .map_err(|error| with_span(error, node.span));
-        }
-        // A plain scalar reads from its text, so an integer wider than 64 bits reads, and so does
-        // a number spelling with a leading zero, as in `01`, which resolves to a string. Other text,
-        // such as `inf` or `1e999`, doesn't, and nor does a string that a tag makes one, which
-        // keeps no text.
-        if let Text::Plain(text) = node.text {
-            match &node.kind {
-                NodeKind::Number(_) => {
-                    if let Ok(value) = text.parse::<f64>() {
-                        return visitor
-                            .visit_f64(value)
-                            .map_err(|error| with_span(error, node.span));
-                    }
-                    // A radix integer is a number to the resolver, but not text that parses
-                    // into a float.
-                    return Err(Error::coded(
-                        ErrorKind::Serde,
-                        ErrorCode::InvalidType,
-                        format!("invalid type: integer `{text}`, expected f64"),
-                    )
-                    .with_span(node.span));
-                }
-                NodeKind::String(_) => {
-                    if let Some(value) = float_from_text(text) {
-                        return visitor
-                            .visit_f64(value)
-                            .map_err(|error| with_span(error, node.span));
-                    }
-                }
-                _ => {}
-            }
-        } else if matches!(node.text, Text::DroppedTag)
-            && let NodeKind::String(text) = &node.kind
-            && let Some(value) = float_from_text(text)
-        {
-            return visitor
-                .visit_f64(value)
-                .map_err(|error| with_span(error, node.span));
-        }
-        NodeDeserializer::new(node).deserialize_any(visitor)
-    }
-
-    fn deserialize_f32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.deserialize_f64(visitor)
-    }
-
-    fn deserialize_unit_struct<V: Visitor<'de>>(
-        self,
-        _name: &'static str,
-        visitor: V,
-    ) -> Result<V::Value, Self::Error> {
-        self.deserialize_unit(visitor)
-    }
-
-    fn deserialize_tuple<V: Visitor<'de>>(
-        self,
-        _length: usize,
-        visitor: V,
-    ) -> Result<V::Value, Self::Error> {
-        NodeDeserializer::new(untagged(self.node)).deserialize_any(visitor)
-    }
-
-    fn deserialize_tuple_struct<V: Visitor<'de>>(
-        self,
-        _name: &'static str,
-        _length: usize,
-        visitor: V,
-    ) -> Result<V::Value, Self::Error> {
-        self.deserialize_tuple(0, visitor)
-    }
-
-    fn deserialize_bool<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        let node = untagged(self.node);
-        if matches!(node.text, Text::DroppedTag) {
-            return deserialize_dropped_tag_bool(node, visitor);
-        }
-        NodeDeserializer::new(node).deserialize_any(visitor)
-    }
-
-    int_targets! {
-        deserialize_i8 deserialize_i16 deserialize_i32 deserialize_i64
-        deserialize_i128 deserialize_u8 deserialize_u16 deserialize_u32 deserialize_u64
-        deserialize_u128
-    }
-
-    plain_targets! {
-        deserialize_unit
-    }
-
-    serde::forward_to_deserialize_any! {
-        ignored_any
-    }
-}
-
-/// An empty scalar, such as a missing value, reads as an empty sequence,
-/// map, or struct; an explicit `~` or `null` does not.
-fn is_empty_scalar(node: &Node<'_>) -> bool {
-    // A value that the source doesn't write is a null with no text. A written null keeps its
-    // text in every style, and is explicit unless that text is empty, as in `!!null ""`. What
-    // a bare variant name holds is no value at all.
-    matches!(node.kind, NodeKind::Null)
-        && !matches!(node.text, Text::Nothing)
-        && node.text.as_str().is_none_or(str::is_empty)
-}
-
-/// An explicit `~` or `null` is not an empty collection. It's reported before
-/// the visitor sees it, so even a visitor that accepts a unit fails.
-fn null_is_not_a_collection(
-    node: &Node<'_>,
-    expected: &dyn serde::de::Expected,
-) -> Result<(), Error> {
-    if matches!(node.kind, NodeKind::Null) {
-        Err(with_span(
-            serde::de::Error::invalid_type(serde::de::Unexpected::Unit, expected),
-            node.span,
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-/// Fail when a visitor left `remaining` of `total` elements unread.
-fn check_consumed(remaining: usize, total: usize, kind: &str) -> Result<(), Error> {
-    if remaining == 0 {
-        Ok(())
-    } else {
-        Err(serde::de::Error::invalid_length(
-            total,
-            &format!("fewer elements in the {kind}").as_str(),
-        ))
-    }
-}
-
-struct EmptySeqAccess;
-
-impl<'de> SeqAccess<'de> for EmptySeqAccess {
-    type Error = Error;
-
-    fn next_element_seed<T: DeserializeSeed<'de>>(
-        &mut self,
-        _seed: T,
-    ) -> Result<Option<T::Value>, Self::Error> {
-        Ok(None)
-    }
-
-    fn size_hint(&self) -> Option<usize> {
-        Some(0)
-    }
-}
-
-struct EmptyMapAccess;
-
-impl<'de> MapAccess<'de> for EmptyMapAccess {
-    type Error = Error;
-
-    fn next_key_seed<K: DeserializeSeed<'de>>(
-        &mut self,
-        _seed: K,
-    ) -> Result<Option<K::Value>, Self::Error> {
-        Ok(None)
-    }
-
-    fn next_value_seed<V: DeserializeSeed<'de>>(
-        &mut self,
-        _seed: V,
-    ) -> Result<V::Value, Self::Error> {
-        Err(Error::coded(
-            ErrorKind::Serde,
-            ErrorCode::MapValueBeforeKey,
-            "map value requested before key",
-        ))
-    }
-}
-
-enum NodeValue<'de, 'a> {
-    Ref(&'a Node<'de>),
-    Null(Node<'de>),
-}
-
-impl<'de> NodeValue<'de, '_> {
-    fn node(&self) -> &Node<'de> {
-        match self {
-            Self::Ref(node) => node,
-            Self::Null(node) => node,
-        }
-    }
-}
-
-struct NodeSeqAccess<'de, 'a> {
-    iter: std::slice::Iter<'a, Node<'de>>,
-    len: usize,
-}
-
-impl<'de> SeqAccess<'de> for NodeSeqAccess<'de, '_> {
-    type Error = Error;
-
-    fn next_element_seed<T: DeserializeSeed<'de>>(
-        &mut self,
-        seed: T,
-    ) -> Result<Option<T::Value>, Self::Error> {
-        let Some(node) = self.iter.next() else {
-            return Ok(None);
-        };
-        let span = node.span;
-        seed.deserialize(NodeDeserializer::new(node))
-            .map(Some)
-            .map_err(|error| with_span(error, span).inside_index(self.len - self.iter.len() - 1))
-    }
-
-    fn size_hint(&self) -> Option<usize> {
-        Some(self.iter.len())
-    }
-}
-
-struct NodeMapAccess<'de, 'a> {
-    iter: std::slice::Iter<'a, (Node<'de>, Node<'de>)>,
-    /// The entry whose key was read and whose value wasn't.
-    entry: Option<&'a (Node<'de>, Node<'de>)>,
-}
-
-impl<'de> MapAccess<'de> for NodeMapAccess<'de, '_> {
-    type Error = Error;
-
-    fn next_key_seed<K: DeserializeSeed<'de>>(
-        &mut self,
-        seed: K,
-    ) -> Result<Option<K::Value>, Self::Error> {
-        let Some(entry) = self.iter.next() else {
-            // The end leaves no value to ask for, as it leaves none to a reader of events: a
-            // value that was passed over would otherwise be given out after it.
-            self.entry = None;
-            return Ok(None);
-        };
-        let key = &entry.0;
-        let span = key.span;
-        self.entry = Some(entry);
-        seed.deserialize(NodeDeserializer::new(key))
-            .map(Some)
-            .map_err(|error| with_span(error, span))
-    }
-
-    fn next_value_seed<V: DeserializeSeed<'de>>(
-        &mut self,
-        seed: V,
-    ) -> Result<V::Value, Self::Error> {
-        let (key, value) = self.entry.take().ok_or_else(|| {
-            Error::coded(
-                ErrorKind::Serde,
-                ErrorCode::MapValueBeforeKey,
-                "map value requested before key",
-            )
-        })?;
-        let span = value.span;
-        seed.deserialize(NodeDeserializer::new(value))
-            .map_err(|error| inside_key(with_span(error, span), key))
-    }
-
-    fn size_hint(&self) -> Option<usize> {
-        Some(self.iter.len())
-    }
-}
-
-struct NodeEnumAccess<'de, 'a, 'e> {
-    variant: String,
-    variant_span: Span,
-    value: NodeValue<'de, 'a>,
-    /// Whether an error inside names the variant. A target that isn't an enum takes the tag as a
-    /// tag, and the document has no key by that name.
-    in_path: bool,
-    /// Set to `true` once the visitor reads the variant name, so a refusal before that is known
-    /// to be a refusal of the tag itself.
-    entered: Option<&'e mut bool>,
-}
-
-impl<'de, 'a> EnumAccess<'de> for NodeEnumAccess<'de, 'a, '_> {
-    type Error = Error;
-    type Variant = NodeVariantAccess<'de, 'a>;
-
-    fn variant_seed<V: DeserializeSeed<'de>>(
-        mut self,
-        seed: V,
-    ) -> Result<(V::Value, Self::Variant), Self::Error> {
-        if let Some(entered) = self.entered.take() {
-            *entered = true;
-        }
-        let node = Node::new(
-            NodeKind::String(Cow::Owned(self.variant)),
-            self.variant_span,
-        );
-        let variant = seed
-            .deserialize(NodeDeserializer::new(&node))
-            .map_err(|error| with_span(error, self.variant_span))?;
-        Ok((
-            variant,
-            NodeVariantAccess {
-                name: self.in_path.then_some(node),
-                value: self.value,
-            },
-        ))
-    }
-}
-
-struct NodeVariantAccess<'de, 'a> {
-    /// The variant's name, if an error inside gives it.
-    name: Option<Node<'de>>,
-    value: NodeValue<'de, 'a>,
-}
-
-impl NodeVariantAccess<'_, '_> {
-    #[cold]
-    fn inside_variant(&self, error: Error) -> Error {
-        match &self.name {
-            Some(name) => inside_key(error, name),
-            None => error,
-        }
-    }
-}
-
-impl<'de> VariantAccess<'de> for NodeVariantAccess<'de, '_> {
-    type Error = Error;
-
-    /// A variant's value reads past an application tag, as a target that isn't an enum does, so
-    /// `Nothing: !t` is the unit variant `Nothing`.
-    fn unit_variant(self) -> Result<(), Self::Error> {
-        let node = untagged(self.value.node());
-        if matches!(&node.kind, NodeKind::Null) {
-            Ok(())
-        } else {
-            Err(self.inside_variant(enum_error("expected a unit enum variant", node.span)))
-        }
-    }
-
-    fn newtype_variant_seed<T: DeserializeSeed<'de>>(
-        self,
-        seed: T,
-    ) -> Result<T::Value, Self::Error> {
-        let node = self.value.node();
-        let span = node.span;
-        seed.deserialize(NodeDeserializer::new(node))
-            .map_err(|error| self.inside_variant(with_span(error, span)))
-    }
-
-    fn tuple_variant<V: Visitor<'de>>(
-        self,
-        length: usize,
-        visitor: V,
-    ) -> Result<V::Value, Self::Error> {
-        NodeDeserializer::new(self.value.node())
-            .deserialize_tuple(length, visitor)
-            .map_err(|error| self.inside_variant(error))
-    }
-
-    /// A tag with no value, as in `!Point`, fills a struct variant's defaults, as an empty value
-    /// fills a struct. A bare name, as in `Point`, names a unit variant, so it fills none.
-    fn struct_variant<V: Visitor<'de>>(
-        self,
-        fields: &'static [&'static str],
-        visitor: V,
-    ) -> Result<V::Value, Self::Error> {
-        let result = match &self.value {
-            NodeValue::Ref(node) => {
-                NodeDeserializer::new(node).deserialize_struct("", fields, visitor)
-            }
-            NodeValue::Null(node) => NodeDeserializer::new(node).deserialize_any(visitor),
-        };
-        result.map_err(|error| self.inside_variant(error))
-    }
-}
-
-/// Say that an error came from inside the value of this key. A scalar key reads as its value,
-/// so `0x10:` and `16:` are one path, whichever typed reader reports it.
-#[cold]
-fn inside_key(error: Error, key: &Node<'_>) -> Error {
-    let mut node = resolve(key);
-    while let NodeKind::Tagged(_, inner) = &node.kind {
-        node = resolve(inner);
-    }
-    match &node.kind {
-        NodeKind::String(text) => error.inside_key(text),
-        NodeKind::Null => error.inside_key("null"),
-        NodeKind::Bool(value) => error.inside_key(&value.to_string()),
-        NodeKind::Number(value) => error.inside_key(&value.to_string()),
-        _ => error.inside_collection_key(),
     }
 }
 

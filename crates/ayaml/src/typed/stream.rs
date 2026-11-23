@@ -34,7 +34,7 @@ use super::{
 use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::Event;
 use crate::limits::Limits;
-use crate::parser::{DocumentEvents, EventConsumer};
+use crate::parser::DocumentEvents;
 use crate::span::{Location, Span};
 
 /// Read one document into what `seed` makes of it.
@@ -57,14 +57,22 @@ pub(super) fn read<'de, T: DeserializeSeed<'de>>(
     let mut stream = Stream::new(events, input.len(), limits, options);
     let result = stream.document(|document| seed.deserialize(document));
     let fault = stream.fault.take();
-    // The tokens are freed before a tree is built.
-    drop(stream);
     let error = match (result, fault) {
         (Ok(value), None) => return Ok(value),
         // A fault in the document stands, whatever the target made of the error it was given.
         (_, Some(fault)) => fault,
-        (Err(error), None) => error,
+        (Err(error), None) => {
+            // The target failed while reading; `read_with_target` already settled and checked the
+            // rest of the root node. Validate the document/stream end on the already-scanned
+            // tokens so valid YAML with a Serde mismatch skips a full second parse.
+            if stream.validate_end().is_ok() && stream.fault.is_none() {
+                return Err(located(error));
+            }
+            error
+        }
     };
+    // The tokens are freed before a tree is built to confirm exact document-order error precedence.
+    drop(stream);
     Err(located(
         parse_document(input, limits, options)
             .err()
@@ -161,7 +169,7 @@ impl<'de> Stream<'de> {
     ) -> Self {
         Self {
             events,
-            builder: Builder::streaming(input_len, limits, options, None),
+            builder: Builder::streaming(input_len, limits, options),
             open: Vec::new(),
             ahead: Ahead::Unknown,
             due: false,
@@ -175,7 +183,11 @@ impl<'de> Stream<'de> {
         target: impl for<'s> FnOnce(StreamDeserializer<'de, 's>) -> Result<R, Error>,
     ) -> Result<R, Error> {
         loop {
-            match self.events.next_event()? {
+            let next = match self.events.next_event() {
+                Ok(event) => event,
+                Err(error) => return Err(self.faulted(error)),
+            };
+            match next {
                 Some(Event::StreamStart { .. } | Event::Directive { .. }) => {}
                 Some(Event::DocumentStart { .. }) => break,
                 // A stream with no document reads as an empty one, which the tree gives as a
@@ -187,7 +199,7 @@ impl<'de> Stream<'de> {
                     self.ended = true;
                     return target(StreamDeserializer { stream: self });
                 }
-                Some(event) => return Err(misplaced(&event)),
+                Some(event) => return Err(self.faulted(misplaced(&event))),
             }
         }
         if let Ahead::Whole(span) = self.ahead()? {
@@ -195,8 +207,25 @@ impl<'de> Stream<'de> {
             self.ahead = Ahead::Whole(span);
         }
         let value = self.read_with_target(target)?;
-        self.end()?;
+        if let Err(error) = self.end() {
+            return Err(self.faulted(error));
+        }
         Ok(value)
+    }
+
+    /// Finish checking the document and trailing stream after a target-side error, using the
+    /// already-scanned tokens so valid YAML skips a second parse.
+    fn validate_end(&mut self) -> Result<(), Error> {
+        if self.ended {
+            return Ok(());
+        }
+        if self.due {
+            self.skip()?;
+        }
+        if !self.open.is_empty() {
+            self.close_to(0)?;
+        }
+        self.end()
     }
 
     /// Build the root as a tree, read the stream to its end, and free the tokens. The root is

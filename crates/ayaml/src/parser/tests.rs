@@ -1253,13 +1253,27 @@ fn event_capacity_reserves_from_the_token_count() {
         kind: TokenKind::PlainScalar,
         span: Span::empty(0),
     };
-    let tokens = vec![token; 1_000];
+    let tokens = vec![token.clone(); 1_000];
     let lines = vec![super::Line {
         start: 0,
         end: tokens.len(),
         indent: 0,
     }];
     assert_eq!(super::event_capacity(&lines, &tokens), 1_000 * 4 / 5 + 200);
+
+    // Small documents scale proportionally rather than reserving +200..+256 flat headroom.
+    let small_tokens = vec![token; 40];
+    let small_lines = vec![
+        super::Line {
+            start: 0,
+            end: 40,
+            indent: 2,
+        };
+        12
+    ];
+    let small_cap = super::event_capacity(&small_lines, &small_tokens);
+    assert_eq!(small_cap, 40 + 12 + 8);
+    assert!(small_cap < 100);
 }
 
 /// One document's events, taken one at a time, and the most that waited for the reader at once.

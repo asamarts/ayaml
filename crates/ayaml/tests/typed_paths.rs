@@ -58,7 +58,7 @@ fn every_reading<T: DeserializeOwned + Debug>(
         (
             "Deserializer::next",
             first(Deserializer::from_str(input).expect("a stream").next::<T>()),
-            false,
+            true,
         ),
         (
             "Deserializer::next_seed",
@@ -67,7 +67,7 @@ fn every_reading<T: DeserializeOwned + Debug>(
                     .expect("a stream")
                     .next_seed(seed),
             ),
-            false,
+            true,
         ),
     ];
     #[cfg(feature = "libyaml-compat")]
