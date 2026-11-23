@@ -15,6 +15,7 @@ arbitrary = "=1.5.0"
 # unchanged. `bench-internals` gives typed-equivalence targets the tree-backed reader to compare
 # with the event-stream reader.
 ayaml = { path = "../crates/ayaml", version = "=0.2.3", features = ["bench-internals", "libyaml-compat"] }
+ayaml-fixtures = { path = "../crates/ayaml-fixtures" }
 libfuzzer-sys = "=0.4.13"
 # Typed deserialization targets in `typed_equiv` and `masked_errors`.
 serde = { version = "=1.0.229", features = ["derive"] }

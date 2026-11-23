@@ -19,10 +19,14 @@
 )]
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::hint::black_box;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use serde::{Deserialize, Serialize};
 
 struct Counting;
 
@@ -370,8 +374,366 @@ fn measure_json(
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct FrontmatterOwned {
+    id: String,
+    title: String,
+    phase: u32,
+    status: String,
+    effort_days: f64,
+    blocked_by: Vec<String>,
+    paths: Vec<String>,
+    tags: Vec<String>,
+}
+
+#[allow(
+    dead_code,
+    reason = "fields are populated by Serde during borrowed allocation measurements"
+)]
+#[derive(Clone, Debug, Deserialize)]
+struct FrontmatterBorrowed<'a> {
+    id: &'a str,
+    title: &'a str,
+    phase: u32,
+    status: &'a str,
+    effort_days: f64,
+    #[serde(borrow)]
+    blocked_by: Vec<&'a str>,
+    #[serde(borrow)]
+    paths: Vec<&'a str>,
+    #[serde(borrow)]
+    tags: Vec<&'a str>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct BoundaryOwned {
+    service: String,
+    entries: BTreeMap<String, String>,
+}
+
+#[allow(
+    dead_code,
+    reason = "fields are populated by Serde during borrowed allocation measurements"
+)]
+#[derive(Clone, Debug, Deserialize)]
+struct BoundaryBorrowed<'a> {
+    service: &'a str,
+    #[serde(borrow)]
+    entries: BTreeMap<&'a str, Cow<'a, str>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AllocSample {
+    peak_bytes: usize,
+    live_bytes: usize,
+    allocations: usize,
+    total_allocated_bytes: usize,
+}
+
+fn measure_op<T>(grows_in_place: bool, op: impl FnOnce() -> T) -> AllocSample {
+    GROWS_IN_PLACE.store(grows_in_place, Ordering::Relaxed);
+    let live_before = LIVE.load(Ordering::Relaxed);
+    let allocs_before = ALLOCATIONS.load(Ordering::Relaxed);
+    let bytes_before = ALLOCATED_BYTES.load(Ordering::Relaxed);
+    reset_peak();
+    let result = op();
+    let sample = AllocSample {
+        peak_bytes: PEAK.load(Ordering::Relaxed).saturating_sub(live_before),
+        live_bytes: LIVE.load(Ordering::Relaxed).saturating_sub(live_before),
+        allocations: ALLOCATIONS.load(Ordering::Relaxed) - allocs_before,
+        total_allocated_bytes: ALLOCATED_BYTES.load(Ordering::Relaxed) - bytes_before,
+    };
+    black_box(&result);
+    drop(result);
+    GROWS_IN_PLACE.store(false, Ordering::Relaxed);
+    sample
+}
+
+fn format_jsonl_row(
+    scenario: &str,
+    bytes: usize,
+    fixture_sha256: &str,
+    operation: &str,
+    sample: AllocSample,
+) -> String {
+    let ratio = if bytes == 0 {
+        0.0
+    } else {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "peak-to-input ratio is a display/diagnostic float"
+        )]
+        let raw = (sample.peak_bytes as f64) / (bytes as f64);
+        (raw * 1000.0).round() / 1000.0
+    };
+    format!(
+        "{{\"schema_version\":1,\"scenario\":\"{scenario}\",\"bytes\":{bytes},\"fixture_sha256\":\"{fixture_sha256}\",\"operation\":\"{operation}\",\"peak_bytes\":{},\"live_bytes\":{},\"allocations\":{},\"total_allocated_bytes\":{},\"peak_to_input_ratio\":{ratio:.3}}}",
+        sample.peak_bytes, sample.live_bytes, sample.allocations, sample.total_allocated_bytes,
+    )
+}
+
+fn measure_fixture_mode(fixture: &ayaml_fixtures::Fixture, mode: &str) -> Result<String, String> {
+    let input = &fixture.content;
+    let sample = match mode {
+        "parse_value" => {
+            if fixture.multi_document {
+                measure_op(false, || ayaml::parse_documents(input).expect("parse_docs"))
+            } else {
+                measure_op(false, || ayaml::parse_value(input).expect("parse_value"))
+            }
+        }
+        "typed_value" => {
+            if fixture.multi_document {
+                return Err(format!(
+                    "typed_value unsupported for multi-doc {}",
+                    fixture.id
+                ));
+            }
+            measure_op(false, || {
+                ayaml::from_str::<ayaml::Value>(input).expect("from_str::<Value>")
+            })
+        }
+        "typed_struct" => match fixture.id.as_str() {
+            "frontmatter-tiny" => measure_op(false, || {
+                ayaml::from_str::<FrontmatterOwned>(input).expect("frontmatter owned")
+            }),
+            id if id.starts_with("boundary-") => measure_op(false, || {
+                ayaml::from_str::<BoundaryOwned>(input).expect("boundary owned")
+            }),
+            _ => measure_op(false, || {
+                ayaml::from_str::<BTreeMap<String, ayaml::Value>>(input).expect("typed map owned")
+            }),
+        },
+        "typed_borrowed" => match fixture.id.as_str() {
+            "frontmatter-tiny" => measure_op(false, || {
+                ayaml::from_str_borrowed::<FrontmatterBorrowed<'_>>(input)
+                    .expect("frontmatter borrowed")
+            }),
+            id if id.starts_with("boundary-") => measure_op(false, || {
+                ayaml::from_str_borrowed::<BoundaryBorrowed<'_>>(input).expect("boundary borrowed")
+            }),
+            _ => measure_op(false, || {
+                ayaml::from_str_borrowed::<BTreeMap<&str, ayaml::Value>>(input)
+                    .expect("typed map borrowed")
+            }),
+        },
+        "json_compat" => {
+            let options = ayaml::compat::ParseOptions::for_max_input();
+            drop(black_box(
+                ayaml::compat::from_str_seed_with::<PhantomData<serde_json::Value>>(
+                    "a: [1, {b: c}]\n",
+                    &options,
+                    PhantomData,
+                )
+                .expect("warmup json"),
+            ));
+            measure_op(true, || {
+                ayaml::compat::from_str_seed_with::<PhantomData<serde_json::Value>>(
+                    input,
+                    &options,
+                    PhantomData,
+                )
+                .expect("json_compat decode")
+            })
+        }
+        "spanned_tree" => measure_op(false, || {
+            ayaml::SpannedTree::parse(input).expect("SpannedTree::parse")
+        }),
+        "emit_value" => {
+            if fixture.multi_document {
+                let docs = ayaml::parse_documents(input).expect("parse_docs");
+                measure_op(false, || {
+                    ayaml::to_string_documents(&docs).expect("emit_docs")
+                })
+            } else {
+                let val = ayaml::parse_value(input).expect("parse_value");
+                measure_op(false, || ayaml::to_string_value(&val).expect("emit_value"))
+            }
+        }
+        "serialize_serde" => match fixture.id.as_str() {
+            "frontmatter-tiny" => {
+                let typed: FrontmatterOwned = ayaml::from_str(input).expect("frontmatter");
+                measure_op(false, || ayaml::to_string(&typed).expect("to_string"))
+            }
+            id if id.starts_with("boundary-") => {
+                let typed: BoundaryOwned = ayaml::from_str(input).expect("boundary");
+                measure_op(false, || ayaml::to_string(&typed).expect("to_string"))
+            }
+            _ => {
+                let val = ayaml::parse_value(input).expect("parse_value");
+                measure_op(false, || ayaml::to_string(&val).expect("to_string"))
+            }
+        },
+        other => return Err(format!("unknown jsonl mode: {other}")),
+    };
+    Ok(format_jsonl_row(
+        &fixture.id,
+        fixture.bytes,
+        &fixture.sha256,
+        mode,
+        sample,
+    ))
+}
+
+/// Curated baseline matrix covering every operation mode across realistic domain, boundary,
+/// scaling, and structural fixtures.
+const BASELINE_CASES: &[(&str, &[&str])] = &[
+    (
+        "frontmatter-tiny",
+        &[
+            "parse_value",
+            "typed_value",
+            "typed_struct",
+            "typed_borrowed",
+            "json_compat",
+            "spanned_tree",
+            "emit_value",
+            "serialize_serde",
+        ],
+    ),
+    (
+        "boundary-4kb-below",
+        &[
+            "parse_value",
+            "typed_struct",
+            "typed_borrowed",
+            "serialize_serde",
+        ],
+    ),
+    (
+        "boundary-4kb-above",
+        &[
+            "parse_value",
+            "typed_struct",
+            "typed_borrowed",
+            "serialize_serde",
+        ],
+    ),
+    (
+        "openapi-spec",
+        &[
+            "parse_value",
+            "typed_value",
+            "json_compat",
+            "spanned_tree",
+            "emit_value",
+            "serialize_serde",
+        ],
+    ),
+    (
+        "cluster-manifests",
+        &["parse_value", "spanned_tree", "emit_value"],
+    ),
+    (
+        "ci-workflow",
+        &["parse_value", "typed_value", "spanned_tree"],
+    ),
+    ("container-compose", &["parse_value", "json_compat"]),
+    (
+        "lockfile-wide",
+        &["parse_value", "typed_value", "emit_value"],
+    ),
+    ("escape-routes", &["parse_value", "spanned_tree"]),
+    ("json-in-yaml", &["parse_value", "json_compat"]),
+    ("unicode-multibyte", &["parse_value", "spanned_tree"]),
+    (
+        "scale-map-100kb",
+        &["parse_value", "typed_borrowed", "json_compat"],
+    ),
+    ("aliases-1000", &["parse_value", "typed_value"]),
+];
+
+fn run_jsonl_cli(args: &[String]) {
+    let mut fixture_id: Option<&str> = None;
+    let mut mode: Option<&str> = None;
+    let mut suite_baseline = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--jsonl" => {}
+            "--suite" => {
+                i += 1;
+                if args.get(i).map(String::as_str) == Some("baseline") {
+                    suite_baseline = true;
+                } else {
+                    eprintln!("unknown --suite value");
+                    std::process::exit(2);
+                }
+            }
+            "--fixture" => {
+                i += 1;
+                fixture_id = args.get(i).map(String::as_str);
+            }
+            "--mode" => {
+                i += 1;
+                mode = args.get(i).map(String::as_str);
+            }
+            other => {
+                eprintln!("unknown --jsonl option: {other}");
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+
+    if suite_baseline || fixture_id.is_none() {
+        for &(id, modes) in BASELINE_CASES {
+            let fixture = ayaml_fixtures::generate(id)
+                .unwrap_or_else(|| panic!("unknown baseline fixture {id}"));
+            for &m in modes {
+                if let Some(filter) = mode
+                    && filter != m
+                {
+                    continue;
+                }
+                match measure_fixture_mode(&fixture, m) {
+                    Ok(line) => println!("{line}"),
+                    Err(err) => {
+                        eprintln!("{err}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    let id = fixture_id.expect("checked Some above");
+    let fixture = ayaml_fixtures::generate(id).unwrap_or_else(|| {
+        eprintln!("unknown fixture id: {id}");
+        std::process::exit(2);
+    });
+    let modes: Vec<&str> = if let Some(m) = mode {
+        vec![m]
+    } else if fixture.multi_document {
+        vec!["parse_value", "spanned_tree", "emit_value"]
+    } else {
+        vec![
+            "parse_value",
+            "typed_value",
+            "spanned_tree",
+            "emit_value",
+            "serialize_serde",
+        ]
+    };
+    for m in modes {
+        match measure_fixture_mode(&fixture, m) {
+            Ok(line) => println!("{line}"),
+            Err(err) => {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
 fn main() {
-    let mut args = std::env::args().skip(1);
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    if raw_args.iter().any(|a| a == "--jsonl") {
+        run_jsonl_cli(&raw_args);
+        return;
+    }
+    let mut args = raw_args.into_iter();
     let path = args
         .next()
         .unwrap_or_else(|| "tests/fixtures/compat/toolchain-pins.yml".to_owned());
@@ -620,5 +982,35 @@ mod tests {
             );
         }
         GROWS_IN_PLACE.store(false, Ordering::Relaxed);
+
+        // Run structured JSONL checks in the same single test thread so libtest does not spawn
+        // parallel allocator threads that perturb global `LIVE` counters above.
+        verify_jsonl_mode_schema();
+    }
+
+    fn verify_jsonl_mode_schema() {
+        let fixture = ayaml_fixtures::generate("frontmatter-tiny").expect("frontmatter-tiny");
+        for mode in [
+            "parse_value",
+            "typed_value",
+            "typed_struct",
+            "typed_borrowed",
+            "json_compat",
+            "spanned_tree",
+            "emit_value",
+            "serialize_serde",
+        ] {
+            let line = super::measure_fixture_mode(&fixture, mode).expect("measure mode");
+            let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSONL");
+            assert_eq!(parsed["schema_version"], 1);
+            assert_eq!(parsed["scenario"], "frontmatter-tiny");
+            assert_eq!(parsed["fixture_sha256"], fixture.sha256);
+            assert_eq!(parsed["operation"], mode);
+            assert!(parsed["peak_bytes"].as_u64().is_some());
+            assert!(parsed["live_bytes"].as_u64().is_some());
+            assert!(parsed["allocations"].as_u64().is_some());
+            assert!(parsed["total_allocated_bytes"].as_u64().is_some());
+            assert!(parsed["peak_to_input_ratio"].as_f64().is_some());
+        }
     }
 }
