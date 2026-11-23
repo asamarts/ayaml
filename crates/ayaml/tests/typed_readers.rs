@@ -1137,16 +1137,19 @@ fn a_root_flow_collection_tells_its_visitor_how_many_entries_it_has() {
         assert_eq!(read("&a [1, 2, 3]\n"), known(3, 2, 3));
         assert_eq!(read("&a {a: 1, b: 2}\n"), known(2, 1, 2));
         assert_eq!(read("&a\n- 1\n- 2\n"), known(2, 1, 2));
-        // A block collection's entries are not counted before they are read.
-        assert_eq!(read("- 1\n- 2\n- 3\n"), unknown(3));
-        assert_eq!(read("a: 1\nb: 2\n"), unknown(2));
-        // Nor are those of a flow collection inside the root.
+        // Small block collections and inner collections whose end waits in the lookahead queue
+        // also tell their exact size.
+        assert_eq!(read("- 1\n- 2\n- 3\n"), known(3, 2, 3));
+        assert_eq!(read("a: 1\nb: 2\n"), known(2, 1, 2));
         let inner = from_str_by_events::<Vec<Hinted>>("- [1, 2, 3]\n- {a: 1}\n", &limits, compat)
             .expect("two collections");
-        assert_eq!(inner, [unknown(3), unknown(1)]);
+        assert_eq!(inner, [known(3, 2, 3), known(1, 0, 1)]);
         let inner = from_str_by_events::<Vec<Hinted>>("[[1, 2, 3], {a: 1}]\n", &limits, compat)
             .expect("two collections");
-        assert_eq!(inner, [unknown(3), unknown(1)]);
+        assert_eq!(inner, [known(3, 2, 3), known(1, 0, 1)]);
+        // A block collection longer than the lookahead queue is not counted ahead of time.
+        let long_block = "- 1\n".repeat(100);
+        assert_eq!(read(&long_block), unknown(100));
     }
     // The public reader reads an input of more than 4 KiB this way, and the size is right
     // for one that is long.
@@ -1157,13 +1160,109 @@ fn a_root_flow_collection_tells_its_visitor_how_many_entries_it_has() {
     assert_eq!((numbers.len(), numbers.capacity()), (2_000, 2_000));
 }
 
+/// Every size hint told to a visitor over generated documents matches the exact number of entries
+/// that collection then gives, both at the root and in nested collections.
+#[test]
+fn every_size_hint_matches_the_entries_given() {
+    #[derive(Debug)]
+    struct CheckHints;
+
+    impl<'de> Deserialize<'de> for CheckHints {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Read;
+            impl<'de> Visitor<'de> for Read {
+                type Value = CheckHints;
+
+                fn expecting(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+                    formatter.write_str("any YAML value")
+                }
+
+                fn visit_bool<E>(self, _: bool) -> Result<CheckHints, E> {
+                    Ok(CheckHints)
+                }
+                fn visit_i64<E>(self, _: i64) -> Result<CheckHints, E> {
+                    Ok(CheckHints)
+                }
+                fn visit_u64<E>(self, _: u64) -> Result<CheckHints, E> {
+                    Ok(CheckHints)
+                }
+                fn visit_f64<E>(self, _: f64) -> Result<CheckHints, E> {
+                    Ok(CheckHints)
+                }
+                fn visit_str<E>(self, _: &str) -> Result<CheckHints, E> {
+                    Ok(CheckHints)
+                }
+                fn visit_unit<E>(self) -> Result<CheckHints, E> {
+                    Ok(CheckHints)
+                }
+                fn visit_none<E>(self) -> Result<CheckHints, E> {
+                    Ok(CheckHints)
+                }
+                fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<CheckHints, D::Error> {
+                    CheckHints::deserialize(d)
+                }
+                fn visit_seq<A: SeqAccess<'de>>(
+                    self,
+                    mut access: A,
+                ) -> Result<CheckHints, A::Error> {
+                    let initial = access.size_hint();
+                    let mut count = 0_usize;
+                    while access.next_element::<CheckHints>()?.is_some() {
+                        count += 1;
+                        if let Some(total) = initial {
+                            assert_eq!(access.size_hint(), Some(total - count));
+                        }
+                    }
+                    if let Some(total) = initial {
+                        assert_eq!(count, total);
+                    }
+                    Ok(CheckHints)
+                }
+                fn visit_map<A: MapAccess<'de>>(
+                    self,
+                    mut access: A,
+                ) -> Result<CheckHints, A::Error> {
+                    let initial = access.size_hint();
+                    let mut count = 0_usize;
+                    while access.next_entry::<CheckHints, CheckHints>()?.is_some() {
+                        count += 1;
+                        if let Some(total) = initial {
+                            assert_eq!(access.size_hint(), Some(total - count));
+                        }
+                    }
+                    if let Some(total) = initial {
+                        assert_eq!(count, total);
+                    }
+                    Ok(CheckHints)
+                }
+            }
+            deserializer.deserialize_any(Read)
+        }
+    }
+
+    let limits = Limits::default();
+    let mut state = 0x517C_C1B7_2722_0A95_u64;
+    let mut ok_docs = 0_usize;
+    for _ in 0..500 {
+        let doc = generated(&mut state);
+        for compat in [false, true] {
+            if from_str_by_events::<CheckHints>(&doc, &limits, compat).is_ok() {
+                ok_docs += 1;
+            }
+        }
+    }
+    assert!(ok_docs > 100, "checked {ok_docs} valid documents");
+}
+
 /// A build with `--cfg ayaml_typed_from_events` reads a small input from its events too, which
-/// is how CI runs the whole suite on that reader. A block sequence tells its visitor its size
-/// only where it is read from a tree, so what it tells shows which reader read it.
+/// is how CI runs the whole suite on that reader. A block sequence longer than the lookahead
+/// queue tells its visitor its size only where it is read from a tree, so what it tells shows
+/// which reader read it.
 #[test]
 fn the_build_that_reads_every_input_from_its_events_does() {
-    let hinted: Hinted = ayaml::from_str("- 1\n- 2\n- 3\n").expect("a sequence");
-    assert_eq!(hinted.entries, 3);
+    let long = "- 1\n".repeat(100);
+    let hinted: Hinted = ayaml::from_str(&long).expect("a sequence");
+    assert_eq!(hinted.entries, 100);
     assert_eq!(
         hinted.before.is_none(),
         cfg!(ayaml_typed_from_events),
