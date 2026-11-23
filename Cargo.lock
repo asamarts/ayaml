@@ -44,7 +44,9 @@ name = "ayaml-bench"
 version = "0.2.3"
 dependencies = [
  "ayaml",
+ "ayaml-fixtures",
  "criterion",
+ "serde",
 ]
 
 [[package]]
