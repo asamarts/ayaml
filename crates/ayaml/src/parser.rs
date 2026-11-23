@@ -86,13 +86,44 @@ const TOKEN_ARENA_WIDE_CHUNK: usize = 16 * 1024;
 const TOKEN_ARENA_SMALL_CHUNK: usize = 64;
 const TOKEN_ARENA_MID_CHUNK: usize = 256;
 
-fn push_token<'a>(tokens: &mut Vec<Token<'a>>, token: Token<'a>, chunk: usize, most: usize) {
+fn reserve_tokens(
+    tokens: &mut Vec<Token<'_>>,
+    additional: usize,
+    most: usize,
+    span: Span,
+    positions: &LineStarts,
+    input: &str,
+) -> Result<(), Error> {
+    tokens.try_reserve_exact(additional).map_err(|_| {
+        let observed = u64::try_from(tokens.len().saturating_add(additional)).unwrap_or(u64::MAX);
+        let limit = u64::try_from(most).unwrap_or(u64::MAX);
+        Error::from(crate::limits::LimitExceeded::new(
+            crate::limits::LimitKind::Events,
+            limit,
+            observed,
+        ))
+        .with_span(span)
+        .with_location_from(positions, input)
+    })
+}
+
+#[cfg(test)]
+fn push_token<'a>(
+    tokens: &mut Vec<Token<'a>>,
+    token: Token<'a>,
+    chunk: usize,
+    most: usize,
+    positions: &LineStarts,
+    input: &str,
+) -> Result<(), Error> {
     if tokens.len() == tokens.capacity() {
         // The scanner refuses the token after `most`, so no arena holds more than that.
         let room = most.saturating_sub(tokens.len()).max(1);
-        tokens.reserve_exact(arena_growth(tokens.len(), chunk).min(room));
+        let additional = arena_growth(tokens.len(), chunk).min(room);
+        reserve_tokens(tokens, additional, most, token.span, positions, input)?;
     }
     tokens.push(token);
+    Ok(())
 }
 
 /// How many tokens a full arena of `len` grows by before any estimate: its first chunk, and
@@ -153,14 +184,17 @@ const fn estimated_growth(len: usize, estimate: usize, chunk: usize, most: usize
 }
 
 /// Tokens to hold after scanning a prefix, or `None` before enough tokens show the density.
-/// The estimate assumes the rest of the input has the prefix's token density. It is capped at
-/// the input's length, since a token takes a byte at least, at `most`, the tokens the limits let
-/// a reader keep, and at [`TOKEN_ARENA_AHEAD`] times the tokens already scanned. That last cap
-/// is what keeps a comment-only rest, or one large scalar, from reserving an arena it will not
-/// use.
+/// The estimate projects the remaining bytes from the higher of the whole prefix's density and
+/// the density since the previous estimate `(last_tokens, last_consumed)`, so a dense tail after
+/// a sparse comment or block-scalar head converges in a few reservations. It is capped at the
+/// input's length, since a token takes a byte at least, at `most`, the tokens the limits let a
+/// reader keep, and at [`TOKEN_ARENA_AHEAD`] times the tokens already scanned. That last cap is
+/// what keeps a comment-only rest, or one large scalar, from reserving an arena it will not use.
 fn prefix_token_capacity(
     tokens: usize,
     consumed: usize,
+    last_tokens: usize,
+    last_consumed: usize,
     input_len: usize,
     most: usize,
 ) -> Option<usize> {
@@ -171,23 +205,21 @@ fn prefix_token_capacity(
     // In 128 bits: on a 32-bit target the product passes `usize` for an input of a few hundred
     // KiB. A sixty-fourth is added, because an estimate that falls a few tokens short costs
     // another growth step, which is larger than that margin.
-    let estimate = tokens as u128 * input_len as u128 / consumed as u128;
+    let overall = tokens as u128 * input_len as u128 / consumed as u128;
+    let remaining = input_len.saturating_sub(consumed) as u128;
+    let recent_tokens = tokens.saturating_sub(last_tokens) as u128;
+    let recent_bytes = consumed.saturating_sub(last_consumed) as u128;
+    let recent = if recent_tokens > 0 && recent_bytes > 0 {
+        (tokens as u128).saturating_add(recent_tokens * remaining / recent_bytes)
+    } else {
+        0
+    };
+    let estimate = overall.max(recent);
     let estimate = usize::try_from(estimate + estimate / 64).unwrap_or(usize::MAX);
     let cap = input_len
         .min(most)
         .min(tokens.saturating_mul(TOKEN_ARENA_AHEAD));
     Some(estimate.min(cap).max(tokens))
-}
-
-/// When [`read_lines`] sizes the token arena from the density of the input scanned so far.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Estimating {
-    /// The arena was reserved from the input length, and doubles if that fills.
-    Never,
-    /// No estimate yet: the first comes once enough tokens show the density.
-    AtThreshold,
-    /// An estimate was made, and the next comes when its reservation is full.
-    WhenFull,
 }
 
 /// Group scanner tokens into logical lines as they arrive.
@@ -217,15 +249,18 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
     let mut tokens = Vec::new();
     let line_count = scanner.line_index().line_count();
     let most = scanner.max_tokens();
-    // A mid-sized input of short lines reserves once from its length. Any other estimates from
-    // the tokens scanned so far: first at the threshold, then again each time the arena fills.
-    let mut estimating = match mid_input_token_capacity(input_len, line_count, most) {
-        Some(capacity) => {
-            tokens.reserve_exact(capacity);
-            Estimating::Never
-        }
-        None => Estimating::AtThreshold,
-    };
+    if let Some(capacity) = mid_input_token_capacity(input_len, line_count, most) {
+        reserve_tokens(
+            &mut tokens,
+            capacity,
+            most,
+            Span::empty(0),
+            scanner.line_index(),
+            input,
+        )?;
+    }
+    let mut last_tokens = 0_usize;
+    let mut last_consumed = 0_usize;
     let mut line_start = 0;
     let mut stream_start = None;
     let mut stream_end = None;
@@ -255,28 +290,39 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
                     matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
                 });
                 let consumed = token.span.end();
+                if tokens.is_empty() {
+                    // Start the recent-density window at the first content token so leading
+                    // comments or blank lines do not depress the first full-arena estimate.
+                    last_consumed = token.span.start();
+                }
                 #[cfg(test)]
                 let capacity_before = tokens.capacity();
-                // A full arena that has had an estimate grows to a new one, made from every
-                // token scanned so far and this one. It grows only when a token needs the room,
-                // so an estimate that was exact reserves nothing after the last token.
-                if estimating == Estimating::WhenFull
-                    && tokens.len() == tokens.capacity()
-                    && let Some(capacity) =
-                        prefix_token_capacity(tokens.len() + 1, consumed, input_len, most)
-                {
-                    tokens.reserve_exact(estimated_growth(tokens.len(), capacity, chunk, most));
+                if tokens.len() == tokens.capacity() {
+                    let room = most.saturating_sub(tokens.len()).max(1);
+                    let additional = if let Some(capacity) = prefix_token_capacity(
+                        tokens.len() + 1,
+                        consumed,
+                        last_tokens,
+                        last_consumed,
+                        input_len,
+                        most,
+                    ) {
+                        last_tokens = tokens.len() + 1;
+                        last_consumed = consumed;
+                        estimated_growth(tokens.len(), capacity, chunk, most)
+                    } else {
+                        arena_growth(tokens.len(), chunk).min(room)
+                    };
+                    reserve_tokens(
+                        &mut tokens,
+                        additional,
+                        most,
+                        token.span,
+                        scanner.line_index(),
+                        input,
+                    )?;
                 }
-                push_token(&mut tokens, token, chunk, most);
-                if estimating == Estimating::AtThreshold
-                    && let Some(capacity) =
-                        prefix_token_capacity(tokens.len(), consumed, input_len, most)
-                {
-                    estimating = Estimating::WhenFull;
-                    if capacity > tokens.capacity() {
-                        tokens.reserve_exact(capacity - tokens.len());
-                    }
-                }
+                tokens.push(token);
                 #[cfg(test)]
                 {
                     growths += usize::from(tokens.capacity() != capacity_before);
