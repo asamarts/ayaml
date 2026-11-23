@@ -47,16 +47,19 @@ pub(crate) fn plain_resolves_to_string(text: &str) -> bool {
 /// is a string. Integers are exact up to 128 bits. A wider decimal
 /// integer is a float, and a wider `0x`/`0o`/`0b` integer is a string.
 fn resolve_plain(text: &str) -> Option<Value> {
-    if is_null(text) {
-        return Some(Value::Null);
+    match text.as_bytes().first().copied() {
+        None => Some(Value::Null),
+        Some(b'~') => (text.len() == 1).then_some(Value::Null),
+        Some(b'n' | b'N') => is_null(text).then_some(Value::Null),
+        Some(b't' | b'T' | b'f' | b'F') => parse_bool(text).map(Value::Bool),
+        Some(b'0'..=b'9' | b'+' | b'-' | b'.') => {
+            if let Some(number) = parse_int(text) {
+                return Some(Value::Number(number));
+            }
+            parse_float(text).map(Value::Number)
+        }
+        _ => None,
     }
-    if let Some(value) = parse_bool(text) {
-        return Some(Value::Bool(value));
-    }
-    if let Some(number) = parse_int(text) {
-        return Some(Value::Number(number));
-    }
-    parse_float(text).map(Value::Number)
 }
 
 #[allow(
@@ -314,5 +317,25 @@ mod tests {
         assert_eq!(plain("-42").as_i64(), Some(-42));
         assert_eq!(plain("+42").as_i64(), Some(42));
         assert_eq!(plain("1.5").as_f64(), Some(1.5));
+    }
+
+    #[test]
+    fn plain_first_byte_dispatch_matches_every_scalar_class() {
+        assert!(plain("").is_null());
+        assert!(plain("~").is_null());
+        assert_eq!(plain("~tilde"), Value::from("~tilde"));
+        assert!(plain("null").is_null());
+        assert!(plain("Null").is_null());
+        assert!(plain("NULL").is_null());
+        assert_eq!(plain("nullable"), Value::from("nullable"));
+        assert_eq!(plain("TRUE"), Value::from(true));
+        assert_eq!(plain("FALSE"), Value::from(false));
+        assert_eq!(plain("truth"), Value::from("truth"));
+        assert_eq!(plain("falsehood"), Value::from("falsehood"));
+        assert_eq!(plain("service-a"), Value::from("service-a"));
+        assert_eq!(plain("/etc/hosts"), Value::from("/etc/hosts"));
+        assert_eq!(plain("café"), Value::from("café"));
+        assert_eq!(plain("-.INF").as_f64(), Some(f64::NEG_INFINITY));
+        assert_eq!(plain("+.Inf").as_f64(), Some(f64::INFINITY));
     }
 }

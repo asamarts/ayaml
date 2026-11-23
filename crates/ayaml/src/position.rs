@@ -128,6 +128,22 @@ fn scan_line_starts<const CHECK: bool>(
     input: &str,
     quoted_only: &mut Vec<usize>,
 ) -> Result<(Vec<usize>, bool), usize> {
+    const LINE_SPECIAL: [bool; 256] = {
+        let mut table = [false; 256];
+        let mut i = 0;
+        while i < 0x20 {
+            table[i] = true;
+            i += 1;
+        }
+        table[b'\t' as usize] = false;
+        table[0x7f] = true;
+        let mut j = 0x80;
+        while j < 256 {
+            table[j] = true;
+            j += 1;
+        }
+        table
+    };
     let bytes = input.as_bytes();
     // Allocated once, at 8 bytes for each CR or LF: growing by doubling would hold up to twice the
     // index, and three times it while a copying `realloc` moves it.
@@ -136,16 +152,14 @@ fn scan_line_starts<const CHECK: bool>(
     let mut ascii = true;
     let mut index = 0;
     while index < bytes.len() {
+        while index < bytes.len() && !LINE_SPECIAL[bytes[index] as usize] {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            break;
+        }
         let byte = bytes[index];
         if byte < 0x80 {
-            if CHECK {
-                if byte < 0x20 && !matches!(byte, b'\t' | b'\n' | b'\r') {
-                    return Err(index);
-                }
-                if byte == 0x7f {
-                    quoted_only.push(index);
-                }
-            }
             match byte {
                 b'\n' => {
                     index += 1;
@@ -158,7 +172,18 @@ fn scan_line_starts<const CHECK: bool>(
                     }
                     starts.push(index);
                 }
-                _ => index += 1,
+                0x7f => {
+                    if CHECK {
+                        quoted_only.push(index);
+                    }
+                    index += 1;
+                }
+                _ => {
+                    if CHECK {
+                        return Err(index);
+                    }
+                    index += 1;
+                }
             }
             continue;
         }
