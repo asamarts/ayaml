@@ -1370,6 +1370,52 @@ class InstructionsBase(unittest.TestCase):
         self.assertEqual(check_instructions.known_operations(older), ("events", "value", "typed", "emit"))
         self.assertEqual(check_instructions.known_operations(""), ())
 
+    def test_callgrind_parsing_cycles_steady_state_and_thresholds(self) -> None:
+        k1_txt = (
+            "events: Ir Dr Dw I1mr D1mr D1mw ILmr DLmr DLmw Bc Bcm Bi Bim\n"
+            "summary: 1000 200 100 10 5 2 1 1 0 50 4 10 1\n"
+        )
+        k2_txt = (
+            "events: Ir Dr Dw I1mr D1mr D1mw ILmr DLmr DLmw Bc Bcm Bi Bim\n"
+            "summary: 5000 1000 500 50 25 10 5 5 0 250 12 50 5\n"
+        )
+        k1 = check_instructions.parse_callgrind_out(k1_txt)
+        k2 = check_instructions.parse_callgrind_out(k2_txt)
+        delta = check_instructions.steady_state_delta(k1, k2, 4)
+        self.assertEqual(delta["Ir"], 1000)
+        # 1000 + 10*(10+5+2) + 100*(1+1+0) + 20*(2+1) = 1430
+        self.assertEqual(delta["EstimatedCycles"], 1430)
+        with self.assertRaises(ValueError):
+            check_instructions.parse_callgrind_out("events: Dr\nsummary: 10\n")
+
+        cells = [("value", "frontmatter-tiny"), ("borrowed", "frontmatter-tiny")]
+        manifest = {"frontmatter-tiny": {"bytes": 340, "sha256": "a" * 64}}
+        base = [{"Ir": 10000, "EstimatedCycles": 12000}, None]
+        # +1.5% Ir and +4.0% cycles passes (+2% / +5% limits); new op passes.
+        ok_head = [
+            {"Ir": 10150, "EstimatedCycles": 12480},
+            {"Ir": 5000, "EstimatedCycles": 6000},
+        ]
+        rows, failed = check_instructions.evaluate_cells(cells, base, ok_head, {}, manifest)
+        self.assertEqual(failed, [])
+        self.assertEqual(rows[0]["status"], "ok")
+        self.assertEqual(rows[1]["status"], "new")
+
+        # +2.5% Ir or +6.0% cycles fails unless accepted in instruction-rises.tsv.
+        bad_head = [
+            {"Ir": 10250, "EstimatedCycles": 12720},
+            {"Ir": 5000, "EstimatedCycles": 6000},
+        ]
+        _, failed = check_instructions.evaluate_cells(cells, base, bad_head, {}, manifest)
+        self.assertEqual(len(failed), 1)
+        self.assertIn("Ir +2.50%", failed[0])
+        self.assertIn("EstCycles +6.00%", failed[0])
+
+        _, allowed = check_instructions.evaluate_cells(
+            cells, base, bad_head, {("value", "frontmatter-tiny"): 7.0}, manifest
+        )
+        self.assertEqual(allowed, [])
+
 
 class ScannerDependencyPolicy(unittest.TestCase):
     def scanner(self, source: str) -> str | None:
