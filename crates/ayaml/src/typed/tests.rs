@@ -120,15 +120,10 @@ fn a_large_stream_reports_trailing_documents() {
 #[test]
 fn a_reserved_collection_stops_at_the_entry_limit() {
     let limits = Limits::default().with_max_collection_entries(3);
-    let mut builder = Builder::streaming(
-        0,
-        &limits,
-        NodeOptions::default(),
-        Some(Rc::new(RefCell::new(None))),
-    );
-    EventConsumer::reserve_collection(&mut builder, 2);
+    let mut builder = Builder::streaming(0, &limits, NodeOptions::default());
+    builder.reserve_collection(2);
     assert_eq!(builder.pending_capacity, Some(2));
-    EventConsumer::reserve_collection(&mut builder, 1_000_000);
+    builder.reserve_collection(1_000_000);
     assert_eq!(builder.pending_capacity, Some(3));
 }
 
@@ -138,14 +133,14 @@ fn a_reserved_collection_stops_at_the_entry_limit() {
 fn a_root_flow_collection_is_built_with_room_for_its_entries() {
     for input in ["[1, 2, 3, 4, 5]\n", "---\n[1, 2, 3, 4, 5]\n"] {
         let node =
-            parse_streaming(input, &Limits::default(), NodeOptions::default()).expect("a node");
+            parse_document(input, &Limits::default(), NodeOptions::default()).expect("a node");
         let NodeKind::Sequence(items) = &node.kind else {
             panic!("{input:?}: a sequence");
         };
         assert_eq!((items.len(), items.capacity()), (5, 5), "{input:?}");
     }
     let input = "{a: 1, b: 2, c: 3}\n";
-    let node = parse_streaming(input, &Limits::default(), NodeOptions::default()).expect("a node");
+    let node = parse_document(input, &Limits::default(), NodeOptions::default()).expect("a node");
     let NodeKind::Mapping(entries) = &node.kind else {
         panic!("{input:?}: a mapping");
     };
@@ -157,7 +152,7 @@ fn a_root_flow_collection_is_built_with_room_for_its_entries() {
 #[test]
 fn the_room_reserved_for_a_root_collection_is_not_reserved_for_its_items() {
     let input = "[[1], {a: 1}, [], 4]\n";
-    let node = parse_streaming(input, &Limits::default(), NodeOptions::default()).expect("a node");
+    let node = parse_document(input, &Limits::default(), NodeOptions::default()).expect("a node");
     let NodeKind::Sequence(items) = &node.kind else {
         panic!("a sequence");
     };

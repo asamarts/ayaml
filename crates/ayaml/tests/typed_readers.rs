@@ -1283,3 +1283,105 @@ fn tree_and_events_agree_when_dropping_global_tags() {
         }
     }
 }
+
+/// `Deserializer::next`, `next_borrowed`, `next_seed`, `next_seed_borrowed`, and `from_str`
+/// all decode through the typed event path and agree on values, error kinds, messages, and
+/// per-node source spans.
+#[test]
+fn deserializer_methods_match_from_str_on_values_and_error_spans() {
+    use std::marker::PhantomData;
+
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct Record {
+        name: String,
+        count: u32,
+        #[serde(default)]
+        tags: Vec<String>,
+    }
+
+    let cases = [
+        "name: alpha\ncount: 3\ntags: [a, b]\n",
+        "name: &n shared\ncount: 7\ntags: [*n, two]\n",
+        "name: alpha\ncount: not-a-number\n",
+        "name: alpha\ncount: 3\ntags: [ok, {nested: bad}]\n",
+        "name: alpha\nname: dup\ncount: 1\n",
+        "name: *missing\ncount: 1\n",
+        "name: alpha\ncount: [1, 2\n",
+    ];
+
+    for input in cases {
+        let single = ayaml::from_str::<Record>(input);
+        let mut owned_de = ayaml::Deserializer::from_str(input).expect("deserializer");
+        let owned = owned_de.next::<Record>().transpose();
+        let mut borrowed_de = ayaml::Deserializer::from_str(input).expect("deserializer");
+        let borrowed = borrowed_de.next_borrowed::<Record>().transpose();
+        let mut seed_de = ayaml::Deserializer::from_str(input).expect("deserializer");
+        let seed = seed_de.next_seed(PhantomData::<Record>).transpose();
+        let mut seed_borrowed_de = ayaml::Deserializer::from_str(input).expect("deserializer");
+        let seed_borrowed = seed_borrowed_de
+            .next_seed_borrowed(PhantomData::<Record>)
+            .transpose();
+
+        match (&single, &owned, &borrowed, &seed, &seed_borrowed) {
+            (Ok(s), Some(Ok(o)), Some(Ok(b)), Some(Ok(sd)), Some(Ok(sdb))) => {
+                assert_eq!(s, o, "{input:?}");
+                assert_eq!(s, b, "{input:?}");
+                assert_eq!(s, sd, "{input:?}");
+                assert_eq!(s, sdb, "{input:?}");
+                assert!(owned_de.next::<Record>().expect("end").is_none());
+                assert!(
+                    borrowed_de
+                        .next_borrowed::<Record>()
+                        .expect("end")
+                        .is_none()
+                );
+            }
+            (Err(s), Some(Err(o)), Some(Err(b)), Some(Err(sd)), Some(Err(sdb))) => {
+                let expected = format!("{s:?} {s}");
+                for (label, got) in [
+                    ("next", o),
+                    ("next_borrowed", b),
+                    ("next_seed", sd),
+                    ("next_seed_borrowed", sdb),
+                ] {
+                    assert_eq!(
+                        format!("{got:?} {got}"),
+                        expected,
+                        "{label} differed from from_str on {input:?}"
+                    );
+                    assert!(
+                        got.span().is_some(),
+                        "{label} lost per-node span on {input:?}: {got}"
+                    );
+                }
+            }
+            other => panic!("mismatched outcomes for {input:?}: {other:?}"),
+        }
+    }
+
+    // Multi-document streams preserve exact spans on errors in later documents too.
+    let multi =
+        "name: first\ncount: 1\n---\nname: second\ncount: nope\n---\nname: third\ncount: 3\n";
+    let mut de = ayaml::Deserializer::from_str(multi).expect("multi");
+    assert_eq!(
+        de.next::<Record>().expect("first"),
+        Some(Record {
+            name: "first".to_owned(),
+            count: 1,
+            tags: Vec::new(),
+        })
+    );
+    let err = de.next::<Record>().expect_err("second fails with span");
+    assert_eq!(err.kind(), ayaml::ErrorKind::Serde);
+    assert_eq!(
+        err.location().map(|loc| (loc.line(), loc.column())),
+        Some((5, 8)),
+        "{err}"
+    );
+    let mut de_b = ayaml::Deserializer::from_str(multi).expect("multi borrowed");
+    assert!(de_b.next_borrowed::<Record>().expect("first").is_some());
+    let err_b = de_b
+        .next_borrowed::<Record>()
+        .expect_err("second fails with span");
+    assert_eq!(format!("{err:?} {err}"), format!("{err_b:?} {err_b}"));
+}

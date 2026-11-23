@@ -775,6 +775,12 @@ pub struct EventStream<'a> {
     inner: parser::EventCursor<'a>,
 }
 
+impl<'a> EventStream<'a> {
+    pub(crate) fn next_document(&mut self) -> Result<Option<Vec<Event<'a>>>, Error> {
+        self.inner.next_document()
+    }
+}
+
 #[cfg(feature = "libyaml-compat")]
 impl<'a> EventStream<'a> {
     pub(crate) fn from_cursor(inner: parser::EventCursor<'a>) -> Self {
@@ -793,10 +799,12 @@ impl<'a> Iterator for EventStream<'a> {
 /// A document-bounded typed deserializer.
 ///
 /// This consumes one YAML document at a time from the public event traversal.
-/// [`next`](Self::next) composes owned values, while
-/// [`next_borrowed`](Self::next_borrowed) decodes from spanned events and can
-/// borrow simple scalar strings from the input. The aliases of every document
-/// draw on one alias budget for the whole stream.
+/// Both [`next`](Self::next) and [`next_borrowed`](Self::next_borrowed) decode
+/// directly from spanned events, preserving per-node source spans on Serde
+/// errors without composing an intermediate owned [`Value`];
+/// [`next_borrowed`](Self::next_borrowed) additionally allows targets to borrow
+/// simple scalar strings from the input. The aliases of every document draw on
+/// one alias budget for the whole stream.
 #[derive(Debug)]
 pub struct Deserializer<'a> {
     events: EventStream<'a>,
@@ -853,6 +861,9 @@ impl<'a> Deserializer<'a> {
 
     /// Deserialize the next document, or return `None` at end of stream.
     ///
+    /// Decodes directly from spanned events so Serde errors preserve per-node
+    /// source spans without materializing an intermediate owned [`Value`].
+    ///
     /// # Errors
     ///
     /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
@@ -861,12 +872,7 @@ impl<'a> Deserializer<'a> {
         reason = "the cursor deliberately mirrors Iterator::next with a different return type"
     )]
     pub fn next<T: serde::de::DeserializeOwned>(&mut self) -> Result<Option<T>, Error> {
-        let Some(value) = self.next_value()? else {
-            return Ok(None);
-        };
-        from_value(value)
-            .map(Some)
-            .map_err(|error| error.with_input_location(self.input, false))
+        self.next_borrowed()
     }
 
     /// Deserialize the next document, borrowing simple strings from the input.
@@ -902,6 +908,9 @@ impl<'a> Deserializer<'a> {
 
     /// Deserialize the next document using a caller-supplied seed.
     ///
+    /// Decodes directly from spanned events so Serde errors preserve per-node
+    /// source spans without materializing an intermediate owned [`Value`].
+    ///
     /// # Errors
     ///
     /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
@@ -909,72 +918,29 @@ impl<'a> Deserializer<'a> {
         &mut self,
         seed: T,
     ) -> Result<Option<T::Value>, Error> {
-        let Some(value) = self.next_value()? else {
+        let Some(events) = self.next_events()? else {
             return Ok(None);
         };
-        from_value_seed(value, seed)
+        typed::from_events_seed_owned(events, self.input_len, &self.limits, &mut self.budget, seed)
             .map(Some)
             .map_err(|error| error.with_input_location(self.input, false))
     }
 
-    fn next_value(&mut self) -> Result<Option<Value>, Error> {
-        let Some(events) = self.next_events()? else {
-            return Ok(None);
-        };
-        let value = composer::compose_documents_with_budget(
-            events,
-            self.input_len,
-            &self.limits,
-            &mut self.budget,
-        )
-        .map_err(|error| error.with_input_location(self.input, false))?
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error::new(ErrorKind::Composition, "document produced no value"))?;
-        Ok(Some(value))
-    }
-
-    #[allow(
-        clippy::match_same_arms,
-        reason = "the arms stay separate to document each representation or state"
-    )]
     fn next_events(&mut self) -> Result<Option<Vec<Event<'a>>>, Error> {
         if self.finished {
             return Ok(None);
         }
-        let mut events = Vec::new();
-        let mut saw_document = false;
-        loop {
-            match self.events.next() {
-                None => {
-                    self.finished = true;
-                    break;
-                }
-                Some(Ok(Event::StreamStart { .. })) => {}
-                Some(Ok(Event::StreamEnd { .. })) => {
-                    self.finished = true;
-                    break;
-                }
-                Some(Ok(event)) => {
-                    if matches!(event, Event::DocumentStart { .. }) {
-                        saw_document = true;
-                    }
-                    let end = matches!(event, Event::DocumentEnd { .. });
-                    events.push(event);
-                    if end {
-                        break;
-                    }
-                }
-                Some(Err(error)) => {
-                    self.finished = true;
-                    return Err(error);
-                }
+        match self.events.next_document() {
+            Ok(Some(events)) => Ok(Some(events)),
+            Ok(None) => {
+                self.finished = true;
+                Ok(None)
+            }
+            Err(error) => {
+                self.finished = true;
+                Err(error)
             }
         }
-        if !saw_document {
-            return Ok(None);
-        }
-        Ok(Some(events))
     }
 }
 
