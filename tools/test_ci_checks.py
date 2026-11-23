@@ -1416,6 +1416,34 @@ class InstructionsBase(unittest.TestCase):
         )
         self.assertEqual(allowed, [])
 
+    def test_build_probe_remaps_source_paths_for_deterministic_binaries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tree = root / "tree"
+            work = root / "work"
+            (tree / "tools").mkdir(parents=True)
+            (tree / "tools" / "instruction-probe.rs").write_text("fn main() {}\n", encoding="utf-8")
+            (tree / "Cargo.lock").write_text("# lock\n", encoding="utf-8")
+            captured: list[dict[str, str]] = []
+
+            def fake_run(*_cmd: object, env: dict[str, str] | None = None, **_kw: object) -> str:
+                captured.append(env or {})
+                out = work / "target" / "release" / "ayaml-instruction-probe"
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(b"bin")
+                return ""
+
+            with (
+                mock.patch.object(check_instructions, "WORK", work),
+                mock.patch.object(check_instructions, "run", side_effect=fake_run),
+            ):
+                check_instructions.build_probe("base", tree)
+
+            self.assertEqual(len(captured), 1)
+            rustflags = captured[0].get("RUSTFLAGS", "")
+            self.assertIn(f"--remap-path-prefix={tree.resolve()}=/ayaml", rustflags)
+            self.assertIn(f"--remap-path-prefix={(work / 'probe-base').resolve()}=/probe", rustflags)
+
 
 class ScannerDependencyPolicy(unittest.TestCase):
     def scanner(self, source: str) -> str | None:

@@ -286,7 +286,20 @@ def build_probe(side: str, tree: Path) -> Path:
         "[workspace]\n",
         encoding="utf-8",
     )
-    run("cargo", "build", "--quiet", "--release", cwd=crate, env={"CARGO_TARGET_DIR": str(WORK / "target")})
+    remap = (
+        f"--remap-path-prefix={tree.resolve()}=/ayaml "
+        f"--remap-path-prefix={crate.resolve()}=/probe"
+    )
+    existing_rustflags = os.environ.get("RUSTFLAGS", "").strip()
+    rustflags = f"{existing_rustflags} {remap}".strip() if existing_rustflags else remap
+    run(
+        "cargo",
+        "build",
+        "--quiet",
+        "--release",
+        cwd=crate,
+        env={"CARGO_TARGET_DIR": str(WORK / "target"), "RUSTFLAGS": rustflags},
+    )
     binary = WORK / f"probe-{side}.bin"
     shutil.copy(WORK / "target" / "release" / "ayaml-instruction-probe", binary)
     return binary

@@ -388,17 +388,38 @@ struct Frame<'a> {
     anchored: bool,
     /// What [`Builder::after_block_scalar`] was when the collection began.
     after_block_scalar: bool,
+    /// The collection is a mapping key (or nested inside one), so the builder assembles its
+    /// resolved [`Value`] bottom-up in linear time instead of re-walking nested subtrees.
+    in_key: bool,
     kind: FrameKind<'a>,
 }
 
+enum KeyTracker {
+    /// Duplicate-key table for regular mappings or complex-key mappings that became unresolvable.
+    Seen(HashMap<Value, usize>),
+    /// Bottom-up resolved mapping for an `in_key` mapping whose entries are all unique and
+    /// resolvable so far; entries align 1:1 with `FrameKind::Mapping::entries`.
+    Resolved(Box<Mapping>),
+}
+
+struct PendingKey<'a> {
+    node: SpannedNode<'a>,
+    resolved: Option<Box<Value>>,
+    after_block_scalar: bool,
+}
+
 enum FrameKind<'a> {
-    Sequence(Vec<SpannedNode<'a>>),
+    Sequence {
+        items: Vec<SpannedNode<'a>>,
+        resolved: Option<Vec<Value>>,
+    },
     Mapping {
         entries: Vec<Entry<'a>>,
-        /// The key that waits for its value, and what [`Builder::after_block_scalar`] was
-        /// when the key began. Boxed, so a sequence's frame isn't as large.
-        key: Option<Box<(SpannedNode<'a>, bool)>>,
-        seen: HashMap<Value, usize>,
+        /// The key that waits for its value, its bottom-up resolved value (when the key was a
+        /// collection), and what [`Builder::after_block_scalar`] was when the key began. Boxed,
+        /// so a sequence's frame isn't as large.
+        key: Option<Box<PendingKey<'a>>>,
+        keys: KeyTracker,
         /// A key here has no value of its own to compare: an alias, or a collection that holds
         /// one. It may be any other key of the mapping again, so a lookup would have to guess.
         guess: bool,
@@ -406,6 +427,19 @@ enum FrameKind<'a> {
 }
 
 impl<'a> Builder<'a> {
+    /// Whether a new collection at the current position belongs to a mapping key (or is nested
+    /// inside one).
+    fn in_key_position(&self) -> bool {
+        self.stack.last().is_some_and(|frame| {
+            frame.in_key || matches!(frame.kind, FrameKind::Mapping { key: None, .. })
+        })
+    }
+
+    /// Whether the current open collection itself tracks bottom-up resolved values.
+    fn tracking_resolved(&self) -> bool {
+        self.stack.last().is_some_and(|frame| frame.in_key)
+    }
+
     fn event(&mut self, event: Event<'a>) -> Result<(), Error> {
         match event {
             Event::StreamStart { .. } | Event::StreamEnd { .. } | Event::Directive { .. } => {}
@@ -429,6 +463,14 @@ impl<'a> Builder<'a> {
                     self.after_block_scalar =
                         matches!(style, ScalarStyle::Literal | ScalarStyle::Folded);
                 }
+                let resolved = self
+                    .tracking_resolved()
+                    .then(|| {
+                        resolve_scalar(&value, style, tag.as_ref())
+                            .ok()
+                            .map(Box::new)
+                    })
+                    .flatten();
                 let node = SpannedNode {
                     span,
                     entry_span: None,
@@ -441,7 +483,7 @@ impl<'a> Builder<'a> {
                         tag,
                     },
                 };
-                self.add(node, before);
+                self.add(node, resolved, before);
             }
             Event::Alias { span, .. } => {
                 let before = std::mem::replace(&mut self.after_block_scalar, false);
@@ -452,7 +494,7 @@ impl<'a> Builder<'a> {
                     anchored: false,
                     kind: Kind::Alias,
                 };
-                self.add(node, before);
+                self.add(node, None, before);
             }
             Event::SequenceStart {
                 span,
@@ -460,134 +502,170 @@ impl<'a> Builder<'a> {
                 anchor,
                 ..
             } => {
+                let in_key = self.in_key_position();
                 self.stack.push(Frame {
                     open: span,
                     style,
                     anchored: anchor.is_some(),
                     after_block_scalar: self.after_block_scalar,
-                    kind: FrameKind::Sequence(Vec::new()),
+                    in_key,
+                    kind: FrameKind::Sequence {
+                        items: Vec::new(),
+                        resolved: in_key.then(Vec::new),
+                    },
                 });
             }
-            Event::SequenceEnd { span } => {
-                let Some(frame) = self.stack.pop() else {
-                    return Err(Error::coded(
-                        ErrorKind::Parser,
-                        ErrorCode::MalformedEventStream,
-                        "unexpected sequence end",
-                    ));
-                };
-                let FrameKind::Sequence(items) = frame.kind else {
-                    return Err(Error::coded(
-                        ErrorKind::Parser,
-                        ErrorCode::MalformedEventStream,
-                        "sequence end for a mapping",
-                    ));
-                };
-                let flow = frame.style == crate::event::CollectionStyle::Flow;
-                let mut items = items;
-                // Without its only item a collection is no collection: what is left of it reads
-                // as an empty value, under whatever tag stood before it.
-                if let [only] = items.as_mut_slice() {
-                    only.entry_span = None;
-                }
-                let node = SpannedNode {
-                    span: Span::new(frame.open.start(), span.end()),
-                    entry_span: None,
-                    content_end: match items.last() {
-                        Some(last) if !flow => last.content_end,
-                        _ => Some(span.end()),
-                    },
-                    anchored: frame.anchored || items.iter().any(|item| item.anchored),
-                    kind: Kind::Sequence(items),
-                };
-                if flow {
-                    self.after_block_scalar = false;
-                }
-                self.add(node, frame.after_block_scalar);
-            }
+            Event::SequenceEnd { span } => self.finish_sequence(span)?,
             Event::MappingStart {
                 span,
                 style,
                 anchor,
                 ..
             } => {
+                let in_key = self.in_key_position();
+                let keys = if in_key {
+                    KeyTracker::Resolved(Box::new(Mapping::new()))
+                } else {
+                    KeyTracker::Seen(HashMap::new())
+                };
                 self.stack.push(Frame {
                     open: span,
                     style,
                     anchored: anchor.is_some(),
                     after_block_scalar: self.after_block_scalar,
+                    in_key,
                     kind: FrameKind::Mapping {
                         entries: Vec::new(),
                         key: None,
-                        seen: HashMap::new(),
+                        keys,
                         guess: false,
                     },
                 });
             }
-            Event::MappingEnd { span } => {
-                let Some(frame) = self.stack.pop() else {
-                    return Err(Error::coded(
-                        ErrorKind::Parser,
-                        ErrorCode::MalformedEventStream,
-                        "unexpected mapping end",
-                    ));
-                };
-                let FrameKind::Mapping { entries, guess, .. } = frame.kind else {
-                    return Err(Error::coded(
-                        ErrorKind::Parser,
-                        ErrorCode::MalformedEventStream,
-                        "mapping end for a sequence",
-                    ));
-                };
-                let flow = frame.style == crate::event::CollectionStyle::Flow;
-                let mut entries = entries;
-                if let [only] = entries.as_mut_slice() {
-                    only.value.entry_span = None;
-                }
-                if guess {
-                    for entry in &mut entries {
-                        entry.ambiguous = true;
-                        entry.value.entry_span = None;
-                    }
-                }
-                // A pair in a flow sequence, as in `[a: b]`, is a mapping with no braces. Its
-                // end event stands at the token after it, past blanks and a comment, where a
-                // mapping with braces has its `}`. The pair ends where what it writes does.
-                let braced = self
-                    .input
-                    .get(span.start()..)
-                    .is_some_and(|text| text.starts_with('}'));
-                let end = match entries.last() {
-                    Some(last) if flow && !braced => {
-                        pair_end(self.input, frame.open.start(), last, span.start())
-                    }
-                    _ => span.end(),
-                };
-                let node = SpannedNode {
-                    span: Span::new(frame.open.start(), end),
-                    entry_span: None,
-                    content_end: match entries.last() {
-                        Some(last) if !flow => last.value.content_end,
-                        _ => Some(end),
-                    },
-                    anchored: frame.anchored
-                        || entries
-                            .iter()
-                            .any(|entry| entry.key.anchored || entry.value.anchored),
-                    kind: Kind::Mapping(entries),
-                };
-                if flow {
-                    self.after_block_scalar = false;
-                }
-                self.add(node, frame.after_block_scalar);
+            Event::MappingEnd { span } => self.finish_mapping(span)?,
+        }
+        Ok(())
+    }
+
+    fn finish_sequence(&mut self, span: Span) -> Result<(), Error> {
+        let Some(frame) = self.stack.pop() else {
+            return Err(Error::coded(
+                ErrorKind::Parser,
+                ErrorCode::MalformedEventStream,
+                "unexpected sequence end",
+            ));
+        };
+        let FrameKind::Sequence {
+            mut items,
+            resolved,
+        } = frame.kind
+        else {
+            return Err(Error::coded(
+                ErrorKind::Parser,
+                ErrorCode::MalformedEventStream,
+                "sequence end for a mapping",
+            ));
+        };
+        let flow = frame.style == crate::event::CollectionStyle::Flow;
+        // Without its only item a collection is no collection: what is left of it reads
+        // as an empty value, under whatever tag stood before it.
+        if let [only] = items.as_mut_slice() {
+            only.entry_span = None;
+        }
+        let node = SpannedNode {
+            span: Span::new(frame.open.start(), span.end()),
+            entry_span: None,
+            content_end: match items.last() {
+                Some(last) if !flow => last.content_end,
+                _ => Some(span.end()),
+            },
+            anchored: frame.anchored || items.iter().any(|item| item.anchored),
+            kind: Kind::Sequence(items),
+        };
+        if flow {
+            self.after_block_scalar = false;
+        }
+        let resolved_val = resolved.map(|vals| Box::new(Value::Sequence(vals)));
+        self.add(node, resolved_val, frame.after_block_scalar);
+        Ok(())
+    }
+
+    fn finish_mapping(&mut self, span: Span) -> Result<(), Error> {
+        let Some(frame) = self.stack.pop() else {
+            return Err(Error::coded(
+                ErrorKind::Parser,
+                ErrorCode::MalformedEventStream,
+                "unexpected mapping end",
+            ));
+        };
+        let FrameKind::Mapping {
+            mut entries,
+            keys,
+            guess,
+            ..
+        } = frame.kind
+        else {
+            return Err(Error::coded(
+                ErrorKind::Parser,
+                ErrorCode::MalformedEventStream,
+                "mapping end for a sequence",
+            ));
+        };
+        let flow = frame.style == crate::event::CollectionStyle::Flow;
+        if let [only] = entries.as_mut_slice() {
+            only.value.entry_span = None;
+        }
+        if guess {
+            for entry in &mut entries {
+                entry.ambiguous = true;
+                entry.value.entry_span = None;
             }
         }
+        // A pair in a flow sequence, as in `[a: b]`, is a mapping with no braces. Its
+        // end event stands at the token after it, past blanks and a comment, where a
+        // mapping with braces has its `}`. The pair ends where what it writes does.
+        let braced = self
+            .input
+            .get(span.start()..)
+            .is_some_and(|text| text.starts_with('}'));
+        let end = match entries.last() {
+            Some(last) if flow && !braced => {
+                pair_end(self.input, frame.open.start(), last, span.start())
+            }
+            _ => span.end(),
+        };
+        let node = SpannedNode {
+            span: Span::new(frame.open.start(), end),
+            entry_span: None,
+            content_end: match entries.last() {
+                Some(last) if !flow => last.value.content_end,
+                _ => Some(end),
+            },
+            anchored: frame.anchored
+                || entries
+                    .iter()
+                    .any(|entry| entry.key.anchored || entry.value.anchored),
+            kind: Kind::Mapping(entries),
+        };
+        if flow {
+            self.after_block_scalar = false;
+        }
+        let resolved_value = match keys {
+            KeyTracker::Resolved(map) if !guess => Some(Box::new(Value::Mapping(*map))),
+            _ => None,
+        };
+        self.add(node, resolved_value, frame.after_block_scalar);
         Ok(())
     }
 
     /// Add a finished node to the collection that is open. `after_block_scalar` says whether
     /// the last thing the source wrote before the node was a block scalar.
-    fn add(&mut self, mut node: SpannedNode<'a>, after_block_scalar: bool) {
+    fn add(
+        &mut self,
+        mut node: SpannedNode<'a>,
+        node_resolved: Option<Box<Value>>,
+        after_block_scalar: bool,
+    ) {
         // An alias to a collection reads the entries inside it, so removing one of them changes
         // what the alias stands for.
         let marked = self.marked;
@@ -597,7 +675,14 @@ impl<'a> Builder<'a> {
             return;
         };
         match &mut frame.kind {
-            FrameKind::Sequence(items) => {
+            FrameKind::Sequence { items, resolved } => {
+                if let Some(values) = resolved {
+                    if let Some(value) = node_resolved {
+                        values.push(*value);
+                    } else {
+                        *resolved = None;
+                    }
+                }
                 node.entry_span = block_entry_span(
                     self.input,
                     frame.style,
@@ -612,15 +697,23 @@ impl<'a> Builder<'a> {
             FrameKind::Mapping {
                 entries,
                 key,
-                seen,
+                keys,
                 guess,
             } => {
                 let Some(waiting) = key.take() else {
                     node.entry_span = None;
-                    *key = Some(Box::new((node, after_block_scalar)));
+                    *key = Some(Box::new(PendingKey {
+                        node,
+                        resolved: node_resolved,
+                        after_block_scalar,
+                    }));
                     return;
                 };
-                let (mut key_node, after_block_scalar) = *waiting;
+                let PendingKey {
+                    node: mut key_node,
+                    resolved: key_resolved,
+                    after_block_scalar,
+                } = *waiting;
                 key_node.entry_span = None;
                 // In an input with a byte-order mark past its start, what a line's indentation
                 // is depends on the reader, so the value stays where the parser places it.
@@ -646,20 +739,63 @@ impl<'a> Builder<'a> {
                     aliased || key_node.anchored || node.anchored,
                     after_block_scalar,
                 );
-                let key_value = key_node.resolved_value();
+                // Nodes inside `in_key` and collection keys already built their resolved value
+                // bottom-up; scalar keys outside `in_key` resolve in O(1) directly from the node.
+                let key_value = if frame.in_key {
+                    key_resolved.map(|val| *val)
+                } else if key_node.is_scalar() {
+                    key_node.resolved_value()
+                } else {
+                    key_resolved.map(|val| *val)
+                };
                 *guess |= key_value.is_none();
                 let mut ambiguous = is_merge_key(&key_node);
-                if let Some(value) = &key_value
-                    && let Some(previous) = seen.get(value)
-                {
-                    if let Some(entry) = entries.get_mut(*previous) {
-                        entry.ambiguous = true;
+                match keys {
+                    KeyTracker::Resolved(map) => {
+                        if let Some(kv) = key_value {
+                            if let Some(previous) = map.get_index_of(&kv) {
+                                if let Some(entry) = entries.get_mut(previous) {
+                                    entry.ambiguous = true;
+                                }
+                                ambiguous = true;
+                                if let KeyTracker::Resolved(existing) =
+                                    std::mem::replace(keys, KeyTracker::Seen(HashMap::new()))
+                                    && let KeyTracker::Seen(seen) = keys
+                                {
+                                    for (idx, (k, _)) in existing.into_iter().enumerate() {
+                                        seen.insert(k, idx);
+                                    }
+                                }
+                            } else if !ambiguous && let Some(vv) = node_resolved {
+                                map.insert(kv, *vv);
+                            } else if let KeyTracker::Resolved(existing) =
+                                std::mem::replace(keys, KeyTracker::Seen(HashMap::new()))
+                                && let KeyTracker::Seen(seen) = keys
+                            {
+                                for (idx, (k, _)) in existing.into_iter().enumerate() {
+                                    seen.insert(k, idx);
+                                }
+                                let index = entries.len();
+                                seen.entry(kv).or_insert(index);
+                            }
+                        } else {
+                            *keys = KeyTracker::Seen(HashMap::new());
+                        }
                     }
-                    ambiguous = true;
-                }
-                if let Some(value) = key_value {
-                    let index = entries.len();
-                    seen.entry(value).or_insert(index);
+                    KeyTracker::Seen(seen) => {
+                        if let Some(value) = &key_value
+                            && let Some(previous) = seen.get(value)
+                        {
+                            if let Some(entry) = entries.get_mut(*previous) {
+                                entry.ambiguous = true;
+                            }
+                            ambiguous = true;
+                        }
+                        if let Some(value) = key_value {
+                            let index = entries.len();
+                            seen.entry(value).or_insert(index);
+                        }
+                    }
                 }
                 node.entry_span = span;
                 entries.push(Entry {
@@ -925,4 +1061,70 @@ fn line_end(input: &str, index: usize) -> usize {
         }
     }
     end
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn complex_keys_detect_duplicates_and_ambiguity_in_linear_time() {
+        // Duplicate mapping keys make lookup return None, while unique complex keys resolve.
+        let unique = "? {a: 1, b: [2, 3]}\n: ok\nother: yes\n";
+        let tree = SpannedTree::parse(unique).expect("parse unique complex key");
+        let mut expected_key = Mapping::new();
+        expected_key.insert(Value::String("a".into()), Value::from(1_i64));
+        expected_key.insert(
+            Value::String("b".into()),
+            Value::Sequence(vec![Value::from(2_i64), Value::from(3_i64)]),
+        );
+        let found = tree
+            .lookup(&[PathSegment::Key(Value::Mapping(expected_key.clone()))])
+            .expect("unique complex key should be found");
+        assert_eq!(found.scalar_text(), Some("ok"));
+        assert_eq!(
+            tree.lookup(&[PathSegment::Key(Value::String("other".into()))])
+                .and_then(SpannedNode::scalar_text),
+            Some("yes")
+        );
+
+        let dup = "? {a: 1, b: [2, 3]}\n: first\n? {b: [2, 3], a: 1}\n: second\nother: yes\n";
+        let dup_tree = SpannedTree::parse(dup).expect("parse duplicate complex keys");
+        assert!(
+            dup_tree
+                .lookup(&[PathSegment::Key(Value::Mapping(expected_key))])
+                .is_none(),
+            "duplicate complex keys must be marked ambiguous"
+        );
+        assert_eq!(
+            dup_tree
+                .lookup(&[PathSegment::Key(Value::String("other".into()))])
+                .and_then(SpannedNode::scalar_text),
+            Some("yes")
+        );
+
+        // An inner duplicate, merge key, or alias inside a complex key marks the enclosing
+        // mapping ambiguous so lookups do not guess.
+        for ambiguous_input in [
+            "? {a: 1, a: 2}\n: v\nother: yes\n",
+            "? {<<: {a: 1}}\n: v\nother: yes\n",
+            "anchor: &x 1\n? {a: *x}\n: v\nother: yes\n",
+            "? [*x]\n: v\nother: yes\n",
+        ] {
+            let t = SpannedTree::parse(ambiguous_input).expect("parse ambiguous complex key");
+            assert!(
+                t.lookup(&[PathSegment::Key(Value::String("other".into()))])
+                    .is_none(),
+                "enclosing mapping must not guess for {ambiguous_input:?}"
+            );
+        }
+
+        // Deeply nested complex keys stay linear.
+        let mut nested = "{k0: 0, k1: 1, k2: 2}".to_owned();
+        for _ in 0..48 {
+            nested = format!("{{? {nested}: null}}");
+        }
+        nested.push('\n');
+        assert!(SpannedTree::parse(&nested).is_ok());
+    }
 }
