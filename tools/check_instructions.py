@@ -41,6 +41,8 @@ CYCLES_LIMIT_PERCENT = 5.0
 LIMIT_PERCENT = IR_LIMIT_PERCENT
 WARMUP_ITERATIONS = 1
 ITERATIONS = 4
+EMIT_ITERATIONS = 12
+WALK_ITERATIONS = 64
 ROOT = Path(__file__).resolve().parent.parent
 WORK = ROOT / "target" / "instructions"
 RISES = "tools/instruction-rises.tsv"
@@ -320,11 +322,21 @@ def collected(binary: Path, operation: str, path: Path, iterations: int) -> dict
         cg_out.unlink(missing_ok=True)
 
 
+def iterations_for(operation: str) -> int:
+    """Steady-state delta iterations sized so one-time setup variance cannot contaminate cheap ops."""
+    if operation == "walk":
+        return WALK_ITERATIONS
+    if operation in ("emit", "serialize"):
+        return EMIT_ITERATIONS
+    return ITERATIONS
+
+
 def per_iteration(binary: Path, operation: str, path: Path) -> dict[str, int]:
     """Steady-state per-iteration counters excluding startup and 1 warmup iteration."""
+    iters = iterations_for(operation)
     k1 = collected(binary, operation, path, WARMUP_ITERATIONS)
-    k2 = collected(binary, operation, path, WARMUP_ITERATIONS + ITERATIONS)
-    return steady_state_delta(k1, k2, ITERATIONS)
+    k2 = collected(binary, operation, path, WARMUP_ITERATIONS + iters)
+    return steady_state_delta(k1, k2, iters)
 
 
 def accepted_rises(base_rev: str) -> dict[tuple[str, str], float]:
