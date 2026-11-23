@@ -1,0 +1,14 @@
+[package]
+name = "ayaml-fixtures"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Deterministic YAML benchmark, memory, and instruction fixture generator for ayaml"
+
+[dev-dependencies]
+ayaml = { path = "../ayaml", version = "=0.2.3" }
+
+[lints]
+workspace = true
