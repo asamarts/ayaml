@@ -204,11 +204,11 @@ that document's tokens. Every other reader holds the tokens of the whole stream.
   set of each open mapping's keys, at 24 bytes a slot and the text of a key that isn't taken
   from the source as it stands. A root that is built whole, because it has an anchor or a tag
   that it keeps or because an enum reads it, is the document as a tree: the tokens are freed
-  before its target reads it. Such a node that is not the root, and a key that is a
-  collection, is kept beside the tokens and the value: a megabyte flow sequence with an anchor
-  peaks about a third above a read that builds the whole tree first, and a document made
-  mostly of anchored nodes about a quarter above it as a JSON tree. A read that fails frees its tokens and then builds
-  the document once more to report the error.
+  before its target reads it. A document dense in anchored nodes or containing a large non-root
+  anchored, kept-tag, or complex-key collection is likewise built as a tree in a single scan
+  with its tokens freed before its target reads it; a large non-root node that reaches the end
+  of the document (such as an enum) also frees the token arena before the target reads it. A
+  read that fails frees its tokens and then builds the document once more to report the error.
 - A collection that is read from events tells its target its exact size whenever it is a root
   flow collection (whose entries the parser counts first) or whenever its end is already among
   the events waiting in the lookahead queue (which covers most small block and nested

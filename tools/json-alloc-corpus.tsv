@@ -23,5 +23,6 @@
 # with no node, and none waits for the reader beyond a few.
 @anchored-flow-ones-1mb	79300000	41	97700000
 @anchored-block-words-1mb	25500000	143000	30800000
-@anchored-maps-50000	105000000	386000	110000000
+@anchored-maps-50000	88000000	386000	116000000
+@anchored-inner-flow-1mb	82000000	70	100000000
 @directives-100k	13300000	111000	13300000

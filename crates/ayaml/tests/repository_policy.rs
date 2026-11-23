@@ -212,6 +212,7 @@ fn allocation_budgets_cover_the_json_decode() {
             "@anchored-flow-ones-1mb",
             "@anchored-block-words-1mb",
             "@anchored-maps-50000",
+            "@anchored-inner-flow-1mb",
             "@directives-100k",
         ]
     );

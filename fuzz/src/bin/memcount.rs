@@ -261,6 +261,7 @@ fn short_scalar_shape(name: &str) -> Option<String> {
             }
             out
         }
+        "@anchored-inner-flow-1mb" => format!("k: &a [1{}]\n", ",1".repeat((MEGABYTE - 7) / 2)),
         "@directives-100k" => "%A\n".repeat(100_000) + "--- x\n",
         _ => return None,
     })
