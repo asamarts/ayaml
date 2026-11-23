@@ -1,0 +1,16 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Workspace automation CLI for ayaml fixtures, benchmarks, memory, Callgrind, scaling, and reports"
+
+[dependencies]
+ayaml = { path = "../ayaml", version = "=0.2.3" }
+ayaml-fixtures = { path = "../ayaml-fixtures", version = "=0.2.3" }
+serde_json.workspace = true
+
+[lints]
+workspace = true
