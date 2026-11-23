@@ -5,6 +5,7 @@ members = [
     "crates/ayaml-bench",
     "crates/ayaml-conformance",
     "crates/ayaml-fixtures",
+    "crates/xtask",
 ]
 default-members = ["crates/ayaml"]
 

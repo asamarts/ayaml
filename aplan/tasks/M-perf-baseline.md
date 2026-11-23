@@ -2,7 +2,7 @@
 id: M-perf-baseline
 title: Build a reproducible multi-scenario benchmark and regression-gating baseline
 phase: 6
-status: todo
+status: done
 blocked_by:
 - AY-136
 - AY-137
@@ -12,6 +12,9 @@ blocked_by:
 tags:
 - milestone
 - performance
+evidence:
+- kind: test
+  ref: tests::jsonl_and_fingerprint_schemas_roundtrip_and_reject_malformed_rows
 ---
 
 ## Why
@@ -24,5 +27,5 @@ reliable before-and-after measurements for optimization work.
 
 ## Acceptance criteria
 
-- [ ] every member is closed with the evidence its tags require
-- [ ] all benchmark, allocation, and Callgrind checks share one deterministic fixture manifest
+- [x] every member is closed with the evidence its tags require
+- [x] all benchmark, allocation, and Callgrind checks share one deterministic fixture manifest
