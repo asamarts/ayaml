@@ -196,12 +196,107 @@ impl<'a> DocumentEvents<'a> {
     /// builds the tree before anything else.
     pub(crate) fn release(&mut self) {
         if matches!(self.state, State::Finished) && self.front().is_none() {
-            self.parser.lines = Vec::new();
-            self.parser.token_arena = Vec::new();
-            self.parser.flow_ends = HashMap::new();
-            self.parser.positions = LineStarts::new("");
-            self.stack = Vec::new();
+            self.clear_parser_storage();
         }
+    }
+
+    /// Free the token arena and parser tables as soon as the parser has finished emitting all
+    /// events for a large input, even while the last few events still wait in the lookahead queue.
+    pub(crate) fn release_tokens(&mut self) {
+        if matches!(self.state, State::Finished) && self.parser.token_arena.len() >= 1_024 {
+            self.clear_parser_storage();
+        }
+    }
+
+    fn clear_parser_storage(&mut self) {
+        self.parser.lines = Vec::new();
+        self.parser.token_arena = Vec::new();
+        self.parser.flow_ends = HashMap::new();
+        self.parser.positions = LineStarts::new("");
+        self.stack = Vec::new();
+    }
+
+    /// Whether building the whole document as a tree (and freeing the token arena before the
+    /// target reads) avoids holding tokens, whole-node trees, and the target's value at once.
+    ///
+    /// Inspects the already-scanned token arena in a single pass with no second scan:
+    /// - Documents dense in anchors (e.g. serializers preserving object identity) keep every
+    ///   anchored node alive in `anchors` beside the tokens and target value.
+    /// - Documents containing a large non-root node that must be built whole (an anchored node,
+    ///   a node with a kept tag, or a large collection key) would otherwise keep that tree alive
+    ///   beside the tokens and target value.
+    pub(crate) fn should_build_whole(&self, drop_global_tags: bool) -> bool {
+        use crate::scanner::TokenKind;
+
+        let tokens = &self.parser.token_arena;
+        if tokens.len() < 1_024 {
+            return false;
+        }
+        let large_span = tokens.len() / 4;
+        let mut anchors = 0_usize;
+        for (index, token) in tokens.iter().enumerate() {
+            match &token.kind {
+                TokenKind::Anchor => {
+                    anchors += 1;
+                    if self.next_node_is_large(index + 1, large_span) {
+                        return true;
+                    }
+                }
+                TokenKind::Tag(tag)
+                    if !(tag.is_core_collection()
+                        || tag.is_core_scalar()
+                        || (drop_global_tags && tag.is_non_core_global())) =>
+                {
+                    if self.next_node_is_large(index + 1, large_span) {
+                        return true;
+                    }
+                }
+                TokenKind::Key => {
+                    if self.next_node_is_large(index + 1, large_span) {
+                        return true;
+                    }
+                }
+                TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart => {
+                    // An implicit complex flow key (`[...]: v` or `{...}: v`) is built whole.
+                    if let Some(&close) = self.parser.flow_ends.get(&index)
+                        && close.saturating_sub(index) >= large_span
+                        && matches!(
+                            tokens.get(close + 1).map(|t| &t.kind),
+                            Some(TokenKind::Value)
+                        )
+                    {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        anchors >= 16 && anchors.saturating_mul(32) >= tokens.len()
+    }
+
+    /// Whether the node starting at or right after `start` (skipping a second property like a tag
+    /// or anchor) is a flow collection covering at least `large_span` tokens.
+    fn next_node_is_large(&self, mut index: usize, large_span: usize) -> bool {
+        use crate::scanner::TokenKind;
+
+        let tokens = &self.parser.token_arena;
+        while matches!(
+            tokens.get(index).map(|t| &t.kind),
+            Some(TokenKind::Anchor | TokenKind::Tag(_))
+        ) {
+            index += 1;
+        }
+        if matches!(
+            tokens.get(index).map(|t| &t.kind),
+            Some(TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart)
+        ) {
+            return self
+                .parser
+                .flow_ends
+                .get(&index)
+                .is_some_and(|&close| close.saturating_sub(index) >= large_span);
+        }
+        false
     }
 
     /// How many tokens are held.

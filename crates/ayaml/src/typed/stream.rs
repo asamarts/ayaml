@@ -206,7 +206,13 @@ impl<'de> Stream<'de> {
                 Some(event) => return Err(self.faulted(misplaced(&event))),
             }
         }
-        if let Ahead::Whole(span) = self.ahead()? {
+        let ahead = self.ahead()?;
+        if matches!(ahead, Ahead::Whole(_))
+            || self
+                .events
+                .should_build_whole(self.builder.options.drop_global_tags)
+        {
+            let span = ahead.span();
             self.build_root()?;
             self.ahead = Ahead::Whole(span);
         }
@@ -492,6 +498,7 @@ impl<'de> Stream<'de> {
                 return Err(self.faulted(error));
             }
             if self.builder.stack.is_empty() {
+                self.events.release_tokens();
                 return Ok(());
             }
         }
@@ -987,5 +994,41 @@ mod tests {
         }
         let (_, after) = tokens::<Vec<Kind>>("- V: [1]\n- W: {a: 2}\n");
         assert!(after > 0, "an enum inside the root: {after}");
+    }
+
+    #[test]
+    fn large_anchored_tagged_key_and_enum_shapes_release_tokens() {
+        use std::fmt::Write as _;
+
+        #[derive(serde::Deserialize)]
+        enum Kind {
+            #[allow(dead_code, reason = "read, to verify tokens are released")]
+            V(Vec<u8>),
+        }
+        #[derive(serde::Deserialize)]
+        struct Wrap {
+            #[allow(dead_code, reason = "read, to verify tokens are released")]
+            k: Kind,
+        }
+
+        let mut anchored_many = String::new();
+        for i in 0..300 {
+            let _ = writeln!(anchored_many, "- &a{i} {{x: {i}, y: w}}");
+        }
+        let big_seq = format!("[1{}]", ",1".repeat(600));
+        let big_anchored = format!("k: &a {big_seq}\n");
+        let big_tagged = format!("k: !t {big_seq}\n");
+        let big_key = format!("? {big_seq}\n: 1\n");
+        for (label, input) in [
+            ("anchored_many", anchored_many.as_str()),
+            ("big_anchored", big_anchored.as_str()),
+            ("big_tagged", big_tagged.as_str()),
+            ("big_key", big_key.as_str()),
+        ] {
+            assert_eq!(tokens::<IgnoredAny>(input), (0, 0), "{label}");
+        }
+        let big_enum = format!("k:\n  V: {big_seq}\n");
+        let (_, after_enum) = tokens::<Wrap>(&big_enum);
+        assert_eq!(after_enum, 0, "large non-root enum releases tokens");
     }
 }
