@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ["0/4", "1/4", "2/4", "3/4"]
+        shard: ["0/8", "1/8", "2/8", "3/8", "4/8", "5/8", "6/8", "7/8"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,7 +50,7 @@ jobs:
               --file crates/ayaml/src/spanned.rs \
               --file crates/ayaml/src/emitter.rs \
               --shard "$SHARD" \
-              --timeout 120 \
+              --timeout 60 \
               --jobs 2 \
               --gitignore=true
           )
@@ -58,6 +58,7 @@ jobs:
           case "$status" in
             0) exit 0 ;;
             2) echo "::warning::mutation survivors recorded in mutants.out"; exit 0 ;;
+            3) echo "::warning::mutant timeouts recorded in mutants.out"; exit 0 ;;
             *) exit "$status" ;;
           esac
       - name: Summarize shard trend

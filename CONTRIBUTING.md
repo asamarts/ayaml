@@ -150,7 +150,7 @@ so run `tools/ci-local.sh scheduled` before a release.
 
 ### Mutation testing triage
 
-`.github/workflows/mutants.yml` runs `cargo-mutants` weekly across four shards on hosted runners
+`.github/workflows/mutants.yml` runs `cargo-mutants` weekly across eight shards on hosted runners
 under an 8 GiB virtual-memory ceiling (`ulimit -v 8388608`) and per-mutant timeout. Never run
 limit-disabling mutants on a shared host: `.cargo/mutants.toml` excludes `limits.rs` and
 resource-limit guards so no mutant can turn adversarial tests into memory exhaustion.
