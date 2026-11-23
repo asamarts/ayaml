@@ -150,8 +150,9 @@ impl<'de> Visitor<'de> for MappingVisitor {
                 serde::de::Error::custom(format!("duplicate entry with key {key}"))
             })?;
         }
-        // As for a `Value`: a mapping that wasn't told its size gives back what it doesn't need.
-        if told.is_none() {
+        // As for a `Value`: a mapping that wasn't told its size (or exceeded the initial cap)
+        // gives back what it doesn't need.
+        if told.is_none_or(|hint| hint > 4096) {
             mapping.shrink_to_fit();
         }
         Ok(mapping)
@@ -244,7 +245,7 @@ impl<'de> Visitor<'de> for ValueVisitor {
     fn visit_seq<A: SeqAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
         let told = access.size_hint();
         let hint = told.unwrap_or(0);
-        let mut sequence = if (8..=1024).contains(&hint) {
+        let mut sequence = if (1..=1024).contains(&hint) {
             Vec::with_capacity(hint)
         } else {
             Vec::new()
@@ -252,9 +253,9 @@ impl<'de> Visitor<'de> for ValueVisitor {
         while let Some(value) = access.next_element()? {
             sequence.push(value);
         }
-        // A collection that is read from the parser's events isn't told its size. It has grown
-        // by doubling, and would keep up to twice the room that its entries need.
-        if told.is_none() {
+        // A collection that wasn't told its size (or exceeded the initial cap) has grown by
+        // doubling, and would keep up to twice the room that its entries need.
+        if told.is_none_or(|hint| hint > 1024) {
             sequence.shrink_to_fit();
         }
         Ok(Value::Sequence(sequence))
@@ -268,7 +269,7 @@ impl<'de> Visitor<'de> for ValueVisitor {
                 serde::de::Error::custom(format!("duplicate entry with key {key}"))
             })?;
         }
-        if told.is_none() {
+        if told.is_none_or(|hint| hint > 4096) {
             mapping.shrink_to_fit();
         }
         Ok(Value::Mapping(mapping))

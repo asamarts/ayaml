@@ -209,13 +209,14 @@ that document's tokens. Every other reader holds the tokens of the whole stream.
   peaks about a third above a read that builds the whole tree first, and a document made
   mostly of anchored nodes about a quarter above it as a JSON tree. A read that fails frees its tokens and then builds
   the document once more to report the error.
-- A collection that is read from events tells its target no size, since its entries are
-  counted only at its end. The root is the exception where it is a flow collection, whose
-  entries the parser counts first. A `Vec` or a map that isn't told its size grows by
-  doubling, so it can keep up to twice the room its entries need. `Value` and `Mapping` give
-  that room back at each collection's end, and keep what a value keeps that was told each
-  size. Another target keeps the spare room unless it does the same, as with
-  `Vec::shrink_to_fit` or `Mapping::shrink_to_fit`.
+- A collection that is read from events tells its target its exact size whenever it is a root
+  flow collection (whose entries the parser counts first) or whenever its end is already among
+  the events waiting in the lookahead queue (which covers most small block and nested
+  collections). Larger collections whose end lies past the lookahead queue tell no size, so a
+  `Vec` or a map grows by doubling and can keep up to twice the room its entries need. `Value`
+  and `Mapping` skip `shrink_to_fit` when told a size within their initial pre-allocation cap,
+  and otherwise give back spare room at each collection's end. Another target keeps the spare
+  room unless it does the same, as with `Vec::shrink_to_fit` or `Mapping::shrink_to_fit`.
 - A block scalar is built as it is read. At its peak a read of one takes about 5 times
   its input in resident memory for short lines, and about 10 times for blank lines,
   where the index costs most. Counting the capacity it reserves without touching, a

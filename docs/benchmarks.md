@@ -161,12 +161,14 @@ counts a root flow collection's entries before it reads them: a root that is
 built as a tree reserves that room, and one that is read entry by entry tells
 its target the count.
 
-What the events cost: a collection other than a root flow collection tells its
-target no size, so a vector or a map grows by doubling, and can keep up to
-twice the room its entries need. `Value` and `Mapping` give the spare room back
-at each collection's end, with one reallocation a collection: about 1% to 2%
-more instructions on a configuration document, and 5% to 9% on a document of
-one-item collections (AY-118). A `Value` of the 4.4 MB service description then
+What the events cost: a root flow collection (counted by the parser) and any
+collection whose end is already among the events waiting in the lookahead queue
+tell their target their exact size; larger collections whose end lies past the
+lookahead queue tell no size, so a vector or a map grows by doubling and can
+keep up to twice the room its entries need. `Value` and `Mapping` skip
+`shrink_to_fit` when told a size within their initial pre-allocation cap
+(`1..=1024` for sequences, `<= 4096` for mappings) and give spare room back at
+each collection's end otherwise (AY-118). A `Value` of the 4.4 MB service description then
 keeps 45 MB and its read peaks at 80 MB, where a read that built the tree
 first, and told each collection its size, kept 48 MB and peaked at 120 MB. A
 mapping of 1,000 to 4,096 entries on its own still peaks higher while it grows,

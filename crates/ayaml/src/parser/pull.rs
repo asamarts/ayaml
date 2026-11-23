@@ -151,6 +151,46 @@ impl<'a> DocumentEvents<'a> {
         }
     }
 
+    /// Count the entries of the collection that just opened if its matching end event is already
+    /// among the events waiting in the lookahead queue. Returns `None` if the collection extends
+    /// past the waiting events or if an unexpected event appears.
+    pub(crate) fn queued_entries(&self, sequence: bool) -> Option<usize> {
+        let EventSink::Queue { events, .. } = &self.parser.sink else {
+            return None;
+        };
+        let mut depth = 0_usize;
+        let mut nodes = 0_usize;
+        for event in events {
+            match event {
+                Event::SequenceStart { .. } | Event::MappingStart { .. } => {
+                    if depth == 0 {
+                        nodes += 1;
+                    }
+                    depth += 1;
+                }
+                Event::SequenceEnd { .. } => {
+                    if depth == 0 {
+                        return sequence.then_some(nodes);
+                    }
+                    depth -= 1;
+                }
+                Event::MappingEnd { .. } => {
+                    if depth == 0 {
+                        return (!sequence && nodes.is_multiple_of(2)).then_some(nodes / 2);
+                    }
+                    depth -= 1;
+                }
+                Event::Scalar { .. } | Event::Alias { .. } => {
+                    if depth == 0 {
+                        nodes += 1;
+                    }
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
     /// Free the tokens and what was read with them, once every event has been taken. A reader
     /// that has built its document as a tree reads the tree without them, as a reader does that
     /// builds the tree before anything else.

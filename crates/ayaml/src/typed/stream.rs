@@ -147,6 +147,8 @@ enum Open<'de> {
     Sequence {
         /// The items that a visitor has asked for.
         read: usize,
+        /// Total items known when the sequence opened, from root flow counting or lookahead.
+        known: Option<usize>,
     },
     Mapping {
         /// The scalar keys of the entries read so far, where a duplicate is refused.
@@ -157,6 +159,8 @@ enum Open<'de> {
         key: Option<Node<'de>>,
         /// The entries whose keys a visitor has asked for.
         read: usize,
+        /// Total entries known when the mapping opened, from root flow counting or lookahead.
+        known: Option<usize>,
     },
 }
 
@@ -419,14 +423,21 @@ impl<'de> Stream<'de> {
         if let Err(error) = self.builder.limits.check_depth(self.open.len() + 1) {
             return Err(self.faulted(Error::from(error).with_span(span)));
         }
+        let known = if self.open.is_empty() {
+            self.events.root_entries()
+        } else {
+            None
+        }
+        .or_else(|| self.events.queued_entries(sequence));
         self.open.push(if sequence {
-            Open::Sequence { read: 0 }
+            Open::Sequence { read: 0, known }
         } else {
             Open::Mapping {
                 seen: HashSet::new(),
                 seen_nodes: None,
                 key: None,
                 read: 0,
+                known,
             }
         });
         Ok(if sequence {
@@ -534,7 +545,7 @@ impl<'de> Stream<'de> {
     /// its position.
     fn count(&mut self) -> usize {
         match self.open.last_mut() {
-            Some(Open::Sequence { read } | Open::Mapping { read, .. }) => {
+            Some(Open::Sequence { read, .. } | Open::Mapping { read, .. }) => {
                 *read += 1;
                 *read - 1
             }
@@ -600,7 +611,7 @@ impl<'de> Stream<'de> {
     fn finish(&mut self) -> Result<(usize, usize), Error> {
         let mut unread = 0;
         let read = match self.open.last() {
-            Some(Open::Sequence { read }) => {
+            Some(Open::Sequence { read, .. }) => {
                 let read = *read;
                 while self.entry()?.is_some() {
                     self.skip()?;
@@ -672,20 +683,18 @@ impl<'de> Stream<'de> {
     }
 
     /// How many entries the collection that was opened as number `level` has left, where that is
-    /// known before they are read: for a root flow collection, whose entries the parser counts.
-    /// Any other collection's are known only at its end, where none are left.
+    /// known before they are read: for a root flow collection (counted by the parser) or any
+    /// collection whose end is already among the events waiting in the lookahead queue.
     fn left(&self, level: usize) -> Option<usize> {
         if self.fault.is_some() {
             return None;
         }
-        if self.open.len() <= level {
-            return Some(0);
+        match self.open.get(level) {
+            None => Some(0),
+            Some(Open::Sequence { read, known } | Open::Mapping { read, known, .. }) => {
+                known.map(|total| total.saturating_sub(*read))
+            }
         }
-        if level != 0 || self.open.len() != 1 {
-            return None;
-        }
-        let (Open::Sequence { read } | Open::Mapping { read, .. }) = self.open.first()?;
-        Some(self.events.root_entries()?.saturating_sub(*read))
     }
 }
 
