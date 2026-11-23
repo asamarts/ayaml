@@ -38,6 +38,8 @@ jobs:
         run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
       - name: Fuzz workspace harness unit tests
         run: cargo test --manifest-path fuzz/Cargo.toml --lib --locked
+      - name: Counting allocator unit tests
+        run: cargo test --manifest-path fuzz/Cargo.toml --bin memcount --locked
       - name: Production library panic profile
         run: cargo clippy -p ayaml --lib --locked --all-features -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
       - name: Test

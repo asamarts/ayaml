@@ -1,0 +1,70 @@
+name: miri
+
+# Daily bounded Miri check over core `ayaml` unit tests and the counting allocator in
+# `fuzz/src/bin/memcount.rs` (AY-134).
+on:
+  schedule:
+    - cron: "37 5 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: miri-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  miri:
+    name: Miri unit and allocator check
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: nightly
+          components: miri
+      - name: Run Miri on ayaml core unit tests
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+        run: |
+          set -euo pipefail
+          # Skip multi-megabyte / 20k-iteration combinatorial unit tests that take minutes under
+          # Miri interpretation while running the remaining ~235 core library unit tests across
+          # scanner, parser, composer, emitter, mapping, merge, position, resolver, serde, spanned,
+          # typed, and value modules.
+          (
+            ulimit -v 8388608
+            timeout -k 5 1200 nice -n 10 cargo +nightly miri test -p ayaml --lib --all-features --locked -- \
+              --skip toolchain_fixture \
+              --skip apply_merge_keys_handles_deep_tagged_chain_without_recursing \
+              --skip event_cursor_queue_gives_back_unused_capacity \
+              --skip a_mapping_that_is_told_its_size_reserves_it_once \
+              --skip the_index_is_allocated_once_within_a_bound \
+              --skip the_end_is_the_input_length \
+              --skip a_dense_prefix_reserves_no_arena_for_a_sparse_rest \
+              --skip a_document_of_even_density_takes_few_reservations \
+              --skip a_sparse_prefix_grows_to_a_dense_rest_in_few_steps \
+              --skip events_on_demand_are_the_events_that_are_collected \
+              --skip few_events_wait_for_a_reader_that_takes_them_one_at_a_time \
+              --skip long_single_line_flow_sequences_do_not_scan_the_prefix_per_item \
+              --skip push_token_grows_a_full_arena_as_arena_growth_says \
+              --skip the_arena_never_reserves_past_the_token_limit \
+              --skip a_large_stream_reports_trailing_documents \
+              --skip a_larger_document_streams_events_into_the_builder \
+              --skip a_medium_document_is_built_as_its_events_arrive \
+              --skip a_root_that_is_built_whole_is_read_after_the_tokens_are_freed \
+              --skip block_scalars_built_as_read_match_the_list_of_lines \
+              --skip the_plain_scalar_fast_path_agrees_with_the_full_path
+          )
+      - name: Run Miri on memcount counting global allocator tests
+        run: |
+          set -euo pipefail
+          (
+            ulimit -v 8388608
+            timeout -k 5 300 nice -n 10 cargo +nightly miri test --manifest-path fuzz/Cargo.toml --bin memcount --locked
+          )

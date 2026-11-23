@@ -507,3 +507,118 @@ fn main() {
         std::process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::alloc::{GlobalAlloc, Layout};
+    use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
+
+    use super::{ALLOCATED_BYTES, ALLOCATIONS, ALLOCATOR, GROWS_IN_PLACE, LIVE, PEAK, reset_peak};
+
+    static SERIALIZE_ALLOC_TESTS: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn counting_allocator_tracks_alloc_realloc_and_dealloc_in_both_modes() {
+        let _guard = SERIALIZE_ALLOC_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        for grows_in_place in [false, true] {
+            GROWS_IN_PLACE.store(grows_in_place, Ordering::Relaxed);
+            let live_start = LIVE.load(Ordering::Relaxed);
+            let allocs_start = ALLOCATIONS.load(Ordering::Relaxed);
+            let bytes_start = ALLOCATED_BYTES.load(Ordering::Relaxed);
+            reset_peak();
+
+            // Direct alloc -> grow -> shrink -> dealloc across multiple alignments.
+            for align in [1_usize, 8, 64] {
+                let before = LIVE.load(Ordering::Relaxed);
+                let initial = Layout::from_size_align(64, align).expect("valid layout");
+                let ptr = unsafe { ALLOCATOR.alloc(initial) };
+                assert!(!ptr.is_null(), "alloc failed for align={align}");
+                assert_eq!(LIVE.load(Ordering::Relaxed), before + initial.size());
+                unsafe {
+                    std::ptr::write_bytes(ptr, 0xA5, initial.size());
+                }
+
+                let grown_size = 256;
+                let grown = unsafe { ALLOCATOR.realloc(ptr, initial, grown_size) };
+                assert!(!grown.is_null(), "grow realloc failed for align={align}");
+                assert_eq!(LIVE.load(Ordering::Relaxed), before + grown_size);
+                unsafe {
+                    let prefix = std::slice::from_raw_parts(grown, initial.size());
+                    assert!(
+                        prefix.iter().all(|&b| b == 0xA5),
+                        "realloc lost original prefix bytes"
+                    );
+                    std::ptr::write_bytes(
+                        grown.add(initial.size()),
+                        0x5A,
+                        grown_size - initial.size(),
+                    );
+                }
+
+                let grown_layout = Layout::from_size_align(grown_size, align).expect("grown");
+                let shrunk_size = 32;
+                let shrunk = unsafe { ALLOCATOR.realloc(grown, grown_layout, shrunk_size) };
+                assert!(!shrunk.is_null(), "shrink realloc failed for align={align}");
+                assert_eq!(LIVE.load(Ordering::Relaxed), before + shrunk_size);
+                unsafe {
+                    let kept = std::slice::from_raw_parts(shrunk, shrunk_size);
+                    assert!(
+                        kept.iter().all(|&b| b == 0xA5),
+                        "shrink realloc corrupted surviving bytes"
+                    );
+                    let shrunk_layout =
+                        Layout::from_size_align(shrunk_size, align).expect("shrunk");
+                    ALLOCATOR.dealloc(shrunk, shrunk_layout);
+                }
+                assert_eq!(LIVE.load(Ordering::Relaxed), before);
+
+                // Exercise `alloc_zeroed` as well.
+                let zero_layout = Layout::from_size_align(48, align).expect("zero layout");
+                let zptr = unsafe { ALLOCATOR.alloc_zeroed(zero_layout) };
+                assert!(!zptr.is_null(), "alloc_zeroed failed for align={align}");
+                assert_eq!(LIVE.load(Ordering::Relaxed), before + zero_layout.size());
+                unsafe {
+                    let slice = std::slice::from_raw_parts(zptr, zero_layout.size());
+                    assert!(slice.iter().all(|&b| b == 0), "alloc_zeroed not zeroed");
+                    ALLOCATOR.dealloc(zptr, zero_layout);
+                }
+                assert_eq!(LIVE.load(Ordering::Relaxed), before);
+            }
+
+            // Exercise the global allocator through standard Rust containers (Box + Vec growth).
+            let mut items: Vec<u64> = Vec::new();
+            for i in 0_u64..128 {
+                items.push(i);
+            }
+            let sum: u64 = items.iter().sum();
+            assert_eq!(sum, 127 * 128 / 2);
+            drop(items);
+
+            let live_end = LIVE.load(Ordering::Relaxed);
+            let peak = PEAK.load(Ordering::Relaxed);
+            let allocs_delta = ALLOCATIONS.load(Ordering::Relaxed) - allocs_start;
+            let bytes_delta = ALLOCATED_BYTES.load(Ordering::Relaxed) - bytes_start;
+            assert!(
+                peak >= live_start + 256,
+                "peak {peak} did not capture allocated bytes above {live_start}"
+            );
+            assert!(
+                allocs_delta >= 9,
+                "expected >= 9 allocations, got {allocs_delta}"
+            );
+            assert!(
+                bytes_delta >= 3 * 256,
+                "expected >= 768 allocated bytes, got {bytes_delta}"
+            );
+            assert_eq!(
+                live_end, live_start,
+                "live byte counter leaked or underflowed (mode grows_in_place={grows_in_place})"
+            );
+        }
+        GROWS_IN_PLACE.store(false, Ordering::Relaxed);
+    }
+}
