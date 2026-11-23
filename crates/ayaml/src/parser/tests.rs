@@ -75,6 +75,7 @@ fn push_token_grows_a_full_arena_as_arena_growth_says() {
         kind: TokenKind::FlowEntry,
         span: Span::empty(0),
     };
+    let positions = crate::position::LineStarts::new("");
     for chunk in [
         TOKEN_ARENA_SMALL_CHUNK,
         TOKEN_ARENA_MID_CHUNK,
@@ -84,7 +85,15 @@ fn push_token_grows_a_full_arena_as_arena_growth_says() {
         let (mut capacity, mut growths) = (0, 0);
         for _ in 0..40 * chunk {
             let before = tokens.capacity();
-            push_token(&mut tokens, token.clone(), chunk, usize::MAX);
+            push_token(
+                &mut tokens,
+                token.clone(),
+                chunk,
+                usize::MAX,
+                &positions,
+                "",
+            )
+            .expect("reserve");
             if tokens.capacity() != before {
                 assert_eq!(before + 1, tokens.len(), "{chunk}: grew before it was full");
                 capacity += arena_growth(before, chunk);
@@ -103,7 +112,15 @@ fn push_token_grows_a_full_arena_as_arena_growth_says() {
     // The arena stops at the tokens the limits let a reader keep: 64, then 100 and not 128.
     let mut tokens = Vec::new();
     for _ in 0..100 {
-        push_token(&mut tokens, token.clone(), TOKEN_ARENA_SMALL_CHUNK, 100);
+        push_token(
+            &mut tokens,
+            token.clone(),
+            TOKEN_ARENA_SMALL_CHUNK,
+            100,
+            &positions,
+            "",
+        )
+        .expect("reserve");
     }
     assert_eq!(tokens.capacity(), 100);
 }
@@ -905,40 +922,54 @@ fn prefix_token_estimate_uses_the_scanned_density_with_a_cap() {
     // estimate adds a sixty-fourth, and one reservation stays within eight times the tokens
     // already scanned.
     assert_eq!(
-        super::prefix_token_capacity(1_024, 5_177, 10_012_509, most),
+        super::prefix_token_capacity(1_024, 5_177, 0, 0, 10_012_509, most),
         Some(8_192)
     );
     assert_eq!(
-        super::prefix_token_capacity(524_288, 2_650_624, 10_012_509, most),
+        super::prefix_token_capacity(524_288, 2_650_624, 0, 0, 10_012_509, most),
         Some(1_980_453 + 1_980_453 / 64)
     );
     assert_eq!(
-        super::prefix_token_capacity(1_023, 5_177, 10_012_509, most),
+        super::prefix_token_capacity(1_023, 5_177, 0, 0, 10_012_509, most),
         None
     );
     assert_eq!(
-        super::prefix_token_capacity(1_024, 0, 10_012_509, most),
+        super::prefix_token_capacity(1_024, 0, 0, 0, 10_012_509, most),
         None
     );
     // A token takes a byte at least, so an estimate stays within the input's length, and it
     // never asks for less than the tokens already scanned.
     assert_eq!(
-        super::prefix_token_capacity(1_024, 1_024, 3_000, most),
+        super::prefix_token_capacity(1_024, 1_024, 0, 0, 3_000, most),
         Some(3_000)
     );
     assert_eq!(
-        super::prefix_token_capacity(2_000, 1_000, 1_500, most),
+        super::prefix_token_capacity(2_000, 1_000, 0, 0, 1_500, most),
         Some(2_000)
     );
     // The lines of the input don't enter into it: one long line is estimated like any other.
     assert_eq!(
-        super::prefix_token_capacity(8_192, 8_192, 1_000_000, most),
+        super::prefix_token_capacity(8_192, 8_192, 0, 0, 1_000_000, most),
         Some(65_536)
     );
     // Nor more than the limits let a reader keep.
     assert_eq!(
-        super::prefix_token_capacity(524_288, 2_650_624, 10_012_509, 1_000_000),
+        super::prefix_token_capacity(524_288, 2_650_624, 0, 0, 10_012_509, 1_000_000),
         Some(1_000_000)
+    );
+    // After a 1 MiB sparse head, weighing the window since the previous estimate projects the
+    // dense tail immediately (within the 8x ahead cap).
+    let head = 1_048_576;
+    assert_eq!(
+        super::prefix_token_capacity(
+            16_384,
+            head + 32_768,
+            8_192,
+            head + 16_384,
+            head + 1_000_000,
+            most
+        ),
+        Some(16_384 * super::TOKEN_ARENA_AHEAD)
     );
 }
 
@@ -948,7 +979,7 @@ fn prefix_token_estimate_uses_the_scanned_density_with_a_cap() {
 #[test]
 fn prefix_token_estimate_does_not_saturate() {
     assert_eq!(
-        super::prefix_token_capacity(1 << 40, 1 << 41, 1 << 42, usize::MAX),
+        super::prefix_token_capacity(1 << 40, 1 << 41, 0, 0, 1 << 42, usize::MAX),
         Some((1 << 41) + (1 << 35))
     );
 }
@@ -1047,6 +1078,54 @@ fn a_sparse_prefix_grows_to_a_dense_rest_in_few_steps() {
         "{capacity} tokens reserved for {len}"
     );
     assert!(growths <= 6, "{growths} reallocations");
+}
+
+#[test]
+fn a_megabyte_sparse_head_before_a_dense_tail_takes_few_reservations() {
+    // 1 MiB of comment lines before 250,000 `- a` lines (500,000 tokens).
+    let mut comments = "# comment line padding to make a megabyte sparse head\n".repeat(20_000);
+    assert!(comments.len() >= 1024 * 1024);
+    comments.push_str(&"- a\n".repeat(250_000));
+    let (capacity, len, growths) = arena_of(&comments, Limits::for_max_input());
+    assert_eq!(len, 500_000);
+    assert!(
+        capacity <= len + len / 8,
+        "comments: {capacity} tokens reserved for {len}"
+    );
+    assert!(growths <= 5, "comments: {growths} reallocations");
+
+    // 1 MiB block scalar before 100,000 `- a` lines (200,002 tokens).
+    let mut block = String::from("- |\n");
+    block.push_str(&format!("  {}\n", "x".repeat(1024)).repeat(1_024));
+    assert!(block.len() >= 1024 * 1024);
+    block.push_str(&"- a\n".repeat(100_000));
+    let (capacity, len, growths) = arena_of(&block, Limits::for_max_input());
+    assert_eq!(len, 200_002);
+    assert!(
+        capacity <= len + len / 8,
+        "block scalar: {capacity} tokens reserved for {len}"
+    );
+    assert!(growths <= 5, "block scalar: {growths} reallocations");
+}
+
+#[test]
+fn overflowing_token_reservation_returns_token_limit_error_without_panicking() {
+    let mut tokens: Vec<Token<'_>> = Vec::new();
+    let positions = crate::position::LineStarts::new("a\n");
+    let err = super::reserve_tokens(
+        &mut tokens,
+        usize::MAX,
+        usize::MAX,
+        Span::empty(0),
+        &positions,
+        "a\n",
+    )
+    .expect_err("overflowing reservation must return an error");
+    assert_eq!(err.kind(), ErrorKind::Limit);
+    assert_eq!(
+        err.limit().map(crate::limits::LimitExceeded::kind),
+        Some(crate::limits::LimitKind::Events)
+    );
 }
 
 #[test]

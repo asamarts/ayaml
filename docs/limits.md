@@ -187,13 +187,16 @@ that document's tokens. Every other reader holds the tokens of the whole stream.
   and names that a `%TAG` prefix makes long to about 150 MB, where `max_tag_expansion_bytes`
   stops them.
 - The readers that scan the whole stream keep its tokens in one arena, which reserves room for
-  no more tokens than `max_events` allows, whatever the input promises. Past its first chunk
-  the arena is sized from the density of the input scanned so far: one reservation is at most
-  eight times the tokens already scanned, and when it fills the next is made from a later
-  estimate, and is a sixteenth of the arena at least. An input of at most 32 KiB may double
-  the arena instead. So the copying stays linear in the tokens, and an arena of more than
-  8,192 tokens ends within eight times the tokens it holds; a smaller one is trimmed to them.
-  `parse_events` and the `Deserializer` keep one document's tokens, in vectors that double.
+  no more tokens than `max_events` allows, whatever the input promises. Each reservation is made
+  fallibly (`try_reserve_exact`), so a reservation that overflows capacity on any target ends in
+  a `LimitKind::Events` error rather than a panic. Whenever the arena fills past 1,024 tokens, it
+  estimates the remaining tokens from the higher of the whole prefix's density and the density
+  since the previous estimate (starting from the first content token): one reservation is at most
+  eight times the tokens already scanned, and at least a sixteenth of the arena or one chunk. So
+  a dense tail after a megabyte comment or block-scalar head converges in a few reservations, the
+  copying stays linear in the tokens, and an arena of more than 8,192 tokens ends within eight
+  times the tokens it holds; a smaller one is trimmed to them. `parse_events` and the
+  `Deserializer` keep one document's tokens, in vectors that double.
 - A reader of one document into a type, such as `from_str`, holds no tree of an input of more
   than 4 KiB beside those: it builds the target's value from the events, and keeps a tree only
   of what an alias may read again, of a collection that keeps its tag, of what an enum reads,
