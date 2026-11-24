@@ -225,7 +225,7 @@ fn readers() -> Vec<Reader> {
     readers
 }
 
-fn extra_typed_readers() -> [Reader; 5] {
+fn extra_typed_readers() -> [Reader; 7] {
     [
         Reader {
             name: "from_str_with_limits (Value)",
@@ -263,6 +263,26 @@ fn extra_typed_readers() -> [Reader; 5] {
             name: "from_reader_with_limits (Value)",
             read: |input, limits| {
                 ayaml::from_reader_with_limits::<_, Value>(input.as_bytes(), limits).map(drop)
+            },
+            values: true,
+            stream: false,
+        },
+        Reader {
+            name: "DocumentDeserializer::from_str_with (Value)",
+            read: |input, limits| {
+                use serde::Deserialize as _;
+                let de = ayaml::DocumentDeserializer::from_str_with(input, &parse_options(limits))?;
+                Value::deserialize(de).map(drop)
+            },
+            values: true,
+            stream: false,
+        },
+        Reader {
+            name: "DocumentDeserializer::from_str_with_limits (IgnoredAny)",
+            read: |input, limits| {
+                use serde::Deserialize as _;
+                let de = ayaml::DocumentDeserializer::from_str_with_limits(input, limits)?;
+                IgnoredAny::deserialize(de).map(drop)
             },
             values: true,
             stream: false,
