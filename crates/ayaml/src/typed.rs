@@ -34,9 +34,12 @@ use crate::span::{Location, Span};
 use crate::tag::Tag;
 use crate::value::Value;
 
+mod doc_de;
 mod key_text;
 mod node_de;
 mod stream;
+
+pub use doc_de::DocumentDeserializer;
 
 use key_text::{SeenNodeIndices, SeenNodeKeys, node_key_text, scalar_key_text};
 use node_de::{NodeDeserializer, check_consumed, inside_key, with_span};

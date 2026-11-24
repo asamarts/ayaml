@@ -868,6 +868,14 @@ fn every_with_entry_point_rejects_invalid_limits_consistently() {
             Deserializer::from_str_with(input, &parse_opts).unwrap_err(),
         );
         assert_config_limit(
+            "DocumentDeserializer::from_str_with",
+            ayaml::DocumentDeserializer::from_str_with(input, &parse_opts).unwrap_err(),
+        );
+        assert_config_limit(
+            "DocumentDeserializer::from_str_with_limits",
+            ayaml::DocumentDeserializer::from_str_with_limits(input, limits).unwrap_err(),
+        );
+        assert_config_limit(
             "SpannedTree::parse_with",
             SpannedTree::parse_with(input, &parse_opts).unwrap_err(),
         );
@@ -913,6 +921,15 @@ fn every_with_entry_point_rejects_invalid_limits_consistently() {
             assert_config_limit(
                 "SpannedTree::parse_compat_with",
                 SpannedTree::parse_compat_with(input, &compat_opts).unwrap_err(),
+            );
+            assert_config_limit(
+                "DocumentDeserializer::from_str_compat_with",
+                ayaml::DocumentDeserializer::from_str_compat_with(input, &compat_opts).unwrap_err(),
+            );
+            assert_config_limit(
+                "DocumentDeserializer::from_str_compat_with_limits",
+                ayaml::DocumentDeserializer::from_str_compat_with_limits(input, limits)
+                    .unwrap_err(),
             );
         }
 

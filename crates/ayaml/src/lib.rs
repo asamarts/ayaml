@@ -175,6 +175,7 @@ pub use position::{ColumnEncoding, LineIndex, PositionError};
 pub use span::{Location, Marker, Position, Span};
 pub use spanned::{SpannedNode, SpannedTree};
 pub use tag::{Tag, TaggedValue};
+pub use typed::DocumentDeserializer;
 pub use value::Value;
 
 pub use emitter::{
@@ -299,7 +300,7 @@ pub mod compat {
         }
     }
 
-    const fn node_options(global_tags: GlobalTags) -> crate::typed::NodeOptions {
+    pub(crate) const fn node_options(global_tags: GlobalTags) -> crate::typed::NodeOptions {
         crate::typed::NodeOptions {
             allow_duplicates: true,
             compat_flow: true,
@@ -311,7 +312,7 @@ pub mod compat {
     /// libyaml-compatible consumers. Each branch is a documented compatibility
     /// deviation keyed by the parser's structured failure, never by the text of
     /// the input or of the message.
-    fn map_error(error: Error) -> Error {
+    pub(crate) fn map_error(error: Error) -> Error {
         if error.is_reserved_after_bom() {
             let mapped = Error::coded(
                 ErrorKind::Scanner,
