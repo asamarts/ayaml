@@ -70,7 +70,10 @@ names of one document's anchors, and every writer to `max_depth`; no limit on wh
 applies to a writer. `Value::apply_merge_keys` and `Value::apply_merge_keys_with_limits`
 enforce `max_depth` on collection nesting (traversing `Value::Tagged` wrappers without adding
 collection depth) and `max_collection_entries` when merging adds new keys to a mapping, and
-validate `Limits` in the same way as the readers and emitters. A limit that cannot apply is stated as such: an event
+validate `Limits` in the same way as the readers and emitters. Opt-in event and typed merge-key
+expansion (`ParseOptions::with_merge_keys(true)`) additionally enforces `max_events`,
+`max_alias_dereferences`, and the alias expansion budget (`max_alias_expansion_bytes` +
+`alias_bytes_per_input_byte`) on merged entries while keeping quoted `"<<"` keys literal. A limit that cannot apply is stated as such: an event
 reader does not copy an alias's target, so the alias-budget limits are asked only of readers that
 build values.
 

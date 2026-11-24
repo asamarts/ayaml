@@ -15,6 +15,8 @@ use crate::limits::Limits;
 use crate::mapping::Mapping;
 use crate::value::Value;
 
+pub(crate) mod events;
+
 impl Value {
     /// Apply YAML 1.1 merge keys recursively using the default resource limits.
     ///
@@ -31,8 +33,10 @@ impl Value {
     ///
     /// The generic parser keeps `<<` literal; this method is opt-in. Because the
     /// generic `Value` model does not retain scalar style, a quoted `"<<"` key
-    /// is treated the same as a plain one here. Use the event stream when a
-    /// caller needs to distinguish those forms.
+    /// is treated the same as a plain one here. Use
+    /// [`ParseOptions::with_merge_keys`](crate::ParseOptions::with_merge_keys)
+    /// when you want event-level or typed merge expansion that keeps quoted
+    /// `"<<"` keys literal and preserves source spans.
     ///
     /// # Errors
     ///

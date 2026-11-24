@@ -79,6 +79,26 @@ impl<'de> DocumentDeserializer<'de> {
     /// contains trailing documents, or when a configured resource limit is exceeded.
     #[inline]
     pub fn from_str_with(input: &'de str, options: &ParseOptions) -> Result<Self, Error> {
+        if options.merge_keys {
+            options.limits.validate()?;
+            let (events, mut budget) =
+                crate::merge::events::expand_single_document(input, &options.limits)?;
+            let node = super::build(
+                events,
+                input.len(),
+                &options.limits,
+                NodeOptions::default(),
+                &mut budget,
+            )
+            .map_err(|error| error.with_input_location(input, false))?;
+            return Ok(Self {
+                input,
+                node,
+                compat_flow: false,
+                #[cfg(feature = "libyaml-compat")]
+                compat_errors: false,
+            });
+        }
         Self::from_str_with_limits(input, &options.limits)
     }
 

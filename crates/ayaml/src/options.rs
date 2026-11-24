@@ -25,6 +25,12 @@ use crate::limits::Limits;
 pub struct ParseOptions {
     /// Resource limits applied to the parse.
     pub limits: Limits,
+    /// Expand YAML 1.1 plain `<<` merge keys during event, value, and typed reading.
+    ///
+    /// Defaults to `false` (YAML 1.2.2 keeps `<<` as a literal mapping key). When `true`,
+    /// plain `<<` (and `!!merge <<`) keys expand their mapping or sequence-of-mappings operand
+    /// while quoted `"<<"` / `'<<'` and `!!str <<` keys remain literal.
+    pub merge_keys: bool,
 }
 
 impl Default for ParseOptions {
@@ -45,6 +51,7 @@ impl ParseOptions {
     pub const fn new() -> Self {
         Self {
             limits: Limits::default_profile(),
+            merge_keys: false,
         }
     }
 
@@ -55,6 +62,7 @@ impl ParseOptions {
     pub const fn for_max_input() -> Self {
         Self {
             limits: Limits::for_max_input(),
+            merge_keys: false,
         }
     }
 
@@ -62,6 +70,13 @@ impl ParseOptions {
     #[must_use]
     pub const fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Enable or disable opt-in YAML 1.1 `<<` merge-key expansion.
+    #[must_use]
+    pub const fn with_merge_keys(mut self, merge_keys: bool) -> Self {
+        self.merge_keys = merge_keys;
         self
     }
 }
