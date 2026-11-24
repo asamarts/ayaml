@@ -35,7 +35,7 @@ use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::Event;
 use crate::limits::Limits;
 use crate::parser::DocumentEvents;
-use crate::span::{Location, Span};
+use crate::span::{Location, SPANNED_FIELDS, SPANNED_TOKEN, Span};
 
 /// Read one document into what `seed` makes of it.
 pub(super) fn read<'de, T: DeserializeSeed<'de>>(
@@ -792,6 +792,18 @@ impl<'de> Deserializer<'de> for StreamDeserializer<'de, '_> {
         fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
+        if name == SPANNED_TOKEN && fields == SPANNED_FIELDS {
+            // Build the node whole so collection end spans and alias use-site spans match
+            // NodeDeserializer and SpannedTree identically.
+            if self.stream.open.is_empty() {
+                self.stream.build_root()?;
+            } else {
+                self.stream.build()?;
+            }
+            return self
+                .stream
+                .read_built(|node| node.deserialize_struct(name, fields, visitor));
+        }
         match self.stream.take()? {
             Taken::Built => self
                 .stream

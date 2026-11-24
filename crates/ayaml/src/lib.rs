@@ -172,7 +172,7 @@ pub use number::Number;
 pub use options::{EmitOptions, ParseOptions};
 pub use position::{ColumnEncoding, LineIndex, PositionError};
 #[allow(deprecated, reason = "re-export the compatibility marker")]
-pub use span::{Location, Marker, Position, Span};
+pub use span::{Location, Marker, Position, Span, Spanned};
 pub use spanned::{SpannedNode, SpannedTree};
 pub use tag::{Tag, TaggedValue};
 pub use typed::DocumentDeserializer;
