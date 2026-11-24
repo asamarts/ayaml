@@ -11,7 +11,7 @@ mode; that mode has its own `ayaml::compat` entry points.
 
 | Limit | Default | Notes |
 | --- | ---: | --- |
-| `max_input_bytes` | 32 MiB | Checked before scanning. |
+| `max_input_bytes` | 32 MiB | Checked before scanning (and before UTF-8 validation on byte/reader entry points; `from_reader*` reads at most `max_input_bytes + 1` bytes). |
 | `max_depth` | 128 | Also the accepted maximum (`MAX_DEPTH_CAP`). |
 | `max_alias_expansion_bytes` | 256 MiB | Fixed alias allowance. |
 | `alias_bytes_per_input_byte` | 16 | Additional allowance per input byte. |

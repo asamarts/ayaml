@@ -185,6 +185,200 @@ fn from_slice_with_checks_limits_before_utf8_validation() {
     let enough = ParseOptions::new().with_limits(Limits::new().with_max_input_bytes(5));
     let error = ayaml::from_slice_with::<Value>(invalid_utf8, &enough).expect_err("invalid utf-8");
     assert_eq!(error.kind(), ErrorKind::InvalidEncoding);
+
+    // The _with_limits slice variants obey the same ordering.
+    let small_limits = Limits::new().with_max_input_bytes(4);
+    let enough_limits = Limits::new().with_max_input_bytes(5);
+    for (name, error) in [
+        (
+            "from_slice_with_limits",
+            ayaml::from_slice_with_limits::<Value>(invalid_utf8, &small_limits)
+                .expect_err("slice_with_limits too large"),
+        ),
+        (
+            "from_slice_borrowed_with_limits",
+            ayaml::from_slice_borrowed_with_limits::<Value>(invalid_utf8, &small_limits)
+                .expect_err("slice_borrowed_with_limits too large"),
+        ),
+    ] {
+        assert_eq!(error.kind(), ErrorKind::Limit, "{name}: {error}");
+        assert_eq!(
+            error.limit().map(ayaml::LimitExceeded::kind),
+            Some(LimitKind::InputBytes),
+            "{name}: {error}"
+        );
+    }
+    assert_eq!(
+        ayaml::from_slice_with_limits::<Value>(invalid_utf8, &enough_limits)
+            .expect_err("slice_with_limits utf-8")
+            .kind(),
+        ErrorKind::InvalidEncoding
+    );
+    assert_eq!(
+        ayaml::from_slice_borrowed_with_limits::<Value>(invalid_utf8, &enough_limits)
+            .expect_err("slice_borrowed_with_limits utf-8")
+            .kind(),
+        ErrorKind::InvalidEncoding
+    );
+}
+
+#[test]
+fn root_with_limits_and_from_reader_variants_cover_bounds_utf8_and_io_errors() {
+    use std::error::Error as _;
+    use std::io;
+
+    struct CountingReader<R> {
+        inner: R,
+        bytes_read: usize,
+    }
+
+    impl<R: io::Read> io::Read for CountingReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.bytes_read += n;
+            Ok(n)
+        }
+    }
+
+    struct FailingReader;
+
+    impl io::Read for FailingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe closed"))
+        }
+    }
+
+    let input = "name: ayaml\ncount: 3\n";
+    let default_limits = Limits::default();
+    let expected = Owned {
+        name: "ayaml".to_owned(),
+        count: 3,
+    };
+
+    assert_eq!(
+        ayaml::from_str_with_limits::<Owned>(input, &default_limits).expect("str_with_limits"),
+        expected
+    );
+    assert_eq!(
+        ayaml::from_slice_with_limits::<Owned>(input.as_bytes(), &default_limits)
+            .expect("slice_with_limits"),
+        expected
+    );
+    let borrowed: Borrowed<'_> =
+        ayaml::from_slice_borrowed_with_limits(input.as_bytes(), &default_limits)
+            .expect("slice_borrowed_with_limits");
+    assert_eq!(
+        borrowed,
+        Borrowed {
+            name: "ayaml",
+            count: 3,
+        }
+    );
+    assert_eq!(
+        ayaml::from_reader::<_, Owned>(input.as_bytes()).expect("from_reader"),
+        expected
+    );
+    assert_eq!(
+        ayaml::from_reader_with::<_, Owned>(input.as_bytes(), &DEFAULT_PARSE)
+            .expect("from_reader_with"),
+        expected
+    );
+    assert_eq!(
+        ayaml::from_reader_with_limits::<_, Owned>(input.as_bytes(), &default_limits)
+            .expect("from_reader_with_limits"),
+        expected
+    );
+
+    // Exact boundary is accepted; one byte above stops after reading at most max_input_bytes + 1.
+    let exact = Limits::new().with_max_input_bytes(input.len());
+    assert_eq!(
+        ayaml::from_reader_with_limits::<_, Owned>(input.as_bytes(), &exact).expect("exact"),
+        expected
+    );
+
+    let tight = Limits::new().with_max_input_bytes(10);
+    let mut counter = CountingReader {
+        inner: io::repeat(b'a'),
+        bytes_read: 0,
+    };
+    let error =
+        ayaml::from_reader_with_limits::<_, Value>(&mut counter, &tight).expect_err("oversized");
+    assert_eq!(error.kind(), ErrorKind::Limit);
+    assert_eq!(
+        error.limit().map(ayaml::LimitExceeded::kind),
+        Some(LimitKind::InputBytes)
+    );
+    assert_eq!(counter.bytes_read, 11);
+
+    // Oversized invalid UTF-8 fails with InputBytes before UTF-8 validation.
+    let invalid_utf8 = b"\xff\xfe\xfd\xfc\xfb";
+    let error = ayaml::from_reader_with_limits::<_, Value>(
+        &invalid_utf8[..],
+        &Limits::new().with_max_input_bytes(4),
+    )
+    .expect_err("oversized invalid utf-8");
+    assert_eq!(error.kind(), ErrorKind::Limit);
+    assert_eq!(
+        error.limit().map(ayaml::LimitExceeded::kind),
+        Some(LimitKind::InputBytes)
+    );
+
+    // Within limit, invalid UTF-8 fails with InvalidEncoding.
+    let error = ayaml::from_reader_with_limits::<_, Value>(
+        &invalid_utf8[..],
+        &Limits::new().with_max_input_bytes(5),
+    )
+    .expect_err("invalid utf-8");
+    assert_eq!(error.kind(), ErrorKind::InvalidEncoding);
+
+    // I/O errors surface as ErrorKind::Io / ErrorCode::Io, preserve the io::Error source,
+    // and redact the underlying message when formatted through Error::masked().
+    let error = ayaml::from_reader::<_, Value>(FailingReader).expect_err("io error");
+    assert_eq!(error.kind(), ErrorKind::Io);
+    assert_eq!(error.code(), ayaml::ErrorCode::Io);
+    let io_source = error
+        .source()
+        .and_then(|source| source.downcast_ref::<io::Error>())
+        .expect("io::Error source");
+    assert_eq!(io_source.kind(), io::ErrorKind::BrokenPipe);
+    assert!(!error.masked().to_string().contains("pipe closed"));
+
+    // Partial read followed by an I/O error still surfaces as ErrorKind::Io.
+    let partial_then_fail = io::Read::chain(&b"name: "[..], FailingReader);
+    let error = ayaml::from_reader::<_, Value>(partial_then_fail).expect_err("partial io error");
+    assert_eq!(error.kind(), ErrorKind::Io);
+    assert_eq!(error.code(), ayaml::ErrorCode::Io);
+
+    // Zero byte limit accepts an empty reader and rejects a 1-byte stream after reading 1 byte.
+    let zero = Limits::new().with_max_input_bytes(0);
+    assert_eq!(
+        ayaml::from_reader_with_limits::<_, Value>(&b""[..], &zero).expect("empty reader"),
+        Value::Null
+    );
+    let mut one_byte = CountingReader {
+        inner: &b"a"[..],
+        bytes_read: 0,
+    };
+    let error =
+        ayaml::from_reader_with_limits::<_, Value>(&mut one_byte, &zero).expect_err("zero limit");
+    assert_eq!(error.kind(), ErrorKind::Limit);
+    assert_eq!(
+        error.limit().map(ayaml::LimitExceeded::kind),
+        Some(LimitKind::InputBytes)
+    );
+    assert_eq!(one_byte.bytes_read, 1);
+
+    // Trailing documents are rejected by from_reader just like from_str.
+    let error =
+        ayaml::from_reader::<_, Value>(&b"a: 1\n---\nb: 2\n"[..]).expect_err("trailing document");
+    assert_eq!(error.code(), ayaml::ErrorCode::TrailingDocuments);
+
+    // Invalid limits fail before reading from the reader.
+    let bad_limits = Limits::new().with_max_depth(MAX_DEPTH_CAP + 1);
+    let error = ayaml::from_reader_with_limits::<_, Value>(FailingReader, &bad_limits)
+        .expect_err("bad limits before io");
+    assert_eq!(error.kind(), ErrorKind::Limit);
+    assert_eq!(error.limit(), None);
 }
 
 #[test]
@@ -648,6 +842,26 @@ fn every_with_entry_point_rejects_invalid_limits_consistently() {
         assert_config_limit(
             "from_slice_with",
             ayaml::from_slice_with::<Value>(input.as_bytes(), &parse_opts).unwrap_err(),
+        );
+        assert_config_limit(
+            "from_reader_with",
+            ayaml::from_reader_with::<_, Value>(input.as_bytes(), &parse_opts).unwrap_err(),
+        );
+        assert_config_limit(
+            "from_str_with_limits",
+            ayaml::from_str_with_limits::<Value>(input, limits).unwrap_err(),
+        );
+        assert_config_limit(
+            "from_slice_with_limits",
+            ayaml::from_slice_with_limits::<Value>(input.as_bytes(), limits).unwrap_err(),
+        );
+        assert_config_limit(
+            "from_slice_borrowed_with_limits",
+            ayaml::from_slice_borrowed_with_limits::<Value>(input.as_bytes(), limits).unwrap_err(),
+        );
+        assert_config_limit(
+            "from_reader_with_limits",
+            ayaml::from_reader_with_limits::<_, Value>(input.as_bytes(), limits).unwrap_err(),
         );
         assert_config_limit(
             "Deserializer::from_str_with",
