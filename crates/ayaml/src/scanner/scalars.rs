@@ -262,7 +262,7 @@ impl<'a> Scanner<'a> {
             while matches!(self.peek(), Some(' ' | '\t')) {
                 self.pos += 1;
             }
-            if !self.peek().is_some_and(is_line_break) {
+            if !matches!(self.input.as_bytes().get(self.pos), Some(b'\n' | b'\r')) {
                 break;
             }
             // By default an empty line can't hold a tab before the scalar's indentation
@@ -1101,7 +1101,7 @@ impl<'a> Scanner<'a> {
     pub(super) fn scan_plain(&mut self) -> Result<Option<Token<'a>>, Error> {
         let start = self.pos;
         self.short_flow_scalar = None;
-        if self.peek() == Some('#') {
+        if self.input.as_bytes().get(start) == Some(&b'#') {
             return Err(self.error_at(
                 start,
                 ErrorCode::MissingCommentWhitespace,
@@ -1172,7 +1172,7 @@ impl<'a> Scanner<'a> {
                     value.pop();
                 }
             }
-            if !self.peek().is_some_and(is_line_break) {
+            if !matches!(self.input.as_bytes().get(self.pos), Some(b'\n' | b'\r')) {
                 break;
             }
             // A scalar that starts after a block prefix cannot continue on a
@@ -1330,7 +1330,7 @@ impl<'a> Scanner<'a> {
         };
         let mut empty_line_tab = None;
         loop {
-            if !self.peek().is_some_and(is_line_break) {
+            if !matches!(self.input.as_bytes().get(self.pos), Some(b'\n' | b'\r')) {
                 break;
             }
             self.consume_line_break();

@@ -517,6 +517,52 @@ impl<'a> Parser<'a> {
                 }));
             }
 
+            // Fast path for the overwhelmingly common implicit `plain_key: ...` entry:
+            // a single `PlainScalar` token is guaranteed single-line, and a byte distance <= 1024
+            // to `:` guarantees <= 1024 characters without querying `LineStarts::location`.
+            if tokens.len() >= 2
+                && matches!(self.token(tokens, 0).kind, TokenKind::PlainScalar)
+                && matches!(self.token(tokens, 1).kind, TokenKind::Value)
+            {
+                let key_span = self.token(tokens, 0).span;
+                let colon_start = self.token(tokens, 1).span.start();
+                if colon_start.saturating_sub(key_span.start()) <= 1024 {
+                    let key_slice = &self.input[key_span.start()..key_span.end()];
+                    self.emit(Event::Scalar {
+                        value: Cow::Borrowed(key_slice),
+                        raw: Cow::Borrowed(key_slice),
+                        style: ScalarStyle::Plain,
+                        tag: None,
+                        anchor: None,
+                        span: key_span,
+                    })?;
+                    if tokens.len() == 3
+                        && let Some(value) = self.single_scalar(tokens.from(2))
+                    {
+                        state.entries += 1;
+                        self.limits
+                            .check_collection_entries(state.entries)
+                            .map_err(|error| self.limit_at(key_span, error))?;
+                        let value_span = value.2;
+                        self.emit(Event::Scalar {
+                            value: value.0,
+                            raw: Cow::Borrowed(&self.input[value_span.start()..value_span.end()]),
+                            style: value.1,
+                            tag: None,
+                            anchor: None,
+                            span: value_span,
+                        })?;
+                        if self.sink.is_full() {
+                            let next_index = state.current_index;
+                            stack.push(Cont::MappingEntry(state));
+                            return Ok(Step::Return(next_index));
+                        }
+                        continue;
+                    }
+                    return self.mapping_after_implicit_key(state, tokens, Some(1), stack);
+                }
+            }
+
             let value_index = value_indicator_index(self.tokens(tokens));
             let key = value_index.map_or(tokens, |index| tokens.until(index));
             if !key.is_empty() {

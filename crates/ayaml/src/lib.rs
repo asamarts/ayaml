@@ -809,6 +809,7 @@ impl<'a> EventStream<'a> {
 impl<'a> Iterator for EventStream<'a> {
     type Item = Result<Event<'a>, Error>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         match &mut self.inner {
             EventStreamInner::Cursor(cursor) => cursor.next_event().transpose(),

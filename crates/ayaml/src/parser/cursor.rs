@@ -150,7 +150,15 @@ impl<'a> EventCursor<'a> {
         }
     }
 
+    #[inline]
     pub(crate) fn next_event(&mut self) -> Result<Option<Event<'a>>, Error> {
+        if let Some(event) = self.queue.pop_front() {
+            return Ok(Some(event));
+        }
+        self.next_event_slow()
+    }
+
+    fn next_event_slow(&mut self) -> Result<Option<Event<'a>>, Error> {
         let result = self
             .next_event_inner()
             .map_err(|error| error.with_location_from(&self.positions, self.input));
@@ -210,33 +218,20 @@ impl<'a> EventCursor<'a> {
         let mut tokens = Vec::new();
         let mut seen_document = false;
         loop {
-            let line_tokens = if let Some(tokens) = self.pending_line.take() {
-                tokens
-            } else {
-                match self.read_line()? {
-                    Some(tokens) => tokens,
-                    None => break,
-                }
-            };
-            let is_start = matches!(
-                line_tokens.first().map(|token| &token.kind),
-                Some(TokenKind::DocumentStart { .. })
-            );
-            let is_end = matches!(
-                line_tokens.first().map(|token| &token.kind),
-                Some(TokenKind::DocumentEnd)
-            );
-            if is_start && seen_document {
-                self.pending_line = Some(line_tokens);
+            let start = tokens.len();
+            if let Some(pending) = self.pending_line.take() {
+                tokens.extend(pending);
+            } else if !self.read_line_into(&mut tokens)? {
                 break;
             }
-            seen_document |= is_start
-                || !matches!(
-                    line_tokens.first().map(|token| &token.kind),
-                    Some(TokenKind::Directive(_))
-                );
-            let start = tokens.len();
-            tokens.extend(line_tokens);
+            let first_kind = &tokens[start].kind;
+            let is_start = matches!(first_kind, TokenKind::DocumentStart { .. });
+            let is_end = matches!(first_kind, TokenKind::DocumentEnd);
+            if is_start && seen_document {
+                self.pending_line = Some(tokens.split_off(start));
+                break;
+            }
+            seen_document |= is_start || !matches!(first_kind, TokenKind::Directive(_));
             lines.push(Line::new(
                 &tokens,
                 start,
@@ -297,43 +292,37 @@ impl<'a> EventCursor<'a> {
         Ok(Some(events))
     }
 
-    fn read_line(&mut self) -> Result<Option<Vec<Token<'a>>>, Error> {
+    /// Read the next non-empty logical line directly into `out`, returning `true` if any tokens
+    /// were appended. Avoids allocating a temporary `Vec<Token>` per line.
+    fn read_line_into(&mut self, out: &mut Vec<Token<'a>>) -> Result<bool, Error> {
         if self.eof {
-            return Ok(None);
+            return Ok(false);
         }
-        let mut current = Vec::new();
+        let start = out.len();
         loop {
             match self.scanner.next_token()? {
                 None => {
                     self.eof = true;
-                    return Ok(if current.is_empty() {
-                        None
-                    } else {
-                        Some(current)
-                    });
+                    return Ok(out.len() > start);
                 }
                 Some(token) if matches!(token.kind, TokenKind::StreamStart) => {}
                 Some(token) if matches!(token.kind, TokenKind::StreamEnd) => {
                     self.eof = true;
                     self.stream_end = Some(token.span);
-                    return Ok(if current.is_empty() {
-                        None
-                    } else {
-                        Some(current)
-                    });
+                    return Ok(out.len() > start);
                 }
                 Some(token) if matches!(token.kind, TokenKind::LineBreak) => {
-                    if !current.is_empty() {
-                        return Ok(Some(current));
+                    if out.len() > start {
+                        return Ok(true);
                     }
                 }
                 Some(token) => {
                     let block_scalar = token.kind.scalar_style().is_some_and(|style| {
                         matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
                     });
-                    current.push(token);
+                    out.push(token);
                     if block_scalar {
-                        return Ok(Some(current));
+                        return Ok(true);
                     }
                 }
             }

@@ -334,13 +334,16 @@ impl<'a> Scanner<'a> {
             return Ok(None);
         }
 
+        let bytes = self.input.as_bytes();
         loop {
             self.skip_insignificant()?;
-            if self.pos >= self.input.len() {
+            if self.pos >= bytes.len() {
                 self.finished = true;
                 return self.make(TokenKind::StreamEnd, self.pos, self.pos);
             }
-            if self.at_line_start()
+            let next_byte = bytes[self.pos];
+            if next_byte == BOM_FIRST_BYTE
+                && self.at_line_start()
                 && self.peek() == Some('\u{feff}')
                 && !(self.compat_flow && self.pos == 3 && self.initial_bom)
             {
@@ -363,7 +366,7 @@ impl<'a> Scanner<'a> {
                 }
                 continue;
             }
-            if self.peek().is_some_and(is_line_break) {
+            if matches!(next_byte, b'\n' | b'\r') {
                 let start = self.pos;
                 self.consume_line_break();
                 if self.flow_level > 0 {
@@ -440,12 +443,12 @@ impl<'a> Scanner<'a> {
         }
 
         let start = self.pos;
-        let Some(ch) = self.peek() else {
+        let Some(&byte) = bytes.get(start) else {
             self.finished = true;
             return self.make(TokenKind::StreamEnd, self.pos, self.pos);
         };
-        match ch {
-            '[' => {
+        match byte {
+            b'[' => {
                 if self.flow_level == 0 {
                     self.flow_start = start;
                 }
@@ -459,14 +462,14 @@ impl<'a> Scanner<'a> {
                 self.pos += 1;
                 self.make(TokenKind::FlowSequenceStart, start, self.pos)
             }
-            ']' => {
+            b']' => {
                 self.pos += 1;
                 self.flow_level = self.flow_level.saturating_sub(1);
                 self.flow_stack.pop();
                 self.flow_allow_zero_indent.pop();
                 self.make(TokenKind::FlowSequenceEnd, start, self.pos)
             }
-            '{' => {
+            b'{' => {
                 if self.flow_level == 0 {
                     self.flow_start = start;
                 }
@@ -478,31 +481,28 @@ impl<'a> Scanner<'a> {
                 self.pos += 1;
                 self.make(TokenKind::FlowMappingStart, start, self.pos)
             }
-            '}' => {
+            b'}' => {
                 self.pos += 1;
                 self.flow_level = self.flow_level.saturating_sub(1);
                 self.flow_stack.pop();
                 self.flow_allow_zero_indent.pop();
                 self.make(TokenKind::FlowMappingEnd, start, self.pos)
             }
-            ',' => {
+            b',' => {
                 if let Some(top) = self.flow_stack.last_mut() {
                     top.2 = false;
                 }
                 self.pos += 1;
                 self.make(TokenKind::FlowEntry, start, self.pos)
             }
-            '-' if self.indicator_follows(start, 1)
+            b'-' if self.indicator_follows(start, 1)
                 && !(self.compat_flow
                     && self.flow_level > 0
                     && self
                         .flow_stack
                         .last()
                         .is_some_and(|&(_, _, explicit)| explicit)
-                    && matches!(
-                        self.input[start + 1..].chars().next(),
-                        Some(',' | ']' | '}')
-                    )) =>
+                    && matches!(bytes.get(start + 1), Some(b',' | b']' | b'}'))) =>
             {
                 self.pos += 1;
                 self.make_indicator(TokenKind::BlockEntry, start, self.pos)
@@ -511,8 +511,8 @@ impl<'a> Scanner<'a> {
             // space or a line break after it (`ns-flow-map-entry`, `ns-flow-pair`), nor a plain
             // scalar, so `[?]`, `{?,a}`, and `[?[a]]` are errors. libyaml reads `{?}` and
             // `[?[a]]`, and refuses `[?]` only because it drops the `]`.
-            '?' if self.flow_level > 0
-                && self.input[start + 1..].starts_with([',', '[', ']', '{', '}']) =>
+            b'?' if self.flow_level > 0
+                && matches!(bytes.get(start + 1), Some(b',' | b'[' | b']' | b'{' | b'}')) =>
             {
                 Err(self.error_at(
                     start,
@@ -523,7 +523,7 @@ impl<'a> Scanner<'a> {
             // In flow context libyaml treats every other `?` as an explicit-key
             // indicator. YAML 1.2.2 makes `?x` a plain scalar (HM87, 652Z);
             // the compatibility scanner keeps the libyaml reading.
-            '?' if (self.compat_flow && self.flow_level > 0)
+            b'?' if (self.compat_flow && self.flow_level > 0)
                 || self.indicator_follows(start, 1) =>
             {
                 if let Some(top) = self.flow_stack.last_mut() {
@@ -532,7 +532,7 @@ impl<'a> Scanner<'a> {
                 self.pos += 1;
                 self.make_indicator(TokenKind::Key, start, self.pos)
             }
-            ':' if self.colon_indicator(start)
+            b':' if self.colon_indicator(start)
                 || (self.flow_level > 0 && self.previous_flow_end) =>
             {
                 // In compat, an implicit key that ran onto a flow collection's line short of its
@@ -550,16 +550,17 @@ impl<'a> Scanner<'a> {
                 self.pos += 1;
                 self.make_indicator(TokenKind::Value, start, self.pos)
             }
-            '&' => self.scan_anchor(false),
-            '*' => self.scan_anchor(true),
-            '!' => self.scan_tag(),
-            '\'' => self.scan_single_quoted(),
-            '"' => self.scan_double_quoted(),
-            '|' => self.scan_block_scalar(start, true),
-            '>' => self.scan_block_scalar(start, false),
+            b'&' => self.scan_anchor(false),
+            b'*' => self.scan_anchor(true),
+            b'!' => self.scan_tag(),
+            b'\'' => self.scan_single_quoted(),
+            b'"' => self.scan_double_quoted(),
+            b'|' => self.scan_block_scalar(start, true),
+            b'>' => self.scan_block_scalar(start, false),
             // Indicators that cannot start a plain scalar (`ns-plain-first`);
             // libyaml rejects them too.
-            '%' | '@' | '`' => {
+            b'%' | b'@' | b'`' => {
+                let ch = char::from(byte);
                 let error = self.error_at(
                     start,
                     ErrorCode::ReservedIndicator,
@@ -652,6 +653,7 @@ impl<'a> Scanner<'a> {
         }))
     }
 
+    #[inline]
     fn make(
         &mut self,
         kind: TokenKind<'a>,
@@ -763,6 +765,7 @@ impl<'a> Scanner<'a> {
         }
     }
 
+    #[inline]
     fn span(&self, start: usize, end: usize) -> Result<Span, Error> {
         self.line_index.span(self.input, start, end).ok_or_else(|| {
             self.error_at(start, ErrorCode::UnexpectedToken, "invalid span position")
