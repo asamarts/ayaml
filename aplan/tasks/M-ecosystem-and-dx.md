@@ -2,7 +2,7 @@
 id: M-ecosystem-and-dx
 title: Complete ecosystem interoperability, ergonomic helpers, and safe editing before 1.0
 phase: 8
-status: todo
+status: done
 blocked_by:
 - AY-143
 - AY-144
@@ -13,6 +13,11 @@ blocked_by:
 tags:
 - milestone
 - api
+evidence:
+- kind: test
+  ref: docs_book_and_reference_pages_are_complete_and_doctested_in_ci
+- kind: commit
+  ref: 1397fad
 ---
 
 ## Why
@@ -25,5 +30,5 @@ guides.
 
 ## Acceptance criteria
 
-- [ ] every member is closed with tests and book documentation examples passing
-- [ ] all new APIs are additive and pass SemVer and public-docs checks
+- [x] every member is closed with tests and book documentation examples passing
+- [x] all new APIs are additive and pass SemVer and public-docs checks

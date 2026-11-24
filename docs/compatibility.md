@@ -112,8 +112,11 @@ reading, so the event writer may leave a tagged scalar plain.
   a leading zero too, as in `01`, which resolves to a string. Other text, such
   as `inf`, a spelling too large for a float, such as `1e999`, and a scalar
   tagged as a string, such as `!!str 1.5`, are errors read into an `f64`.
-- A plain or quoted `<<` remains a literal key. Merge-key application is an
-  explicit `Value::apply_merge_keys` operation, not an implicit parser effect.
+- A plain or quoted `<<` remains a literal key by default. Merge-key expansion
+  is opt-in via `ParseOptions::with_merge_keys(true)` (for event, value,
+  `SpannedTree`, frontmatter, and typed readers, keeping quoted `"<<"` literal)
+  or `Value::apply_merge_keys` (after composing a `Value`), not an implicit
+  parser effect.
 - Tags, anchors, aliases, directives, and document markers are preserved in the
   event stream.
 - A node has at most one tag and one anchor; a second one is an error, in both

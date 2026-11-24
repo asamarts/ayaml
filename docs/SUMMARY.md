@@ -5,6 +5,9 @@
 # Guide
 
 - [Getting started](getting-started.md)
+- [Cookbook](cookbook.md)
+- [Migrating from YAML 1.1](migration.md)
+- [Sizing resource limits](limits-sizing.md)
 - [Format contract and interface](interface.md)
 - [Compatibility profile](compatibility.md)
 

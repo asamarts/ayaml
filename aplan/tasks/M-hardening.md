@@ -2,7 +2,7 @@
 id: M-hardening
 title: Close remaining test, API, and consumer follow-ups after 0.1.2
 phase: 2
-status: todo
+status: done
 blocked_by:
 - AY-036
 - AY-037
@@ -53,6 +53,10 @@ blocked_by:
 tags:
 - milestone
 - hardening
+evidence:
+- kind: note
+  ref: all 46 member tasks closed with verified evidence
+  captured: 2026-11-24
 ---
 
 ## Why
@@ -61,4 +65,4 @@ These follow-ups matter but do not block the 0.1.2 release.
 
 ## Acceptance criteria
 
-- [ ] every member is closed or explicitly dropped
+- [x] every member is closed or explicitly dropped

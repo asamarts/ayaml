@@ -20,6 +20,15 @@ pub mod book_doctests {
     #[doc = include_str!("../../../docs/getting-started.md")]
     pub struct GettingStarted;
 
+    #[doc = include_str!("../../../docs/cookbook.md")]
+    pub struct Cookbook;
+
+    #[doc = include_str!("../../../docs/migration.md")]
+    pub struct Migration;
+
+    #[doc = include_str!("../../../docs/limits-sizing.md")]
+    pub struct LimitsSizing;
+
     #[doc = include_str!("../../../docs/interface.md")]
     pub struct Interface;
 
