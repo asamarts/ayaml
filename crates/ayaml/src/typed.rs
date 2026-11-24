@@ -237,6 +237,17 @@ pub(crate) struct NodeOptions {
     pub(crate) drop_global_tags: bool,
 }
 
+/// Decode one document with opt-in YAML 1.1 merge-key expansion enabled.
+pub(crate) fn from_str_with_merged<'de, T: DeserializeSeed<'de>>(
+    input: &'de str,
+    limits: &Limits,
+    seed: T,
+) -> Result<T::Value, Error> {
+    let (events, mut budget) = crate::merge::events::expand_single_document(input, limits)?;
+    from_events_seed(events, input.len(), limits, &mut budget, seed)
+        .map_err(|error| error.with_input_location(input, false))
+}
+
 /// Decode one document into a typed value, borrowing scalar strings from input.
 pub(crate) fn from_str<'de, T: Deserialize<'de>>(
     input: &'de str,

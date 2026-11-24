@@ -764,6 +764,16 @@ pub mod internals {
     }
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the default EventCursor path stays unboxed to avoid an extra heap allocation on every parse_events call"
+)]
+#[derive(Debug)]
+enum EventStreamInner<'a> {
+    Cursor(parser::EventCursor<'a>),
+    Merged(Box<merge::events::MergedEventStream<'a>>),
+}
+
 /// A pull traversal over spanned parser events.
 ///
 /// Events are produced lazily in document-sized chunks. Pulling stops further
@@ -775,19 +785,24 @@ pub mod internals {
 /// buffering remain hardening work.
 #[derive(Debug)]
 pub struct EventStream<'a> {
-    inner: parser::EventCursor<'a>,
+    inner: EventStreamInner<'a>,
 }
 
 impl<'a> EventStream<'a> {
     pub(crate) fn next_document(&mut self) -> Result<Option<Vec<Event<'a>>>, Error> {
-        self.inner.next_document()
+        match &mut self.inner {
+            EventStreamInner::Cursor(cursor) => cursor.next_document(),
+            EventStreamInner::Merged(merged) => merged.next_document(),
+        }
     }
 }
 
 #[cfg(feature = "libyaml-compat")]
 impl<'a> EventStream<'a> {
     pub(crate) fn from_cursor(inner: parser::EventCursor<'a>) -> Self {
-        Self { inner }
+        Self {
+            inner: EventStreamInner::Cursor(inner),
+        }
     }
 }
 
@@ -795,7 +810,10 @@ impl<'a> Iterator for EventStream<'a> {
     type Item = Result<Event<'a>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next_event().transpose()
+        match &mut self.inner {
+            EventStreamInner::Cursor(cursor) => cursor.next_event().transpose(),
+            EventStreamInner::Merged(merged) => merged.next_event().transpose(),
+        }
     }
 }
 
@@ -981,7 +999,15 @@ pub fn parse_events_with<'a>(
     input: &'a str,
     options: &ParseOptions,
 ) -> Result<EventStream<'a>, Error> {
-    parser::EventCursor::new(input, &options.limits).map(|inner| EventStream { inner })
+    if options.merge_keys {
+        merge::events::MergedEventStream::new(input, &options.limits).map(|merged| EventStream {
+            inner: EventStreamInner::Merged(Box::new(merged)),
+        })
+    } else {
+        parser::EventCursor::new(input, &options.limits).map(|cursor| EventStream {
+            inner: EventStreamInner::Cursor(cursor),
+        })
+    }
 }
 
 /// Parse a YAML input into a pull traversal with explicit limits.
@@ -996,7 +1022,9 @@ pub fn parse_events_with_limits<'a>(
     input: &'a str,
     limits: &Limits,
 ) -> Result<EventStream<'a>, Error> {
-    parser::EventCursor::new(input, limits).map(|inner| EventStream { inner })
+    parser::EventCursor::new(input, limits).map(|cursor| EventStream {
+        inner: EventStreamInner::Cursor(cursor),
+    })
 }
 
 /// Parse one YAML document into the generic value model.
@@ -1028,6 +1056,17 @@ pub fn parse_value(input: &str) -> Result<Value, Error> {
 ///
 /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
 pub fn parse_value_with(input: &str, options: &ParseOptions) -> Result<Value, Error> {
+    if options.merge_keys {
+        let (events, mut budget) = merge::events::expand_single_document(input, &options.limits)?;
+        let mut docs = composer::compose_documents_with_budget(
+            events,
+            input.len(),
+            &options.limits,
+            &mut budget,
+        )
+        .map_err(|error| error.with_input_location(input, false))?;
+        return Ok(docs.pop().unwrap_or(Value::Null));
+    }
     parse_single_value(input, &options.limits)
 }
 
@@ -1084,6 +1123,16 @@ pub fn parse_documents(input: &str) -> Result<Vec<Value>, Error> {
 ///
 /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
 pub fn parse_documents_with(input: &str, options: &ParseOptions) -> Result<Vec<Value>, Error> {
+    if options.merge_keys {
+        let (events, mut budget) = merge::events::expand_all_documents(input, &options.limits)?;
+        return composer::compose_documents_with_budget(
+            events,
+            input.len(),
+            &options.limits,
+            &mut budget,
+        )
+        .map_err(|error| error.with_input_location(input, false));
+    }
     parse_stream_documents(input, &options.limits)
 }
 
@@ -1155,6 +1204,9 @@ pub fn from_str_with<'de, T: serde::Deserialize<'de>>(
     input: &'de str,
     options: &ParseOptions,
 ) -> Result<T, Error> {
+    if options.merge_keys {
+        return typed::from_str_with_merged(input, &options.limits, std::marker::PhantomData::<T>);
+    }
     typed::from_str(input, &options.limits)
 }
 
@@ -1231,6 +1283,9 @@ pub fn from_str_seed_with<'de, T: serde::de::DeserializeSeed<'de>>(
     options: &ParseOptions,
     seed: T,
 ) -> Result<T::Value, Error> {
+    if options.merge_keys {
+        return typed::from_str_with_merged(input, &options.limits, seed);
+    }
     typed::from_str_seed_with_options(input, &options.limits, typed::NodeOptions::default(), seed)
 }
 
@@ -1364,7 +1419,9 @@ pub fn from_reader_with<R: std::io::Read, T: serde::de::DeserializeOwned>(
     reader: R,
     options: &ParseOptions,
 ) -> Result<T, Error> {
-    from_reader_with_limits(reader, &options.limits)
+    let bytes = read_bounded(reader, &options.limits)?;
+    let text = text_of_with(&bytes, &options.limits)?;
+    from_str_with(text, options)
 }
 
 /// Deserialize one UTF-8 YAML document from an I/O reader with explicit limits.

@@ -118,3 +118,51 @@ fn wide_merge_sequences_stay_linear_and_enforce_entry_limits() {
         );
     });
 }
+
+/// Opt-in YAML 1.1 merge-key expansion (`ParseOptions::with_merge_keys(true)`) rejects hostile
+/// chained merge bombs and oversized merged mappings across event, value, and typed readers
+/// without unbounded allocation.
+#[test]
+fn opt_in_merge_keys_rejects_merge_bombs_on_typed_and_event_readers() {
+    in_child!(|| {
+        use std::fmt::Write as _;
+
+        // Chained exponential merge bomb: each level merges the previous level twice into
+        // nested mappings (`x: { <<: *m{prev} }`, `y: { <<: *m{prev} }`), doubling the expanded
+        // node count at every level (2^20 subtrees) so event, value, and typed readers all stop
+        // cleanly at resource limits.
+        let mut bomb = String::from("m0: &m0\n  a: x\n  b: y\n");
+        for level in 1..20 {
+            let prev = level - 1;
+            let _ = writeln!(
+                bomb,
+                "m{level}: &m{level}\n  x:\n    <<: *m{prev}\n  y:\n    <<: *m{prev}"
+            );
+        }
+
+        let opts = ParseOptions::new().with_merge_keys(true);
+        let events_err = ayaml::parse_events_with(&bomb, &opts)
+            .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+            .expect_err("merge bomb events");
+        assert_eq!(events_err.kind(), ErrorKind::Limit);
+
+        let value_err = ayaml::parse_value_with(&bomb, &opts).expect_err("merge bomb value");
+        assert_eq!(value_err.kind(), ErrorKind::Limit);
+
+        let typed_err = ayaml::from_str_with::<Value>(&bomb, &opts).expect_err("merge bomb typed");
+        assert_eq!(typed_err.kind(), ErrorKind::Limit);
+
+        // Chained depth bomb via merge: merging a nested mapping past max_depth is rejected.
+        let deep_merge = "base: &b\n  inner:\n    leaf: 1\ntop:\n  <<: *b\n";
+        let shallow = ParseOptions::new()
+            .with_limits(Limits::new().with_max_depth(2))
+            .with_merge_keys(true);
+        let depth_err =
+            ayaml::from_str_with::<Value>(deep_merge, &shallow).expect_err("merge depth limit");
+        assert_eq!(depth_err.kind(), ErrorKind::Limit);
+        assert_eq!(
+            depth_err.limit().map(LimitExceeded::kind),
+            Some(LimitKind::Depth)
+        );
+    });
+}
