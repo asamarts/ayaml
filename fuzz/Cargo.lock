@@ -17,6 +17,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ayaml-edit"
+version = "0.2.3"
+dependencies = [
+ "ayaml",
+]
+
+[[package]]
 name = "ayaml-fixtures"
 version = "0.2.3"
 
@@ -26,6 +33,7 @@ version = "0.1.0"
 dependencies = [
  "arbitrary",
  "ayaml",
+ "ayaml-edit",
  "ayaml-fixtures",
  "libfuzzer-sys",
  "serde",

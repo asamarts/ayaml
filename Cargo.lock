@@ -59,6 +59,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ayaml-edit"
+version = "0.2.3"
+dependencies = [
+ "ayaml",
+ "proptest",
+]
+
+[[package]]
 name = "ayaml-fixtures"
 version = "0.2.3"
 dependencies = [

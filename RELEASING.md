@@ -196,3 +196,22 @@ python3 tools/check_release.py registry "$crate" X.Y.Z 0
 Releases up to 0.1.1 were published by hand, before this workflow, so they have no
 attestation. Rebuilt with cargo 1.99.1, the 0.1.1 tag gives the bytes crates.io serves, sha256
 `3758e32658d9b5ad8a75bfd1593e55130e93a82a95088660c64f9ac93aa8533c`.
+
+## Publishing `ayaml-edit`
+
+`ayaml-edit` lives in `crates/ayaml-edit` and depends only on `ayaml`'s public API. Because it is a
+separate crates.io package, its initial publication and Trusted Publisher setup follow the same
+sequence as `ayaml`:
+
+1. **First publish.** Publish the initial version of `ayaml-edit` only after the matching `ayaml`
+   version is live on crates.io (`cargo publish -p ayaml-edit --locked` once, or via the release
+   workflow after adding `ayaml-edit` to the publish job).
+2. **crates.io Trusted Publisher.** On crates.io, open `ayaml-edit`'s Settings → Trusted
+   Publishing and add a GitHub publisher matching `ayaml`:
+   - repository owner `asamarts`;
+   - repository `ayaml`;
+   - workflow `release.yml`;
+   - environment `release`.
+3. **Lock down token publishing.** After the first workflow-driven publish of `ayaml-edit`, enable
+   "Trusted Publishing only" (`trustpub_only: true`) in `ayaml-edit`'s crates.io settings and
+   revoke any temporary API token used for step 1.

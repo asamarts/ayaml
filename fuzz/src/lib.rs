@@ -641,6 +641,48 @@ pub fn run_typed_equiv(data: &[u8]) {
     );
 }
 
+/// Target 7 (`edit`): `ayaml_edit::replace_scalar` and `remove_entry` never panic and every
+/// returned `VerifiedEdit` parses cleanly and matches `apply_edits`.
+///
+/// # Panics
+///
+/// Panics if a returned `VerifiedEdit` fails to re-parse or disagrees with `apply_edits`.
+pub fn run_edit(data: &[u8]) {
+    let mut u = Unstructured::new(data);
+    let Ok(doc) = FuzzDoc::arbitrary(&mut u) else {
+        return;
+    };
+    let input = doc.render();
+    let Ok(original) = ayaml::parse_value(&input) else {
+        return;
+    };
+    let Some(mapping) = original.as_mapping() else {
+        return;
+    };
+    for (k, _) in mapping.iter().take(4) {
+        let path = [PathSegment::Key(k.clone())];
+        if let Ok(verified) = ayaml_edit::replace_scalar(&input, &path, &Value::from("edited")) {
+            let applied = ayaml_edit::apply_edits(&input, verified.edits())
+                .expect("verified edits must apply cleanly");
+            assert_eq!(applied, verified.output());
+            let reparsed = ayaml::parse_value(verified.output())
+                .expect("verified replace_scalar output must parse");
+            assert_eq!(
+                reparsed.as_mapping().and_then(|m| m.get(k)),
+                Some(&Value::from("edited"))
+            );
+        }
+        if let Ok(verified) = ayaml_edit::remove_entry(&input, &path) {
+            let applied = ayaml_edit::apply_edits(&input, verified.edits())
+                .expect("verified edits must apply cleanly");
+            assert_eq!(applied, verified.output());
+            let reparsed = ayaml::parse_value(verified.output())
+                .expect("verified remove_entry output must parse");
+            assert!(reparsed.as_mapping().and_then(|m| m.get(k)).is_none());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -711,6 +753,13 @@ mod tests {
     fn typed_equiv_harness_runs_on_seeds() {
         for seed in deterministic_seeds() {
             run_typed_equiv(&seed);
+        }
+    }
+
+    #[test]
+    fn edit_harness_runs_on_seeds() {
+        for seed in deterministic_seeds() {
+            super::run_edit(&seed);
         }
     }
 }
