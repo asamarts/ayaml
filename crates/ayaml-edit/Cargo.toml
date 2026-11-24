@@ -1,0 +1,21 @@
+[package]
+name = "ayaml-edit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/ayaml-edit"
+readme = "README.md"
+description = "Verified source-preserving edits for YAML documents built on ayaml."
+keywords = ["yaml", "edit", "refactor", "no-unsafe"]
+categories = ["parser-implementations", "encoding", "development-tools"]
+
+[dependencies]
+ayaml = { path = "../ayaml", version = "=0.2.3" }
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

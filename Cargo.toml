@@ -4,6 +4,7 @@ members = [
     "crates/ayaml",
     "crates/ayaml-bench",
     "crates/ayaml-conformance",
+    "crates/ayaml-edit",
     "crates/ayaml-fixtures",
     "crates/xtask",
 ]

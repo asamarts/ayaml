@@ -446,6 +446,7 @@ fn every_place_that_repeats_the_version_agrees_with_the_workspace() {
     for name in [
         "crates/ayaml-bench/Cargo.toml",
         "crates/ayaml-conformance/Cargo.toml",
+        "crates/ayaml-edit/Cargo.toml",
         "fuzz/Cargo.toml",
     ] {
         let text = read(&root, name);
@@ -920,6 +921,7 @@ fn fuzz_targets_and_harness_unit_tests_are_wired_in_ci() {
 
     let expected = [
         "borrowed",
+        "edit",
         "emit",
         "event_emit",
         "masked_errors",
