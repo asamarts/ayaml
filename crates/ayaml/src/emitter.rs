@@ -943,6 +943,7 @@ impl<'a, W: Write> Output<'a, W> {
         }
     }
 
+    #[inline]
     pub(crate) fn push_str(&mut self, value: &str) -> Result<(), Error> {
         let total = self.written.saturating_add(value.len());
         self.limits.check_output_bytes(total).map_err(Error::from)?;

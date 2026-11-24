@@ -355,6 +355,7 @@ impl LineStarts {
     }
 
     /// Return a byte span for `start..end`.
+    #[inline]
     #[must_use]
     pub(crate) fn span(&self, input: &str, start: usize, end: usize) -> Option<Span> {
         if start > end || end > self.len {
@@ -368,12 +369,26 @@ impl LineStarts {
 
     /// Byte offset of the line containing `index`. An index past the end of the input is on the
     /// last line.
+    #[inline]
     #[must_use]
     pub(crate) fn line_start(&self, index: usize) -> usize {
-        match self.starts.binary_search(&index) {
-            Ok(line) => self.starts[line],
-            Err(next) => self.starts[next.saturating_sub(1)],
+        let mut line = self.last_line.get();
+        if index >= self.starts[line] {
+            if line + 1 >= self.starts.len() || index < self.starts[line + 1] {
+                return self.starts[line];
+            }
+            if line + 2 >= self.starts.len() || index < self.starts[line + 2] {
+                line += 1;
+                self.last_line.set(line);
+                return self.starts[line];
+            }
         }
+        line = self
+            .starts
+            .partition_point(|&start| start <= index)
+            .saturating_sub(1);
+        self.last_line.set(line);
+        self.starts[line]
     }
 
     /// The number of lines, including a final empty line after a break.

@@ -50,17 +50,29 @@ impl Line {
     ) -> Self {
         let indent = tokens.get(start).map_or(0, |token| {
             let offset = token.span.start();
-            let column = positions
-                .marker(input, offset)
-                .map_or(0, |position| position.column().saturating_sub(1));
-            let blanks = input.as_bytes()[..offset]
-                .iter()
-                .rev()
-                .take_while(|byte| matches!(byte, b' ' | b'\t'))
-                .count();
-            match input[offset - blanks..offset].find('\t') {
-                Some(tab) => column.saturating_sub(blanks - tab),
-                None => column,
+            let bytes = input.as_bytes();
+            let mut i = offset;
+            let mut first_tab: Option<usize> = None;
+            while i > 0 {
+                match bytes[i - 1] {
+                    b' ' => i -= 1,
+                    b'\t' => {
+                        i -= 1;
+                        first_tab = Some(i);
+                    }
+                    _ => break,
+                }
+            }
+            if i == 0 || matches!(bytes[i - 1], b'\n' | b'\r') {
+                first_tab.map_or(offset - i, |tab| tab - i)
+            } else {
+                let column = positions
+                    .marker(input, offset)
+                    .map_or(0, |position| position.column().saturating_sub(1));
+                match first_tab {
+                    Some(tab) => column.saturating_sub(offset - tab),
+                    None => column,
+                }
             }
         });
         Self { start, end, indent }

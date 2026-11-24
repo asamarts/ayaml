@@ -106,37 +106,33 @@ pub(crate) fn plain_text_ok(value: &str, flow: bool) -> bool {
     if !leading_ok {
         return false;
     }
-    let mut prev_space = false;
     let mut index = 0;
     while index < bytes.len() {
+        // Fast path over runs of ordinary ASCII bytes (the overwhelming majority of scalar text).
+        while index < bytes.len() && PLAIN_CLASS[bytes[index] as usize] == PLAIN_SIMPLE {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            break;
+        }
         match PLAIN_CLASS[bytes[index] as usize] {
-            PLAIN_SIMPLE => {
-                prev_space = false;
-                index += 1;
-            }
-            PLAIN_SPACE => {
-                prev_space = true;
-                index += 1;
-            }
+            PLAIN_SPACE => index += 1,
             PLAIN_FLOW => {
                 if flow {
                     return false;
                 }
-                prev_space = false;
                 index += 1;
             }
             PLAIN_COLON => {
                 if flow || bytes.get(index + 1).is_none_or(|&next| next == b' ') {
                     return false;
                 }
-                prev_space = false;
                 index += 1;
             }
             PLAIN_HASH => {
-                if prev_space {
+                if index > 0 && bytes[index - 1] == b' ' {
                     return false;
                 }
-                prev_space = false;
                 index += 1;
             }
             PLAIN_BAD => return false,
@@ -147,7 +143,6 @@ pub(crate) fn plain_text_ok(value: &str, flow: bool) -> bool {
                 if !is_raw_char(ch) {
                     return false;
                 }
-                prev_space = false;
                 index += ch.len_utf8();
             }
         }
@@ -232,14 +227,20 @@ pub(crate) fn block_scalar_ok(value: &str) -> bool {
             line_all_ws = true;
             index += 1;
         } else if byte < 0x80 {
-            if !((0x20..=0x7e).contains(&byte) || byte == b'\t') {
+            if byte == b' ' || byte == b'\t' {
+                line_non_empty = true;
+                index += 1;
+            } else if (0x21..=0x7e).contains(&byte) {
+                line_non_empty = true;
+                line_all_ws = false;
+                index += 1;
+                // Once a line has non-whitespace content, blast through printable ASCII bytes.
+                while index < bytes.len() && (0x20..=0x7e).contains(&bytes[index]) {
+                    index += 1;
+                }
+            } else {
                 return false;
             }
-            line_non_empty = true;
-            if byte != b' ' && byte != b'\t' {
-                line_all_ws = false;
-            }
-            index += 1;
         } else {
             let Some(ch) = value[index..].chars().next() else {
                 break;
