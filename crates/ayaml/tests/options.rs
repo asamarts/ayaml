@@ -871,6 +871,18 @@ fn every_with_entry_point_rejects_invalid_limits_consistently() {
             "SpannedTree::parse_with",
             SpannedTree::parse_with(input, &parse_opts).unwrap_err(),
         );
+        assert_config_limit(
+            "split_frontmatter_with",
+            ayaml::split_frontmatter_with(input, &parse_opts).unwrap_err(),
+        );
+        assert_config_limit(
+            "parse_frontmatter_with",
+            ayaml::parse_frontmatter_with::<Value>(input, &parse_opts).unwrap_err(),
+        );
+        assert_config_limit(
+            "parse_frontmatter_value_with",
+            ayaml::parse_frontmatter_value_with(input, &parse_opts).unwrap_err(),
+        );
 
         #[cfg(feature = "libyaml-compat")]
         {
