@@ -193,6 +193,12 @@ fn check_spanned_tree(
         let _reparsed = ayaml::parse_value(&edited).expect("deleting entry_span must stay valid");
     }
 
+    if node.is_alias() {
+        assert!(node.scalar_text().is_none());
+        assert!(input[span.start()..span.end()].starts_with('*'));
+        return;
+    }
+
     match value.untag_ref() {
         Value::Sequence(items) => {
             assert!(node.is_sequence());

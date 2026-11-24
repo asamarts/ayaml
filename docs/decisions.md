@@ -644,8 +644,11 @@ input of more than 4 KiB costs: it is read from its events, and read twice when 
 document that reads as the original without that entry, and with nothing else changed. A block
 mapping entry or a block sequence item has one when all of this holds:
 
-- it begins its own line: only indentation before a key, and only indentation, a `-`, and
-  spaces before an item;
+- it begins its own line (only indentation before a key, and only indentation, a `-`, and
+  spaces before an item), **or** it is the first key of a block mapping on a sequence's `-`
+  line whose next key begins on a later line with spaces alone at the exact same column and its
+  `:` on that line (in which case the span runs from the first key's start to the next key's
+  start, leaving the `-` and moving the next key into its column);
 - a key and its `:` are on one line, so no `?` begins the entry on that line or an earlier one,
   and the key has text;
 - nothing follows the entry on its last line but a comment, and its end is known: an entry that
@@ -659,8 +662,16 @@ mapping entry or a block sequence item has one when all of this holds:
 - it defines no anchor and stands inside no collection that has one, since an alias reads what
   it names;
 - it is not the only entry of its collection, which would then be no collection;
-- where a block scalar is the last thing written before it, content follows it directly, since
-  the scalar would otherwise take the blank and comment lines after the entry.
+- where a block scalar is the last thing written before it, either content follows it directly
+  or the preceding block scalar has non-empty content without an explicit indentation indicator
+  and every intervening blank or comment line before the next content line is ignored by the
+  scalar (no space-indented blank lines, no tab-indented blank or comment lines, no blank line
+  before a comment after a keep-chomping scalar, and no comment indented to or past the
+  scalar's content column).
+
+An entry whose value is an alias is found by `SpannedTree::lookup` at its own path (with
+`SpannedNode::is_alias` true and `scalar_text` returning `None`), and gets an entry span under
+the same rules above; stepping *through* an alias still returns `None`.
 
 The span runs from the start of the entry's first line through its last line break, so it takes
 a nested value, a block scalar, and a trailing comment, and leaves a byte-order mark. Every other

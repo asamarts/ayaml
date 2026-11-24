@@ -2,13 +2,18 @@
 id: M-perf-optimization
 title: Close known memory and throughput bottlenecks against the performance baseline
 phase: 7
-status: todo
+status: done
 blocked_by:
 - AY-141
 - AY-142
 tags:
 - milestone
 - performance
+evidence:
+- kind: commit
+  ref: 05ba22b
+- kind: commit
+  ref: 7305cc5
 ---
 
 ## Why
@@ -19,5 +24,5 @@ loop bottlenecks with deterministic instruction and allocation evidence.
 
 ## Acceptance criteria
 
-- [ ] every member is closed with before-and-after instruction and allocation evidence
-- [ ] no correctness or limit invariant regresses
+- [x] every member is closed with before-and-after instruction and allocation evidence
+- [x] no correctness or limit invariant regresses

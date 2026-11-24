@@ -86,13 +86,15 @@ plain scalar's span and raw text end at its last non-whitespace character, so
 the separation before a comment, line break, or flow indicator stays outside it.
 
 `SpannedTree` builds a read-only tree from the same events and answers path lookups with a
-node's byte span, its entry span, and the original scalar text. Aliases, merge keys,
-duplicate keys, and multi-document streams return `None` rather than guessing. An entry span is
-the bytes whose removal removes that entry and changes nothing else. A block entry that begins
-its own line can have one, which runs through the entry's last line break. A flow entry has
-none, and nor does a block entry whose removal the lines around it would make inexact; D92 lists
-the conditions. A value that the source doesn't write after its key's `:` has an empty span
-right after that `:`.
+node's byte span, its entry span, and the original scalar text. Merge keys, duplicate keys,
+multi-document streams, and paths that step through an alias return `None` rather than guessing;
+an alias value itself is found at its own path (`is_alias() == true`). An entry span is the bytes
+whose removal removes that entry and changes nothing else. A block entry that begins its own line
+can have one running through its last line break, and the first key of a block mapping on a
+sequence's `-` line can have one running to the next key's start so the `-` stays in place. A flow
+entry has none, and nor does a block entry whose removal the lines around it would make inexact;
+D92 lists the conditions. A value that the source doesn't write after its key's `:` has an empty
+span right after that `:`.
 
 Errors have a coarse `ErrorKind` that names the layer that refused the input, a stable
 machine-readable `ErrorCode` (`yaml.<kebab-name>` via `Error::code()`), an optional span and
