@@ -14,7 +14,10 @@ use serde::de::{DeserializeSeed, EnumAccess, MapAccess, SeqAccess, VariantAccess
 use super::{Node, NodeKind, Text, resolve, unexpected_node, untagged};
 use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::resolver::{float_from_text, parse_bool, parse_int};
-use crate::span::Span;
+use crate::span::{
+    SPANNED_END_FIELD, SPANNED_FIELDS, SPANNED_START_FIELD, SPANNED_TOKEN, SPANNED_VALUE_FIELD,
+    Span,
+};
 
 /// Controls whether borrowed source slices are handed to visitors via
 /// `visit_borrowed_*` (when `'src == 'de`) or `visit_*` (when `'de` is independent).
@@ -265,7 +268,7 @@ impl<'src, 'de, M: StrMode<'src, 'de>> Deserializer<'de> for NodeDeserializer<'s
             _ => match &node.text {
                 Text::Plain(value) | Text::Spelled(value) => M::visit_src_str(visitor, value),
                 Text::Decoded(value) => visitor.visit_str(value),
-                Text::None | Text::Nothing | Text::DroppedTag => {
+                Text::None | Text::CollectionEnd(_) | Text::Nothing | Text::DroppedTag => {
                     return NodeDeserializer::<M>::with_mode(node)
                         .deserialize_any(visitor)
                         .map_err(|error| with_span(error, span));
@@ -315,10 +318,23 @@ impl<'src, 'de, M: StrMode<'src, 'de>> Deserializer<'de> for NodeDeserializer<'s
 
     fn deserialize_struct<V: Visitor<'de>>(
         self,
-        _name: &'static str,
-        _fields: &'static [&'static str],
+        name: &'static str,
+        fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
+        if name == SPANNED_TOKEN && fields == SPANNED_FIELDS {
+            // Preserve the outer node's full span (e.g. alias use-site span or full collection
+            // span) before resolving aliases.
+            let span = self.node.full_span();
+            return visitor
+                .visit_map(SpannedMapAccess::<M> {
+                    node: self.node,
+                    span,
+                    state: 0,
+                    mode: PhantomData,
+                })
+                .map_err(|error| with_span(error, span));
+        }
         let node = untagged(self.node);
         let span = node.span;
         if is_empty_scalar(node) {
@@ -837,5 +853,52 @@ pub(super) fn inside_key(error: Error, key: &Node<'_>) -> Error {
         NodeKind::Bool(value) => error.inside_key(&value.to_string()),
         NodeKind::Number(value) => error.inside_key(&value.to_string()),
         _ => error.inside_collection_key(),
+    }
+}
+
+/// Synthetic [`MapAccess`] supplying `(start, end, value)` to [`crate::Spanned`].
+struct SpannedMapAccess<'src, 'a, M> {
+    node: &'a Node<'src>,
+    span: Span,
+    state: u8,
+    mode: PhantomData<M>,
+}
+
+impl<'src, 'de, M: StrMode<'src, 'de>> MapAccess<'de> for SpannedMapAccess<'src, '_, M> {
+    type Error = Error;
+
+    fn next_key_seed<K: DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, Self::Error> {
+        let key = match self.state {
+            0 => SPANNED_START_FIELD,
+            1 => SPANNED_END_FIELD,
+            2 => SPANNED_VALUE_FIELD,
+            _ => return Ok(None),
+        };
+        seed.deserialize(serde::de::value::BorrowedStrDeserializer::<Error>::new(key))
+            .map(Some)
+    }
+
+    fn next_value_seed<V: DeserializeSeed<'de>>(
+        &mut self,
+        seed: V,
+    ) -> Result<V::Value, Self::Error> {
+        let step = self.state;
+        self.state += 1;
+        match step {
+            0 => seed.deserialize(serde::de::value::U64Deserializer::<Error>::new(
+                self.span.start() as u64,
+            )),
+            1 => seed.deserialize(serde::de::value::U64Deserializer::<Error>::new(
+                self.span.end() as u64,
+            )),
+            2 => seed.deserialize(NodeDeserializer::<M>::with_mode(self.node)),
+            _ => Err(Error::new(
+                ErrorKind::Serde,
+                "Spanned<T> deserializer state exhausted",
+            )),
+        }
     }
 }

@@ -5,7 +5,19 @@
 //! bytes, Unicode scalar values, or UTF-16 code units. A [`Position`] counts
 //! from zero, for a machine; a [`Location`] counts from one, for a person.
 
-use std::ops::Range;
+use std::fmt;
+use std::marker::PhantomData;
+use std::ops::{Deref, Range};
+
+use serde::de::{self, Deserialize, Deserializer, MapAccess, Visitor};
+use serde::ser::{Serialize, Serializer};
+
+pub(crate) const SPANNED_TOKEN: &str = "$__ayaml_private_Spanned";
+pub(crate) const SPANNED_START_FIELD: &str = "$__ayaml_private_start";
+pub(crate) const SPANNED_END_FIELD: &str = "$__ayaml_private_end";
+pub(crate) const SPANNED_VALUE_FIELD: &str = "$__ayaml_private_value";
+pub(crate) const SPANNED_FIELDS: &[&str] =
+    &[SPANNED_START_FIELD, SPANNED_END_FIELD, SPANNED_VALUE_FIELD];
 
 /// A byte offset with one-based line and column values.
 ///
@@ -205,6 +217,215 @@ impl From<Span> for Range<usize> {
 impl From<Range<usize>> for Span {
     fn from(range: Range<usize>) -> Self {
         Self::new(range.start, range.end)
+    }
+}
+
+/// A deserialized value paired with the exact byte [`Span`] where it appeared in the YAML source.
+///
+/// When deserialized through `ayaml`'s source-backed typed readers ([`from_str`](crate::from_str),
+/// [`from_str_with`](crate::from_str_with), [`from_str_borrowed`](crate::from_str_borrowed),
+/// [`from_slice`](crate::from_slice), [`from_reader`](crate::from_reader),
+/// [`Deserializer`](crate::Deserializer), [`DocumentDeserializer`](crate::DocumentDeserializer),
+/// [`parse_frontmatter`](crate::parse_frontmatter), and
+/// `ayaml::compat`), `Spanned<T>` captures the node's byte [`Span`] alongside the decoded value
+/// `T` on both the small-tree and event-stream paths.
+///
+/// # Behavior details
+///
+/// - **Aliases:** `Spanned<T>` on an alias node records the alias use-site span (e.g. `*anchor`),
+///   matching [`SpannedTree`](crate::SpannedTree), while inner `Spanned<U>` fields inside an
+///   aliased collection record the spans of the anchored target's entries.
+/// - **Tags:** `Spanned<T>` on a tagged node records the node's span, matching
+///   [`SpannedTree`](crate::SpannedTree).
+/// - **Collections:** `Spanned<Vec<T>>`, structs, and maps record the full collection span from
+///   opening token through closing token, matching [`SpannedTree::span_at`](crate::SpannedTree::span_at).
+/// - **Borrowed strings:** `Spanned<&'a str>` borrows directly from the YAML source when the
+///   underlying scalar is borrowable.
+/// - **Non-`ayaml` deserializers and [`from_value`](crate::from_value):** Deserializers that do
+///   not carry YAML source spans (such as `serde_json` or [`from_value`](crate::from_value))
+///   return a Serde error rather than fabricating a placeholder span.
+/// - **Serialization:** [`Serialize`] writes the inner value transparently so structs containing
+///   `Spanned<T>` fields round-trip cleanly through [`to_string`](crate::to_string).
+///
+/// ```
+/// use ayaml::Spanned;
+/// use serde::Deserialize;
+///
+/// #[derive(Deserialize)]
+/// struct Config<'a> {
+///     #[serde(borrow)]
+///     name: Spanned<&'a str>,
+///     retries: Spanned<u32>,
+/// }
+///
+/// let input = "name: ayaml\nretries: 3\n";
+/// let config: Config<'_> = ayaml::from_str_borrowed(input)?;
+/// assert_eq!(*config.name, "ayaml");
+/// assert_eq!(config.name.span().slice(input), Some("ayaml"));
+/// assert_eq!(*config.retries, 3);
+/// assert_eq!(config.retries.span().slice(input), Some("3"));
+/// # Ok::<(), ayaml::Error>(())
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Spanned<T> {
+    span: Span,
+    value: T,
+}
+
+impl<T> Spanned<T> {
+    /// Pair a value with its byte [`Span`].
+    #[must_use]
+    pub const fn new(span: Span, value: T) -> Self {
+        Self { span, value }
+    }
+
+    /// The byte [`Span`] of this value in the original YAML input.
+    #[must_use]
+    pub const fn span(&self) -> Span {
+        self.span
+    }
+
+    /// Borrow the inner value.
+    #[must_use]
+    pub const fn get_ref(&self) -> &T {
+        &self.value
+    }
+
+    /// Mutably borrow the inner value.
+    #[must_use]
+    pub const fn get_mut(&mut self) -> &mut T {
+        &mut self.value
+    }
+
+    /// Consume the wrapper and return the inner value.
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        self.value
+    }
+
+    /// Consume the wrapper and return `(value, span)`.
+    #[must_use]
+    pub fn into_parts(self) -> (T, Span) {
+        (self.value, self.span)
+    }
+}
+
+impl<T> Deref for Spanned<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+impl<T> AsRef<T> for Spanned<T> {
+    fn as_ref(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T> AsMut<T> for Spanned<T> {
+    fn as_mut(&mut self) -> &mut T {
+        &mut self.value
+    }
+}
+
+impl<T: Serialize> Serialize for Spanned<T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.value.serialize(serializer)
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Spanned<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct SpannedVisitor<T>(PhantomData<T>);
+
+        impl<'de, T: Deserialize<'de>> Visitor<'de> for SpannedVisitor<T> {
+            type Value = Spanned<T>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a spanned YAML value from an ayaml source-backed deserializer")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                enum Field {
+                    Start,
+                    End,
+                    Value,
+                }
+
+                impl<'de> Deserialize<'de> for Field {
+                    fn deserialize<D: Deserializer<'de>>(
+                        deserializer: D,
+                    ) -> Result<Self, D::Error> {
+                        struct FieldVisitor;
+
+                        impl Visitor<'_> for FieldVisitor {
+                            type Value = Field;
+
+                            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                                formatter.write_str(
+                                    "a spanned YAML value from an ayaml source-backed deserializer",
+                                )
+                            }
+
+                            fn visit_str<E: de::Error>(
+                                self,
+                                value: &str,
+                            ) -> Result<Self::Value, E> {
+                                match value {
+                                    SPANNED_START_FIELD => Ok(Field::Start),
+                                    SPANNED_END_FIELD => Ok(Field::End),
+                                    SPANNED_VALUE_FIELD => Ok(Field::Value),
+                                    _ => Err(de::Error::custom(
+                                        "Spanned<T> requires an ayaml source-backed deserializer",
+                                    )),
+                                }
+                            }
+                        }
+
+                        deserializer.deserialize_identifier(FieldVisitor)
+                    }
+                }
+
+                let mut start: Option<usize> = None;
+                let mut end: Option<usize> = None;
+                let mut value: Option<T> = None;
+                while let Some(key) = map.next_key::<Field>()? {
+                    match key {
+                        Field::Start => {
+                            if start.is_some() {
+                                return Err(de::Error::duplicate_field(SPANNED_START_FIELD));
+                            }
+                            start = Some(map.next_value()?);
+                        }
+                        Field::End => {
+                            if end.is_some() {
+                                return Err(de::Error::duplicate_field(SPANNED_END_FIELD));
+                            }
+                            end = Some(map.next_value()?);
+                        }
+                        Field::Value => {
+                            if value.is_some() {
+                                return Err(de::Error::duplicate_field(SPANNED_VALUE_FIELD));
+                            }
+                            value = Some(map.next_value()?);
+                        }
+                    }
+                }
+                let (Some(start), Some(end), Some(value)) = (start, end, value) else {
+                    return Err(de::Error::custom(
+                        "Spanned<T> requires an ayaml source-backed deserializer",
+                    ));
+                };
+                Ok(Spanned {
+                    span: Span::new(start, end),
+                    value,
+                })
+            }
+        }
+
+        deserializer.deserialize_struct(SPANNED_TOKEN, SPANNED_FIELDS, SpannedVisitor(PhantomData))
     }
 }
 

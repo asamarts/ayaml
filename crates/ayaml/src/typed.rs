@@ -62,6 +62,9 @@ pub(crate) struct Node<'de> {
 enum Text<'de> {
     /// No text: a value the source doesn't write, a collection, or a string that isn't plain.
     None,
+    /// Closing byte offset of a collection (`SequenceEnd` / `MappingEnd`), used by [`crate::Spanned`]
+    /// while keeping `Node.span` equal to the opening span for error-span parity with `Stream`.
+    CollectionEnd(usize),
     /// No text, and not a value the source left out: what a bare variant name holds, which is
     /// nothing. It fills a unit variant and an optional one, and no collection (D87).
     Nothing,
@@ -81,7 +84,7 @@ impl Text<'_> {
     /// The text, if the node keeps any.
     fn as_str(&self) -> Option<&str> {
         match self {
-            Self::None | Self::Nothing | Self::DroppedTag => None,
+            Self::None | Self::CollectionEnd(_) | Self::Nothing | Self::DroppedTag => None,
             Self::Plain(text) | Self::Spelled(text) => Some(text),
             Self::Decoded(text) => Some(text),
         }
@@ -211,6 +214,18 @@ impl<'de> Node<'de> {
 
     fn null(span: Span) -> Self {
         Self::new(NodeKind::Null, span)
+    }
+
+    /// The full byte span of this node (`start..end` for collections, matching `SpannedTree`),
+    /// while keeping `self.span` at the opening token for error-span parity with `Stream`.
+    pub(super) fn full_span(&self) -> Span {
+        match (&self.kind, &self.text) {
+            (_, Text::CollectionEnd(end)) => Span::new(self.span.start(), *end),
+            (NodeKind::Tagged(_, inner), _) => {
+                Span::new(self.span.start(), inner.full_span().end())
+            }
+            _ => self.span,
+        }
     }
 }
 
@@ -751,7 +766,11 @@ impl<'de> Builder<'de> {
                 }) => {
                     let node = apply_tag(
                         tag,
-                        Node::new(NodeKind::Sequence(items), span),
+                        Node::scalar(
+                            NodeKind::Sequence(items),
+                            Text::CollectionEnd(event_span.end()),
+                            span,
+                        ),
                         self.options.drop_global_tags,
                     );
                     let size = size.saturating_add(tag_cost(&node, self.limits.node_cost_bytes));
@@ -772,7 +791,11 @@ impl<'de> Builder<'de> {
                 }) => {
                     let node = apply_tag(
                         tag,
-                        Node::new(NodeKind::Mapping(entries), span),
+                        Node::scalar(
+                            NodeKind::Mapping(entries),
+                            Text::CollectionEnd(event_span.end()),
+                            span,
+                        ),
                         self.options.drop_global_tags,
                     );
                     let size = size.saturating_add(tag_cost(&node, self.limits.node_cost_bytes));
@@ -847,6 +870,12 @@ impl<'de> Builder<'de> {
             return Built { node, size, height };
         };
         let span = node.span;
+        let end = node.full_span().end();
+        let text = if end > span.end() {
+            Text::CollectionEnd(end)
+        } else {
+            Text::None
+        };
         let shared = Arc::new(node);
         let target = Anchored {
             node: Arc::clone(&shared),
@@ -855,7 +884,7 @@ impl<'de> Builder<'de> {
         };
         record(&mut self.anchors, anchor.as_str(), target);
         Built {
-            node: Node::new(NodeKind::Alias(shared), span),
+            node: Node::scalar(NodeKind::Alias(shared), text, span),
             size,
             height,
         }
