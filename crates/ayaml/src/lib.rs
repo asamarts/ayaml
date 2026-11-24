@@ -123,6 +123,7 @@
 mod composer;
 mod emitter;
 mod event_emitter;
+mod frontmatter;
 mod merge;
 mod options;
 #[allow(
@@ -160,6 +161,7 @@ pub mod value;
 
 pub use error::{Error, ErrorCode, ErrorKind, MaskedError};
 pub use event::{Anchor, CollectionStyle, Event, ScalarStyle};
+pub use frontmatter::{Frontmatter, FrontmatterDelimiter, ParsedFrontmatter};
 pub use limits::{
     ALIAS_BYTES_PER_INPUT_BYTE, COMPAT_MAX_DOCUMENTS, DEFAULT_MAX_DOCUMENTS, LimitExceeded,
     LimitKind, Limits, MAX_ALIAS_EXPANSION_BYTES, MAX_DEPTH, MAX_DEPTH_CAP, MAX_INPUT_BYTES,
@@ -1415,6 +1417,115 @@ fn text_of_with<'a>(input: &'a [u8], limits: &Limits) -> Result<&'a str, Error> 
     std::str::from_utf8(input).map_err(|error| {
         Error::new(ErrorKind::InvalidEncoding, "input is not valid UTF-8").with_source(error)
     })
+}
+
+/// Split a leading YAML frontmatter block (`---` ... `---` or `...`) from the remaining body.
+///
+/// Returns `Ok(None)` when `input` does not start with a standalone `---` opening line
+/// (optionally preceded by a UTF-8 BOM). When frontmatter is present, [`Frontmatter::yaml`]
+/// starts at byte `0` of `input` so any [`Span`] or [`Error`] produced when parsing it aligns
+/// directly with [`LineIndex::new(input)`](LineIndex::new), and [`Frontmatter::body_offset`]
+/// gives the exact byte offset of [`Frontmatter::body`] into `input`.
+///
+/// ```
+/// let doc = "---\ntitle: Hello\n---\n# Body\n";
+/// let split = ayaml::split_frontmatter(doc)?.expect("frontmatter");
+/// assert_eq!(split.body(), "# Body\n");
+/// assert_eq!(&doc[split.body_offset()..], split.body());
+/// # Ok::<(), ayaml::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// Returns [`ErrorKind::Limit`] when the frontmatter exceeds the default `max_input_bytes`,
+/// or [`ErrorKind::Parser`] when an opening `---` line has no closing `---` or `...` delimiter.
+pub fn split_frontmatter(input: &str) -> Result<Option<Frontmatter<'_>>, Error> {
+    frontmatter::split_frontmatter_with_limits(input, &Limits::default_profile())
+}
+
+/// Split a leading YAML frontmatter block from `input` with explicit parse options.
+///
+/// Validates `options.limits` first and enforces `options.limits.max_input_bytes` on the
+/// frontmatter slice without scanning past it into an oversized or non-YAML body.
+///
+/// # Errors
+///
+/// Returns [`ErrorKind::Limit`] when `options.limits` is invalid or the frontmatter exceeds
+/// `options.limits.max_input_bytes`, or [`ErrorKind::Parser`] when an opening `---` line has
+/// no closing `---` or `...` delimiter.
+pub fn split_frontmatter_with<'a>(
+    input: &'a str,
+    options: &ParseOptions,
+) -> Result<Option<Frontmatter<'a>>, Error> {
+    frontmatter::split_frontmatter_with_limits(input, &options.limits)
+}
+
+/// Parse a leading YAML frontmatter block into a typed Serde value under the default limits,
+/// returning the decoded value alongside the remaining non-YAML body slice and its byte offset.
+///
+/// Accepts both owned (`DeserializeOwned`) and borrowed (`Deserialize<'de>`) targets.
+///
+/// ```
+/// #[derive(serde::Deserialize)]
+/// struct Header<'a> {
+///     title: &'a str,
+/// }
+///
+/// let doc = "---\ntitle: Guide\n---\n# Heading\n";
+/// let parsed: ayaml::ParsedFrontmatter<'_, Header<'_>> =
+///     ayaml::parse_frontmatter(doc)?.expect("frontmatter");
+/// assert_eq!(parsed.frontmatter.title, "Guide");
+/// assert_eq!(parsed.body, "# Heading\n");
+/// assert_eq!(&doc[parsed.body_offset..], parsed.body);
+/// # Ok::<(), ayaml::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// Returns an error when an opening `---` line is missing its closing delimiter, when the
+/// frontmatter YAML or target decoding fails, or when a configured limit is exceeded.
+pub fn parse_frontmatter<'de, T: serde::Deserialize<'de>>(
+    input: &'de str,
+) -> Result<Option<ParsedFrontmatter<'de, T>>, Error> {
+    frontmatter::parse_frontmatter_with(input, &ParseOptions::new())
+}
+
+/// Parse a leading YAML frontmatter block into a typed Serde value with explicit parse options.
+///
+/// # Errors
+///
+/// Returns an error when `options.limits` is invalid, when an opening `---` line is missing
+/// its closing delimiter, when the frontmatter YAML or target decoding fails, or when a
+/// configured limit is exceeded.
+pub fn parse_frontmatter_with<'de, T: serde::Deserialize<'de>>(
+    input: &'de str,
+    options: &ParseOptions,
+) -> Result<Option<ParsedFrontmatter<'de, T>>, Error> {
+    frontmatter::parse_frontmatter_with(input, options)
+}
+
+/// Parse a leading YAML frontmatter block into a generic [`Value`] under the default limits.
+///
+/// # Errors
+///
+/// Returns an error when an opening `---` line is missing its closing delimiter, when the
+/// frontmatter YAML is invalid, or when a configured limit is exceeded.
+pub fn parse_frontmatter_value(input: &str) -> Result<Option<ParsedFrontmatter<'_, Value>>, Error> {
+    frontmatter::parse_frontmatter_value_with(input, &ParseOptions::new())
+}
+
+/// Parse a leading YAML frontmatter block into a generic [`Value`] with explicit parse options.
+///
+/// # Errors
+///
+/// Returns an error when `options.limits` is invalid, when an opening `---` line is missing
+/// its closing delimiter, when the frontmatter YAML is invalid, or when a configured limit
+/// is exceeded.
+pub fn parse_frontmatter_value_with<'a>(
+    input: &'a str,
+    options: &ParseOptions,
+) -> Result<Option<ParsedFrontmatter<'a, Value>>, Error> {
+    frontmatter::parse_frontmatter_value_with(input, options)
 }
 
 /// The crate version.

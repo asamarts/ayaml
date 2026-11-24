@@ -284,3 +284,40 @@ fn duplicate_key_collision_stress_stays_bounded() {
         assert_eq!(err.code(), ErrorCode::DuplicateKey);
     });
 }
+
+/// Frontmatter helpers enforce alias, depth, and input-size limits boundedly on hostile headers
+/// without scanning past `max_input_bytes` or failing on large non-YAML bodies.
+#[test]
+fn frontmatter_enforces_limits_and_alias_bombs_boundedly() {
+    in_child!(|| {
+        // Alias bomb embedded in frontmatter is rejected by both typed and value parsers.
+        let bomb_doc = format!("---\n{}---\n# Markdown body\n", super::alias_bomb());
+        for err in [
+            ayaml::parse_frontmatter::<Value>(&bomb_doc).expect_err("typed bomb"),
+            ayaml::parse_frontmatter_value(&bomb_doc).expect_err("value bomb"),
+        ] {
+            assert_eq!(err.kind(), ErrorKind::Limit);
+        }
+
+        // Unclosed oversized frontmatter fails with InputBytes without scanning past the limit.
+        let tight = ParseOptions::new().with_limits(Limits::new().with_max_input_bytes(256));
+        let mut huge_unclosed = String::from("---\n");
+        huge_unclosed.push_str(&"a".repeat(64 * 1024));
+        let err =
+            ayaml::split_frontmatter_with(&huge_unclosed, &tight).expect_err("oversized unclosed");
+        assert_eq!(err.kind(), ErrorKind::Limit);
+        assert_eq!(
+            err.limit().map(ayaml::LimitExceeded::kind),
+            Some(LimitKind::InputBytes)
+        );
+
+        // Deep nesting in frontmatter is rejected with DepthLimit.
+        let deep = format!(
+            "---\n{}{}\n---\nbody\n",
+            "[".repeat(MAX_DEPTH + 1),
+            "]".repeat(MAX_DEPTH + 1)
+        );
+        let err = ayaml::parse_frontmatter_value(&deep).expect_err("deep frontmatter");
+        assert_eq!(err.code(), ErrorCode::DepthLimit);
+    });
+}
