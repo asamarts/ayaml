@@ -156,9 +156,10 @@ impl<'a> SpannedTree<'a> {
 
     /// Look up a node by a path. A multi-document stream has no unambiguous root, so this returns
     /// `None` unless it holds exactly one document. A lookup that would have to guess returns
-    /// `None` too: a key that the mapping holds twice, a merge key, and any key of a mapping
-    /// that has an alias among its keys, or a key that holds an alias or a merge key, since
-    /// that key may be any other key of the mapping again.
+    /// `None` too: a key that the mapping holds twice, a merge key, any key of a mapping that has
+    /// an alias among its keys or a key that holds an alias or a merge key (since that key may be
+    /// any other key of the mapping again), and any path that steps through an alias value. An
+    /// alias value itself is found at its own path, with [`SpannedNode::is_alias`] true.
     #[must_use]
     pub fn lookup(&self, path: &[PathSegment]) -> Option<&SpannedNode<'a>> {
         let [document] = self.documents.as_slice() else {
@@ -216,17 +217,21 @@ impl SpannedNode<'_> {
     /// known to leave a document that reads as before without that entry, and with nothing
     /// else changed.
     ///
-    /// A block mapping's entry and a block sequence's item can have one. The span runs from the
-    /// start of the entry's first line through its last line break, so it takes the entry's
-    /// indentation, a value on later lines, a block scalar, and a comment after the value.
-    /// The byte-order marks that open the input stay outside the first entry's.
+    /// A block mapping's entry and a block sequence's item can have one. Usually the span runs
+    /// from the start of the entry's first line through its last line break, so it takes the
+    /// entry's indentation, a value on later lines, a block scalar, and a comment after the value.
+    /// For the first key of a block mapping that begins on a sequence item's `-` line, the span
+    /// runs from the key's start to the next key's start, leaving the `-` and moving the next key
+    /// into its column when that is exact. The byte-order marks that open the input stay outside
+    /// the first entry's.
     ///
     /// `None` is conservative: it means that no span is known to be exact. These have none:
     ///
     /// - an entry of a flow collection, whose separator belongs to its neighbor as much as to
     ///   it;
-    /// - an entry that doesn't begin its own line, such as the first key of a mapping on a
-    ///   sequence's `-` line, and one with more than a comment after it on its last line;
+    /// - an entry that doesn't begin its own line (other than the first key of a mapping on a
+    ///   sequence's `-` line whose next key can move into its place), and one with more than a
+    ///   comment after it on its last line;
     /// - a mapping entry with an explicit `?`, with a tag or an anchor before its key, or with
     ///   a key that has no text;
     /// - an item with no value, an item whose value begins on a later line, and an entry that
@@ -239,8 +244,10 @@ impl SpannedNode<'_> {
     /// - every entry of an input that holds a byte-order mark past the marks that open it, be
     ///   it in a quoted scalar: what a mark that begins a line means depends on the lines
     ///   before it;
-    /// - an entry after a block scalar, unless content follows the entry directly: the scalar
-    ///   would take the blank and comment lines after it.
+    /// - an entry after a block scalar when a following blank or comment line could be absorbed
+    ///   by the scalar (for example, an empty or explicitly indented scalar, a keep-chomping
+    ///   scalar followed by a blank line, a blank line with spaces, a tab-indented blank or
+    ///   comment line, or a comment indented to the scalar's content column).
     ///
     /// The lines around an entry decide most of these, so the same entry can have a span in one
     /// document and none in another.
@@ -290,12 +297,12 @@ impl SpannedNode<'_> {
 }
 
 fn find<'a, 'b>(node: &'b SpannedNode<'a>, path: &[PathSegment]) -> Option<&'b SpannedNode<'a>> {
-    if node.is_alias() {
-        return None;
-    }
     let Some((first, rest)) = path.split_first() else {
         return Some(node);
     };
+    if node.is_alias() {
+        return None;
+    }
     match (&node.kind, first) {
         (Kind::Sequence(items), PathSegment::Index(index)) => find(items.get(*index)?, rest),
         (Kind::Mapping(entries), PathSegment::Key(key)) => {
@@ -344,6 +351,75 @@ impl SpannedNode<'_> {
     }
 }
 
+/// Compact encoding of whether the last written node was a block scalar, and if so, its content
+/// indentation and keep-chomping flag. Fits in 4 bytes to avoid growing parser frames.
+///
+/// Encoding:
+/// - `0`: not after a block scalar
+/// - `1`: after an empty or explicitly indented block scalar (conservative)
+/// - `>= 2`: `indent = ((raw - 2) >> 1) as usize`, `keep = (raw - 2) & 1 != 0`
+#[derive(Clone, Copy, Default)]
+struct AfterBlockScalar(u32);
+
+impl AfterBlockScalar {
+    const NONE: Self = Self(0);
+    const UNKNOWN: Self = Self(1);
+
+    fn is_some(self) -> bool {
+        self.0 != 0
+    }
+
+    fn known(self) -> Option<(usize, bool)> {
+        (self.0 >= 2).then(|| {
+            let packed = self.0 - 2;
+            ((packed >> 1) as usize, (packed & 1) != 0)
+        })
+    }
+
+    fn from_raw(raw: &str) -> Self {
+        let (header, rest) = split_first_line(raw);
+        let header = header.split('#').next().unwrap_or(header);
+        let keep = header.contains('+');
+        if header.bytes().any(|byte| byte.is_ascii_digit()) {
+            return Self::UNKNOWN;
+        }
+        let mut cursor = rest;
+        while !cursor.is_empty() {
+            let (line, next) = split_first_line(cursor);
+            let spaces = line.len() - line.trim_start_matches(' ').len();
+            if spaces < line.len() {
+                return u32::try_from(spaces)
+                    .ok()
+                    .and_then(|s| s.checked_shl(1))
+                    .and_then(|s| s.checked_add(2 + u32::from(keep)))
+                    .map_or(Self::UNKNOWN, Self);
+            }
+            cursor = next;
+        }
+        Self::UNKNOWN
+    }
+}
+
+fn split_first_line(text: &str) -> (&str, &str) {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\n' {
+            return (&text[..i], &text[i + 1..]);
+        }
+        if bytes[i] == b'\r' {
+            let next = if bytes.get(i + 1) == Some(&b'\n') {
+                i + 2
+            } else {
+                i + 1
+            };
+            return (&text[..i], &text[next..]);
+        }
+        i += 1;
+    }
+    (text, "")
+}
+
 fn build<'a>(
     input: &'a str,
     events: impl Iterator<Item = Result<Event<'a>, Error>>,
@@ -353,7 +429,7 @@ fn build<'a>(
         documents: Vec::new(),
         stack: Vec::new(),
         root: None,
-        after_block_scalar: false,
+        after_block_scalar: AfterBlockScalar::NONE,
         // A run of marks opens the input as one mark does.
         marked: input.trim_start_matches('\u{feff}').contains('\u{feff}'),
     };
@@ -372,7 +448,7 @@ struct Builder<'a> {
     root: Option<SpannedNode<'a>>,
     /// The last scalar or alias that the source writes was a block scalar. One takes the blank
     /// and more indented lines after it as its own, until other content ends it.
-    after_block_scalar: bool,
+    after_block_scalar: AfterBlockScalar,
     /// The input holds a byte-order mark past the marks that open it. The compatibility reader
     /// counts one at a line's start toward that line's indentation, and takes one after a line
     /// break for a comment's or a blank line's start, unless it opens the input. So what such
@@ -387,7 +463,7 @@ struct Frame<'a> {
     /// The collection has an anchor of its own.
     anchored: bool,
     /// What [`Builder::after_block_scalar`] was when the collection began.
-    after_block_scalar: bool,
+    after_block_scalar: AfterBlockScalar,
     /// The collection is a mapping key (or nested inside one), so the builder assembles its
     /// resolved [`Value`] bottom-up in linear time instead of re-walking nested subtrees.
     in_key: bool,
@@ -405,7 +481,7 @@ enum KeyTracker {
 struct PendingKey<'a> {
     node: SpannedNode<'a>,
     resolved: Option<Box<Value>>,
-    after_block_scalar: bool,
+    after_block_scalar: AfterBlockScalar,
 }
 
 enum FrameKind<'a> {
@@ -461,7 +537,11 @@ impl<'a> Builder<'a> {
                 // A scalar with no text isn't written, so it ends no block scalar before it.
                 if !span.is_empty() {
                     self.after_block_scalar =
-                        matches!(style, ScalarStyle::Literal | ScalarStyle::Folded);
+                        if matches!(style, ScalarStyle::Literal | ScalarStyle::Folded) {
+                            AfterBlockScalar::from_raw(&raw)
+                        } else {
+                            AfterBlockScalar::NONE
+                        };
                 }
                 let resolved = self
                     .tracking_resolved()
@@ -486,7 +566,8 @@ impl<'a> Builder<'a> {
                 self.add(node, resolved, before);
             }
             Event::Alias { span, .. } => {
-                let before = std::mem::replace(&mut self.after_block_scalar, false);
+                let before =
+                    std::mem::replace(&mut self.after_block_scalar, AfterBlockScalar::NONE);
                 let node = SpannedNode {
                     span,
                     entry_span: None,
@@ -583,7 +664,7 @@ impl<'a> Builder<'a> {
             kind: Kind::Sequence(items),
         };
         if flow {
-            self.after_block_scalar = false;
+            self.after_block_scalar = AfterBlockScalar::NONE;
         }
         let resolved_val = resolved.map(|vals| Box::new(Value::Sequence(vals)));
         self.add(node, resolved_val, frame.after_block_scalar);
@@ -620,6 +701,17 @@ impl<'a> Builder<'a> {
                 entry.ambiguous = true;
                 entry.value.entry_span = None;
             }
+        } else if !flow
+            && !self.marked
+            && !frame.anchored
+            && !self.stack.iter().any(|outer| outer.anchored)
+            && entries.len() >= 2
+            && entries[0].value.entry_span.is_none()
+            && !entries[0].key.anchored
+            && !entries[0].value.anchored
+        {
+            entries[0].value.entry_span =
+                compact_first_entry_span(self.input, &entries[0], &entries[1]);
         }
         // A pair in a flow sequence, as in `[a: b]`, is a mapping with no braces. Its
         // end event stands at the token after it, past blanks and a comment, where a
@@ -648,7 +740,7 @@ impl<'a> Builder<'a> {
             kind: Kind::Mapping(entries),
         };
         if flow {
-            self.after_block_scalar = false;
+            self.after_block_scalar = AfterBlockScalar::NONE;
         }
         let resolved_value = match keys {
             KeyTracker::Resolved(map) if !guess => Some(Box::new(Value::Mapping(*map))),
@@ -664,7 +756,7 @@ impl<'a> Builder<'a> {
         &mut self,
         mut node: SpannedNode<'a>,
         node_resolved: Option<Box<Value>>,
-        after_block_scalar: bool,
+        after_block_scalar: AfterBlockScalar,
     ) {
         // An alias to a collection reads the entries inside it, so removing one of them changes
         // what the alias stands for.
@@ -893,6 +985,65 @@ enum Lead {
 /// anchor, stands inside a collection that has one, or is in an input with a byte-order mark
 /// past the marks that open it, and `after_block_scalar` whether the last thing written before
 /// it is a block scalar.
+/// Whether `before` is indentation followed by one or more block-sequence `- ` indicators, as
+/// precedes the first key of a compact mapping (`- a: 1` or `- - a: 1`).
+fn is_compact_item_prefix(before: &str) -> bool {
+    let mut rest = before.trim_start_matches(' ');
+    let mut seen = false;
+    while let Some(after) = rest.strip_prefix('-') {
+        let spaces = after.len() - after.trim_start_matches(' ').len();
+        if spaces == 0 {
+            return false;
+        }
+        rest = &after[spaces..];
+        seen = true;
+    }
+    seen && rest.is_empty()
+}
+
+/// The span that removes the first entry of a block mapping starting on a sequence's `-` line
+/// (`- a: 1\n  b: 2\n`), leaving `- ` and shifting `next` into `first`'s column (`- b: 2\n`).
+fn compact_first_entry_span(
+    input: &str,
+    first_entry: &Entry<'_>,
+    next_entry: &Entry<'_>,
+) -> Option<Span> {
+    let first = first_entry.key.span.start();
+    let key_end = first_entry.key.content_end?;
+    let content_end = first_entry.value.content_end?;
+    let mut line0 = line_start(input, first);
+    if line0 == 0 {
+        line0 = input.len() - input.trim_start_matches('\u{feff}').len();
+    }
+    let before = input.get(line0..first)?;
+    if !is_compact_item_prefix(before) {
+        return None;
+    }
+    let colon = after_key(input, key_end);
+    if colon <= key_end || input.get(first..colon)?.contains(['\n', '\r']) {
+        return None;
+    }
+    let end = entry_end(input, content_end)?;
+    let next_first = next_entry.key.span.start();
+    let next_key_end = next_entry.key.content_end?;
+    let next_line = line_start(input, next_first);
+    if end > next_line {
+        return None;
+    }
+    let next_before = input.get(next_line..next_first)?;
+    if !next_before.bytes().all(|byte| byte == b' ') || next_before.len() != before.len() {
+        return None;
+    }
+    let next_colon = after_key(input, next_key_end);
+    if next_colon <= next_key_end || input.get(next_first..next_colon)?.contains(['\n', '\r']) {
+        return None;
+    }
+    if end < next_line && value_indicator_follows(input, end) {
+        return None;
+    }
+    (next_first > first).then(|| Span::new(first, next_first))
+}
+
 fn block_entry_span(
     input: &str,
     style: crate::event::CollectionStyle,
@@ -900,7 +1051,7 @@ fn block_entry_span(
     first: usize,
     content_end: Option<usize>,
     anchored: bool,
-    after_block_scalar: bool,
+    after_block_scalar: AfterBlockScalar,
 ) -> Option<Span> {
     if style == crate::event::CollectionStyle::Flow || anchored {
         return None;
@@ -935,12 +1086,50 @@ fn block_entry_span(
         return None;
     }
     // A block scalar that is the last thing written before this entry ends where the entry
-    // begins. With the entry gone it would run on through the blank and comment lines that
-    // follow, unless content follows.
-    if after_block_scalar && !content_follows(input, end) {
+    // begins. With the entry gone it could absorb blank or comment lines that follow unless
+    // content follows or every intervening blank/comment line is outside the scalar.
+    if after_block_scalar.is_some() && !block_scalar_ignores_after(input, end, after_block_scalar) {
         return None;
     }
     (end > start).then(|| Span::new(start, end))
+}
+
+/// Whether the preceding block scalar ignores all blank and comment lines starting at `from`
+/// until the next content line (or EOF).
+fn block_scalar_ignores_after(input: &str, from: usize, scalar: AfterBlockScalar) -> bool {
+    if content_follows(input, from) {
+        return true;
+    }
+    let Some((indent, keep)) = scalar.known() else {
+        return false;
+    };
+    let mut cursor = input.get(from..).unwrap_or_default();
+    let mut seen_comment = false;
+    while !cursor.is_empty() {
+        let (line, next) = split_first_line(cursor);
+        let spaces = line.len() - line.trim_start_matches(' ').len();
+        let after = &line[spaces..];
+        if after.is_empty() {
+            if spaces > 0 || (keep && !seen_comment) {
+                return false;
+            }
+        } else if after.starts_with('\t') {
+            let trimmed = after.trim_start_matches([' ', '\t']);
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                return false;
+            }
+            return true;
+        } else if after.starts_with('#') {
+            if spaces >= indent {
+                return false;
+            }
+            seen_comment = true;
+        } else {
+            return true;
+        }
+        cursor = next;
+    }
+    true
 }
 
 /// Whether the input ends at `from`, or the line there holds more than blanks or a comment.
@@ -1042,22 +1231,25 @@ fn after_key(input: &str, key_end: usize) -> usize {
 }
 
 fn line_start(input: &str, index: usize) -> usize {
-    input[..index]
-        .rfind(['\n', '\r'])
-        .map_or(0, |break_at| break_at + 1)
+    let bytes = input.as_bytes();
+    let mut i = index;
+    while i > 0 && !matches!(bytes[i - 1], b'\n' | b'\r') {
+        i -= 1;
+    }
+    i
 }
 
 fn line_end(input: &str, index: usize) -> usize {
-    let mut end = input[index..]
-        .find(['\n', '\r'])
-        .map_or(input.len(), |offset| index + offset);
-    if end < input.len() {
-        let mut chars = input[end..].chars();
-        if let Some(ch) = chars.next() {
-            end += ch.len_utf8();
-            if ch == '\r' && input[end..].starts_with('\n') {
-                end += 1;
-            }
+    let bytes = input.as_bytes();
+    let mut end = index;
+    while end < bytes.len() && !matches!(bytes[end], b'\n' | b'\r') {
+        end += 1;
+    }
+    if end < bytes.len() {
+        if bytes[end] == b'\r' && bytes.get(end + 1) == Some(&b'\n') {
+            end += 2;
+        } else {
+            end += 1;
         }
     }
     end

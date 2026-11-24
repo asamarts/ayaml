@@ -29,8 +29,21 @@ fn scalar_positions_and_encodings_follow_the_source() {
 
 #[test]
 fn aliases_merge_keys_duplicates_and_multiple_documents_are_ambiguous() {
-    let alias = SpannedTree::parse("a: &x 1\nb: *x\n").expect("tree");
-    assert!(alias.lookup(&[PathSegment::key("b")]).is_none());
+    let alias_src = "a: &x\n  k: 1\nb: *x\n";
+    let alias = SpannedTree::parse(alias_src).expect("tree");
+    let alias_node = alias
+        .lookup(&[PathSegment::key("b")])
+        .expect("alias value is found at its own path");
+    assert!(alias_node.is_alias());
+    assert_eq!(alias_node.span().slice(alias_src), Some("*x"));
+    assert_eq!(alias_node.scalar_text(), None);
+    assert_eq!(entry(alias_src, &[key("b")]), Some("b: *x\n"));
+    assert!(
+        alias
+            .lookup(&[PathSegment::key("b"), PathSegment::key("k")])
+            .is_none(),
+        "stepping through an alias returns None"
+    );
     let merge = SpannedTree::parse("base: {a: 1}\nuse:\n  <<: {b: 2}\n").expect("tree");
     assert!(
         merge
@@ -305,6 +318,7 @@ fn a_block_entry_span_removes_the_whole_entry() {
     assert_eq!(entry(nested_items, &[index(0), index(1)]), Some("  - b\n"));
     let compact = "- a: 1\n  b: 2\n- c\n";
     assert_eq!(entry(compact, &[index(0)]), Some("- a: 1\n  b: 2\n"));
+    assert_eq!(entry(compact, &[index(0), key("a")]), Some("a: 1\n  "));
     assert_eq!(entry(compact, &[index(0), key("b")]), Some("  b: 2\n"));
 
     // A tagged value, a quoted key, and a key that is a flow collection.
@@ -334,10 +348,13 @@ fn an_entry_with_no_exact_span_has_none() {
         None
     );
     assert_eq!(entry("x: [10, 20]\ny: 0\n", &[key("x"), index(0)]), None);
-    // The first key of a mapping that begins on its item's line shares that line with the `-`,
-    // and so does the first item of a sequence that begins there.
-    assert_eq!(entry("- a: 1\n  b: 2\n- c\n", &[index(0), key("a")]), None);
+    // The first item of a nested compact sequence shares its line with `-`, and a compact first
+    // mapping key has no span when its next key cannot move into its column.
     assert_eq!(entry("- - a\n  - b\n- c\n", &[index(0), index(0)]), None);
+    assert_eq!(entry("- a: 1\n  !t b: 2\n", &[index(0), key("a")]), None);
+    assert_eq!(entry("- a: 1\n  ? b\n  : 2\n", &[index(0), key("a")]), None);
+    assert_eq!(entry("- !t a: 1\n  b: 2\n", &[index(0), key("a")]), None);
+    assert_eq!(entry("- a: 1\n", &[index(0), key("a")]), None);
     // An item with no value, and one whose value begins on the next line.
     assert_eq!(entry("-\n- b\n", &[index(0)]), None);
     assert_eq!(entry("- a\n- ", &[index(1)]), None);
@@ -773,6 +790,103 @@ fn an_entry_after_a_block_scalar_needs_content_after_it() {
     );
 }
 
+#[test]
+fn compact_first_mapping_key_and_alias_entries_have_exact_spans() {
+    // Nested compact sequences, multiline values, blank lines before the next key, and BOMs.
+    assert_eq!(
+        entry("- - a: 1\n    b: 2\n- c\n", &[index(0), index(0), key("a")]),
+        Some("a: 1\n    ")
+    );
+    assert_eq!(
+        entry("- a:\n    x: 1\n  b: 2\n", &[index(0), key("a")]),
+        Some("a:\n    x: 1\n  ")
+    );
+    assert_eq!(
+        entry("\u{feff}- a: 1\n  b: 2\n", &[index(0), key("a")]),
+        Some("a: 1\n  ")
+    );
+    assert_eq!(
+        entry("- a: 1\n\n  b: 2\n", &[index(0), key("a")]),
+        Some("a: 1\n\n  ")
+    );
+    // Sequence items and mapping entries whose value is an alias.
+    assert_eq!(entry("- &x 1\n- *x\n- 2\n", &[index(1)]), Some("- *x\n"));
+    assert_eq!(
+        entry(
+            "a: &x 1\nitems:\n  - k: *x\n    j: 2\n",
+            &[key("items"), index(0), key("k")]
+        ),
+        Some("k: *x\n    ")
+    );
+}
+
+#[test]
+fn entry_after_block_scalar_allows_safe_blank_and_comment_lines() {
+    // Clip and strip scalars ignore empty lines and comments indented left of their content.
+    assert_eq!(
+        entry("a: |\n  x\nb: 1\n\n# about c\nc: 2\n", &[key("b")]),
+        Some("b: 1\n")
+    );
+    assert_eq!(
+        entry("a: |-\n  x\nb: 1\n\nc: 2\n", &[key("b")]),
+        Some("b: 1\n")
+    );
+    // Keep scalar ignores empty lines only after a lower-indented comment ends the scalar.
+    assert_eq!(
+        entry("a: |+\n  x\nb: 1\n# c\n\nd: 2\n", &[key("b")]),
+        Some("b: 1\n")
+    );
+    // Nested workflow shape: block scalar at indent 4, sibling entry, blank + comment at indent 2.
+    let workflow = "a:\n  script: |\n    echo hi\n  name: build\n\n  # next\n  env: 1\n";
+    assert_eq!(
+        entry(workflow, &[key("a"), key("name")]),
+        Some("  name: build\n")
+    );
+    // Empty and explicitly indented block scalars remain conservative.
+    assert_eq!(entry("a: |\nb: 1\n\nc: 2\n", &[key("b")]), None);
+    assert_eq!(entry("a: |2\n  x\nb: 1\n\nc: 2\n", &[key("b")]), None);
+}
+
+/// Every entry span given across this repository's workflow files is exact, and the share of
+/// entries with a span improves over the pre-AY-116 baseline (74%).
+#[test]
+fn workflow_files_have_exact_entry_spans_with_high_coverage() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows");
+    if !dir.is_dir() {
+        return;
+    }
+    let mut total = 0usize;
+    let mut with_span = 0usize;
+    let mut files = 0usize;
+    for item in std::fs::read_dir(&dir).expect("read workflows dir") {
+        let path = item.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+            continue;
+        }
+        let input = std::fs::read_to_string(&path).expect("read workflow");
+        let tree = SpannedTree::parse(&input).expect("spanned tree");
+        let value = ayaml::parse_value(&input).expect("parse value");
+        let mut all = Vec::new();
+        paths(&value, &mut Vec::new(), &mut all);
+        for p in all {
+            total += 1;
+            if tree.entry_span_at(&p).is_some() {
+                with_span += 1;
+            }
+            if let Some(problem) = inexact(Mode::Default, &input, &tree, &p) {
+                panic!("{} at {p:?}: {problem}", path.display());
+            }
+        }
+        files += 1;
+    }
+    assert!(files >= 8 && total >= 400, "files={files} total={total}");
+    let pct = (with_span * 100) / total;
+    assert!(
+        pct >= 85,
+        "expected >= 85% entry span coverage on workflows, got {with_span}/{total} ({pct}%)"
+    );
+}
+
 /// A value that the source doesn't write after its key's `:`, on the key's line, has an empty
 /// span right after that `:`, and its entry is the key's line.
 #[test]
@@ -836,16 +950,22 @@ const LINES: &[&str] = &[
     "d: [1, 2]",
     "e: {x: 1}",
     "f: |",
+    "f: |2",
     "g: |+",
     "h: >-",
     "i: &n 3",
     "j: *n",
+    "*n : 1",
     "k: !t 4",
     "l: !!map",
     "m: !!str",
     "n: \"q\"",
     "o: 'q'",
     "p: # c",
+    "x: {",
+    "a: 1,",
+    "b: 2",
+    "}",
     "- 1",
     "- two",
     "-",

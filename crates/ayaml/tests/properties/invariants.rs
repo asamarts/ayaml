@@ -296,6 +296,22 @@ fn check_spanned_paths(
         );
     }
 
+    if node.is_alias() {
+        prop_assert!(
+            node.scalar_text().is_none(),
+            "alias node should not expose scalar_text at {:?}\ninput:\n{}",
+            path,
+            input
+        );
+        prop_assert!(
+            input[span.start()..span.end()].starts_with('*'),
+            "alias span should start with '*' at {:?}\ninput:\n{}",
+            path,
+            input
+        );
+        return Ok(());
+    }
+
     let untagged = value.untag_ref();
     match untagged {
         Value::Sequence(items) => {
