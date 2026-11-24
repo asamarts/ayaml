@@ -1912,3 +1912,6 @@ mod dos;
 
 #[path = "adversarial/merge.rs"]
 mod merge;
+
+#[path = "adversarial/reader.rs"]
+mod reader;

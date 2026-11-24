@@ -221,7 +221,53 @@ fn readers() -> Vec<Reader> {
             stream: true,
         },
     ]);
+    readers.extend(extra_typed_readers());
     readers
+}
+
+fn extra_typed_readers() -> [Reader; 5] {
+    [
+        Reader {
+            name: "from_str_with_limits (Value)",
+            read: |input, limits| ayaml::from_str_with_limits::<Value>(input, limits).map(drop),
+            values: true,
+            stream: false,
+        },
+        Reader {
+            name: "from_slice_with_limits (Value)",
+            read: |input, limits| {
+                ayaml::from_slice_with_limits::<Value>(input.as_bytes(), limits).map(drop)
+            },
+            values: true,
+            stream: false,
+        },
+        Reader {
+            name: "from_slice_borrowed_with_limits (IgnoredAny)",
+            read: |input, limits| {
+                ayaml::from_slice_borrowed_with_limits::<IgnoredAny>(input.as_bytes(), limits)
+                    .map(drop)
+            },
+            values: true,
+            stream: false,
+        },
+        Reader {
+            name: "from_reader_with (Value)",
+            read: |input, limits| {
+                ayaml::from_reader_with::<_, Value>(input.as_bytes(), &parse_options(limits))
+                    .map(drop)
+            },
+            values: true,
+            stream: false,
+        },
+        Reader {
+            name: "from_reader_with_limits (Value)",
+            read: |input, limits| {
+                ayaml::from_reader_with_limits::<_, Value>(input.as_bytes(), limits).map(drop)
+            },
+            values: true,
+            stream: false,
+        },
+    ]
 }
 
 /// An input and a limit, with the least value of the limit that accepts it.

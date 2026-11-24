@@ -1125,6 +1125,20 @@ pub fn from_str<T: serde::de::DeserializeOwned>(input: &str) -> Result<T, Error>
     typed::from_str(input, &Limits::default_profile())
 }
 
+/// Deserialize one YAML document into a typed Serde value with explicit limits.
+///
+/// Accepts owned (`DeserializeOwned`) targets. See [`from_str`] for the decoding rules.
+///
+/// # Errors
+///
+/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+pub fn from_str_with_limits<T: serde::de::DeserializeOwned>(
+    input: &str,
+    limits: &Limits,
+) -> Result<T, Error> {
+    typed::from_str(input, limits)
+}
+
 /// Deserialize one YAML document into a typed Serde value with explicit parse
 /// options, borrowing simple strings from `input` where possible.
 ///
@@ -1254,6 +1268,37 @@ pub fn from_slice<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, Err
     from_slice_with(input, &ParseOptions::new())
 }
 
+/// Deserialize one UTF-8 YAML document from bytes with explicit limits,
+/// borrowing simple strings from `input` where possible.
+///
+/// Checks `limits` before validating UTF-8 so oversized byte slices fail
+/// without scanning the whole buffer.
+///
+/// # Errors
+///
+/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+pub fn from_slice_borrowed_with_limits<'de, T: serde::Deserialize<'de>>(
+    input: &'de [u8],
+    limits: &Limits,
+) -> Result<T, Error> {
+    typed::from_str(text_of_with(input, limits)?, limits)
+}
+
+/// Deserialize one UTF-8 YAML document from bytes with explicit limits.
+///
+/// Checks `limits` before validating UTF-8 so oversized byte slices fail
+/// without scanning the whole buffer.
+///
+/// # Errors
+///
+/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+pub fn from_slice_with_limits<T: serde::de::DeserializeOwned>(
+    input: &[u8],
+    limits: &Limits,
+) -> Result<T, Error> {
+    typed::from_str(text_of_with(input, limits)?, limits)
+}
+
 /// Deserialize one UTF-8 YAML document from bytes with explicit parse options,
 /// borrowing simple strings from `input` where possible.
 ///
@@ -1269,6 +1314,93 @@ pub fn from_slice_with<'de, T: serde::Deserialize<'de>>(
     options: &ParseOptions,
 ) -> Result<T, Error> {
     from_str_with(text_of_with(input, &options.limits)?, options)
+}
+
+/// Deserialize one UTF-8 YAML document from an I/O reader under the default limits.
+///
+/// Reads at most `Limits::default().max_input_bytes + 1` bytes from `reader` before
+/// failing with [`ErrorKind::Limit`] (`LimitKind::InputBytes`), preventing unbounded
+/// reads from hostile or infinite streams.
+///
+/// ```
+/// #[derive(serde::Deserialize)]
+/// struct Config {
+///     name: String,
+/// }
+///
+/// let config: Config = ayaml::from_reader("name: ayaml\n".as_bytes()).unwrap();
+/// assert_eq!(config.name, "ayaml");
+/// ```
+///
+/// Trailing documents are rejected.
+///
+/// # Errors
+///
+/// Returns [`ErrorKind::Io`] when reading from `reader` fails, [`ErrorKind::Limit`]
+/// when a configured limit is exceeded, [`ErrorKind::InvalidEncoding`] when the input
+/// is not valid UTF-8, or a parse/Serde error when the document or target is invalid.
+pub fn from_reader<R: std::io::Read, T: serde::de::DeserializeOwned>(
+    reader: R,
+) -> Result<T, Error> {
+    from_reader_with_limits(reader, &Limits::default_profile())
+}
+
+/// Deserialize one UTF-8 YAML document from an I/O reader with explicit parse options.
+///
+/// Reads at most `options.limits.max_input_bytes + 1` bytes from `reader` before
+/// failing with [`ErrorKind::Limit`] (`LimitKind::InputBytes`), preventing unbounded
+/// reads from hostile or infinite streams.
+///
+/// # Errors
+///
+/// Returns [`ErrorKind::Io`] when reading from `reader` fails, [`ErrorKind::Limit`]
+/// when `options.limits` is invalid or a configured limit is exceeded,
+/// [`ErrorKind::InvalidEncoding`] when the input is not valid UTF-8, or a parse/Serde
+/// error when the document or target is invalid.
+pub fn from_reader_with<R: std::io::Read, T: serde::de::DeserializeOwned>(
+    reader: R,
+    options: &ParseOptions,
+) -> Result<T, Error> {
+    from_reader_with_limits(reader, &options.limits)
+}
+
+/// Deserialize one UTF-8 YAML document from an I/O reader with explicit limits.
+///
+/// Validates `limits` before reading from `reader`, and reads at most
+/// `limits.max_input_bytes + 1` bytes before failing with [`ErrorKind::Limit`]
+/// (`LimitKind::InputBytes`), preventing unbounded reads from hostile or infinite streams.
+///
+/// # Errors
+///
+/// Returns [`ErrorKind::Io`] when reading from `reader` fails, [`ErrorKind::Limit`]
+/// when `limits` is invalid or a configured limit is exceeded,
+/// [`ErrorKind::InvalidEncoding`] when the input is not valid UTF-8, or a parse/Serde
+/// error when the document or target is invalid.
+pub fn from_reader_with_limits<R: std::io::Read, T: serde::de::DeserializeOwned>(
+    reader: R,
+    limits: &Limits,
+) -> Result<T, Error> {
+    let bytes = read_bounded(reader, limits)?;
+    let text = text_of_with(&bytes, limits)?;
+    typed::from_str(text, limits)
+}
+
+/// Read at most `limits.max_input_bytes + 1` bytes from `reader` after validating `limits`.
+fn read_bounded<R: std::io::Read>(reader: R, limits: &Limits) -> Result<Vec<u8>, Error> {
+    use std::io::Read as _;
+
+    limits.validate()?;
+    let read_cap = u64::try_from(limits.max_input_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut bytes = Vec::new();
+    reader
+        .take(read_cap)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            Error::new(ErrorKind::Io, "failed to read YAML input").with_source(error)
+        })?;
+    Ok(bytes)
 }
 
 /// The bytes as text, checking the configured limits before UTF-8 validation
