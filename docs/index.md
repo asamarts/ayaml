@@ -55,6 +55,9 @@ assert_eq!(ayaml::from_str::<Service>(&rendered)?, service);
 | Topic | Page |
 | --- | --- |
 | Parsing, typed Serde reads, events, spans, options, and emitting | [Getting started](getting-started.md) |
+| Production recipes: streaming, tags, merges, `Spanned<T>`, frontmatter, middleware | [Cookbook](cookbook.md) |
+| Moving from YAML 1.1 scalars, duplicate keys, and merge keys | [Migrating from YAML 1.1](migration.md) |
+| Choosing `Limits` profiles for untrusted payloads and large schemas | [Sizing resource limits](limits-sizing.md) |
 | Format contract layers, spans, positions, and locations | [Format contract and interface](interface.md) |
 | YAML 1.2.2 profile and optional `libyaml-compat` mode | [Compatibility profile](compatibility.md) |
 | Stable `ErrorCode` catalog and masked error output | [Error codes](error-codes.md) |
