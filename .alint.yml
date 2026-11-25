@@ -1,7 +1,7 @@
 # Repository-shape, text, and Rust lint policy. See docs/decisions.md D84.
 version: 1
 requires:
-  alint: "0.22.0"
+  alint: "0.23.0"
 
 extends:
   - alint://bundled/oss-baseline@v1

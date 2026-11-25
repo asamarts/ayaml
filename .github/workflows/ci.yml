@@ -158,7 +158,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Lint the repository structure
-        uses: asamarts/alint@8d7a60f6642cb1b59537202ae81df7d951a078ad # v0.22.0
+        uses: asamarts/alint@465e70c48ec13774c8cb3bb58856b58b71e3a93d # v0.23.0
         with:
           fail-on-warning: "true"
       - name: Show the alint version
@@ -409,8 +409,8 @@ jobs:
       # Dependabot moves only the action, and tools/test_ci_checks.py fails until the tag names the
       # same version: take the digest of ghcr.io/trufflesecurity/trufflehog at that tag. Docker
       # pulls the digest, so the step below checks that the image is the tag's version.
-      SCANNER_TAG: "3.99.8"
-      SCANNER_DIGEST: sha256:674b2f187620a19df77f44cf9a7d77efcc581a5662accef2f2739cbb46ba4a3a
+      SCANNER_TAG: "3.100.1"
+      SCANNER_DIGEST: sha256:9c7a8325d43a4af2960d3f21d61a08981d8a1bf0542e007efa2e47097e386452
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -423,7 +423,7 @@ jobs:
           echo "$reported"
           test "$reported" = "trufflehog $SCANNER_TAG"
       - name: TruffleHog
-        uses: trufflesecurity/trufflehog@ea68ca03c865c5f324e86e849ced20ed3cf9dbbb # v3.99.8
+        uses: trufflesecurity/trufflehog@4ef51f69ca6347aaa76a5e64a87eac9c0c909f71 # v3.100.1
         with:
           path: ./
           version: ${{ env.SCANNER_TAG }}@${{ env.SCANNER_DIGEST }}

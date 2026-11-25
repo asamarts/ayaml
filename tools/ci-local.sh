@@ -373,9 +373,9 @@ job_plan() {
 job_alint() {
   if ! command -v alint >/dev/null; then
     if [ "$release" -eq 1 ]; then
-      step "alint version" sh -c 'echo "alint 0.22.0 is required for a release run" >&2; exit 1'
+      step "alint version" sh -c 'echo "alint 0.23.0 is required for a release run" >&2; exit 1'
     else
-      skip "alint 0.22.0 not installed"
+      skip "alint 0.23.0 not installed"
     fi
     return
   fi
@@ -383,12 +383,12 @@ job_alint() {
   shown="$(alint --version 2>/dev/null | head -n1)"
   step "alint version" alint --version
   case "$shown" in
-    "alint 0.22.0"*) ;;
+    "alint 0.23.0"*) ;;
     *)
       if [ "$release" -eq 1 ]; then
-        step "alint version check" sh -c 'echo "alint 0.22.0 is required, found $1" >&2; exit 1' _ "$shown"
+        step "alint version check" sh -c 'echo "alint 0.23.0 is required, found $1" >&2; exit 1' _ "$shown"
       else
-        skip "alint 0.22.0 required, found ${shown:-nothing}"
+        skip "alint 0.23.0 required, found ${shown:-nothing}"
       fi
       return
       ;;

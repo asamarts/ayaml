@@ -65,7 +65,7 @@ fn the_repository_lint_policy_is_the_one_the_plan_requires() {
     };
     let config = parse_value(&read(&root, ".alint.yml")).expect(".alint.yml parses");
 
-    assert_eq!(config["requires"]["alint"].as_str(), Some("0.22.0"));
+    assert_eq!(config["requires"]["alint"].as_str(), Some("0.23.0"));
     assert_eq!(config["baseline"], Value::Null, "a baseline is not allowed");
 
     let extends = strings(&config["extends"]);
@@ -163,14 +163,14 @@ fn the_repository_lint_policy_is_the_one_the_plan_requires() {
 
     let workflow = read(&root, ".github/workflows/ci.yml");
     assert!(
-        workflow.contains("asamarts/alint@8d7a60f6642cb1b59537202ae81df7d951a078ad"),
-        "the alint action is not pinned to v0.22.0"
+        workflow.contains("asamarts/alint@465e70c48ec13774c8cb3bb58856b58b71e3a93d"),
+        "the alint action is not pinned to v0.23.0"
     );
     assert!(workflow.contains("fail-on-warning: \"true\""));
 
     let local = read(&root, "tools/ci-local.sh");
     assert!(local.contains("alint check --fail-on-warning"));
-    assert!(local.contains("alint 0.22.0"));
+    assert!(local.contains("alint 0.23.0"));
 }
 
 /// The nine document shapes of issue #178 each have a peak, an allocation count, and a total
