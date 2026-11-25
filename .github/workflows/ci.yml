@@ -189,18 +189,18 @@ jobs:
       - name: Package
         run: cargo package -p ayaml --locked
       - name: The package holds the commit's files
-        run: python3 tools/check_release.py package target/package/ayaml-*.crate "$(git rev-parse HEAD)"
+        run: python3 tools/check_release.py package target/package/ayaml-[0-9]*.crate "$(git rev-parse HEAD)"
       - name: Package ayaml-edit
         run: cargo package -p ayaml-edit --locked --no-verify
       - name: The ayaml-edit package holds the commit's files
-        run: python3 tools/check_release.py package --package ayaml-edit target/package/ayaml-edit-*.crate "$(git rev-parse HEAD)"
+        run: python3 tools/check_release.py package --package ayaml-edit target/package/ayaml-edit-[0-9]*.crate "$(git rev-parse HEAD)"
       - name: Test the unpacked package
         run: |
           set -e
           tmp="${RUNNER_TEMP}/ayaml-package-test"
           rm -rf "$tmp"
           mkdir -p "$tmp"
-          tar -xzf target/package/ayaml-*.crate -C "$tmp"
+          tar -xzf target/package/ayaml-[0-9]*.crate -C "$tmp"
           crate="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d -name 'ayaml-*' ! -name 'ayaml-edit-*' | head -n1)"
           test -n "$crate"
           cargo test --manifest-path "$crate/Cargo.toml" --all-features --locked
@@ -210,8 +210,8 @@ jobs:
           tmp="${RUNNER_TEMP}/ayaml-edit-package-test"
           rm -rf "$tmp"
           mkdir -p "$tmp"
-          tar -xzf target/package/ayaml-*.crate -C "$tmp"
-          tar -xzf target/package/ayaml-edit-*.crate -C "$tmp"
+          tar -xzf target/package/ayaml-[0-9]*.crate -C "$tmp"
+          tar -xzf target/package/ayaml-edit-[0-9]*.crate -C "$tmp"
           ayaml_crate="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d -name 'ayaml-*' ! -name 'ayaml-edit-*' | head -n1)"
           edit_crate="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d -name 'ayaml-edit-*' | head -n1)"
           test -n "$ayaml_crate"
@@ -224,8 +224,8 @@ jobs:
           tmp="${RUNNER_TEMP}/ayaml-downstream"
           rm -rf "$tmp"
           mkdir -p "$tmp/unpacked"
-          tar -xzf target/package/ayaml-*.crate -C "$tmp/unpacked"
-          tar -xzf target/package/ayaml-edit-*.crate -C "$tmp/unpacked"
+          tar -xzf target/package/ayaml-[0-9]*.crate -C "$tmp/unpacked"
+          tar -xzf target/package/ayaml-edit-[0-9]*.crate -C "$tmp/unpacked"
           ayaml_pkg="$(find "$tmp/unpacked" -mindepth 1 -maxdepth 1 -type d -name 'ayaml-*' ! -name 'ayaml-edit-*' | head -n1)"
           edit_pkg="$(find "$tmp/unpacked" -mindepth 1 -maxdepth 1 -type d -name 'ayaml-edit-*' | head -n1)"
           test -n "$ayaml_pkg"

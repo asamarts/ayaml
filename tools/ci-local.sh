@@ -446,9 +446,9 @@ PY
   fi
   if [ "$dirty" -eq 0 ]; then
     step "the package holds the commit's files" python3 tools/check_release.py package "$crate" "$sha"
-    # Mirrors: python3 tools/check_release.py package target/package/ayaml-*.crate "$(git rev-parse HEAD)"
+    # Mirrors: python3 tools/check_release.py package target/package/ayaml-[0-9]*.crate "$(git rev-parse HEAD)"
     step "the ayaml-edit package holds the commit's files" python3 tools/check_release.py package --package ayaml-edit "$edit_crate" "$sha"
-    # Mirrors: python3 tools/check_release.py package --package ayaml-edit target/package/ayaml-edit-*.crate "$(git rev-parse HEAD)"
+    # Mirrors: python3 tools/check_release.py package --package ayaml-edit target/package/ayaml-edit-[0-9]*.crate "$(git rev-parse HEAD)"
   else
     skip "the checkout is dirty: the packages against the commit"
   fi
