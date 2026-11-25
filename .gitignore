@@ -1,6 +1,12 @@
 /target/
 __pycache__/
 /CLAUDE.md
+/site/node_modules/
+/site/package-lock.json
+/site/dist/
+/site/.astro/
+/site/src/content/docs/
+/site/src/data/sidebar.json
 /fuzz/target
 /fuzz/artifacts
 /fuzz/corpus/**/*

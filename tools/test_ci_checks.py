@@ -1744,29 +1744,22 @@ class SharedVectors(unittest.TestCase):
 
 
 class DocsCheck(unittest.TestCase):
-    """tools/check_docs.py checks book.toml, SUMMARY.md, book_doctests, links, and Rust fences."""
+    """tools/check_docs.py checks site config, SUMMARY.md, book_doctests, links, and Rust fences."""
 
     def make_tree(self) -> Path:
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         root = Path(scratch.name)
-        (root / "docs").mkdir()
-        (root / "crates/ayaml-conformance/src").mkdir(parents=True)
-        (root / "book.toml").write_text(
-            '[book]\nsrc = "docs"\n[build]\nbuild-dir = "target/book"\ncreate-missing = false\n',
-            encoding="utf-8",
-        )
+        for d in ("docs", "site/scripts", "crates/ayaml-conformance/src"):
+            (root / d).mkdir(parents=True)
+        (root / "site/package.json").write_text('{"scripts":{"sync":"x","build":"x","check:links":"x"}}\n', encoding="utf-8")
+        (root / "site/astro.config.mjs").write_text("export default { site: 'https://asamarts.github.io', base: '/ayaml' };\n", encoding="utf-8")
+        (root / "site/scripts/sync-docs.mjs").write_text("// sync\n", encoding="utf-8")
+        (root / "site/scripts/check-links.mjs").write_text("// check\n", encoding="utf-8")
         (root / "README.md").write_text("# ayaml\n\nSee [Index](docs/index.md).\n", encoding="utf-8")
-        (root / "docs/SUMMARY.md").write_text(
-            "# Summary\n\n[Introduction](index.md)\n- [Security](security.md)\n",
-            encoding="utf-8",
-        )
-        (root / "docs/index.md").write_text(
-            "# Intro\n\nSee [Security](security.md).\n", encoding="utf-8"
-        )
-        (root / "docs/security.md").write_text(
-            "# Security\n\n```rust\nassert_eq!(1 + 1, 2);\n```\n", encoding="utf-8"
-        )
+        (root / "docs/SUMMARY.md").write_text("# Summary\n\n[Introduction](index.md)\n- [Security](security.md)\n", encoding="utf-8")
+        (root / "docs/index.md").write_text("# Intro\n\nSee [Security](security.md).\n", encoding="utf-8")
+        (root / "docs/security.md").write_text("# Security\n\n```rust\nassert_eq!(1 + 1, 2);\n```\n", encoding="utf-8")
         (root / "crates/ayaml-conformance/src/lib.rs").write_text(
             '#[doc = include_str!("../../../README.md")]\n'
             '#[doc = include_str!("../../../docs/index.md")]\n'

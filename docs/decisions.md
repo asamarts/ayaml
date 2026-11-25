@@ -1158,3 +1158,29 @@ exclusively to public library names preserves every operational and privacy guar
 **Consequences.** `AY-159`, `AY-160`, `AY-161`, and `AY-162` can publish reproducible comparative
 benchmark results and end-to-end tested migration guides on the refreshed documentation site, while
 all non-comparison leak-gate classes remain enforced on every push and pull request.
+
+## D106 — Astro + Starlight documentation site backed by `docs/` single source of truth
+
+**Date:** 2026-11-25
+**Status:** Accepted (supersedes mdBook tooling in D72 while retaining `docs/SUMMARY.md` and `book_doctests`)
+
+**Decision.** Build and deploy `https://asamarts.github.io/ayaml/` from `site/` using Astro +
+Starlight (`base: '/ayaml'`) with a bespoke landing page (`/`), an interactive pinned-JSONL
+benchmarks showcase (`/benchmarks/`), Pagefind search, `llms.txt` / `llms-full.txt`, and
+Starlight documentation pages synced directly from `docs/**/*.md` via `site/scripts/sync-docs.mjs`
+and ordered by `docs/SUMMARY.md`. Remove `book.toml`.
+
+**Alternatives.** Stay on mdBook: limited layout flexibility for an interactive benchmark showcase,
+modern landing page, and `llms.txt` generation. Duplicate Markdown files inside `site/src/content/`:
+creates drift between GitHub Markdown, `crates/ayaml-conformance` `book_doctests`, and the deployed
+site.
+
+**Why.** Keeping `docs/**/*.md` as plain GitHub-Flavored Markdown (without Starlight frontmatter)
+preserves clean GitHub browsing, `markdownlint-cli2`, `tools/check_docs.py`, and workspace
+`book_doctests` across every Rust example, while Astro + Starlight delivers a fast, accessible
+modern site and data-driven benchmark visualizations with zero duplicated prose.
+
+**Consequences.** `.github/workflows/docs.yml` runs `tools/check_docs.py`, builds `site/` with
+`npm --prefix site install --no-audit --no-fund && npm --prefix site run build`, validates every internal link and fragment
+with `npm --prefix site run check:links`, runs `cargo test --doc -p ayaml-conformance --all-features --locked`,
+and deploys `site/dist` to GitHub Pages.

@@ -1,0 +1,102 @@
+---
+import '@fontsource-variable/inter/wght.css';
+import '@fontsource/jetbrains-mono/400.css';
+import '@fontsource/jetbrains-mono/600.css';
+import '../styles/tokens.css';
+import '../styles/site.css';
+import SiteNav from '../components/SiteNav.astro';
+import SiteFooter from '../components/SiteFooter.astro';
+import ThemeInit from '../components/ThemeInit.astro';
+import ThemeToggle from '../components/ThemeToggle.astro';
+import { BASE } from '../lib/site';
+
+interface Props {
+  title: string;
+  description: string;
+  canonical: string;
+}
+const { title, description, canonical } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <ThemeInit />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <meta property="og:site_name" content="ayaml" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:type" content="website" />
+    <link rel="icon" type="image/svg+xml" href={`${BASE}/favicon.svg`} />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#101216" media="(prefers-color-scheme: dark)" />
+    <slot name="head" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <SiteNav>
+      <ThemeToggle slot="end" />
+    </SiteNav>
+    <main id="main">
+      <slot />
+    </main>
+    <SiteFooter />
+    <script is:inline>
+      (() => {
+        // Accessible tabs pattern for interactive code and benchmark views.
+        for (const root of document.querySelectorAll('[data-tabs]')) {
+          const tabs = [...root.querySelectorAll('[role="tab"]')];
+          const select = (tab, focus) => {
+            for (const t of tabs) {
+              const active = t === tab;
+              t.setAttribute('aria-selected', String(active));
+              t.tabIndex = active ? 0 : -1;
+              const panel = document.getElementById(t.getAttribute('aria-controls'));
+              if (panel) panel.hidden = !active;
+            }
+            if (focus) tab.focus();
+          };
+          root.addEventListener('click', (e) => {
+            const tab = e.target.closest('[role="tab"]');
+            if (tab && tabs.includes(tab)) select(tab, false);
+          });
+          root.addEventListener('keydown', (e) => {
+            const i = tabs.indexOf(document.activeElement);
+            if (i < 0) return;
+            const next = {
+              ArrowRight: (i + 1) % tabs.length,
+              ArrowLeft: (i - 1 + tabs.length) % tabs.length,
+              Home: 0,
+              End: tabs.length - 1,
+            }[e.key];
+            if (next === undefined) return;
+            e.preventDefault();
+            select(tabs[next], true);
+          });
+        }
+
+        // One-click copy buttons.
+        for (const btn of document.querySelectorAll('[data-copy]')) {
+          btn.addEventListener('click', async () => {
+            const text = btn.getAttribute('data-copy') || '';
+            try {
+              await navigator.clipboard.writeText(text);
+              const prev = btn.textContent;
+              btn.textContent = 'Copied';
+              setTimeout(() => {
+                btn.textContent = prev;
+              }, 1600);
+            } catch {
+              // ignore clipboard errors
+            }
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,40 @@
+---
+import Default from '@astrojs/starlight/components/Footer.astro';
+import { BASE, DOCS_RS_AYAML, GITHUB_URL } from '../lib/site';
+---
+
+<Default {...Astro.props} />
+<div class="docs-extra-footer">
+  <a href={`${BASE}/`}>Home</a>
+  <span aria-hidden="true">&middot;</span>
+  <a href={`${BASE}/benchmarks/`}>Benchmarks</a>
+  <span aria-hidden="true">&middot;</span>
+  <a href={`${BASE}/docs/migrating-from/serde-yaml/`}>Migration guides</a>
+  <span aria-hidden="true">&middot;</span>
+  <a href={`${BASE}/llms.txt`}>llms.txt</a>
+  <span aria-hidden="true">&middot;</span>
+  <a href={DOCS_RS_AYAML} target="_blank" rel="noopener noreferrer">docs.rs</a>
+  <span aria-hidden="true">&middot;</span>
+  <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer">GitHub</a>
+</div>
+
+<style>
+  .docs-extra-footer {
+    margin-top: 1.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--sl-color-hairline);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    color: var(--sl-color-gray-3);
+  }
+  .docs-extra-footer a {
+    color: var(--sl-color-gray-2);
+    text-decoration: none;
+  }
+  .docs-extra-footer a:hover {
+    color: var(--sl-color-white);
+    text-decoration: underline;
+  }
+</style>

@@ -16,6 +16,7 @@ ayaml = { path = "../ayaml", version = "=0.2.3", features = ["bench-internals"] 
 serde_json.workspace = true
 
 [dev-dependencies]
+ayaml-edit = { path = "../ayaml-edit", version = "=0.2.3" }
 serde = { workspace = true, features = ["derive"] }
 
 [lints]

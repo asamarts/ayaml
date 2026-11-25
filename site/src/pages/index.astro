@@ -1,0 +1,587 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { BASE, DOCS_RS_AYAML, DOCS_RS_EDIT, SITE_URL, WORKSPACE_VERSION } from '../lib/site';
+import { HEADLINE, TIER2_PEERS, fingerprint } from '../lib/bench';
+
+const TITLE = 'ayaml — Safe, fast, pure-Rust YAML 1.2.2';
+const DESCRIPTION =
+  'A safe, pure-Rust YAML 1.2.2 parser, spanned event stream, generic value model, Serde codec, deterministic emitter, and format-preserving editor.';
+
+const tier2Rust = TIER2_PEERS.filter((r) => !r.isUnsafeArena && (r.lang === 'Rust' || r.impl === 'fkyaml'));
+const maxRatio = Math.max(...tier2Rust.map((r) => r.speedRatio));
+
+const EXAMPLES = [
+  {
+    id: 'serde',
+    label: 'Typed Serde',
+    filename: 'src/config.rs',
+    code: `use ayaml::{from_str_borrowed, to_string};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, Serialize)]
+struct Service<'a> {
+    name: &'a str,
+    ports: Vec<u16>,
+    tls: bool,
+}
+
+let yaml = "name: api\\nports: [8080, 8443]\\ntls: true\\n";
+let svc: Service<'_> = from_str_borrowed(yaml)?;
+let out = to_string(&svc)?;`,
+  },
+  {
+    id: 'spanned',
+    label: 'Spans & diagnostics',
+    filename: 'src/diagnostics.rs',
+    code: `use ayaml::{ColumnEncoding, LineIndex, Location, Spanned};
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct Config {
+    port: Spanned<u16>,
+}
+
+let src = "port: 80\\n";
+let cfg: Config = ayaml::from_str(src)?;
+let idx = LineIndex::new(src);
+let pos = idx.to_position(cfg.port.span().start(), ColumnEncoding::Scalar).unwrap();
+let loc = Location::from(pos); // line 1, column 7`,
+  },
+  {
+    id: 'security',
+    label: 'Limits & masked errors',
+    filename: 'src/untrusted.rs',
+    code: `use ayaml::{ErrorCode, Limits, ParseOptions, from_reader_with};
+
+const UNTRUSTED: ParseOptions = ParseOptions::new().with_limits(
+    Limits::new()
+        .with_max_input_bytes(256 * 1024)
+        .with_max_depth(32)
+        .with_max_alias_expansion_bytes(1024 * 1024),
+);
+
+let err = from_reader_with::<_, serde_json::Value>(reader, &UNTRUSTED).unwrap_err();
+assert_eq!(err.code(), ErrorCode::InvalidType);
+// Never leaks document contents or secret keys into logs:
+tracing::warn!("{}", err.masked());`,
+  },
+  {
+    id: 'merge',
+    label: 'Opt-in merge keys',
+    filename: 'src/merge.rs',
+    code: `use ayaml::{ParseOptions, from_str_with};
+
+let input = "\\
+defaults: &def
+  image: rust:1.88
+  retries: 2
+build:
+  <<: *def
+  retries: 0
+";
+
+// YAML 1.2.2 keeps \`<<\` literal by default; opt in explicitly:
+let opts = ParseOptions::new().with_merge_keys(true);
+let doc: ayaml::Value = ayaml::parse_value_with(input, &opts)?;`,
+  },
+  {
+    id: 'edit',
+    label: 'Surgical edits',
+    filename: 'src/edit.rs',
+    code: `use ayaml::{PathSegment, Value};
+use ayaml_edit::replace_scalar;
+
+let src = "# Keep comments, blank lines, and indentation\\nservice:\\n  port: 8080\\n";
+let path = [PathSegment::key("service"), PathSegment::key("port")];
+let verified = replace_scalar(src, &path, &Value::from(9090_u64))?;
+
+// Verified against canonical event diff before returning:
+assert_eq!(verified.output(), "# Keep comments, blank lines, and indentation\\nservice:\\n  port: 9090\\n");`,
+  },
+  {
+    id: 'frontmatter',
+    label: 'Frontmatter',
+    filename: 'src/markdown.rs',
+    code: `use ayaml::{ParseOptions, Spanned, parse_frontmatter_with};
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct Post<'a> {
+    #[serde(borrow)]
+    title: Spanned<&'a str>,
+    draft: bool,
+}
+
+let doc = "---\\ntitle: Release 1.0\\ndraft: false\\n---\\n# Hello\\n";
+let parsed = parse_frontmatter_with::<Post<'_>>(doc, &ParseOptions::new())?.unwrap();
+assert_eq!(parsed.body, "# Hello\\n");`,
+  },
+];
+
+const GUARANTEES = [
+  {
+    badge: 'YAML 1.2.2',
+    title: 'One scanner and grammar across every API',
+    body: 'Events, Value DOM, typed owned/borrowed Serde, SpannedTree, DocumentDeserializer, and frontmatter share one strict YAML 1.2.2 core — 100% passing on the pinned YAML Test Suite.',
+    href: `${BASE}/docs/interface/`,
+    linkText: 'Format contract',
+  },
+  {
+    badge: '#![forbid(unsafe_code)]',
+    title: 'Pure safe Rust with 2 runtime dependencies',
+    body: 'Published workspace crates forbid unsafe code and avoid C/libyaml FFI completely. Direct runtime dependencies are limited strictly to serde and indexmap.',
+    href: `${BASE}/docs/dependencies/`,
+    linkText: 'Dependency policy',
+  },
+  {
+    badge: 'Hardened defaults',
+    title: 'Native DoS limits & leak-proof masked errors',
+    body: 'Every parse, decode, merge expansion, reader, and emit call enforces explicit ceilings for input bytes, depth, collections, events, and byte-weighted alias expansion. Error::masked() strips document text.',
+    href: `${BASE}/docs/security/`,
+    linkText: 'Security model',
+  },
+  {
+    badge: 'Byte-accurate spans',
+    title: 'Spanned<T>, SpannedTree & surgical edits',
+    body: 'Attach exact byte spans to typed Serde fields, convert offsets to UTF-8/scalar/UTF-16 positions via LineIndex, or apply comment-preserving edits verified with ayaml-edit.',
+    href: `${BASE}/docs/editing/`,
+    linkText: 'Spans & editing',
+  },
+  {
+    badge: 'Zero-copy & streaming',
+    title: 'Fastest pure-Rust YAML stack',
+    body: `Leads every measured Rust YAML library by ${HEADLINE.vsYamlRust2.toFixed(2)}x–${HEADLINE.vsSerdeSaphyr.toFixed(2)}x on geometric mean across ${HEADLINE.scenarioCount} fixtures, with ${HEADLINE.vsYamlSerdeAllocs.toFixed(1)}x fewer allocations than yaml-serde.`,
+    href: `${BASE}/benchmarks/`,
+    linkText: 'Explore benchmarks',
+  },
+  {
+    badge: 'Incremental migration',
+    title: 'Opt-in merge keys & libyaml-compat boundary',
+    body: 'Adopt strict YAML 1.2.2 immediately while opting into <<: merge keys per call or enabling the additive libyaml-compat feature for legacy inputs.',
+    href: `${BASE}/docs/compatibility/`,
+    linkText: 'Compatibility profile',
+  },
+];
+
+const MIGRATIONS = [
+  {
+    from: 'serde_yaml',
+    tag: 'Archived libyaml Serde crate',
+    summary: 'Drop-in API table, YAML 1.1 scalar changes, duplicate keys, merge keys, and Error::masked() upgrades.',
+    href: `${BASE}/docs/migrating-from/serde-yaml/`,
+  },
+  {
+    from: 'serde_yml / serde_yaml_ng / yaml-serde',
+    tag: 'libyaml C FFI forks',
+    summary: 'Remove unsafe C FFI, cut allocations by 3.8x, adopt zero-copy borrowed decoding, and use ayaml::compat if needed.',
+    href: `${BASE}/docs/migrating-from/serde-yml-and-forks/`,
+  },
+  {
+    from: 'yaml-rust2 / saphyr / serde-saphyr',
+    tag: 'Pure-Rust YAML 1.2 crates',
+    summary: 'Move from YamlLoader / MarkedYaml / EventReceiver to SpannedTree, Spanned<T>, and faster pull events.',
+    href: `${BASE}/docs/migrating-from/yaml-rust2-and-saphyr/`,
+  },
+];
+---
+
+<BaseLayout title={TITLE} description={DESCRIPTION} canonical={`${SITE_URL}/`}>
+  <section class="hero wrap">
+    <div class="hero-grid">
+      <div class="hero-copy">
+        <span class="hero-pill">Pure safe Rust &middot; YAML 1.2.2 &middot; MSRV 1.88</span>
+        <h1>Fast, safe YAML 1.2.2 for production Rust</h1>
+        <p class="hero-lede">
+          <code>ayaml</code> gives you one unified scanner and grammar backing typed Serde decoding,
+          zero-copy borrowed reads, spanned event streams, a generic <code>Value</code> DOM,
+          deterministic emission, and verified format-preserving edits — with
+          <code>#![forbid(unsafe_code)]</code> and native DoS protection on every call.
+        </p>
+        <div class="hero-actions">
+          <a class="btn" href={`${BASE}/docs/getting-started/`}>Get started</a>
+          <a class="btn btn-ghost" href={`${BASE}/benchmarks/`}>View benchmarks</a>
+          <a class="btn btn-ghost" href={`${BASE}/docs/migrating-from/serde-yaml/`}>Migrate from serde_yaml</a>
+        </div>
+      </div>
+
+      <aside class="hero-install" aria-label="Installation">
+        <div class="code-frame">
+          <div class="code-bar">
+            <span>Cargo.toml</span>
+            <button
+              class="copy-btn"
+              type="button"
+              data-copy={`cargo add ayaml\ncargo add serde --features derive`}
+            >
+              Copy cargo add
+            </button>
+          </div>
+          <pre><code>{`[dependencies]
+ayaml = "${WORKSPACE_VERSION}"
+serde = { version = "1", features = ["derive"] }
+
+# Optional format-preserving edits:
+# ayaml-edit = "${WORKSPACE_VERSION}"`}</code></pre>
+        </div>
+        <div class="hero-checks">
+          <span><strong>0</strong> unsafe blocks</span>
+          <span><strong>2</strong> runtime deps (<code>serde</code>, <code>indexmap</code>)</span>
+          <span><strong>100%</strong> YAML Test Suite pass</span>
+        </div>
+      </aside>
+    </div>
+
+    <div class="kpi-grid hero-kpis">
+      <div class="kpi-card">
+        <div class="kpi-val accent">{HEADLINE.vsYamlRust2.toFixed(2)}x–{HEADLINE.vsSerdeSaphyr.toFixed(2)}x</div>
+        <div class="kpi-label">Faster than pure-Rust peers</div>
+        <div class="kpi-sub">
+          Geometric mean across {HEADLINE.scenarioCount} pinned fixtures vs <code>yaml-rust2</code>,
+          <code>saphyr</code>, <code>noyalib</code>, <code>fast-yaml-core</code>, and <code>serde-saphyr</code>.
+        </div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-val">{HEADLINE.vsLibyamlEvents.toFixed(2)}x / {HEADLINE.vsLibfyamlEvents.toFixed(2)}x</div>
+        <div class="kpi-label">Faster than C libyaml &amp; libfyaml</div>
+        <div class="kpi-sub">
+          Spanned <code>ayaml</code> event stream vs C <code>libyaml</code> ({HEADLINE.vsLibyamlEvents.toFixed(2)}x)
+          and <code>libfyaml</code> ({HEADLINE.vsLibfyamlEvents.toFixed(2)}x), with zero unsafe FFI.
+        </div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-val">{HEADLINE.largeScalarMib.toFixed(0)} MiB/s</div>
+        <div class="kpi-label">Large-scalar throughput</div>
+        <div class="kpi-sub">
+          Over {HEADLINE.largeScalarVsRyml.toFixed(1)}x faster than C++ <code>rapidyaml</code> on
+          1 MiB scalars; up to {HEADLINE.ciEmitMib.toFixed(0)} MiB/s deterministic YAML emission.
+        </div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-val">{HEADLINE.vsYamlSerdeAllocs.toFixed(1)}x fewer allocs</div>
+        <div class="kpi-label">Lower memory churn than yaml-serde</div>
+        <div class="kpi-sub">
+          {HEADLINE.vsYamlSerdePeak.toFixed(2)}x lower peak heap and {HEADLINE.vsYamlSerde.toFixed(2)}x
+          higher speed than libyaml-backed <code>yaml-serde</code>.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="sec-kicker">One cohesive API</span>
+        <h2>Every YAML workflow, backed by one parser</h2>
+        <p class="sec-lede">
+          Switch seamlessly between zero-copy Serde structs, generic values, spanned diagnostics,
+          untrusted readers, opt-in merge keys, frontmatter, and comment-preserving edits without
+          changing syntax rules or resource limits.
+        </p>
+      </div>
+
+      <div data-tabs>
+        <div class="tab-list" role="tablist" aria-label="ayaml code examples">
+          {
+            EXAMPLES.map((ex, i) => (
+              <button
+                class="tab-btn"
+                type="button"
+                role="tab"
+                id={`tab-${ex.id}`}
+                aria-selected={i === 0 ? 'true' : 'false'}
+                aria-controls={`panel-${ex.id}`}
+                tabindex={i === 0 ? 0 : -1}
+              >
+                {ex.label}
+              </button>
+            ))
+          }
+        </div>
+        {
+          EXAMPLES.map((ex, i) => (
+            <div
+              id={`panel-${ex.id}`}
+              role="tabpanel"
+              aria-labelledby={`tab-${ex.id}`}
+              hidden={i !== 0}
+            >
+              <div class="code-frame">
+                <div class="code-bar">
+                  <span>{ex.filename}</span>
+                  <button class="copy-btn" type="button" data-copy={ex.code}>
+                    Copy snippet
+                  </button>
+                </div>
+                <pre><code>{ex.code}</code></pre>
+              </div>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="sec-kicker">Performance snapshot</span>
+        <h2>Fastest safe Rust YAML parser — verified by pinned data</h2>
+        <p class="sec-lede">
+          Relative parse time across all {HEADLINE.scenarioCount} shared fixtures in the
+          <code>ayaml-fixtures</code> catalog (lower bar = faster; <code>1.00x</code> = <code>ayaml value</code>).
+          Measured on {fingerprint.cpu} with pinned CPU affinity and SHA-256 verified inputs.
+        </p>
+      </div>
+
+      <div class="bar-chart">
+        {
+          tier2Rust.map((row) => (
+            <div class:list={['bar-row', { 'is-ayaml': row.isAyaml }]}>
+              <div class="bar-name">
+                <span>{row.label}</span>
+                <span class="bar-sub">{row.safety}</span>
+              </div>
+              <div class="bar-track" aria-hidden="true">
+                <div
+                  class="bar-fill"
+                  style={`width: ${((row.speedRatio / maxRatio) * 100).toFixed(1)}%`}
+                />
+              </div>
+              <div class="bar-val">{row.speedRatio.toFixed(2)}x time</div>
+            </div>
+          ))
+        }
+      </div>
+
+      <div class="bench-cta">
+        <a class="btn" href={`${BASE}/benchmarks/`}>Explore full interactive benchmarks</a>
+        <span class="bench-note">
+          Includes Tier 1 C/C++ comparisons (including <code>rapidyaml</code> architectural trade-offs),
+          typed Serde decode, emission, peak heap, 10x linear scaling, and reproduction commands.
+        </span>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="sec-kicker">Design guarantees</span>
+        <h2>Built for correctness, security, and long-term maintenance</h2>
+      </div>
+      <div class="feature-grid">
+        {
+          GUARANTEES.map((g) => (
+            <article class="feature-card">
+              <span class="pill pill-rust">{g.badge}</span>
+              <h3>{g.title}</h3>
+              <p>{g.body}</p>
+              <a class="card-link" href={g.href}>{g.linkText} &rarr;</a>
+            </article>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="sec-kicker">End-to-end tested guides</span>
+        <h2>Migrating from another Rust YAML crate</h2>
+        <p class="sec-lede">
+          Every Rust snippet in our migration guides compiles and executes in CI via
+          <code>book_doctests</code>, backed by an end-to-end integration suite verifying edge cases.
+        </p>
+      </div>
+
+      <div class="migration-grid">
+        {
+          MIGRATIONS.map((m) => (
+            <a class="migration-card" href={m.href}>
+              <span class="pill pill-muted">{m.tag}</span>
+              <h3>From {m.from}</h3>
+              <p>{m.summary}</p>
+              <span class="card-link">Read migration guide &rarr;</span>
+            </a>
+          ))
+        }
+      </div>
+
+      <div class="ref-strip">
+        <div>
+          <strong>Looking for generated Rustdoc API documentation?</strong>
+          <span>Browse complete trait signatures, builder methods, and examples on docs.rs.</span>
+        </div>
+        <div class="ref-links">
+          <a class="btn btn-ghost" href={DOCS_RS_AYAML} target="_blank" rel="noopener noreferrer">docs.rs/ayaml</a>
+          <a class="btn btn-ghost" href={DOCS_RS_EDIT} target="_blank" rel="noopener noreferrer">docs.rs/ayaml-edit</a>
+          <a class="btn btn-ghost" href={`${BASE}/docs/api-reference/`}>API map</a>
+        </div>
+      </div>
+    </div>
+  </section>
+</BaseLayout>
+
+<style>
+  .hero {
+    padding-block: clamp(44px, 6vw, 84px) var(--s8);
+  }
+  .hero-grid {
+    display: grid;
+    gap: var(--s6);
+    align-items: start;
+  }
+  @media (min-width: 960px) {
+    .hero-grid {
+      grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.95fr);
+      gap: var(--s7);
+    }
+  }
+  .hero-pill {
+    display: inline-block;
+    padding: 4px 10px;
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--muted);
+    font-family: var(--font-code);
+    font-size: 0.78rem;
+    font-weight: 500;
+  }
+  .hero h1 {
+    margin-top: var(--s4);
+    font-size: var(--t-hero);
+    line-height: 1.03;
+    letter-spacing: -0.036em;
+  }
+  .hero-lede {
+    margin-top: var(--s4);
+    max-width: 39rem;
+    color: var(--text);
+    font-size: var(--t-lede);
+    line-height: 1.56;
+  }
+  .hero-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: var(--s5);
+  }
+  .hero-install {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s3);
+  }
+  .hero-checks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 18px;
+    padding: 10px 14px;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    background: var(--surface);
+    font-size: 0.84rem;
+    color: var(--muted);
+  }
+  .hero-checks strong {
+    color: var(--ink);
+  }
+  .hero-kpis {
+    margin-top: var(--s7);
+  }
+  .bench-cta {
+    margin-top: var(--s5);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--s4);
+  }
+  .bench-note {
+    flex: 1 1 20rem;
+    color: var(--muted);
+    font-size: var(--t-small);
+  }
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+    gap: var(--s4);
+  }
+  .feature-card {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--s3);
+    padding: var(--s5);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+  .feature-card p {
+    color: var(--muted);
+    font-size: var(--t-small);
+    line-height: 1.55;
+  }
+  .card-link {
+    margin-top: auto;
+    font-size: 0.88rem;
+    font-weight: 600;
+    color: var(--accent-strong);
+    text-decoration: none;
+  }
+  .card-link:hover {
+    text-decoration: underline;
+  }
+  .migration-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: var(--s4);
+  }
+  .migration-card {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--s3);
+    padding: var(--s5);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    background: var(--paper);
+    text-decoration: none;
+    transition: border-color 140ms var(--ease), transform 140ms var(--ease);
+  }
+  .migration-card:hover {
+    border-color: var(--accent);
+    transform: translateY(-2px);
+  }
+  .migration-card p {
+    color: var(--muted);
+    font-size: var(--t-small);
+    line-height: 1.55;
+  }
+  .ref-strip {
+    margin-top: var(--s6);
+    padding: var(--s5);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    background: var(--surface);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s4);
+  }
+  .ref-strip div:first-child {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .ref-strip span {
+    color: var(--muted);
+    font-size: var(--t-small);
+  }
+  .ref-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+</style>

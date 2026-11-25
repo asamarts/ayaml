@@ -1,0 +1,110 @@
+/*
+ * Shared design tokens for both the marketing/benchmarks pages and the
+ * Starlight documentation pages. Paper-and-graphite aesthetic with a crisp
+ * terracotta-rust accent and WCAG AA+ contrast in light and dark themes.
+ */
+
+:root {
+  color-scheme: light;
+  --paper: #ffffff;
+  --surface: #f8f9fb;
+  --wash: #f2f4f7;
+  --well: #edf0f4;
+  --ink: #111318;
+  --text: #2a2f38;
+  --muted: #58606d;
+  --rule: #e2e6ec;
+  --ctl: #8c95a3;
+  --accent: #c8431b;
+  --accent-strong: #a93513;
+  --accent-wash: #fdf0eb;
+  --green: #166e3c;
+  --green-wash: #e4f4eb;
+  --blue: #1e5490;
+  --blue-wash: #e8f1fb;
+  --ochre: #955800;
+  --ochre-wash: #fcf2df;
+  --focus: #111318;
+  --shadow-card: 0 1px 2px rgb(17 19 24 / 0.04), 0 8px 24px -10px rgb(17 19 24 / 0.08);
+
+  --font-body: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-code: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --t-hero: clamp(2.35rem, 1.5rem + 2.8vw, 3.85rem);
+  --t-h1: clamp(2.1rem, 1.65rem + 1.8vw, 3.1rem);
+  --t-h2: clamp(1.5rem, 1.3rem + 0.75vw, 2rem);
+  --t-h3: 1.2rem;
+  --t-lede: clamp(1.08rem, 1.02rem + 0.3vw, 1.25rem);
+  --t-body: 1.03125rem;
+  --t-small: 0.92rem;
+  --t-note: 0.85rem;
+  --t-code: 0.86rem;
+
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+  --s8: 64px;
+  --s9: 88px;
+  --gutter: clamp(16px, 4vw, 44px);
+  --page: 1200px;
+  --nav-h: 58px;
+  --radius: 8px;
+  --radius-sm: 5px;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+@media screen and (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --paper: #101216;
+    --surface: #161920;
+    --wash: #1d212a;
+    --well: #1a1e26;
+    --ink: #f3f5f8;
+    --text: #cbd2dc;
+    --muted: #939caa;
+    --rule: #282e38;
+    --ctl: #687180;
+    --accent: #f2744a;
+    --accent-strong: #ff8e68;
+    --accent-wash: #341d15;
+    --green: #4ed082;
+    --green-wash: #142a1e;
+    --blue: #7ab3f2;
+    --blue-wash: #162438;
+    --ochre: #e8a73e;
+    --ochre-wash: #312510;
+    --focus: #f3f5f8;
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.25), 0 12px 30px -10px rgb(0 0 0 / 0.45);
+  }
+}
+
+@media screen {
+  :root[data-theme='dark'] {
+    color-scheme: dark;
+    --paper: #101216;
+    --surface: #161920;
+    --wash: #1d212a;
+    --well: #1a1e26;
+    --ink: #f3f5f8;
+    --text: #cbd2dc;
+    --muted: #939caa;
+    --rule: #282e38;
+    --ctl: #687180;
+    --accent: #f2744a;
+    --accent-strong: #ff8e68;
+    --accent-wash: #341d15;
+    --green: #4ed082;
+    --green-wash: #142a1e;
+    --blue: #7ab3f2;
+    --blue-wash: #162438;
+    --ochre: #e8a73e;
+    --ochre-wash: #312510;
+    --focus: #f3f5f8;
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.25), 0 12px 30px -10px rgb(0 0 0 / 0.45);
+  }
+}

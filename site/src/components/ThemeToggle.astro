@@ -1,0 +1,75 @@
+---
+// Shared light/dark theme toggle wired to Starlight's `starlight-theme` key.
+---
+<button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch color theme">
+  <svg class="moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+  </svg>
+  <svg class="sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <circle cx="12" cy="12" r="4"></circle>
+    <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path>
+  </svg>
+</button>
+
+<style>
+  .theme-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .theme-toggle:hover {
+    background: var(--wash);
+    color: var(--ink);
+  }
+  .theme-toggle .sun {
+    display: none;
+  }
+  :global(:root[data-theme='dark']) .theme-toggle .sun {
+    display: inline;
+  }
+  :global(:root[data-theme='dark']) .theme-toggle .moon {
+    display: none;
+  }
+</style>
+
+<script is:inline>
+  (() => {
+    const syncLabel = () => {
+      const dark = document.documentElement.dataset.theme === 'dark';
+      for (const b of document.querySelectorAll('[data-theme-toggle]')) {
+        const text = dark ? 'Switch to light theme' : 'Switch to dark theme';
+        b.setAttribute('aria-label', text);
+        b.title = text;
+      }
+    };
+    for (const b of document.querySelectorAll('[data-theme-toggle]')) {
+      if (b.dataset.bound) continue;
+      b.dataset.bound = '1';
+      b.addEventListener('click', () => {
+        const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+        document.documentElement.dataset.theme = next;
+        try {
+          localStorage.setItem('starlight-theme', next);
+        } catch {
+          // ignore storage restrictions
+        }
+        if (window.StarlightThemeProvider) {
+          window.StarlightThemeProvider.updatePickers(next);
+        }
+      });
+    }
+    syncLabel();
+    new MutationObserver(syncLabel).observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['data-theme'],
+    });
+  })();
+</script>

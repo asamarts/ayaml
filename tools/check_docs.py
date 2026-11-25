@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Check the mdBook configuration, page coverage, doctest coverage, and relative links."""
+"""Check the Astro + Starlight site configuration, page coverage, doctest coverage, and relative links."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
 import sys
-import tomllib
 
 LINK_PATTERN = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 HTML_HREF_PATTERN = re.compile(r'href="([^"]+)"')
@@ -53,7 +53,7 @@ def heading_slugs(text: str) -> set[str]:
         heading = heading.replace("`", "")
         raw = heading.strip().lower()
         slug = re.sub(r"[^a-z0-9 _-]", "", raw)
-        slug = re.sub(r"\s+", "-", slug).strip("-")
+        slug = slug.replace(" ", "-").strip("-")
         if not slug:
             continue
         seen = counts.get(slug, 0)
@@ -62,25 +62,30 @@ def heading_slugs(text: str) -> set[str]:
     return slugs
 
 
-def check_book_toml(root: Path) -> list[str]:
+def check_site_config(root: Path) -> list[str]:
     errors: list[str] = []
-    book_toml = root / "book.toml"
-    if not book_toml.is_file():
-        return [f"{book_toml}: missing book.toml"]
+    pkg_json = root / "site/package.json"
+    astro_cfg = root / "site/astro.config.mjs"
+    sync_script = root / "site/scripts/sync-docs.mjs"
+    link_script = root / "site/scripts/check-links.mjs"
+    for required in (pkg_json, astro_cfg, sync_script, link_script):
+        if not required.is_file():
+            errors.append(f"{required.relative_to(root)}: missing site file")
+    if errors:
+        return errors
     try:
-        config = tomllib.loads(book_toml.read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError as error:
-        return [f"{book_toml}: invalid TOML: {error}"]
-    book = config.get("book", {})
-    if book.get("src") != "docs":
-        errors.append(f"{book_toml}: book.src must be 'docs', got {book.get('src')!r}")
-    build = config.get("build", {})
-    if build.get("build-dir") != "target/book":
-        errors.append(
-            f"{book_toml}: build.build-dir must be 'target/book', got {build.get('build-dir')!r}"
-        )
-    if build.get("create-missing") is not False:
-        errors.append(f"{book_toml}: build.create-missing must be false")
+        pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        return [f"{pkg_json.relative_to(root)}: invalid JSON: {error}"]
+    scripts = pkg.get("scripts", {})
+    for script_name in ("sync", "build", "check:links"):
+        if script_name not in scripts:
+            errors.append(f"site/package.json: missing npm script {script_name!r}")
+    cfg_text = astro_cfg.read_text(encoding="utf-8")
+    if "base: '/ayaml'" not in cfg_text and 'base: "/ayaml"' not in cfg_text:
+        errors.append("site/astro.config.mjs: must configure base: '/ayaml'")
+    if "https://asamarts.github.io" not in cfg_text:
+        errors.append("site/astro.config.mjs: must configure site: 'https://asamarts.github.io'")
     return errors
 
 
@@ -232,7 +237,7 @@ def check_summary_and_doctests(root: Path, docs_dir: Path) -> list[str]:
 
 def problems(root: Path) -> list[str]:
     docs_dir = root / "docs"
-    errors = check_book_toml(root)
+    errors = check_site_config(root)
     if not docs_dir.is_dir():
         return errors + ["docs/: missing directory"]
     files = [
@@ -259,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"FAIL: {problem}", file=sys.stderr)
         return 1
     doc_count = len(list((root / "docs").rglob("*.md")))
-    print(f"OK: book.toml, SUMMARY.md, book_doctests, and links verified across {doc_count} book files")
+    print(f"OK: site config, SUMMARY.md, book_doctests, and links verified across {doc_count} docs files")
     return 0
 
 

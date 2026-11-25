@@ -23,8 +23,20 @@ pub mod book_doctests {
     #[doc = include_str!("../../../docs/cookbook.md")]
     pub struct Cookbook;
 
+    #[doc = include_str!("../../../docs/editing.md")]
+    pub struct Editing;
+
     #[doc = include_str!("../../../docs/migration.md")]
     pub struct Migration;
+
+    #[doc = include_str!("../../../docs/migrating-from/serde-yaml.md")]
+    pub struct MigratingSerdeYaml;
+
+    #[doc = include_str!("../../../docs/migrating-from/serde-yml-and-forks.md")]
+    pub struct MigratingSerdeYmlAndForks;
+
+    #[doc = include_str!("../../../docs/migrating-from/yaml-rust2-and-saphyr.md")]
+    pub struct MigratingYamlRust2AndSaphyr;
 
     #[doc = include_str!("../../../docs/limits-sizing.md")]
     pub struct LimitsSizing;
@@ -37,6 +49,9 @@ pub mod book_doctests {
         doc = include_str!("../../../docs/compatibility.md")
     )]
     pub struct Compatibility;
+
+    #[doc = include_str!("../../../docs/api-reference.md")]
+    pub struct ApiReference;
 
     #[doc = include_str!("../../../docs/error-codes.md")]
     pub struct ErrorCodes;
@@ -58,6 +73,9 @@ pub mod book_doctests {
 
     #[doc = include_str!("../../../docs/benchmarks.md")]
     pub struct Benchmarks;
+
+    #[doc = include_str!("../../../docs/tools.md")]
+    pub struct Tools;
 
     #[doc = include_str!("../../../docs/decisions.md")]
     pub struct Decisions;

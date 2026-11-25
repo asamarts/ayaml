@@ -33,7 +33,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `Value::apply_merge_keys_with_limits` enforcing `max_depth` and `max_collection_entries` on
   post-parse merge-key expansion.
 - Documentation guides for YAML 1.1 migration (`docs/migration.md`), recipes (`docs/cookbook.md`),
-  and resource-limit sizing (`docs/limits-sizing.md`).
+  resource-limit sizing (`docs/limits-sizing.md`), surgical editing (`docs/editing.md`),
+  developer tooling (`docs/tools.md`), API reference and caveats (`docs/api-reference.md`), and
+  three end-to-end tested library migration guides (`docs/migrating-from/`).
+- Refreshed Astro + Starlight documentation site (`site/`) for GitHub Pages with a modern landing
+  page, Pagefind search, `llms.txt` / `llms-full.txt`, and an interactive `/benchmarks/` showcase
+  driven by pinned, SHA-256-verified JSONL benchmark artifacts.
 - Pre-1.0 additive trait and `const fn` polish: `DerefMut` on `Spanned<T>`, `Hash` on `Chomping`,
   `Frontmatter`, `ParsedFrontmatter`, `ayaml_edit::TextEdit`, and `ayaml_edit::EditErrorKind`,
   and `PartialEq`/`Eq` + `const fn` constructors on `ayaml_edit::EditOptions`.
