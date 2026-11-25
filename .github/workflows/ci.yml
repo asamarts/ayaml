@@ -170,8 +170,8 @@ jobs:
         with:
           persist-credentials: false
       - name: markdownlint
-        run: npx --yes markdownlint-cli2@0.23.3 README.md CHANGELOG.md CONTRIBUTING.md AGENTS.md RELEASING.md SECURITY.md fuzz/README.md tools/leak-scan/README.md tests/fixtures/compat/README.md tests/real-world/README.md "docs/**/*.md"
-      - name: Check documentation links and book coverage
+        run: npx --yes markdownlint-cli2@0.23.3 README.md CHANGELOG.md CONTRIBUTING.md AGENTS.md RELEASING.md SECURITY.md crates/ayaml-edit/README.md fuzz/README.md tools/leak-scan/README.md tests/fixtures/compat/README.md tests/real-world/README.md "docs/**/*.md"
+      - name: Check documentation links and coverage
         run: python3 tools/check_docs.py
 
   package:

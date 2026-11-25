@@ -27,7 +27,7 @@
   --sl-color-text-invert: var(--paper);
   --sl-color-bg: var(--paper);
   --sl-color-bg-nav: var(--paper);
-  --sl-color-bg-sidebar: var(--paper);
+  --sl-color-bg-sidebar: var(--surface);
   --sl-color-bg-inline-code: var(--wash);
   --sl-color-hairline-light: var(--rule);
   --sl-color-hairline: var(--rule);
@@ -52,7 +52,6 @@
 }
 
 .sl-markdown-content table {
-  width: 100%;
   border-collapse: collapse;
   font-size: 0.92rem;
 }
@@ -74,6 +73,18 @@
   font-weight: 600;
 }
 
+/* Give Pagefind modal inputs and results distinct elevation over the dialog surface */
+#starlight__search .pagefind-ui__search-input,
+#starlight__search .pagefind-ui__result {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+}
+
+/* Hide Starlight's built-in mobile drawer theme select because our header always renders ThemeToggle */
+starlight-theme-select {
+  display: none;
+}
+
 /* Header override integration */
 header.header {
   padding: 0 !important;
@@ -85,4 +96,5 @@ header.header .site-header {
   position: static;
   border-bottom: 0;
   background: transparent;
+  backdrop-filter: none;
 }

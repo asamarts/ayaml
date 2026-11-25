@@ -1070,7 +1070,7 @@ pins every error path in the crate that can interpolate document text against re
 ## D102 — Documentation book, reference pages, and workspace book doctests
 
 **Date:** 2026-11-21
-**Status:** Accepted
+**Status:** Accepted (mdBook tooling superseded by D106; `docs/SUMMARY.md` and `book_doctests` retained)
 
 **Decision.** Publish the existing `docs/` pages and new guide/reference pages (`index.md`,
 `getting-started.md`, `security.md`, `stability.md`) as an mdBook (`book.toml` + `docs/SUMMARY.md`)
@@ -1162,7 +1162,7 @@ all non-comparison leak-gate classes remain enforced on every push and pull requ
 ## D106 — Astro + Starlight documentation site backed by `docs/` single source of truth
 
 **Date:** 2026-11-25
-**Status:** Accepted (supersedes mdBook tooling in D72 while retaining `docs/SUMMARY.md` and `book_doctests`)
+**Status:** Accepted (supersedes mdBook tooling in D102 while retaining `docs/SUMMARY.md` and `book_doctests`)
 
 **Decision.** Build and deploy `https://asamarts.github.io/ayaml/` from `site/` using Astro +
 Starlight (`base: '/ayaml'`) with a bespoke landing page (`/`), an interactive pinned-JSONL

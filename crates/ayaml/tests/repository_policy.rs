@@ -439,13 +439,35 @@ fn every_place_that_repeats_the_version_agrees_with_the_workspace() {
     assert_eq!(
         dependency_versions(&editing),
         [version],
-        "docs/editing.md's install line"
+        "docs/editing.md's ayaml install line"
+    );
+    assert_eq!(
+        crate_dependency_versions(&editing, "ayaml-edit"),
+        [version],
+        "docs/editing.md's ayaml-edit install line"
     );
     let serde_yaml_guide = read(&root, "docs/migrating-from/serde-yaml.md");
     assert_eq!(
         dependency_versions(&serde_yaml_guide),
         [version, version],
         "docs/migrating-from/serde-yaml.md's install lines"
+    );
+    let serde_yml_guide = read(&root, "docs/migrating-from/serde-yml-and-forks.md");
+    assert_eq!(
+        dependency_versions(&serde_yml_guide),
+        [version],
+        "docs/migrating-from/serde-yml-and-forks.md's install line"
+    );
+    let yaml_rust2_guide = read(&root, "docs/migrating-from/yaml-rust2-and-saphyr.md");
+    assert_eq!(
+        dependency_versions(&yaml_rust2_guide),
+        [version],
+        "docs/migrating-from/yaml-rust2-and-saphyr.md's ayaml install line"
+    );
+    assert_eq!(
+        crate_dependency_versions(&yaml_rust2_guide, "ayaml-edit"),
+        [version],
+        "docs/migrating-from/yaml-rust2-and-saphyr.md's ayaml-edit install line"
     );
     assert!(
         guide.contains(&format!(
@@ -513,11 +535,12 @@ fn stated_releases(text: &str) -> Vec<&str> {
         .collect()
 }
 
-/// The version of each line of a text that asks for this crate as a dependency, in either
-/// form: `ayaml = "1.2.3"`, or `ayaml = { version = "1.2.3", .. }`.
-fn dependency_versions(text: &str) -> Vec<&str> {
+/// The version of each line of a text that asks for `crate_name` as a dependency, in either
+/// form: `<crate> = "1.2.3"`, or `<crate> = { version = "1.2.3", .. }`.
+fn crate_dependency_versions<'a>(text: &'a str, crate_name: &str) -> Vec<&'a str> {
+    let prefix = format!("{crate_name} = ");
     text.lines()
-        .filter_map(|line| line.trim_start().strip_prefix("ayaml = "))
+        .filter_map(|line| line.trim_start().strip_prefix(&prefix))
         .map(|rest| {
             let rest = rest
                 .split_once("version = ")
@@ -527,6 +550,12 @@ fn dependency_versions(text: &str) -> Vec<&str> {
                 .unwrap_or(rest)
         })
         .collect()
+}
+
+/// The version of each line of a text that asks for `ayaml` as a dependency, in either
+/// form: `ayaml = "1.2.3"`, or `ayaml = { version = "1.2.3", .. }`.
+fn dependency_versions(text: &str) -> Vec<&str> {
+    crate_dependency_versions(text, "ayaml")
 }
 
 /// The two helpers above find a version wherever a document can state one, so that a second,
@@ -816,8 +845,8 @@ fn ci_compares_the_public_api_with_the_last_release() {
     );
 }
 
-/// The mdBook configuration, summary, security reference, stability reference, error-code
-/// reference, workspace book doctests, and docs/CI workflows stay wired together.
+/// The Astro + Starlight site configuration, summary, security reference, stability reference,
+/// error-code reference, workspace documentation doctests, and docs/CI workflows stay wired together.
 #[test]
 fn docs_book_and_reference_pages_are_complete_and_doctested_in_ci() {
     fn markdown_files(dir: &Path, found: &mut Vec<PathBuf>) {

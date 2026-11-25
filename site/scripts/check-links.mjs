@@ -1,15 +1,17 @@
 #!/usr/bin/env node
-// Verifies every internal href and #fragment across site/dist/**/*.html
-// respecting Astro's `base: '/ayaml'` prefix for GitHub Pages deployment.
+// Verifies every internal href/src, #fragment, trailing slash, GitHub repo link,
+// Pagefind index, sitemap, robots.txt, 404.html, and llms*.txt bundle across site/dist/.
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SITE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const REPO_ROOT = resolve(SITE_ROOT, '..');
 const DIST = join(SITE_ROOT, 'dist');
 const SITE_ORIGIN = 'https://asamarts.github.io';
 const BASE_PREFIX = '/ayaml';
+const GITHUB_REPO_PREFIX = 'https://github.com/asamarts/ayaml/';
 
 function* walkHtml(dir) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -33,25 +35,28 @@ function stripBase(pathname) {
 
 function resolveDistFile(pathname) {
   const sub = stripBase(pathname);
-  if (sub === null) return null;
+  if (sub === null) return { file: null, missingSlash: false };
   if (sub === '/') {
     const idx = join(DIST, 'index.html');
-    return existsSync(idx) ? idx : null;
+    return { file: existsSync(idx) ? idx : null, missingSlash: pathname === BASE_PREFIX };
   }
   const rel = sub.replace(/^\//, '');
   const direct = join(DIST, rel);
   if (sub.endsWith('/')) {
     const idx = join(direct, 'index.html');
-    if (existsSync(idx)) return idx;
+    if (existsSync(idx)) return { file: idx, missingSlash: false };
     const html = `${direct.replace(/\/$/, '')}.html`;
-    return existsSync(html) ? html : null;
+    return { file: existsSync(html) ? html : null, missingSlash: false };
   }
-  if (existsSync(direct) && statSync(direct).isFile()) return direct;
+  if (existsSync(direct) && statSync(direct).isFile()) {
+    return { file: direct, missingSlash: false };
+  }
+  // HTML route without trailing slash violates Astro's `trailingSlash: 'always'`.
   const idx = join(direct, 'index.html');
-  if (existsSync(idx)) return idx;
+  if (existsSync(idx)) return { file: idx, missingSlash: true };
   const html = `${direct}.html`;
-  if (existsSync(html)) return html;
-  return null;
+  if (existsSync(html)) return { file: html, missingSlash: true };
+  return { file: null, missingSlash: false };
 }
 
 const idCache = new Map();
@@ -59,12 +64,17 @@ function idsOf(htmlPath) {
   if (!idCache.has(htmlPath)) {
     const html = readFileSync(htmlPath, 'utf8');
     const ids = new Set();
-    for (const m of html.matchAll(/\s(?:id|name)=["']([^"']+)["']/g)) {
+    for (const m of html.matchAll(/\sid=["']([^"']+)["']/gi)) {
       ids.add(m[1].replace(/&amp;/g, '&'));
     }
     idCache.set(htmlPath, ids);
   }
   return idCache.get(htmlPath);
+}
+
+function addError(map, key, source) {
+  if (!map.has(key)) map.set(key, new Set());
+  map.get(key).add(source);
 }
 
 function main() {
@@ -75,34 +85,68 @@ function main() {
 
   const broken = new Map();
   const badFragments = new Map();
+  const missingSlash = new Map();
+  const badRepoLinks = new Map();
+  const extraErrors = [];
+
   let totalPages = 0;
   let totalLinks = 0;
   let totalFragments = 0;
+  let totalRepoLinks = 0;
 
   for (const htmlPath of walkHtml(DIST)) {
     totalPages++;
     const html = readFileSync(htmlPath, 'utf8');
     const sourceUrl = htmlPathToUrl(htmlPath);
+    const is404 = htmlPath === join(DIST, '404.html');
 
-    for (const match of html.matchAll(/href=["']([^"']+)["']/gi)) {
-      const raw = match[1].replace(/&amp;/g, '&').trim();
-      if (!raw || raw.startsWith('mailto:') || raw.startsWith('javascript:') || raw.startsWith('data:')) {
+    for (const match of html.matchAll(/\s(href|src)=["']([^"']+)["']/gi)) {
+      const attr = match[1].toLowerCase();
+      const raw = match[2].replace(/&amp;/g, '&').trim();
+      if (
+        !raw ||
+        raw.startsWith('mailto:') ||
+        raw.startsWith('javascript:') ||
+        raw.startsWith('data:') ||
+        raw.startsWith('//')
+      ) {
         continue;
       }
-      if (raw.startsWith('//')) continue;
+
+      if (is404 && !raw.startsWith('#') && !raw.startsWith('/') && !/^https?:\/\//.test(raw)) {
+        extraErrors.push(`404.html uses relative ${attr}="${raw}" (must be root-relative /ayaml/... for nested 404 paths)`);
+      }
 
       let urlPath;
       let fragment = '';
       if (raw.startsWith('#')) {
+        if (attr !== 'href') continue;
         urlPath = sourceUrl;
         fragment = raw.slice(1);
       } else if (raw.startsWith('http://') || raw.startsWith('https://')) {
-        if (!raw.startsWith(`${SITE_ORIGIN}${BASE_PREFIX}/`) && raw !== `${SITE_ORIGIN}${BASE_PREFIX}`) {
+        if (raw.startsWith(GITHUB_REPO_PREFIX)) {
+          const parsed = new URL(raw);
+          const repoMatch = /^\/asamarts\/ayaml\/(edit|blob|tree)\/main\/(.+)$/.exec(parsed.pathname);
+          if (repoMatch) {
+            totalRepoLinks++;
+            const repoRel = decodeURIComponent(repoMatch[2]).replace(/\/$/, '');
+            if (!existsSync(join(REPO_ROOT, repoRel))) {
+              addError(badRepoLinks, raw, sourceUrl);
+            }
+          }
           continue;
         }
-        const parsed = new URL(raw);
-        urlPath = parsed.pathname;
-        fragment = parsed.hash.replace(/^#/, '');
+        if (raw.startsWith(`${SITE_ORIGIN}/`) || raw === SITE_ORIGIN) {
+          const parsed = new URL(raw);
+          if (parsed.pathname !== BASE_PREFIX && !parsed.pathname.startsWith(`${BASE_PREFIX}/`)) {
+            addError(broken, raw, sourceUrl);
+            continue;
+          }
+          urlPath = parsed.pathname;
+          fragment = parsed.hash.replace(/^#/, '');
+        } else {
+          continue;
+        }
       } else {
         const parsed = new URL(raw, `${SITE_ORIGIN}${sourceUrl}`);
         urlPath = parsed.pathname;
@@ -110,14 +154,16 @@ function main() {
       }
 
       totalLinks++;
-      const targetFile = resolveDistFile(urlPath);
-      if (!targetFile) {
-        if (!broken.has(urlPath)) broken.set(urlPath, new Set());
-        broken.get(urlPath).add(sourceUrl);
+      const resolved = resolveDistFile(urlPath);
+      if (!resolved.file) {
+        addError(broken, `${attr}:${urlPath}`, sourceUrl);
         continue;
       }
+      if (attr === 'href' && resolved.missingSlash) {
+        addError(missingSlash, urlPath, sourceUrl);
+      }
 
-      if (fragment && targetFile.endsWith('.html')) {
+      if (attr === 'href' && fragment && resolved.file.endsWith('.html')) {
         totalFragments++;
         let decoded = fragment;
         try {
@@ -125,42 +171,69 @@ function main() {
         } catch {
           decoded = fragment;
         }
-        if (decoded !== 'top' && decoded !== '_top' && !idsOf(targetFile).has(decoded)) {
-          const key = `${urlPath}#${decoded}`;
-          if (!badFragments.has(key)) badFragments.set(key, new Set());
-          badFragments.get(key).add(sourceUrl);
+        if (decoded !== 'top' && decoded !== '_top' && !idsOf(resolved.file).has(decoded)) {
+          addError(badFragments, `${urlPath}#${decoded}`, sourceUrl);
         }
       }
     }
   }
 
-  let failed = false;
-  if (broken.size > 0) {
-    failed = true;
-    console.error(`FAIL: ${broken.size} broken internal link(s):`);
-    for (const [href, sources] of [...broken.entries()].sort()) {
-      console.error(`  - ${href} (from ${[...sources].slice(0, 4).join(', ')})`);
+  for (const extra of ['llms.txt', 'llms-full.txt', 'robots.txt', '404.html', 'sitemap-index.xml']) {
+    if (!existsSync(join(DIST, extra))) {
+      extraErrors.push(`missing expected build output dist/${extra}`);
     }
   }
-  if (badFragments.size > 0) {
-    failed = true;
-    console.error(`FAIL: ${badFragments.size} broken fragment anchor(s):`);
-    for (const [key, sources] of [...badFragments.entries()].sort()) {
-      console.error(`  - ${key} (from ${[...sources].slice(0, 4).join(', ')})`);
+  if (!existsSync(join(DIST, 'pagefind', 'pagefind-ui.js'))) {
+    extraErrors.push('missing Pagefind index under dist/pagefind/');
+  }
+
+  // Verify llms.txt & llms-full.txt links and ensure rustdoc boilerplate was stripped.
+  for (const bundle of ['llms.txt', 'llms-full.txt']) {
+    const p = join(DIST, bundle);
+    if (!existsSync(p)) continue;
+    const text = readFileSync(p, 'utf8');
+    for (const m of text.matchAll(/https:\/\/asamarts\.github\.io\/ayaml\/[^\s)>'"`]+/g)) {
+      const cleanedUrl = m[0].replace(/[.,;:]+$/, '');
+      const parsed = new URL(cleanedUrl);
+      const resolved = resolveDistFile(parsed.pathname);
+      if (!resolved.file) {
+        addError(broken, `${bundle}:${parsed.pathname}`, bundle);
+      }
+    }
+    if (bundle === 'llms-full.txt') {
+      if (/\n# fn main\(\)/.test(text) || /\n# Ok\(\(\)\)/.test(text)) {
+        extraErrors.push('dist/llms-full.txt contains unstripped rustdoc hidden `# ` lines');
+      }
+      const relMd = text.match(/\]\((?!https?:\/\/|#|\/)[^)#]+\.md(?:#[^)]*)?\)/);
+      if (relMd) {
+        extraErrors.push(`dist/llms-full.txt contains unrewritten relative .md link: ${relMd[0]}`);
+      }
     }
   }
 
-  // Also verify llms.txt and llms-full.txt were emitted.
-  for (const extra of ['llms.txt', 'llms-full.txt']) {
-    if (!existsSync(join(DIST, extra))) {
+  let failed = false;
+  for (const [label, map] of [
+    ['broken internal link/asset(s)', broken],
+    ['broken fragment anchor(s)', badFragments],
+    ['HTML route link(s) missing trailing slash', missingSlash],
+    ['broken GitHub repository link(s)', badRepoLinks],
+  ]) {
+    if (map.size > 0) {
       failed = true;
-      console.error(`FAIL: missing expected build output dist/${extra}`);
+      console.error(`FAIL: ${map.size} ${label}:`);
+      for (const [href, sources] of [...map.entries()].sort()) {
+        console.error(`  - ${href} (from ${[...sources].slice(0, 4).join(', ')})`);
+      }
     }
+  }
+  for (const err of extraErrors) {
+    failed = true;
+    console.error(`FAIL: ${err}`);
   }
 
   if (failed) process.exit(1);
   console.log(
-    `OK: verified ${totalLinks} internal links and ${totalFragments} fragments across ${totalPages} pages (+ llms.txt & llms-full.txt)`,
+    `OK: verified ${totalLinks} internal links/assets, ${totalFragments} fragments, and ${totalRepoLinks} GitHub repo links across ${totalPages} pages (+ llms*.txt, sitemap, robots.txt, 404.html, pagefind)`,
   );
 }
 

@@ -14,8 +14,9 @@ interface Props {
   title: string;
   description: string;
   canonical: string;
+  indexInSearch?: boolean;
 }
-const { title, description, canonical } = Astro.props;
+const { title, description, canonical, indexInSearch = true } = Astro.props;
 ---
 
 <!doctype html>
@@ -33,8 +34,7 @@ const { title, description, canonical } = Astro.props;
     <meta property="og:url" content={canonical} />
     <meta property="og:type" content="website" />
     <link rel="icon" type="image/svg+xml" href={`${BASE}/favicon.svg`} />
-    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#101216" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#ffffff" />
     <slot name="head" />
   </head>
   <body>
@@ -42,10 +42,11 @@ const { title, description, canonical } = Astro.props;
     <SiteNav>
       <ThemeToggle slot="end" />
     </SiteNav>
-    <main id="main">
+    <main id="main" data-pagefind-body={indexInSearch ? '' : undefined}>
       <slot />
     </main>
     <SiteFooter />
+    <div id="copy-status" class="sr-only" role="status" aria-live="polite"></div>
     <script is:inline>
       (() => {
         // Accessible tabs pattern for interactive code and benchmark views.
@@ -80,20 +81,29 @@ const { title, description, canonical } = Astro.props;
           });
         }
 
-        // One-click copy buttons.
+        // One-click copy buttons with safe repeated-click handling and polite live announcement.
+        const live = document.getElementById('copy-status');
+        const timers = new WeakMap();
         for (const btn of document.querySelectorAll('[data-copy]')) {
+          btn.dataset.origLabel ??= btn.textContent || 'Copy';
           btn.addEventListener('click', async () => {
             const text = btn.getAttribute('data-copy') || '';
+            const prevTimer = timers.get(btn);
+            if (prevTimer) clearTimeout(prevTimer);
             try {
               await navigator.clipboard.writeText(text);
-              const prev = btn.textContent;
               btn.textContent = 'Copied';
-              setTimeout(() => {
-                btn.textContent = prev;
-              }, 1600);
+              if (live) live.textContent = 'Copied to clipboard';
             } catch {
-              // ignore clipboard errors
+              btn.textContent = 'Copy failed';
+              if (live) live.textContent = 'Could not copy to clipboard';
             }
+            timers.set(
+              btn,
+              setTimeout(() => {
+                btn.textContent = btn.dataset.origLabel || 'Copy';
+              }, 1600),
+            );
           });
         }
       })();

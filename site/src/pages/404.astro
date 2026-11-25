@@ -1,0 +1,41 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { BASE, SITE_URL } from '../lib/site';
+
+const TITLE = 'Page not found | ayaml';
+const DESCRIPTION = 'That ayaml documentation page could not be found.';
+---
+
+<BaseLayout
+  title={TITLE}
+  description={DESCRIPTION}
+  canonical={`${SITE_URL}/404.html`}
+  indexInSearch={false}
+>
+  <section class="not-found wrap">
+    <span class="sec-kicker">404 &middot; Page not found</span>
+    <h1>That page does not exist</h1>
+    <p class="sec-lede">
+      The link may have moved or been mistyped. Explore the documentation index, interactive
+      benchmarks, or migration guides below.
+    </p>
+    <div class="nf-actions">
+      <a class="btn" href={`${BASE}/docs/`}>Go to documentation</a>
+      <a class="btn btn-ghost" href={`${BASE}/benchmarks/`}>View benchmarks</a>
+      <a class="btn btn-ghost" href={`${BASE}/`}>Return home</a>
+    </div>
+  </section>
+</BaseLayout>
+
+<style>
+  .not-found {
+    padding-block: clamp(56px, 9vw, 112px);
+    max-width: 44rem;
+  }
+  .nf-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: var(--s5);
+  }
+</style>

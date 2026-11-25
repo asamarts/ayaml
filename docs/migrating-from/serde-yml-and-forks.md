@@ -1,30 +1,46 @@
 # Migrating from `serde_yml`, `serde_yaml_ng`, and `yaml-serde`
 
-`serde_yml`, `serde_yaml_ng`, and `yaml-serde` are maintained forks of
-`serde_yaml` backed by `unsafe` C `libyaml` (or C-transpiled `unsafe-libyaml`)
-code. Moving to `ayaml` removes `unsafe` FFI from your dependency graph, cuts
-heap allocations by ~3.8x and peak heap by ~1.67x vs `yaml-serde`, doubles
-parsing throughput, and adds zero-copy borrowed decoding, `Spanned<T>`, and
-`DocumentDeserializer` for Serde middleware.
+`serde_yml` (now deprecated/unmaintained upstream, RUSTSEC-2025-0068),
+`serde_yaml_ng`, and `yaml-serde` are forks of `serde_yaml` backed by `unsafe`
+C-transpiled `libyaml` code (`unsafe-libyaml` / `libyaml-rs`). Moving to `ayaml`
+removes `unsafe` parser code from your dependency graph (`#![forbid(unsafe_code)]`),
+delivers ~2.01x faster `Value` DOM parsing with ~3.8x fewer heap allocations and
+~1.67x lower peak heap vs `yaml-serde` (geometric mean across 22 shared pinned
+fixtures — see the [Benchmarks showcase](https://asamarts.github.io/ayaml/benchmarks/)
+and [Benchmark methodology](../benchmarks.md)), and adds zero-copy borrowed
+decoding, `Spanned<T>`, and `DocumentDeserializer` for Serde middleware.
+
+## Updating `Cargo.toml`
+
+Replace the fork crate with `ayaml`:
+
+```toml
+[dependencies]
+ayaml = "0.2.3"
+serde = { version = "1", features = ["derive"] }
+```
 
 ## Quick API mapping
 
 | `serde_yml` / `serde_yaml_ng` / `yaml-serde` | `ayaml` | Notes |
 | --- | --- | --- |
 | `from_str`, `from_slice`, `from_reader` | `ayaml::from_str`, `from_slice`, `from_reader` | Add `_with(..., &ParseOptions)` for custom `Limits` or merge keys. |
-| `from_str` into `&'a str` | `ayaml::from_str_borrowed` / `from_slice_borrowed` | True zero-copy `&str` borrowing for unescaped scalars. |
+| Owned `String` fields (their `from_str` requires `DeserializeOwned`) | `ayaml::from_str_borrowed`, `from_slice_borrowed`, `from_str_with`, `from_slice_with` | True zero-copy `&'de str` borrowing for unescaped single-line scalars; use `Cow<'de, str>` or `String` when escapes or multiline folding may occur. |
 | `to_string`, `to_writer` | `ayaml::to_string`, `to_writer` | Add `_with(..., &EmitOptions)` for indentation, flow layout, or output byte caps. |
-| `Deserializer::from_str` passed to `serde_path_to_error` / `serde_ignored` | `ayaml::DocumentDeserializer::from_str` | Implements `serde::Deserializer<'de>` directly for a single document while keeping `ayaml` spans and limits. |
-| `Value`, `Mapping`, `Number` | `ayaml::Value`, `Mapping`, `Number` | Insertion-ordered mapping with deterministic `PartialEq` and exact `i64`/`u64`/`f64` numbers. |
-| `Value::apply_merge` | `ParseOptions::new().with_merge_keys(true)` | Expands plain `<<:` merges during streaming/typed decode; `Value::apply_merge_keys` is also available. |
+| `Deserializer::from_str` passed to `serde_path_to_error` / `serde_ignored` | `ayaml::DocumentDeserializer::from_str` / `from_str_with` / `from_str_compat*` | Fallible (`Result`); implements `serde::Deserializer<'de>` by both value and `&mut` for a single document while keeping `ayaml` spans and limits. |
+| `Value`, `Mapping`, `Number` | `ayaml::Value`, `Mapping`, `Number` | Insertion-ordered mapping with deterministic `PartialEq` and exact `i64`/`u64`/`i128`/`u128` integers plus IEEE-754 `f64` floats. |
+| `Value::apply_merge` | `ParseOptions::new().with_merge_keys(true)` | Expands plain `<<:` merges during streaming/typed decode while keeping `"<<"` literal; `Value::apply_merge_keys` and `apply_merge_keys_with_limits` are also available. |
 | `Error::location()` | `Error::span()`, `Error::location()`, `Error::code()`, `Error::masked()` | Structured machine-readable `ErrorCode` plus leak-free `MaskedError`. |
 
 ## 1. Zero-copy borrowed decoding and `Spanned<T>`
 
-`libyaml`-backed Serde crates materialize intermediate buffers for every scalar
-and lose source offsets once deserialized. `ayaml` supports borrowing plain
+`libyaml`-backed Serde crates materialize owned buffers for every scalar and
+lose source offsets once deserialized. `ayaml` supports borrowing unescaped
 scalars directly from the input buffer and attaching exact byte spans to fields
-with `Spanned<T>`:
+with `Spanned<T>`. Note that `Spanned<T>` requires a direct source-backed
+`ayaml` deserializer: it is refused by `from_value`, foreign deserializers, and
+buffered Serde attributes (`#[serde(flatten)]`, `#[serde(untagged)]`,
+`#[serde(tag = "...")]`).
 
 ```rust
 use ayaml::{ColumnEncoding, LineIndex, Location, Spanned, from_str_borrowed};
@@ -61,8 +77,10 @@ assert_eq!(Location::from(pos).line(), 1);
 
 In `serde_yml` and `yaml-serde`, callers often pass a `Deserializer` into
 wrapper crates such as `serde_path_to_error` or `serde_ignored`. In `ayaml`,
-use `DocumentDeserializer` for single-document middleware because
-`ayaml::Deserializer` is a multi-document stream cursor:
+use `DocumentDeserializer` (which implements `serde::Deserializer<'de>` by both
+value and `&mut`, and also offers `from_str_compat` / `from_str_compat_with`
+under `libyaml-compat`) because `ayaml::Deserializer` is a multi-document
+stream cursor:
 
 ```rust
 use ayaml::{DocumentDeserializer, ParseOptions};

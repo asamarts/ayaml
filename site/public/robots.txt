@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://asamarts.github.io/ayaml/sitemap-index.xml

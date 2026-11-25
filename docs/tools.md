@@ -9,11 +9,11 @@ verification, and mutation testing.
 Run the same checks that gate pull requests locally before pushing:
 
 ```sh
-tools/ci-local.sh --list       # list all mirrored CI jobs
-tools/ci-local.sh quality      # fmt, clippy, panic-profile clippy, workspace tests, docs
-tools/ci-local.sh suite        # pinned YAML Test Suite (default + compat profiles)
-tools/ci-local.sh allocation   # JSONL baseline + legacy corpus allocation gates
-tools/ci-local.sh docs-lint    # markdownlint, link/coverage checks, site build, book doctests
+tools/ci-local.sh --list         # list all mirrored CI jobs
+tools/ci-local.sh quality-stable # fmt, clippy, panic-profile clippy, workspace tests, docs (also quality-msrv)
+tools/ci-local.sh suite          # pinned YAML Test Suite (default + compat profiles)
+tools/ci-local.sh harness        # conformance fixtures, JSONL baseline + legacy corpus allocation gates, bench/fuzz compile
+tools/ci-local.sh docs-lint      # markdownlint, link/coverage checks, site build, documentation doctests
 ```
 
 ## Unified benchmark & measurement CLI (`cargo xtask`)
@@ -25,7 +25,7 @@ Callgrind instruction/cycle diffs, and 10x linear scaling checks:
 ```sh
 cargo xtask fixtures --verify                     # verify pinned SHA-256 fixture digests
 cargo xtask speed --out-dir target/xtask          # export Criterion speed.jsonl
-cargo xtask memory --suite baseline               # export counting-allocator memory.jsonl
+cargo xtask memory --suite full --out-dir target/xtask # export counting-allocator memory.jsonl
 cargo xtask det --base-rev HEAD~1                 # steady-state Callgrind Ir + EstCycles diff
 cargo xtask scale --out-dir target/xtask          # verify 10x O(n) time & memory scaling
 cargo xtask compare --baseline DIR_A --current DIR_B
@@ -78,8 +78,11 @@ timeout -k 5 120 nice -n 10 cargo +nightly fuzz run spanned -- -max_total_time=6
 ( ulimit -v 8388608; timeout -k 5 300 nice -n 10 cargo test -p ayaml --all-features --locked )
 ```
 
-- **Miri:** Scheduled CI checks `crates/ayaml` under Miri with strict provenance
-  and isolation.
+- **Miri:** Daily bounded scheduled CI (`.github/workflows/miri.yml`) runs
+  `cargo +nightly miri test` over core `ayaml` library unit tests (with
+  `-Zmiri-disable-isolation`) and the counting global allocator tests in
+  `fuzz/src/bin/memcount.rs` (under default isolation), bounded by
+  `ulimit -v 8388608` and `timeout`.
 - **Kani bounded model checking:** Pure arithmetic and bounds invariants are
   verified via `python3 tools/run_kani.py --package ayaml --all-features`
   (which enforces per-harness virtual-memory, peak-RSS, and timeout bounds).

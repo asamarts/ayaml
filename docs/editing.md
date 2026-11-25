@@ -7,7 +7,8 @@ comments, blank lines, quoting style, and key alignment.
 The companion crate `ayaml-edit` (`#![forbid(unsafe_code)]`) applies verified,
 byte-range edits using `ayaml::SpannedTree`, preserving surrounding comments,
 BOMs, CRLF/LF line endings, and formatting. Every edit re-parses the resulting
-document and compares canonical event streams before returning `Ok(VerifiedEdit)`.
+document and verifies both the expected `Value` tree and the canonical event
+stream before returning `Ok(VerifiedEdit)`.
 
 Full Rustdoc reference: [docs.rs/ayaml-edit](https://docs.rs/ayaml-edit).
 
@@ -21,9 +22,10 @@ ayaml-edit = "0.2.3"
 
 ## Replacing a scalar value
 
-`replace_scalar` locates the target node by `PathSegment`s, quotes strings
-automatically when plain syntax would be ambiguous or flow-unsafe, and verifies
-that no unrelated node changed:
+`replace_scalar` (and `replace_scalar_with` for custom `EditOptions`) locates
+the target node by `PathSegment`s, quotes strings automatically when plain
+syntax would be ambiguous or flow-unsafe, and verifies that no unrelated node
+changed:
 
 ```rust
 use ayaml::{PathSegment, Value};
@@ -38,14 +40,15 @@ assert_eq!(
     verified.output(),
     "# Service settings\nservice:\n  host: localhost # local bind\n  port: 9090\n"
 );
+assert_eq!(verified.edits().len(), 1);
 # Ok(())
 # }
 ```
 
 ## Removing a mapping entry or sequence item
 
-`remove_entry` removes the target entry's exact `entry_span()` while keeping
-neighboring comments and structure intact:
+`remove_entry` (and `remove_entry_with`) removes the target entry's exact
+`entry_span()` while keeping neighboring comments and structure intact:
 
 ```rust
 use ayaml::PathSegment;
@@ -55,7 +58,7 @@ use ayaml_edit::remove_entry;
 let src = "keep: 1\nobsolete: true\nalso_keep: 2\n";
 let verified = remove_entry(src, &[PathSegment::key("obsolete")])?;
 
-assert_eq!(verified.output(), "keep: 1\nalso_keep: 2\n");
+assert_eq!(verified.into_output(), "keep: 1\nalso_keep: 2\n");
 # Ok(())
 # }
 ```
@@ -63,7 +66,8 @@ assert_eq!(verified.output(), "keep: 1\nalso_keep: 2\n");
 ## Applying multiple edits atomically (`apply_batch`)
 
 Use `apply_batch` (or `apply_batch_with` with custom `EditOptions`) to apply
-several non-overlapping `EditOp` operations in one verified pass:
+several non-overlapping `EditOp` operations in one verified pass. Lower-level
+callers can also splice explicit byte ranges via `apply_edits` with `TextEdit`:
 
 ```rust
 use ayaml::{PathSegment, Value};
@@ -87,20 +91,30 @@ assert_eq!(verified.output(), "service:\n  name: api\n  port: 8443\n");
 # }
 ```
 
-## Conservative refusal guarantees
+## Conservative refusal guarantees and error kinds
 
 `ayaml-edit` refuses to guess whenever a byte edit could silently corrupt
-document semantics or delete comments unexpectedly, returning
-`EditErrorKind::Unsupported`:
+document semantics or delete comments unexpectedly, returning an `EditError`
+categorized by `EditErrorKind`:
 
-- Multi-document streams (`---` / multiple documents).
-- Documents containing anchors (`&a`), aliases (`*a`), or explicit tags (`!tag`).
-- `ParseOptions` with `merge_keys` enabled (`with_merge_keys(true)`).
-- Block scalar replacements (`|` / `>`), complex non-scalar replacements, or
-  ambiguous inline entries where removing an entry would strip comments or
-  break compact `- key: val` structure.
-- Overlapping byte spans across batch operations (`EditErrorKind::InvalidEdit`).
+- **`EditErrorKind::Parse`**: source YAML failed to parse under the configured
+  `ParseOptions`.
+- **`EditErrorKind::NotFound`**: target `PathSegment` path does not exist.
+- **`EditErrorKind::InvalidEdit`**: invalid replacement value, empty path, or
+  overlapping / out-of-bounds byte spans across batch `TextEdit` operations.
+- **`EditErrorKind::VerificationFailed`**: the spliced document failed
+  post-edit re-parse or semantic/event verification.
+- **`EditErrorKind::Unsupported`**: document-wide or target-level constructs
+  that cannot be edited conservatively:
+  - Multi-document streams (`---` / multiple documents).
+  - Documents containing anchors (`&a`), aliases (`*a`), explicit tags
+    (`!tag`), or block scalars (`|` / `>`) anywhere in the document.
+  - `ParseOptions` with `merge_keys` enabled (`with_merge_keys(true)`).
+  - Non-scalar targets, unwritten empty scalars (`key:`), multiline
+    plain/quoted scalars, replacement scalars that cannot format on one line,
+    flow entries, removing the document root or the sole entry of a collection,
+    or `#` comments immediately adjoining a scalar without whitespace.
 
-For documents that require structural transformations across anchors, tags, or
-multi-document streams, parse with `ayaml::parse_documents`, transform the
-`Value` tree, and re-emit with `ayaml::to_string_documents_with`.
+For documents that require structural transformations across anchors, tags,
+block scalars, or multi-document streams, parse with `ayaml::parse_documents`,
+transform the `Value` tree, and re-emit with `ayaml::to_string_documents_with`.

@@ -1,4 +1,5 @@
 ---
+import { Code } from 'astro:components';
 import BaseLayout from '../layouts/BaseLayout.astro';
 import { BASE, SITE_URL } from '../lib/site';
 import {
@@ -20,7 +21,7 @@ import {
 } from '../lib/bench';
 
 const TITLE = 'Benchmarks & Performance | ayaml';
-const DESCRIPTION = `Transparent, pinned-JSONL throughput, latency, peak heap, allocation count, and 10x linear scaling benchmarks across ${HEADLINE.scenarioCount} YAML workloads.`;
+const DESCRIPTION = `Transparent, pinned-JSONL throughput, latency, peak heap, allocation count, and 10x linear scaling benchmarks across ${HEADLINE.scenarioCount} timed and ${HEADLINE.memoryScenarioCount} memory YAML workloads.`;
 
 const maxTier2Ratio = Math.max(...TIER2_PEERS.map((r) => r.speedRatio));
 const maxTier1Ratio = Math.max(...TIER1_PEERS.map((r) => r.speedRatio));
@@ -28,20 +29,27 @@ const progressRows = getProgressSinceV023();
 const maxSpeedup = Math.max(...progressRows.map((r) => r.speedup));
 const scalingSteps = getScalingSteps();
 
-// Precompute full 23-scenario matrix columns so users can explore every fixture cleanly.
-const MATRIX_COLS = [
+// Precompute full 23-scenario matrix columns grouped cleanly by Tier 1 (structural/events) vs Tier 2 (DOM/Serde).
+const MATRIX_TIER1_COLS = [
   { id: 'ayaml-events', impl: 'ayaml', op: 'events', label: 'ayaml events', isAyaml: true },
-  { id: 'ayaml-value', impl: 'ayaml', op: 'value', label: 'ayaml value', isAyaml: true },
-  { id: 'ayaml-serde', impl: 'ayaml', op: 'serde-value', label: 'ayaml serde', isAyaml: true },
   { id: 'ryml-arena', impl: 'rapidyaml', op: 'parse-arena', label: 'rapidyaml arena', isAyaml: false },
   { id: 'libyaml-ev', impl: 'libyaml', op: 'events', label: 'libyaml events', isAyaml: false },
+  { id: 'libfyaml-ev', impl: 'libfyaml', op: 'events', label: 'libfyaml events', isAyaml: false },
+] as const;
+
+const MATRIX_TIER2_COLS = [
+  { id: 'ayaml-value', impl: 'ayaml', op: 'value', label: 'ayaml value', isAyaml: true },
+  { id: 'ayaml-serde', impl: 'ayaml', op: 'serde-value', label: 'ayaml serde', isAyaml: true },
   { id: 'fkyaml', impl: 'fkyaml', op: 'parse', label: 'fkYAML', isAyaml: false },
   { id: 'yaml-rust2', impl: 'yaml-rust2', op: 'parse', label: 'yaml-rust2', isAyaml: false },
   { id: 'noyalib', impl: 'noyalib', op: 'value', label: 'noyalib', isAyaml: false },
   { id: 'saphyr', impl: 'saphyr', op: 'parse', label: 'saphyr', isAyaml: false },
+  { id: 'fast-yaml', impl: 'fast-yaml-core', op: 'parse', label: 'fast-yaml-core', isAyaml: false },
   { id: 'yaml-serde', impl: 'yaml-serde', op: 'value', label: 'yaml-serde', isAyaml: false },
   { id: 'serde-saphyr', impl: 'serde-saphyr', op: 'serde-json', label: 'serde-saphyr', isAyaml: false },
 ] as const;
+
+const MATRIX_COLS = [...MATRIX_TIER1_COLS, ...MATRIX_TIER2_COLS];
 
 const scenarioMatrix = ALL_SCENARIOS.map((s) => ({
   ...s,
@@ -64,8 +72,8 @@ cargo xtask fixtures --verify
 # Run Criterion timing suite and export speed.jsonl
 cargo xtask speed --out-dir target/xtask
 
-# Run counting-allocator memory & allocation probe
-cargo xtask memory --suite baseline --out-dir target/xtask
+# Run counting-allocator memory & allocation probe (all 26 fixtures)
+cargo xtask memory --suite full --out-dir target/xtask
 
 # Verify 10x linear time & memory scaling
 cargo xtask scale --out-dir target/xtask
@@ -83,10 +91,12 @@ tools/check_alloc_corpus.sh`;
     <span class="sec-kicker">Pinned benchmark artifacts &middot; {fingerprint.captured_date}</span>
     <h1>Benchmarks &amp; Performance</h1>
     <p class="sec-lede">
-      Every chart and number on this page is rendered at build time directly from pinned,
-      SHA-256-verified JSONL artifacts (<code>{fingerprint.speed_rows}</code> speed rows and
-      <code>{fingerprint.memory_rows}</code> memory rows across <code>{HEADLINE.scenarioCount}</code>
-      reproducible fixtures). Nothing is hand-typed.
+      Every chart, ratio, and table on this page is computed at build time directly from pinned,
+      SHA-256-verified JSONL artifacts (<code>{fingerprint.speed_rows}</code> speed rows across
+      <code>{HEADLINE.scenarioCount}</code> timed fixtures and
+      <code>{fingerprint.memory_rows}</code> memory rows across
+      <code>{HEADLINE.memoryScenarioCount}</code> fixtures, including 1 MiB scaling points).
+      Nothing is hand-typed.
     </p>
     <nav class="jump-nav" aria-label="On this page">
       <a href="#tier2">Tier 2 DOM</a>
@@ -104,7 +114,9 @@ tools/check_alloc_corpus.sh`;
   <section class="wrap summary-kpis">
     <div class="kpi-grid">
       <div class="kpi-card">
-        <div class="kpi-val accent">{HEADLINE.vsYamlRust2.toFixed(2)}x–{HEADLINE.vsSerdeSaphyr.toFixed(2)}x</div>
+        <div class="kpi-val accent">
+          {HEADLINE.vsYamlRust2.toFixed(2)}x–{HEADLINE.vsSerdeSaphyr.toFixed(2)}x
+        </div>
         <div class="kpi-label">Fastest Rust YAML DOM</div>
         <div class="kpi-sub">
           <code>ayaml value</code> leads <code>yaml-rust2</code> ({HEADLINE.vsYamlRust2.toFixed(2)}x),
@@ -113,19 +125,23 @@ tools/check_alloc_corpus.sh`;
         </div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-val">{HEADLINE.vsLibyamlEvents.toFixed(2)}x / {HEADLINE.vsFkyaml.toFixed(2)}x</div>
+        <div class="kpi-val">
+          {HEADLINE.vsLibyamlEvents.toFixed(2)}x / {HEADLINE.vsFkyaml.toFixed(2)}x
+        </div>
         <div class="kpi-label">Ahead of C libyaml &amp; C++ fkYAML</div>
         <div class="kpi-sub">
           Safe Rust beats C <code>libyaml</code> events ({HEADLINE.vsLibyamlEvents.toFixed(2)}x),
-          C <code>libfyaml</code> ({HEADLINE.vsLibfyamlEvents.toFixed(2)}x), and C++ <code>fkYAML</code> ({HEADLINE.vsFkyaml.toFixed(2)}x).
+          C <code>libfyaml</code> ({HEADLINE.vsLibfyamlEvents.toFixed(2)}x), and C++
+          <code>fkYAML</code> ({HEADLINE.vsFkyaml.toFixed(2)}x) on geometric mean.
         </div>
       </div>
       <div class="kpi-card">
         <div class="kpi-val">{HEADLINE.ciEmitMib.toFixed(1)} MiB/s</div>
         <div class="kpi-label">Deterministic YAML emission</div>
         <div class="kpi-sub">
-          <code>{HEADLINE.ciEmitVsYamlSerde.toFixed(1)}x</code> faster than <code>yaml-serde</code> on CI workflows
-          and <code>1.4x–1.8x</code> faster than C++ <code>fkYAML</code>.
+          <code>{HEADLINE.ciEmitVsYamlSerde.toFixed(1)}x</code> faster than <code>yaml-serde</code>
+          on CI workflows and <code>{HEADLINE.emitVsFkyamlMin.toFixed(1)}x–{HEADLINE.emitVsFkyamlMax.toFixed(1)}x</code>
+          faster than C++ <code>fkYAML</code>.
         </div>
       </div>
       <div class="kpi-card">
@@ -133,7 +149,8 @@ tools/check_alloc_corpus.sh`;
         <div class="kpi-label">1 MiB scalar streaming</div>
         <div class="kpi-sub">
           <code>{HEADLINE.largeScalarVsRyml.toFixed(2)}x</code> faster than C++ <code>rapidyaml</code>
-          and <code>5.3x</code> faster than <code>libyaml</code> on large block scalars.
+          and <code>{HEADLINE.largeScalarVsLibyaml.toFixed(1)}x</code> faster than
+          <code>libyaml</code> on large block scalars.
         </div>
       </div>
     </div>
@@ -142,12 +159,12 @@ tools/check_alloc_corpus.sh`;
   <section id="tier2" class="sec">
     <div class="wrap">
       <div class="sec-head">
-        <span class="sec-kicker">Tier 2 &middot; Full Semantic / Typed DOM</span>
+        <span class="sec-kicker">Tier 2 &middot; Full Semantic / Typed DOM &middot; Shorter bar = faster</span>
         <h2>Generic <code>Value</code> &amp; Serde DOM comparison</h2>
         <p class="sec-lede">
-          Geometric mean across all shared fixtures relative to <code>ayaml value</code> (<code>1.00x</code>).
-          A ratio above <code>1.00x</code> means <code>ayaml</code> is faster (or uses less peak memory / fewer allocations);
-          below <code>1.00x</code> means the peer is faster.
+          Geometric mean across shared fixtures relative to <code>ayaml value</code> (<code>1.00x</code>).
+          Shorter bar = faster; a ratio above <code>1.00x</code> means <code>ayaml</code> is faster
+          (or uses less peak memory / fewer allocations), and below <code>1.00x</code> means the peer is faster.
         </p>
       </div>
 
@@ -160,7 +177,7 @@ tools/check_alloc_corpus.sh`;
                   {row.label}
                   {row.isUnsafeArena && <span class="pill pill-blue" style="margin-left: 6px;">C++ arena</span>}
                 </span>
-                <span class="bar-sub">{row.safety} &middot; {row.sharedScenarios} scenarios</span>
+                <span class="bar-sub">{row.safety} &middot; {row.sharedScenarios} shared</span>
               </div>
               <div class="bar-track" aria-hidden="true">
                 <div
@@ -181,7 +198,7 @@ tools/check_alloc_corpus.sh`;
               <th>Implementation</th>
               <th>Operation</th>
               <th>Language / Safety</th>
-              <th class="num">Shared</th>
+              <th class="num">Shared (speed / mem)</th>
               <th class="num">Time vs ayaml</th>
               <th class="num">Peak heap vs ayaml</th>
               <th class="num">Allocs vs ayaml</th>
@@ -194,7 +211,9 @@ tools/check_alloc_corpus.sh`;
                   <td><code>{r.impl}</code></td>
                   <td><code>{r.op}</code></td>
                   <td>{r.safety}</td>
-                  <td class="num">{r.sharedScenarios}</td>
+                  <td class="num">
+                    {r.sharedScenarios} / {r.memSharedScenarios}
+                  </td>
                   <td class="num">{r.speedRatio.toFixed(2)}x</td>
                   <td class="num">{r.peakRatio !== null ? `${r.peakRatio.toFixed(2)}x` : 'n/a'}</td>
                   <td class="num">{r.allocRatio !== null ? `${r.allocRatio.toFixed(2)}x` : 'n/a'}</td>
@@ -210,13 +229,14 @@ tools/check_alloc_corpus.sh`;
   <section id="tier1" class="sec">
     <div class="wrap">
       <div class="sec-head">
-        <span class="sec-kicker">Tier 1 &middot; Zero-Copy &amp; Structural Parsing</span>
+        <span class="sec-kicker">Tier 1 &middot; Zero-Copy &amp; Structural Parsing &middot; Shorter bar = faster</span>
         <h2>Spanned event stream vs C &amp; C++ structural parsers</h2>
         <p class="sec-lede">
-          Geometric mean relative to <code>ayaml events</code> (<code>1.00x</code>).
+          Geometric mean relative to <code>ayaml events</code> (<code>1.00x</code>; shorter bar = faster).
           <code>ayaml</code>'s pull-based spanned event stream beats both C <code>libyaml</code>
-          (<code>{HEADLINE.vsLibyamlEvents.toFixed(2)}x</code> faster with <code>56x</code> fewer allocations)
-          and C <code>libfyaml</code> (<code>{HEADLINE.vsLibfyamlEvents.toFixed(2)}x</code> faster).
+          (<code>{HEADLINE.vsLibyamlEvents.toFixed(2)}x</code> faster with
+          <code>{HEADLINE.vsLibyamlEventsAllocs.toFixed(0)}x</code> fewer allocations) and C
+          <code>libfyaml</code> (<code>{HEADLINE.vsLibfyamlEvents.toFixed(2)}x</code> faster).
         </p>
       </div>
 
@@ -226,7 +246,7 @@ tools/check_alloc_corpus.sh`;
             <div class:list={['bar-row', { 'is-ayaml': row.isAyaml, 'is-arena': row.isUnsafeArena }]}>
               <div class="bar-name">
                 <span>{row.label}</span>
-                <span class="bar-sub">{row.safety} &middot; {row.sharedScenarios} scenarios</span>
+                <span class="bar-sub">{row.safety} &middot; {row.sharedScenarios} shared</span>
               </div>
               <div class="bar-track" aria-hidden="true">
                 <div
@@ -246,10 +266,11 @@ tools/check_alloc_corpus.sh`;
             <tr>
               <th>Implementation</th>
               <th>Operation</th>
-              <th class="num">Shared</th>
+              <th>Language / Safety</th>
+              <th class="num">Shared (speed / mem)</th>
               <th class="num">Time vs ayaml events</th>
-              <th class="num">Peak heap ratio</th>
-              <th class="num">Alloc count ratio</th>
+              <th class="num">Peak heap vs ayaml events</th>
+              <th class="num">Allocs vs ayaml events</th>
             </tr>
           </thead>
           <tbody>
@@ -258,7 +279,10 @@ tools/check_alloc_corpus.sh`;
                 <tr class:list={[{ 'is-ayaml': r.isAyaml }]}>
                   <td><code>{r.impl}</code></td>
                   <td><code>{r.op}</code></td>
-                  <td class="num">{r.sharedScenarios}</td>
+                  <td>{r.safety}</td>
+                  <td class="num">
+                    {r.sharedScenarios} / {r.memSharedScenarios}
+                  </td>
                   <td class="num">{r.speedRatio.toFixed(2)}x</td>
                   <td class="num">{r.peakRatio !== null ? `${r.peakRatio.toFixed(2)}x` : 'n/a'}</td>
                   <td class="num">{r.allocRatio !== null ? `${r.allocRatio.toFixed(2)}x` : 'n/a'}</td>
@@ -268,64 +292,83 @@ tools/check_alloc_corpus.sh`;
           </tbody>
         </table>
       </div>
+      <p class="table-note">
+        <strong>Memory methodology note:</strong> In the Tier 1 memory probe,
+        <code>ayaml events</code> collects the document's spanned event buffer
+        (<code>live_bytes &gt; 0</code>) whereas C <code>libyaml</code> and <code>libfyaml</code>
+        event loops discard each event immediately on every pull (<code>live_bytes = 0</code>),
+        accounting for their smaller retained peak ratios despite higher allocation counts.
+      </p>
     </div>
   </section>
 
   <section id="typed" class="sec">
     <div class="wrap">
       <div class="sec-head">
-        <span class="sec-kicker">Typed Rust Serde Decode</span>
+        <span class="sec-kicker">Typed Rust Serde Decode &middot; Longer bar = faster</span>
         <h2>Owned &amp; zero-copy borrowed struct deserialization</h2>
         <p class="sec-lede">
-          Direct struct decoding across small frontmatter and the 4 KiB streaming boundary.
-          <code>ayaml::from_str_borrowed</code> and <code>ayaml::from_str</code> lead every measured
-          Rust Serde crate in latency and throughput while cutting peak heap by up to <code>7.5x</code>
-          compared to <code>yaml-serde</code>.
+          Direct struct decoding across small frontmatter and the 4 KiB streaming boundary (longer
+          bar = higher throughput). <code>ayaml::from_str_borrowed</code> and
+          <code>ayaml::from_str</code> lead every measured Rust Serde crate in latency and throughput
+          while cutting peak heap by up to
+          <code>{HEADLINE.typedMaxPeakSavingsVsYamlSerde.toFixed(1)}x</code> compared to
+          <code>yaml-serde</code>.
         </p>
       </div>
 
       <div data-tabs>
         <div class="tab-list" role="tablist" aria-label="Typed decode scenario">
           {
-            TYPED_SCENARIOS.map((sc, i) => (
-              <button
-                class="tab-btn"
-                type="button"
-                role="tab"
-                id={`typed-tab-${sc}`}
-                aria-selected={i === 0 ? 'true' : 'false'}
-                aria-controls={`typed-panel-${sc}`}
-                tabindex={i === 0 ? 0 : -1}
-              >
-                {sc}
-              </button>
-            ))
+            TYPED_SCENARIOS.map((sc, i) => {
+              const meta = ALL_SCENARIOS.find((s) => s.id === sc.id);
+              const sizeStr = meta ? fmtBytes(meta.bytes) : '';
+              return (
+                <button
+                  class="tab-btn"
+                  type="button"
+                  role="tab"
+                  id={`typed-tab-${sc.id}`}
+                  aria-selected={i === 0 ? 'true' : 'false'}
+                  aria-controls={`typed-panel-${sc.id}`}
+                  tabindex={i === 0 ? 0 : -1}
+                >
+                  {sc.label} ({sizeStr})
+                </button>
+              );
+            })
           }
         </div>
         {
           TYPED_SCENARIOS.map((sc, i) => {
-            const rows = getTypedDecodeRows(sc);
+            const rows = getTypedDecodeRows(sc.id);
             const maxT = Math.max(...rows.map((r) => r.throughput));
+            const meta = ALL_SCENARIOS.find((s) => s.id === sc.id);
             return (
               <div
-                id={`typed-panel-${sc}`}
+                id={`typed-panel-${sc.id}`}
                 role="tabpanel"
-                aria-labelledby={`typed-tab-${sc}`}
+                aria-labelledby={`typed-tab-${sc.id}`}
+                tabindex="0"
                 hidden={i !== 0}
               >
+                <p class="nojs-panel-title">
+                  {sc.label} ({meta ? fmtBytes(meta.bytes) : sc.id})
+                </p>
                 <div class="bar-chart">
                   {rows.map((r) => (
                     <div class:list={['bar-row', { 'is-ayaml': r.isAyaml }]}>
                       <div class="bar-name">
                         <span>{r.label}</span>
                         <span class="bar-sub">
-                          Peak {fmtBytes(r.peakBytes)} &middot; Live {fmtBytes(r.liveBytes)} &middot; {r.allocations} allocs
+                          {fmtTimeUs(r.medianUs)} &middot; Peak {fmtBytes(r.peakBytes)} &middot;
+                          Live {fmtBytes(r.liveBytes)} &middot; {r.allocations} allocs
                         </span>
                       </div>
                       <div class="bar-track" aria-hidden="true">
                         <div class="bar-fill" style={`width: ${((r.throughput / maxT) * 100).toFixed(1)}%`} />
                       </div>
-                      <div class="bar-val">{r.throughput.toFixed(1)} MiB/s ({fmtTimeUs(r.medianUs)})</div>
+                      <div class="bar-val">{r.throughput.toFixed(1)} MiB/s</div>
                     </div>
                   ))}
                 </div>
@@ -340,13 +383,18 @@ tools/check_alloc_corpus.sh`;
   <section id="emit" class="sec">
     <div class="wrap">
       <div class="sec-head">
-        <span class="sec-kicker">Serialization &amp; Emission</span>
+        <span class="sec-kicker">Serialization &amp; Emission &middot; Longer bar = faster</span>
         <h2>Deterministic YAML emission throughput</h2>
         <p class="sec-lede">
-          Higher is faster (MiB/s). <code>ayaml</code> emits canonical, YAML 1.1-safe output at
-          106–175 MiB/s — <code>1.4x–1.8x</code> faster than C++ <code>fkYAML</code>,
-          <code>1.5x–2.3x</code> faster than <code>noyalib</code>, and
-          <code>3.9x–4.5x</code> faster than <code>yaml-serde</code>.
+          Higher is faster (MiB/s). <code>ayaml</code> emits canonical output with YAML 1.1-safe
+          leading-zero numeral quoting at
+          <code>{HEADLINE.emitMinMib.toFixed(0)}–{HEADLINE.emitMaxMib.toFixed(0)} MiB/s</code> —
+          <code>{HEADLINE.emitVsFkyamlMin.toFixed(1)}x–{HEADLINE.emitVsFkyamlMax.toFixed(1)}x</code>
+          faster than C++ <code>fkYAML</code>,
+          <code>{HEADLINE.emitVsNoyalibMin.toFixed(1)}x–{HEADLINE.emitVsNoyalibMax.toFixed(1)}x</code>
+          faster than <code>noyalib</code>, and
+          <code>{HEADLINE.emitVsYamlSerdeMin.toFixed(1)}x–{HEADLINE.emitVsYamlSerdeMax.toFixed(1)}x</code>
+          faster than <code>yaml-serde</code>.
         </p>
       </div>
 
@@ -365,10 +413,10 @@ tools/check_alloc_corpus.sh`;
                         <span>{r.label}</span>
                         <span class="bar-sub">{fmtTimeUs(r.medianUs)}</span>
                       </div>
+                      <div class="bar-val">{r.throughput.toFixed(1)} MiB/s</div>
                       <div class="bar-track" aria-hidden="true">
                         <div class="bar-fill" style={`width: ${((r.throughput / maxT) * 100).toFixed(1)}%`} />
                       </div>
-                      <div class="bar-val">{r.throughput.toFixed(1)} MiB/s</div>
                     </div>
                   ))}
                 </div>
@@ -383,12 +431,18 @@ tools/check_alloc_corpus.sh`;
   <section id="progress" class="sec">
     <div class="wrap">
       <div class="sec-head">
-        <span class="sec-kicker">Optimization trajectory</span>
-        <h2>Speedups since <code>v0.2.3</code></h2>
+        <span class="sec-kicker">Optimization trajectory &middot; Longer bar = larger speedup</span>
+        <h2>Speedups &amp; memory reductions since <code>v0.2.3</code></h2>
         <p class="sec-lede">
           Same hardware, same compiler (<code>{fingerprint.rustc}</code>), same SHA-256 verified
           fixtures comparing <code>v0.2.3</code> (<code>{fingerprint.baseline_v023_git_sha.slice(0, 8)}</code>)
           against the pre-1.0 fast-path engine (<code>{fingerprint.public_git_sha.slice(0, 8)}</code>).
+          Across all <code>{HEADLINE.v023SpeedRowCount}</code> shared speed rows, geometric-mean
+          speedup is <strong>{HEADLINE.v023OverallSpeedup.toFixed(2)}x</strong> (range
+          <code>{HEADLINE.v023MinSpeedup.toFixed(2)}x–{HEADLINE.v023MaxSpeedup.toFixed(2)}x</code>,
+          zero regressions), with <strong>{HEADLINE.v023PeakImprovement.toFixed(2)}x</strong>
+          geometric-mean peak-heap improvement across <code>{HEADLINE.v023MemoryRowCount}</code>
+          memory rows. Top highlights sorted by speedup:
         </p>
       </div>
 
@@ -400,6 +454,9 @@ tools/check_alloc_corpus.sh`;
                 <span>{r.label}</span>
                 <span class="bar-sub">
                   {r.v023Mib.toFixed(1)} &rarr; {r.curMib.toFixed(1)} MiB/s
+                  {r.peakRatio !== null && r.peakRatio > 1.02
+                    ? ` · ${r.peakRatio.toFixed(2)}x lower peak heap`
+                    : ''}
                 </span>
               </div>
               <div class="bar-track" aria-hidden="true">
@@ -416,10 +473,11 @@ tools/check_alloc_corpus.sh`;
   <section id="matrix" class="sec">
     <div class="wrap">
       <div class="sec-head">
-        <span class="sec-kicker">Full dataset &middot; All {HEADLINE.scenarioCount} scenarios</span>
+        <span class="sec-kicker">Full dataset &middot; All {HEADLINE.scenarioCount} timed scenarios</span>
         <h2>Per-scenario throughput, latency, peak heap, and allocations</h2>
         <p class="sec-lede">
-          Switch metrics below to inspect every single workload in the pinned qualification run.
+          Switch metrics below to inspect every workload in the pinned qualification run, grouped by
+          Tier 1 (structural / event parsers) and Tier 2 (full Value / Serde DOM parsers).
         </p>
       </div>
 
@@ -439,121 +497,57 @@ tools/check_alloc_corpus.sh`;
           </button>
         </div>
 
-        <div id="mat-panel-mib" role="tabpanel" aria-labelledby="mat-tab-mib">
-          <div class="table-wrap">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>Scenario</th>
-                  <th class="num">Size</th>
-                  {MATRIX_COLS.map((c) => <th class="num">{c.label}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {
-                  scenarioMatrix.map((row) => (
-                    <tr>
-                      <td><code>{row.id}</code></td>
-                      <td class="num">{fmtBytes(row.bytes)}</td>
-                      {row.cells.map((cell) => (
-                        <td class:list={['num', { 'col-ayaml': cell.col.isAyaml }]}>
-                          {cell.mib !== null ? cell.mib.toFixed(1) : '—'}
-                        </td>
-                      ))}
+        {
+          [
+            { id: 'mib', title: 'Throughput (MiB/s)', fmt: (c: typeof scenarioMatrix[0]['cells'][0]) => (c.mib !== null ? c.mib.toFixed(1) : '—') },
+            { id: 'us', title: 'Median latency (µs / ms)', fmt: (c: typeof scenarioMatrix[0]['cells'][0]) => (c.us !== null ? fmtTimeUs(c.us) : '—') },
+            { id: 'peak', title: 'Peak heap (KiB / MiB)', fmt: (c: typeof scenarioMatrix[0]['cells'][0]) => (c.peakBytes !== null ? fmtBytes(c.peakBytes) : '—') },
+            { id: 'allocs', title: 'Heap allocations (count)', fmt: (c: typeof scenarioMatrix[0]['cells'][0]) => (c.allocs !== null ? c.allocs.toLocaleString('en-US') : '—') },
+          ].map((metric, idx) => (
+            <div
+              id={`mat-panel-${metric.id}`}
+              role="tabpanel"
+              aria-labelledby={`mat-tab-${metric.id}`}
+              tabindex="0"
+              hidden={idx !== 0}
+            >
+              <p class="nojs-panel-title">{metric.title}</p>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr class="tier-group-row">
+                      <th colspan="2">Workload</th>
+                      <th colspan={MATRIX_TIER1_COLS.length} class="tier-group">
+                        Tier 1 &middot; Structural / Events
+                      </th>
+                      <th colspan={MATRIX_TIER2_COLS.length} class="tier-group">
+                        Tier 2 &middot; Value / Serde DOM
+                      </th>
                     </tr>
-                  ))
-                }
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div id="mat-panel-us" role="tabpanel" aria-labelledby="mat-tab-us" hidden>
-          <div class="table-wrap">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>Scenario</th>
-                  <th class="num">Size</th>
-                  {MATRIX_COLS.map((c) => <th class="num">{c.label}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {
-                  scenarioMatrix.map((row) => (
                     <tr>
-                      <td><code>{row.id}</code></td>
-                      <td class="num">{fmtBytes(row.bytes)}</td>
-                      {row.cells.map((cell) => (
-                        <td class:list={['num', { 'col-ayaml': cell.col.isAyaml }]}>
-                          {cell.us !== null ? fmtTimeUs(cell.us) : '—'}
-                        </td>
-                      ))}
+                      <th>Scenario</th>
+                      <th class="num">Size</th>
+                      {MATRIX_COLS.map((c) => <th class="num">{c.label}</th>)}
                     </tr>
-                  ))
-                }
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div id="mat-panel-peak" role="tabpanel" aria-labelledby="mat-tab-peak" hidden>
-          <div class="table-wrap">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>Scenario</th>
-                  <th class="num">Size</th>
-                  {MATRIX_COLS.map((c) => <th class="num">{c.label}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {
-                  scenarioMatrix.map((row) => (
-                    <tr>
-                      <td><code>{row.id}</code></td>
-                      <td class="num">{fmtBytes(row.bytes)}</td>
-                      {row.cells.map((cell) => (
-                        <td class:list={['num', { 'col-ayaml': cell.col.isAyaml }]}>
-                          {cell.peakBytes !== null ? fmtBytes(cell.peakBytes) : '—'}
-                        </td>
-                      ))}
-                    </tr>
-                  ))
-                }
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div id="mat-panel-allocs" role="tabpanel" aria-labelledby="mat-tab-allocs" hidden>
-          <div class="table-wrap">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>Scenario</th>
-                  <th class="num">Size</th>
-                  {MATRIX_COLS.map((c) => <th class="num">{c.label}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {
-                  scenarioMatrix.map((row) => (
-                    <tr>
-                      <td><code>{row.id}</code></td>
-                      <td class="num">{fmtBytes(row.bytes)}</td>
-                      {row.cells.map((cell) => (
-                        <td class:list={['num', { 'col-ayaml': cell.col.isAyaml }]}>
-                          {cell.allocs !== null ? cell.allocs.toLocaleString('en-US') : '—'}
-                        </td>
-                      ))}
-                    </tr>
-                  ))
-                }
-              </tbody>
-            </table>
-          </div>
-        </div>
+                  </thead>
+                  <tbody>
+                    {scenarioMatrix.map((row) => (
+                      <tr>
+                        <td><code>{row.id}</code></td>
+                        <td class="num">{fmtBytes(row.bytes)}</td>
+                        {row.cells.map((cell) => (
+                          <td class:list={['num', { 'col-ayaml': cell.col.isAyaml }]}>
+                            {metric.fmt(cell)}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))
+        }
       </div>
     </div>
   </section>
@@ -562,10 +556,12 @@ tools/check_alloc_corpus.sh`;
     <div class="wrap">
       <div class="sec-head">
         <span class="sec-kicker">Complexity verification</span>
-        <h2>10x linear scaling ladder</h2>
+        <h2>10x linear scaling ladder (10 KiB &rarr; 100 KiB &rarr; 1 MiB)</h2>
         <p class="sec-lede">
           Normalized growth when input size increases by 10x (<code>1.00x</code> = ideal O(n) scaling).
-          Verified automatically by <code>cargo xtask scale</code>.
+          Notice that amortized arena/table capacity jumps between 10 KiB and 100 KiB settle below
+          <code>1.00x</code> from 100 KiB to 1 MiB. Verified automatically by
+          <code>cargo xtask scale</code>.
         </p>
       </div>
 
@@ -587,8 +583,16 @@ tools/check_alloc_corpus.sh`;
                   <td><strong>{s.family}</strong></td>
                   <td><code>{s.from}</code> &rarr; <code>{s.to}</code></td>
                   <td class="num">{s.sizeRatio.toFixed(2)}x</td>
-                  <td class="num"><span class="pill pill-green">{s.timeNorm.toFixed(2)}x</span></td>
-                  <td class="num">{s.peakNorm.toFixed(2)}x</td>
+                  <td class="num">
+                    {s.timeNorm !== null ? (
+                      <span class="pill pill-green">{s.timeNorm.toFixed(2)}x</span>
+                    ) : (
+                      'mem-only'
+                    )}
+                  </td>
+                  <td class="num">
+                    <span class="pill pill-muted">{s.peakNorm.toFixed(2)}x</span>
+                  </td>
                 </tr>
               ))
             }
@@ -608,20 +612,23 @@ tools/check_alloc_corpus.sh`;
       <div class="callout blue">
         <h3>Safety, conformance, and ownership vs. raw mutable byte arenas</h3>
         <p>
-          Across all 23 fixtures, <code>ayaml</code> is faster than every measured Rust YAML library,
-          C <code>libyaml</code>, C <code>libfyaml</code>, and C++ <code>fkYAML</code>. On dense multi-node
-          documents, C++ <code>rapidyaml</code> stays roughly <code>1.6x–2.4x</code> faster because it
-          solves a fundamentally different problem: it parses raw bytes into a flat, unsafe C++ index arena
-          (optionally mutating the input buffer in place) with 2–3 arena allocations, no Rust UTF-8 ownership
-          barriers, no duplicate-key hashing/rejection, no YAML 1.2.2 Core schema resolution on the arena
-          path, and no per-node owned Rust <code>Value</code> / <code>Mapping</code> DOM.
+          On geometric mean across the {HEADLINE.scenarioCount}-fixture suite, <code>ayaml</code> is
+          faster than every measured Rust YAML library, C <code>libyaml</code>, C
+          <code>libfyaml</code>, and C++ <code>fkYAML</code>. On dense multi-node documents, C++
+          <code>rapidyaml</code> remains roughly
+          <code>{HEADLINE.rymlAheadOfEvents.toFixed(2)}x–{HEADLINE.rymlAheadOfValue.toFixed(2)}x</code>
+          faster on geometric mean because it solves a fundamentally different problem: it parses raw
+          bytes into a flat, unsafe C++ index arena (optionally mutating the input buffer in place)
+          with 2–3 arena allocations, no Rust UTF-8 ownership barriers, no duplicate-key
+          hashing/rejection, no YAML 1.2.2 Core schema resolution on the arena path, and no per-node
+          owned Rust <code>Value</code> / <code>Mapping</code> DOM.
         </p>
         <p>
-          <code>ayaml</code> enforces <code>#![forbid(unsafe_code)]</code>, strict YAML 1.2.2 Core schema
-          semantics, duplicate mapping-key rejection, byte-accurate spans, bounded alias-expansion budgets,
-          and full Serde integration. Where input is dominated by bulk text rather than tiny node overhead
-          (such as <code>large-scalar-1mb</code>), <code>ayaml</code> already runs at
-          <strong>{HEADLINE.largeScalarMib.toFixed(1)} MiB/s</strong> — more than
+          <code>ayaml</code> enforces <code>#![forbid(unsafe_code)]</code>, strict YAML 1.2.2 Core
+          schema semantics, duplicate mapping-key rejection, byte-accurate spans, bounded
+          alias-expansion budgets, and full Serde integration. Where input is dominated by bulk text
+          rather than tiny node overhead (such as <code>large-scalar-1mb</code>), <code>ayaml</code>
+          runs at <strong>{HEADLINE.largeScalarMib.toFixed(1)} MiB/s</strong> — more than
           <strong>{HEADLINE.largeScalarVsRyml.toFixed(1)}x faster than rapidyaml</strong>.
         </p>
       </div>
@@ -639,13 +646,28 @@ tools/check_alloc_corpus.sh`;
         <div class="table-wrap">
           <table class="data-table">
             <tbody>
-              <tr><th>CPU &amp; architecture</th><td>{fingerprint.cpu} ({fingerprint.os}/{fingerprint.arch}, {fingerprint.cpu_count} logical cores)</td></tr>
-              <tr><th>Isolation</th><td>Pinned CPU core <code>{fingerprint.cpu_pin}</code>, <code>{fingerprint.governor}</code> frequency governor</td></tr>
+              <tr>
+                <th>CPU &amp; architecture</th>
+                <td>
+                  {fingerprint.cpu} ({fingerprint.os}/{fingerprint.arch}, {fingerprint.cpu_count}
+                  logical cores)
+                </td>
+              </tr>
+              <tr>
+                <th>Isolation</th>
+                <td>
+                  Pinned CPU core <code>{fingerprint.cpu_pin}</code>,
+                  <code>{fingerprint.governor}</code> frequency governor
+                </td>
+              </tr>
               <tr><th>Rust compiler</th><td><code>{fingerprint.rustc}</code></td></tr>
               <tr><th>Measured commit</th><td><code>{fingerprint.public_git_sha}</code></td></tr>
               <tr><th>v0.2.3 baseline commit</th><td><code>{fingerprint.baseline_v023_git_sha}</code></td></tr>
               <tr><th>Fixture manifest SHA-256</th><td><code>{fingerprint.fixture_manifest_sha256}</code></td></tr>
-              <tr><th>Detailed methodology</th><td><a href={`${BASE}/docs/benchmarks/`}>Benchmark methodology guide</a></td></tr>
+              <tr>
+                <th>Detailed methodology</th>
+                <td><a href={`${BASE}/docs/benchmarks/`}>Benchmark methodology guide</a></td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -655,7 +677,12 @@ tools/check_alloc_corpus.sh`;
             <span>Reproduce locally</span>
             <button class="copy-btn" type="button" data-copy={REPRO_COMMANDS}>Copy commands</button>
           </div>
-          <pre><code>{REPRO_COMMANDS}</code></pre>
+          <Code
+            code={REPRO_COMMANDS}
+            lang="bash"
+            themes={{ light: 'github-light', dark: 'github-dark' }}
+            defaultColor={false}
+          />
         </div>
       </div>
     </div>
@@ -663,6 +690,22 @@ tools/check_alloc_corpus.sh`;
 </BaseLayout>
 
 <style>
+  :global(.astro-code),
+  :global(.astro-code span) {
+    color: var(--shiki-light);
+    background-color: transparent !important;
+  }
+  @media (prefers-color-scheme: dark) {
+    :global(:root:not([data-theme='light']) .astro-code),
+    :global(:root:not([data-theme='light']) .astro-code span) {
+      color: var(--shiki-dark);
+    }
+  }
+  :global(:root[data-theme='dark'] .astro-code),
+  :global(:root[data-theme='dark'] .astro-code span) {
+    color: var(--shiki-dark);
+  }
+
   .page-head {
     padding-block: clamp(36px, 5vw, 64px) var(--s6);
   }
@@ -691,9 +734,15 @@ tools/check_alloc_corpus.sh`;
   .summary-kpis {
     padding-bottom: var(--s7);
   }
+  .table-note {
+    margin-top: var(--s3);
+    color: var(--muted);
+    font-size: var(--t-note);
+    line-height: 1.5;
+  }
   .emit-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
     gap: var(--s5);
   }
   .emit-card {
@@ -701,6 +750,27 @@ tools/check_alloc_corpus.sh`;
     border: 1px solid var(--rule);
     border-radius: var(--radius);
     background: var(--surface);
+    min-width: 0;
+  }
+  /* Stack emit bars into 2 clean rows so tracks always span the full card width */
+  .emit-card .bar-row {
+    grid-template-columns: 1fr auto;
+    grid-template-rows: auto auto;
+    gap: 6px 12px;
+  }
+  .emit-card .bar-track {
+    grid-column: 1 / -1;
+  }
+  .tier-group-row th {
+    font-size: 0.75rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+    background: var(--wash);
+  }
+  .tier-group {
+    border-left: 1px solid var(--rule);
+    text-align: center !important;
   }
   .col-ayaml {
     background: color-mix(in oklab, var(--accent-wash) 65%, transparent);
@@ -711,6 +781,10 @@ tools/check_alloc_corpus.sh`;
     display: grid;
     gap: var(--s5);
     align-items: start;
+  }
+  .prov-grid code {
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
   @media (min-width: 960px) {
     .prov-grid {

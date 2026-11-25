@@ -26,12 +26,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import check_alloc_baseline
 import check_deps
-import check_docs
 import check_instructions
 import check_release
 import check_scheduled_runs
 import check_unsafe_census
 import run_kani
+from test_docs_check import DocsCheck  # noqa: F401
 
 NO_UNSAFE = {
     kind: {"safe": 1, "unsafe_": 0}
@@ -1741,81 +1741,6 @@ class SharedVectors(unittest.TestCase):
     def test_the_source_names_a_commit(self) -> None:
         source = (self.DIRECTORY / "SOURCE.md").read_text(encoding="utf-8")
         self.assertRegex(source, r"commit `[0-9a-f]{40}`")
-
-
-class DocsCheck(unittest.TestCase):
-    """tools/check_docs.py checks site config, SUMMARY.md, book_doctests, links, and Rust fences."""
-
-    def make_tree(self) -> Path:
-        scratch = tempfile.TemporaryDirectory()
-        self.addCleanup(scratch.cleanup)
-        root = Path(scratch.name)
-        for d in ("docs", "site/scripts", "crates/ayaml-conformance/src"):
-            (root / d).mkdir(parents=True)
-        (root / "site/package.json").write_text('{"scripts":{"sync":"x","build":"x","check:links":"x"}}\n', encoding="utf-8")
-        (root / "site/astro.config.mjs").write_text("export default { site: 'https://asamarts.github.io', base: '/ayaml' };\n", encoding="utf-8")
-        (root / "site/scripts/sync-docs.mjs").write_text("// sync\n", encoding="utf-8")
-        (root / "site/scripts/check-links.mjs").write_text("// check\n", encoding="utf-8")
-        (root / "README.md").write_text("# ayaml\n\nSee [Index](docs/index.md).\n", encoding="utf-8")
-        (root / "docs/SUMMARY.md").write_text("# Summary\n\n[Introduction](index.md)\n- [Security](security.md)\n", encoding="utf-8")
-        (root / "docs/index.md").write_text("# Intro\n\nSee [Security](security.md).\n", encoding="utf-8")
-        (root / "docs/security.md").write_text("# Security\n\n```rust\nassert_eq!(1 + 1, 2);\n```\n", encoding="utf-8")
-        (root / "crates/ayaml-conformance/src/lib.rs").write_text(
-            '#[doc = include_str!("../../../README.md")]\n'
-            '#[doc = include_str!("../../../docs/index.md")]\n'
-            '#[doc = include_str!("../../../docs/security.md")]\n',
-            encoding="utf-8",
-        )
-        return root
-
-    def test_valid_tree_passes(self) -> None:
-        root = self.make_tree()
-        self.assertEqual(check_docs.problems(root), [])
-
-    def test_unlisted_page_fails_summary_and_doctests(self) -> None:
-        root = self.make_tree()
-        (root / "docs/extra.md").write_text("# Extra\n", encoding="utf-8")
-        found = check_docs.problems(root)
-        self.assertTrue(any("not listed in docs/SUMMARY.md" in msg for msg in found), found)
-        self.assertTrue(any("not included in" in msg for msg in found), found)
-
-    def test_broken_and_escaping_links_fail(self) -> None:
-        root = self.make_tree()
-        (root / "docs/index.md").write_text(
-            "# Intro\n\n[Missing](missing.md) and [Escape](../README.md)\n", encoding="utf-8"
-        )
-        found = check_docs.problems(root)
-        self.assertTrue(any("missing link target 'missing.md'" in msg for msg in found), found)
-        self.assertTrue(any("escapes docs/" in msg for msg in found), found)
-
-    def test_ignored_or_no_run_or_untagged_fence_fails(self) -> None:
-        for fence, expected in (
-            ("```rust,ignore\nlet x = 1;\n```\n", "uses 'ignore'"),
-            ("```rust,no_run\nlet x = 1;\n```\n", "uses 'no_run'"),
-            ("```\nplain block\n```\n", "no language tag"),
-        ):
-            with self.subTest(expected=expected):
-                root = self.make_tree()
-                (root / "docs/security.md").write_text(f"# Security\n\n{fence}", encoding="utf-8")
-                found = check_docs.problems(root)
-                self.assertTrue(any(expected in msg for msg in found), found)
-
-    def test_missing_anchor_and_duplicate_summary_fail(self) -> None:
-        root = self.make_tree()
-        (root / "docs/index.md").write_text(
-            "# Intro\n\nSee [Missing anchor](security.md#does-not-exist).\n", encoding="utf-8"
-        )
-        (root / "docs/SUMMARY.md").write_text(
-            "# Summary\n\n[Introduction](index.md)\n- [Security](security.md)\n- [Again](security.md)\n",
-            encoding="utf-8",
-        )
-        found = check_docs.problems(root)
-        self.assertTrue(any("missing heading anchor #does-not-exist" in msg for msg in found), found)
-        self.assertTrue(any("duplicate entry for 'security.md'" in msg for msg in found), found)
-
-    def test_repository_tree_passes(self) -> None:
-        repo = Path(__file__).resolve().parent.parent
-        self.assertEqual(check_docs.problems(repo), [])
 
 
 class RunKaniTests(unittest.TestCase):

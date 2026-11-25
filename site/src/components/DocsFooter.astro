@@ -4,7 +4,7 @@ import { BASE, DOCS_RS_AYAML, GITHUB_URL } from '../lib/site';
 ---
 
 <Default {...Astro.props} />
-<div class="docs-extra-footer">
+<nav class="docs-extra-footer" aria-label="Site links">
   <a href={`${BASE}/`}>Home</a>
   <span aria-hidden="true">&middot;</span>
   <a href={`${BASE}/benchmarks/`}>Benchmarks</a>
@@ -16,7 +16,7 @@ import { BASE, DOCS_RS_AYAML, GITHUB_URL } from '../lib/site';
   <a href={DOCS_RS_AYAML} target="_blank" rel="noopener noreferrer">docs.rs</a>
   <span aria-hidden="true">&middot;</span>
   <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer">GitHub</a>
-</div>
+</nav>
 
 <style>
   .docs-extra-footer {
