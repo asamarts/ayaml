@@ -311,7 +311,6 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
     let mut line_start = 0;
     let mut stream_start = None;
     let mut stream_end = None;
-    let mut seen_flow_start = false;
     let mut scanner_error = None;
     #[cfg(test)]
     let mut growths = 0;
@@ -320,7 +319,7 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
             Ok(Some(token)) => token,
             Ok(None) => break,
             Err(error) => {
-                if !seen_flow_start {
+                if !scanner.saw_flow_start() {
                     return Err(error);
                 }
                 if scanner.flow_level() == 0 {
@@ -330,9 +329,6 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
                 break;
             }
         };
-        if is_flow_start(&token.kind) {
-            seen_flow_start = true;
-        }
         match token.kind {
             TokenKind::StreamStart => stream_start = Some(token.span),
             TokenKind::StreamEnd => {
@@ -930,10 +926,54 @@ impl<'a> Parser<'a> {
     /// synthesizing an empty node or closing a block collection at EOF.
     #[inline]
     pub(super) fn check_truncated_eof(&mut self, index: usize) -> Result<(), Error> {
-        if index >= self.lines.len()
-            && let Some(error) = self.scanner_error.take()
-        {
+        if self.scanner_error.is_some() && index >= self.lines.len() {
+            return self.take_deferred_scanner_error();
+        }
+        Ok(())
+    }
+
+    /// Surface a deferred scanner error at block-mapping exit: either at truncated EOF or when
+    /// the last line at `indent` is an unclosed flow key truncated before its `:`.
+    #[inline]
+    pub(super) fn check_mapping_exit_scanner_error(
+        &mut self,
+        current_index: usize,
+        indent: usize,
+    ) -> Result<(), Error> {
+        if self.scanner_error.is_some() {
+            return self.check_mapping_exit_scanner_error_cold(current_index, indent);
+        }
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn take_deferred_scanner_error(&mut self) -> Result<(), Error> {
+        if let Some(error) = self.scanner_error.take() {
             return Err(error);
+        }
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn check_mapping_exit_scanner_error_cold(
+        &mut self,
+        current_index: usize,
+        indent: usize,
+    ) -> Result<(), Error> {
+        if current_index >= self.lines.len() {
+            return self.take_deferred_scanner_error();
+        }
+        let truncated_flow_key = current_index + 1 == self.lines.len()
+            && self.lines[current_index].indent == indent
+            && {
+                let line_tokens = self.line_tokens(current_index);
+                !is_mapping_line(line_tokens)
+                    && line_tokens.iter().any(|token| is_flow_start(&token.kind))
+            };
+        if truncated_flow_key {
+            return self.take_deferred_scanner_error();
         }
         Ok(())
     }

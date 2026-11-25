@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 
-use super::{Line, Lines, drop_truncated_block_line, is_flow_start, parse_lines};
+use super::{Line, Lines, drop_truncated_block_line, parse_lines};
 use crate::error::Error;
 use crate::event::{Event, ScalarStyle};
 use crate::limits::Limits;
@@ -36,8 +36,6 @@ pub(crate) struct EventCursor<'a> {
     compat: bool,
     /// Reject a second document at its start (mirrors single-document eager readers).
     single_document: bool,
-    /// Whether any flow collection opener (`[` or `{`) has been scanned so far in the stream.
-    seen_flow_start: bool,
     /// Deferred scanner failure encountered after scanning a flow opener.
     ///
     /// Scanner errors hold only owned metadata (no dynamic `source`), so wrapping in
@@ -88,7 +86,6 @@ impl<'a> EventCursor<'a> {
             events: 0,
             compat,
             single_document: false,
-            seen_flow_start: false,
             scanner_error: None,
         })
     }
@@ -364,9 +361,6 @@ impl<'a> EventCursor<'a> {
                     }
                 }
                 Ok(Some(token)) => {
-                    if is_flow_start(&token.kind) {
-                        self.seen_flow_start = true;
-                    }
                     let block_scalar = token.kind.scalar_style().is_some_and(|style| {
                         matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
                     });
@@ -376,7 +370,7 @@ impl<'a> EventCursor<'a> {
                     }
                 }
                 Err(error) => {
-                    if !self.seen_flow_start {
+                    if !self.scanner.saw_flow_start() {
                         return Err(error);
                     }
                     if self.scanner.flow_level() == 0 {

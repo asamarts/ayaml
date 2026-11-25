@@ -161,10 +161,13 @@ pub(crate) struct Scanner<'a> {
     pending_tag_handles: HashMap<String, String>,
     started: bool,
     finished: bool,
-    /// Pending depth-limit error to yield on the next `next_token()` call after emitting a flow
-    /// opener that exceeded `max_depth`, so the parser reports earlier errors first and never
-    /// misreads a truncated flow-key line as trailing content (AY-027).
-    stop_error: Option<std::panic::AssertUnwindSafe<Error>>,
+    /// The next call returns a depth-limit error: a flow start went over the depth limit, so the
+    /// parser reports earlier errors first and never misreads a truncated flow-key line (AY-027).
+    stop_after: bool,
+    /// Whether any flow collection opener (`[` or `{`) has been emitted in this stream.
+    saw_flow_start: bool,
+    /// Byte offset of the flow opener that triggered `stop_after`.
+    stop_depth_start: usize,
     initial_bom: bool,
     /// The byte after the stream-start run of byte order marks.
     initial_bom_end: usize,
@@ -274,7 +277,9 @@ impl<'a> Scanner<'a> {
             pending_tag_handles: HashMap::new(),
             started: false,
             finished: false,
-            stop_error: None,
+            stop_after: false,
+            saw_flow_start: false,
+            stop_depth_start: 0,
             initial_bom,
             initial_bom_end,
             after_line_bom: if initial_bom && !compat_flow { pos } else { 0 },
@@ -326,6 +331,22 @@ impl<'a> Scanner<'a> {
         self.flow_level
     }
 
+    /// Whether any flow collection opener (`[` or `{`) has been emitted so far.
+    pub(crate) const fn saw_flow_start(&self) -> bool {
+        self.saw_flow_start
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn finish_depth_stop(&mut self) -> Result<Option<Token<'a>>, Error> {
+        self.stop_after = false;
+        self.finished = true;
+        match self.limits.check_depth(self.flow_level) {
+            Err(limit) => Err(self.limit_at(self.stop_depth_start, limit)),
+            Ok(()) => Ok(None),
+        }
+    }
+
     /// Return the next token, or `None` after the stream end has been emitted.
     #[allow(
         clippy::too_many_lines,
@@ -336,12 +357,11 @@ impl<'a> Scanner<'a> {
             self.started = true;
             return self.make(TokenKind::StreamStart, self.pos, self.pos);
         }
-        if let Some(error) = self.stop_error.take() {
-            self.finished = true;
-            return Err(error.0);
-        }
         if self.finished {
             return Ok(None);
+        }
+        if self.stop_after {
+            return self.finish_depth_stop();
         }
 
         let bytes = self.input.as_bytes();
@@ -459,22 +479,24 @@ impl<'a> Scanner<'a> {
         };
         match byte {
             b'[' => {
+                let allow_zero = self.may_continue_at_column_zero();
+                let token = self.make(TokenKind::FlowSequenceStart, start, start + 1)?;
                 if self.flow_level == 0 {
                     self.flow_start = start;
                 }
                 self.flow_level += 1;
                 self.flow_stack.push(('[', start, false));
-                self.flow_allow_zero_indent
-                    .push(self.may_continue_at_column_zero());
+                self.flow_allow_zero_indent.push(allow_zero);
+                self.saw_flow_start = true;
                 // The parser checks depth from this token. Stop reading ahead here and yield the
                 // depth limit on the next call, so earlier errors still win while a truncated
                 // flow-key line cannot masquerade as trailing content (AY-027).
-                if let Err(limit) = self.limits.check_depth(self.flow_level) {
-                    self.stop_error =
-                        Some(std::panic::AssertUnwindSafe(self.limit_at(start, limit)));
+                if self.limits.check_depth(self.flow_level).is_err() {
+                    self.stop_after = true;
+                    self.stop_depth_start = start;
                 }
                 self.pos += 1;
-                self.make(TokenKind::FlowSequenceStart, start, self.pos)
+                Ok(token)
             }
             b']' => {
                 self.pos += 1;
@@ -484,19 +506,21 @@ impl<'a> Scanner<'a> {
                 self.make(TokenKind::FlowSequenceEnd, start, self.pos)
             }
             b'{' => {
+                let allow_zero = self.may_continue_at_column_zero();
+                let token = self.make(TokenKind::FlowMappingStart, start, start + 1)?;
                 if self.flow_level == 0 {
                     self.flow_start = start;
                 }
                 self.flow_level += 1;
                 self.flow_stack.push(('{', start, false));
-                self.flow_allow_zero_indent
-                    .push(self.may_continue_at_column_zero());
-                if let Err(limit) = self.limits.check_depth(self.flow_level) {
-                    self.stop_error =
-                        Some(std::panic::AssertUnwindSafe(self.limit_at(start, limit)));
+                self.flow_allow_zero_indent.push(allow_zero);
+                self.saw_flow_start = true;
+                if self.limits.check_depth(self.flow_level).is_err() {
+                    self.stop_after = true;
+                    self.stop_depth_start = start;
                 }
                 self.pos += 1;
-                self.make(TokenKind::FlowMappingStart, start, self.pos)
+                Ok(token)
             }
             b'}' => {
                 self.pos += 1;
