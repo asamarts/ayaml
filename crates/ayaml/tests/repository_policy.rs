@@ -826,8 +826,40 @@ fn ci_compares_the_public_api_with_the_last_release() {
         Some(0),
         "public-api checkout must fetch release tags (fetch-depth: 0)"
     );
+    let edit_api_steps = steps_that_run(&text, &|step| {
+        step["run"].as_str().map(str::trim)
+            == Some("python3 tools/check_public_api.py --package ayaml-edit")
+    });
+    assert_eq!(
+        edit_api_steps,
+        Ok(1),
+        "CI must run the ayaml-edit public API check unconditionally"
+    );
+    let edit_panic_clippy = steps_that_run(&text, &|step| {
+        step["run"].as_str().map(str::trim)
+            == Some(
+                "cargo clippy -p ayaml-edit --lib --locked --all-features -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic",
+            )
+    });
+    assert_eq!(
+        edit_panic_clippy,
+        Ok(1),
+        "CI must run the ayaml-edit panic-profile Clippy check unconditionally"
+    );
+    let edit_census = steps_that_run(&text, &|step| {
+        step["run"].as_str().map(str::trim)
+            == Some(
+                "python3 tools/check_unsafe_census.py --crate ayaml-edit \"${RUNNER_TEMP}/geiger-edit.json\"",
+            )
+    });
+    assert_eq!(
+        edit_census,
+        Ok(1),
+        "CI must evaluate the ayaml-edit unsafe census unconditionally"
+    );
     let local = read(&root, "tools/ci-local.sh");
     assert!(local.contains("python3 tools/check_public_api.py"));
+    assert!(local.contains("python3 tools/check_public_api.py --package ayaml-edit"));
     assert!(local.contains("AYAML_TEST_PUBLIC_API_LIVE=1 python3 tools/test_public_api.py"));
     let tests = read(&root, "tools/test_public_api.py");
     let (_, after) = tests

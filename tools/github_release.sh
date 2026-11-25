@@ -3,12 +3,13 @@
 # rehearsal shows that the release job's steps still work. Run it from the repository's root, with
 # GH_TOKEN and GH_REPO set for gh.
 #
-#   tools/github_release.sh fetch VERSION DIGEST DIST
-#       Downloads the crate crates.io serves into DIST, checks it as `check_release.py registry`
-#       does and against DIGEST, and writes DIST/SHA256SUMS.
+#   tools/github_release.sh fetch VERSION DIGEST DIST [PKG=DIGEST ...]
+#       Downloads the crate(s) crates.io serves into DIST (always ayaml, plus any extra PKG=DIGEST
+#       pairs such as ayaml-edit=<sha256>), checks each as `check_release.py registry` does and
+#       against its digest, and writes DIST/SHA256SUMS.
 #   tools/github_release.sh release TAG VERSION DIST NOTES
-#       Creates the release of TAG with the crate and SHA256SUMS of DIST and the notes in NOTES, and
-#       checks what it made. A release that exists, as a rerun finds it, must hold exactly those
+#       Creates the release of TAG with the crate(s) and SHA256SUMS of DIST and the notes in NOTES,
+#       and checks what it made. A release that exists, as a rerun finds it, must hold exactly those
 #       assets with these bytes, and if it's a draft it's then published.
 #   tools/github_release.sh rehearse NAME TARGET VERSION DIST NOTES
 #       Creates a draft named NAME the same way, checks it as a rerun checks a release, and deletes
@@ -30,17 +31,39 @@ fail() {
   exit 1
 }
 
-fetch() {
-  local version="$1" digest="$2" dist="$3"
-  local crate="$dist/ayaml-$version.crate"
-  mkdir -p "$dist"
+fetch_one() {
+  local pkg="$1" version="$2" digest="$3" dist="$4"
+  local crate="$dist/$pkg-$version.crate"
   curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error --retry 3 \
     --user-agent "ayaml-release (https://github.com/asamarts/ayaml)" \
-    --output "$crate" "https://static.crates.io/crates/ayaml/ayaml-$version.crate"
-  python3 "$tools/check_release.py" registry "$crate" "$version" 600
+    --output "$crate" "https://static.crates.io/crates/$pkg/$pkg-$version.crate"
+  if [ "$pkg" = "ayaml" ]; then
+    python3 "$tools/check_release.py" registry "$crate" "$version" 600
+  else
+    python3 "$tools/check_release.py" registry --package "$pkg" "$crate" "$version" 600
+  fi
   [ "$(sha256sum "$crate" | cut -d' ' -f1)" = "$digest" ] ||
-    fail "crates.io serves other bytes for ayaml $version than the package job built; see RELEASING.md"
-  (cd "$dist" && sha256sum "ayaml-$version.crate" > SHA256SUMS)
+    fail "crates.io serves other bytes for $pkg $version than the package job built; see RELEASING.md"
+}
+
+fetch() {
+  local version="$1" digest="$2" dist="$3"
+  shift 3
+  mkdir -p "$dist"
+  local crates=("ayaml-$version.crate")
+  fetch_one "ayaml" "$version" "$digest" "$dist"
+  local spec pkg extra_digest
+  for spec in "$@"; do
+    [[ "$spec" == *=* ]] || fail "invalid extra package spec '$spec'; expected PKG=DIGEST"
+    pkg="${spec%%=*}"
+    extra_digest="${spec#*=}"
+    [ -n "$pkg" ] && [ -n "$extra_digest" ] || fail "invalid extra package spec '$spec'"
+    fetch_one "$pkg" "$version" "$extra_digest" "$dist"
+    crates+=("$pkg-$version.crate")
+  done
+  local sorted_crates=()
+  mapfile -t sorted_crates < <(printf '%s\n' "${crates[@]}" | LC_ALL=C sort)
+  (cd "$dist" && sha256sum "${sorted_crates[@]}" > SHA256SUMS)
 }
 
 # Sets `found` to draft, published, or absent for NAME, which gh finds by its tag's name, draft or
@@ -66,28 +89,64 @@ look_up() {
   rm -f "$errors"
 }
 
-# NAME holds exactly the crate and SHA256SUMS of DIST, with these bytes.
+# Sorted basenames of the release assets in DIST (`SHA256SUMS` plus every `*-<version>.crate`).
+dist_asset_names() {
+  local version="$1" dist="$2"
+  local names=() path base
+  shopt -s nullglob
+  for path in "$dist"/*-"$version".crate; do
+    base="$(basename "$path")"
+    names+=("$base")
+  done
+  shopt -u nullglob
+  [ "${#names[@]}" -gt 0 ] || fail "no *-$version.crate files found in $dist"
+  [ -f "$dist/SHA256SUMS" ] || fail "SHA256SUMS missing from $dist"
+  names+=("SHA256SUMS")
+  printf '%s\n' "${names[@]}" | LC_ALL=C sort
+}
+
+# NAME holds exactly the crate(s) and SHA256SUMS of DIST, with these bytes.
 check_assets() {
-  local name="$1" version="$2" dist="$3" assets existing
+  local name="$1" version="$2" dist="$3" assets existing expected_list
+  local expected=() download_args=() asset
+  mapfile -t expected < <(dist_asset_names "$version" "$dist")
+  expected_list="$(printf '%s ' "${expected[@]}")"
+  expected_list="${expected_list% }"
   assets="$(gh release view "$name" --json assets --jq '[.assets[].name] | sort | join(" ")')"
-  [ "$assets" = "SHA256SUMS ayaml-$version.crate" ] ||
-    fail "release $name holds '$assets', not this crate and SHA256SUMS; see RELEASING.md"
+  [ "$assets" = "$expected_list" ] ||
+    fail "release $name holds '$assets', not '$expected_list'; see RELEASING.md"
   existing="$(mktemp -d)"
-  gh release download "$name" --dir "$existing" --pattern "ayaml-$version.crate" --pattern SHA256SUMS
-  cmp "$existing/ayaml-$version.crate" "$dist/ayaml-$version.crate"
-  cmp "$existing/SHA256SUMS" "$dist/SHA256SUMS"
+  for asset in "${expected[@]}"; do
+    download_args+=(--pattern "$asset")
+  done
+  gh release download "$name" --dir "$existing" "${download_args[@]}"
+  for asset in "${expected[@]}"; do
+    cmp "$existing/$asset" "$dist/$asset"
+  done
   rm -r "$existing"
+}
+
+dist_upload_paths() {
+  local version="$1" dist="$2"
+  local path
+  shopt -s nullglob
+  for path in "$dist"/*-"$version".crate; do
+    printf '%s\n' "$path"
+  done | LC_ALL=C sort
+  shopt -u nullglob
+  printf '%s\n' "$dist/SHA256SUMS"
 }
 
 release() {
   local tag="$1" version="$2" dist="$3" notes="$4"
-  local digest
-  digest="$(cut -d' ' -f1 "$dist/SHA256SUMS")"
+  local digest upload_paths=()
+  digest="$(head -n1 "$dist/SHA256SUMS" | cut -d' ' -f1)"
+  mapfile -t upload_paths < <(dist_upload_paths "$version" "$dist")
   look_up "$tag"
   case "$found" in
     absent)
       gh release create "$tag" --verify-tag --title "ayaml $version" --notes-file "$notes" \
-        "$dist/ayaml-$version.crate" "$dist/SHA256SUMS"
+        "${upload_paths[@]}"
       look_up "$tag"
       [ "$found" = published ] || fail "gh created the release $tag, but it is $found"
       check_assets "$tag" "$version" "$dist"
@@ -136,14 +195,15 @@ discard_draft() {
 
 rehearse() {
   local name="$1" target="$2" version="$3" dist="$4" notes="$5"
-  local body
+  local body upload_paths=()
   [[ "$name" =~ $rehearsal_name ]] || fail "$name isn't a rehearsal's name, rehearsal-RUN-ATTEMPT"
+  mapfile -t upload_paths < <(dist_upload_paths "$version" "$dist")
   look_up "$name"
   [ "$found" = absent ] || fail "a release named $name exists already"
   draft="$name"
   trap discard_draft EXIT
   gh release create "$name" --draft --target "$target" --title "ayaml $version (rehearsal)" \
-    --notes-file "$notes" "$dist/ayaml-$version.crate" "$dist/SHA256SUMS"
+    --notes-file "$notes" "${upload_paths[@]}"
   look_up "$name"
   [ "$found" = draft ] || fail "$name was created, but it is $found, not a draft"
   check_assets "$name" "$version" "$dist"
@@ -177,7 +237,7 @@ usage() {
 command="${1:-}"
 [ $# -eq 0 ] || shift
 case "$command" in
-  fetch) [ $# -eq 3 ] || usage ;;
+  fetch) [ $# -ge 3 ] || usage ;;
   release) [ $# -eq 4 ] || usage ;;
   rehearse) [ $# -eq 5 ] || usage ;;
   discard) [ $# -eq 1 ] || usage ;;

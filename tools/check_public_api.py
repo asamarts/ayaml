@@ -38,13 +38,43 @@ PACKAGE_DIR = "crates/ayaml"
 ROOT = Path(__file__).resolve().parent.parent
 WORK = ROOT / "target" / "public-api"
 
-# Feature sets that change the public API, in check order.
+# Feature sets that change the public API of `ayaml`, in check order.
 FEATURE_SETS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("default", ()),
     ("libyaml-compat", ("libyaml-compat",)),
 )
 # Features declared in crates/ayaml/Cargo.toml that must not add to the public API.
 NON_API_FEATURES: frozenset[str] = frozenset({"default", "bench-internals"})
+
+
+@dataclass(frozen=True)
+class PackageConfig:
+    package: str
+    package_dir: str
+    crate_ident: str
+    feature_sets: tuple[tuple[str, tuple[str, ...]], ...]
+    non_api_features: frozenset[str]
+    hidden_features: tuple[str, ...]
+
+
+PACKAGE_CONFIGS: dict[str, PackageConfig] = {
+    "ayaml": PackageConfig(
+        package="ayaml",
+        package_dir="crates/ayaml",
+        crate_ident="ayaml",
+        feature_sets=FEATURE_SETS,
+        non_api_features=NON_API_FEATURES,
+        hidden_features=("bench-internals",),
+    ),
+    "ayaml-edit": PackageConfig(
+        package="ayaml-edit",
+        package_dir="crates/ayaml-edit",
+        crate_ident="ayaml_edit",
+        feature_sets=(("default", ()),),
+        non_api_features=frozenset({"default"}),
+        hidden_features=(),
+    ),
+}
 
 TAG_RE = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 SEMVER_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
@@ -73,7 +103,7 @@ FN_RE = re.compile(rf"^pub\s+(?:const\s+)?(?:unsafe\s+)?fn\s+(?P<path>{_REF_PATH
 TYPE_RE = re.compile(rf"^pub\s+type\s+(?P<path>{_REF_PATH})")
 CONST_STATIC_RE = re.compile(rf"^pub\s+(?P<kind>const|static)\s+(?:mut\s+)?(?P<path>{_PATH})")
 DECL_RE = re.compile(rf"^pub\s+(?P<kind>struct|enum|trait|union|mod)\s+(?P<path>{_PATH})")
-MEMBER_RE = re.compile(rf"^pub\s+(?P<path>ayaml::{_PATH})")
+MEMBER_RE = re.compile(rf"^pub\s+(?P<path>(?:ayaml|ayaml_edit)::{_PATH})")
 
 
 def parse_impl_header(line: str) -> tuple[str | None, str] | None:
@@ -209,30 +239,35 @@ def last_release_tag(root: Path, head_ref: str = "HEAD") -> str:
     return candidates[-1][1]
 
 
-def package_version(tree: Path) -> str:
-    manifest = tomllib.loads((tree / PACKAGE_DIR / "Cargo.toml").read_text(encoding="utf-8"))
+def package_version(tree: Path, package_dir: str = PACKAGE_DIR) -> str:
+    manifest = tomllib.loads((tree / package_dir / "Cargo.toml").read_text(encoding="utf-8"))
     version = manifest["package"]["version"]
     if isinstance(version, dict) and version.get("workspace") is True:
         workspace = tomllib.loads((tree / "Cargo.toml").read_text(encoding="utf-8"))
         version = workspace["workspace"]["package"]["version"]
     if not isinstance(version, str):
-        raise RuntimeError(f"{PACKAGE_DIR}/Cargo.toml has no version")
+        raise RuntimeError(f"{package_dir}/Cargo.toml has no version")
     return version
 
 
-def validate_manifest_features(manifest_text: str) -> None:
-    """Ensure every feature in crates/ayaml/Cargo.toml is covered by FEATURE_SETS or NON_API_FEATURES."""
+def validate_manifest_features(
+    manifest_text: str,
+    *,
+    package_dir: str = PACKAGE_DIR,
+    feature_sets: tuple[tuple[str, tuple[str, ...]], ...] = FEATURE_SETS,
+    non_api_features: frozenset[str] = NON_API_FEATURES,
+) -> None:
+    """Ensure every feature in Cargo.toml is covered by feature_sets or non_api_features."""
     manifest = tomllib.loads(manifest_text)
     declared = set(manifest.get("features", {}).keys())
-    covered = set(NON_API_FEATURES)
-    for _, features in FEATURE_SETS:
+    covered = set(non_api_features)
+    for _, features in feature_sets:
         covered.update(features)
     unknown = sorted(declared - covered)
     if unknown:
         raise RuntimeError(
-            f"unclassified feature(s) in {PACKAGE_DIR}/Cargo.toml: {', '.join(unknown)}; "
-            "add each public feature to FEATURE_SETS (or internal feature to NON_API_FEATURES) "
-            "in tools/check_public_api.py"
+            f"unclassified feature(s) in {package_dir}/Cargo.toml: {', '.join(unknown)}; "
+            "add each public feature to PACKAGE_CONFIGS in tools/check_public_api.py"
         )
 
 
@@ -322,7 +357,9 @@ def collect_traits(items: set[str]) -> set[str]:
     return traits
 
 
-def canonicalize_self_for_method(line: str, trait_paths: set[str]) -> str | None:
+def canonicalize_self_for_method(
+    line: str, trait_paths: set[str], crate_ident: str = PACKAGE
+) -> str | None:
     """Replace standalone `Self` with the concrete owner type on non-trait methods."""
     body = strip_attributes(line)
     match = FN_RE.match(body)
@@ -334,13 +371,13 @@ def canonicalize_self_for_method(line: str, trait_paths: set[str]) -> str | None
         return None
     owner = inner.rsplit("::", 1)[0]
     owner_base = strip_generic_args(owner)
-    if owner_base == "ayaml" or owner_base in trait_paths:
+    if owner_base == crate_ident or owner_base in trait_paths:
         return None
     # Replace standalone `Self` (not `Self::Assoc`) with the concrete owner path.
     return re.sub(r"(?<![A-Za-z0-9_])Self(?![A-Za-z0-9_:])", owner, body)
 
 
-def diff_listings(base: set[str], head: set[str]) -> ApiDiff:
+def diff_listings(base: set[str], head: set[str], crate_ident: str = PACKAGE) -> ApiDiff:
     """Compute removed, changed, and added items between two filtered public API listings."""
     only_base = sorted(base - head)
     only_head = sorted(head - base)
@@ -351,14 +388,14 @@ def diff_listings(base: set[str], head: set[str]) -> ApiDiff:
     # their concrete owner type (e.g. `#[derive(PartialEq)]` vs manual `impl PartialEq`).
     head_by_canon: dict[str, list[int]] = {}
     for idx, item in enumerate(only_head):
-        canon = canonicalize_self_for_method(item, trait_paths)
+        canon = canonicalize_self_for_method(item, trait_paths, crate_ident=crate_ident)
         if canon is not None:
             head_by_canon.setdefault(canon, []).append(idx)
 
     matched_head: set[int] = set()
     remaining_base: list[str] = []
     for old in only_base:
-        canon = canonicalize_self_for_method(old, trait_paths)
+        canon = canonicalize_self_for_method(old, trait_paths, crate_ident=crate_ident)
         if canon is not None and head_by_canon.get(canon):
             matched_head.add(head_by_canon[canon].pop(0))
         else:
@@ -456,8 +493,8 @@ def split_bullets(changed_text: str) -> list[str]:
     return blocks
 
 
-def find_root_reexports(items: set[str]) -> set[str]:
-    """Return names that appear directly at crate root (`ayaml::Name`)."""
+def find_root_reexports(items: set[str], crate_ident: str = PACKAGE) -> set[str]:
+    """Return names that appear directly at crate root (`<crate>::Name`)."""
     names: set[str] = set()
     for line in items:
         body = strip_attributes(line)
@@ -470,33 +507,35 @@ def find_root_reexports(items: set[str]) -> set[str]:
             if ref_kind:
                 continue
             parts = inner.split("::")
-            if len(parts) == 2 and parts[0] == PACKAGE:
+            if len(parts) == 2 and parts[0] == crate_ident:
                 names.add(parts[1])
             break
     return names
 
 
-def path_aliases(full_path: str, root_reexports: set[str]) -> list[str]:
-    """Return acceptable ways to name `ayaml::...` in `CHANGELOG.md`.
+def path_aliases(
+    full_path: str, root_reexports: set[str], crate_ident: str = PACKAGE
+) -> list[str]:
+    """Return acceptable ways to name `<crate>::...` in `CHANGELOG.md`.
 
     Submodule items under `compat::` always keep `compat::`. Other submodule items may omit the
     defining module only when the item is re-exported at the crate root.
     """
     clean = strip_generic_args(full_path)
     parts = clean.split("::")
-    if not parts or parts[0] != PACKAGE:
+    if not parts or parts[0] != crate_ident:
         return [clean]
     if len(parts) == 1:
-        return [PACKAGE]
+        return [crate_ident]
     aliases = [clean, "::".join(parts[1:])]
     if len(parts) == 2:
         return aliases
-    # `ayaml::<mod>::<Type>[::<member>...]`
+    # `<crate>::<mod>::<Type>[::<member>...]`
     module, head_name, *rest = parts[1:]
     if module != "compat" and head_name in root_reexports:
         short = "::".join([head_name, *rest])
         aliases.append(short)
-        aliases.append(f"{PACKAGE}::{short}")
+        aliases.append(f"{crate_ident}::{short}")
     return list(dict.fromkeys(aliases))
 
 
@@ -569,6 +608,7 @@ def is_documented(
     bullets: list[str],
     root_reexports: set[str],
     removed_types: set[str],
+    crate_ident: str = PACKAGE,
 ) -> bool:
     """Whether `entry` is explicitly named in `bullets` (the active `### Changed` section)."""
     if not bullets:
@@ -581,7 +621,7 @@ def is_documented(
         for length in range(len(parts), 1, -1):
             ancestor = "::".join(parts[:length])
             if ancestor in removed_types:
-                aliases = path_aliases(ancestor, root_reexports)
+                aliases = path_aliases(ancestor, root_reexports, crate_ident=crate_ident)
                 if any(text_names_identifier(b, a) for b in bullets for a in aliases):
                     return True
 
@@ -591,7 +631,7 @@ def is_documented(
     if (parsed := parse_impl_header(body)) is not None:
         trait_part, target_part = parsed
         ref_kind, inner = split_ref_prefix(strip_generic_args(target_part))
-        target_aliases = path_aliases(inner, root_reexports)
+        target_aliases = path_aliases(inner, root_reexports, crate_ident=crate_ident)
         if trait_part is not None:
             trait_short = trait_short_name(trait_part)
             for bullet in bullets:
@@ -612,7 +652,7 @@ def is_documented(
         if ref_kind or (len(parts) >= 3 and parts[-2][0].isupper()):
             assoc_name = parts[-1]
             target_path = "::".join(parts[:-1])
-            target_aliases = path_aliases(target_path, root_reexports)
+            target_aliases = path_aliases(target_path, root_reexports, crate_ident=crate_ident)
             explicit_aliases = [f"{a}::{assoc_name}" for a in target_aliases]
             if any(text_names_target(b, ref_kind, explicit_aliases) for b in bullets):
                 return True
@@ -625,14 +665,14 @@ def is_documented(
                 ):
                     return True
             return False
-        aliases = path_aliases(inner, root_reexports)
+        aliases = path_aliases(inner, root_reexports, crate_ident=crate_ident)
         return any(text_names_identifier(b, a) for b in bullets for a in aliases)
 
     # 4. Function or method (`pub [const] [unsafe] fn ...`).
     if match := FN_RE.match(body):
         full_path = strip_generic_args(match.group("path"))
         ref_kind, inner = split_ref_prefix(full_path)
-        aliases = path_aliases(inner, root_reexports)
+        aliases = path_aliases(inner, root_reexports, crate_ident=crate_ident)
         if ref_kind:
             return any(text_names_target(b, ref_kind, aliases) for b in bullets)
         return any(text_names_identifier(b, a) for b in bullets for a in aliases)
@@ -641,7 +681,7 @@ def is_documented(
     for regex in (CONST_STATIC_RE, DECL_RE, MEMBER_RE):
         if match := regex.match(body):
             inner = strip_generic_args(match.group("path"))
-            aliases = path_aliases(inner, root_reexports)
+            aliases = path_aliases(inner, root_reexports, crate_ident=crate_ident)
             return any(text_names_identifier(b, a) for b in bullets for a in aliases)
 
     return False
@@ -673,6 +713,8 @@ def generate_listing(
     target_dir: Path,
     features: tuple[str, ...],
     tool_bin: str,
+    package: str = PACKAGE,
+    crate_ident: str = PACKAGE,
 ) -> set[str]:
     cmd: list[str | Path] = [
         "cargo",
@@ -682,7 +724,7 @@ def generate_listing(
         "--manifest-path",
         tree / "Cargo.toml",
         "-p",
-        PACKAGE,
+        package,
         "--lib",
         "--locked",
     ]
@@ -698,7 +740,7 @@ def generate_listing(
         "CARGO_ENCODED_RUSTDOCFLAGS": None,
     }
     run(*cmd, env=env)
-    json_path = target_dir / "doc" / f"{PACKAGE}.json"
+    json_path = target_dir / "doc" / f"{crate_ident}.json"
     if not json_path.is_file():
         raise RuntimeError(f"rustdoc did not write {json_path}")
     raw = run(tool_bin, "list", json_path)
@@ -711,6 +753,7 @@ def check_comparison(
     changelog_text: str,
     head_version: str,
     base_version: str | None,
+    crate_ident: str = PACKAGE,
 ) -> tuple[list[ApiBreak], list[ApiBreak], dict[str, ApiDiff]]:
     """Compare listings across all feature sets and return (undocumented, documented, diffs)."""
     changed_text = active_changed_section(changelog_text, head_version, base_version)
@@ -721,9 +764,9 @@ def check_comparison(
 
     for label, base_items in base_listings.items():
         head_items = head_listings[label]
-        diff = diff_listings(base_items, head_items)
+        diff = diff_listings(base_items, head_items, crate_ident=crate_ident)
         diffs[label] = diff
-        root_reexports = find_root_reexports(base_items)
+        root_reexports = find_root_reexports(base_items, crate_ident=crate_ident)
         removed_types = removed_top_level_types(diff.removed)
 
         entries: list[ApiBreak] = [
@@ -733,7 +776,9 @@ def check_comparison(
             for old, new in diff.changed
         ]
         for entry in entries:
-            if is_documented(entry, bullets, root_reexports, removed_types):
+            if is_documented(
+                entry, bullets, root_reexports, removed_types, crate_ident=crate_ident
+            ):
                 documented.append(entry)
             else:
                 undocumented.append(entry)
@@ -748,7 +793,13 @@ def format_break(entry: ApiBreak) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Compare ayaml's public API with the last release.")
+    parser = argparse.ArgumentParser(description="Compare a public workspace crate's API with the last release.")
+    parser.add_argument(
+        "--package",
+        choices=sorted(PACKAGE_CONFIGS),
+        default=PACKAGE,
+        help="Workspace crate to inspect (default: ayaml).",
+    )
     parser.add_argument("--base", help="Base git revision or tag (default: last released tag).")
     parser.add_argument("--head", help="Head git revision or tag (default: working tree).")
     parser.add_argument("--changelog", type=Path, help="Path to CHANGELOG.md to check.")
@@ -764,6 +815,7 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --changelog and --no-changelog are mutually exclusive", file=sys.stderr)
         return 2
 
+    cfg = PACKAGE_CONFIGS[args.package]
     tool_bin = shutil.which(TOOL_BIN)
     if tool_bin is None:
         print(
@@ -796,8 +848,13 @@ def main(argv: list[str] | None = None) -> int:
             head_tree = ROOT
             head_key = "working-tree"
 
-        validate_manifest_features((head_tree / PACKAGE_DIR / "Cargo.toml").read_text(encoding="utf-8"))
-        head_version = package_version(head_tree)
+        validate_manifest_features(
+            (head_tree / cfg.package_dir / "Cargo.toml").read_text(encoding="utf-8"),
+            package_dir=cfg.package_dir,
+            feature_sets=cfg.feature_sets,
+            non_api_features=cfg.non_api_features,
+        )
+        head_version = package_version(head_tree, cfg.package_dir)
 
         if args.no_changelog:
             changelog_text = ""
@@ -806,32 +863,83 @@ def main(argv: list[str] | None = None) -> int:
         else:
             changelog_text = (head_tree / "CHANGELOG.md").read_text(encoding="utf-8")
 
+        base_has_crate = (base_tree / cfg.package_dir / "Cargo.toml").is_file()
         base_listings: dict[str, set[str]] = {}
         head_listings: dict[str, set[str]] = {}
-        for label, features in FEATURE_SETS:
-            base_listings[label] = generate_listing(
-                base_tree, WORK / f"target-{base_key}-{label}", features, tool_bin
-            )
+        for label, features in cfg.feature_sets:
+            if base_has_crate:
+                base_listings[label] = generate_listing(
+                    base_tree,
+                    WORK / f"target-{cfg.package}-{base_key}-{label}",
+                    features,
+                    tool_bin,
+                    package=cfg.package,
+                    crate_ident=cfg.crate_ident,
+                )
             head_listings[label] = generate_listing(
-                head_tree, WORK / f"target-{head_key}-{label}", features, tool_bin
+                head_tree,
+                WORK / f"target-{cfg.package}-{head_key}-{label}",
+                features,
+                tool_bin,
+                package=cfg.package,
+                crate_ident=cfg.crate_ident,
             )
 
-        # Verify bench-internals stays doc(hidden) and neither adds nor removes public API items.
-        bench_listing = generate_listing(
-            head_tree, WORK / f"target-{head_key}-bench-internals", ("bench-internals",), tool_bin
-        )
-        leaked = sorted(bench_listing - head_listings["default"])
-        dropped = sorted(head_listings["default"] - bench_listing)
-        if leaked or dropped:
-            print("error: feature `bench-internals` changes the public API:", file=sys.stderr)
-            for item in leaked:
-                print(f"  + {item}", file=sys.stderr)
-            for item in dropped:
-                print(f"  - {item}", file=sys.stderr)
-            return 1
+        for hidden in cfg.hidden_features:
+            hidden_listing = generate_listing(
+                head_tree,
+                WORK / f"target-{cfg.package}-{head_key}-{hidden}",
+                (hidden,),
+                tool_bin,
+                package=cfg.package,
+                crate_ident=cfg.crate_ident,
+            )
+            leaked = sorted(hidden_listing - head_listings["default"])
+            dropped = sorted(head_listings["default"] - hidden_listing)
+            if leaked or dropped:
+                print(f"error: feature `{hidden}` changes the public API of {cfg.package}:", file=sys.stderr)
+                for item in leaked:
+                    print(f"  + {item}", file=sys.stderr)
+                for item in dropped:
+                    print(f"  - {item}", file=sys.stderr)
+                return 1
+
+        if not base_has_crate:
+            if args.json:
+                payload = {
+                    "package": cfg.package,
+                    "base": base_rev,
+                    "head": args.head or "working-tree",
+                    "new_crate": True,
+                    "undocumented": [],
+                    "documented": [],
+                    "summary": {
+                        label: {
+                            "base_items": 0,
+                            "head_items": len(head_listings[label]),
+                            "removed": 0,
+                            "changed": 0,
+                            "added": len(head_listings[label]),
+                        }
+                        for label, _ in cfg.feature_sets
+                    },
+                }
+                print(json.dumps(payload, indent=2))
+            else:
+                for label, _ in cfg.feature_sets:
+                    print(
+                        f"public-api ({cfg.package} {label}): {len(head_listings[label])} items "
+                        f"(new crate since {base_rev}; baseline diff starts after first release tag containing {cfg.package_dir})"
+                    )
+            return 0
 
         undocumented, documented, diffs = check_comparison(
-            base_listings, head_listings, changelog_text, head_version, base_version
+            base_listings,
+            head_listings,
+            changelog_text,
+            head_version,
+            base_version,
+            crate_ident=cfg.crate_ident,
         )
     except Exception as error:  # noqa: BLE001
         print(f"error: {error}", file=sys.stderr)
@@ -839,6 +947,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.json:
         payload = {
+            "package": cfg.package,
             "base": base_rev,
             "head": args.head or "working-tree",
             "undocumented": [b.to_dict() for b in undocumented],
@@ -851,15 +960,15 @@ def main(argv: list[str] | None = None) -> int:
                     "changed": len(diffs[label].changed),
                     "added": len(diffs[label].added),
                 }
-                for label, _ in FEATURE_SETS
+                for label, _ in cfg.feature_sets
             },
         }
         print(json.dumps(payload, indent=2))
     else:
-        for label, _ in FEATURE_SETS:
+        for label, _ in cfg.feature_sets:
             diff = diffs[label]
             print(
-                f"public-api ({label}) vs {base_rev}: "
+                f"public-api ({cfg.package} {label}) vs {base_rev}: "
                 f"{len(head_listings[label])} items "
                 f"(+{len(diff.added)} added, ~{len(diff.changed)} changed, -{len(diff.removed)} removed)"
             )

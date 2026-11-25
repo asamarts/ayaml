@@ -76,29 +76,42 @@ fn replace_scalar_quotes_ambiguous_strings_and_updates_flow_values() {
 
 #[test]
 fn shared_edit_order_vectors_pass_and_edge_cases_are_rejected() {
-    // Run every shared format-contract vector in tests/vectors/edit-order.json.
-    let vectors = include_str!("../../../tests/vectors/edit-order.json");
-    let parsed = parse_value(vectors).expect("edit-order.json parses");
-    let cases = parsed["cases"].as_sequence().expect("cases sequence");
-    assert_ne!(cases.len(), 0);
-    for case in cases {
-        let name = case["name"].as_str().expect("name");
-        let source = case["source"].as_str().expect("source");
-        let expected = case["expected"].as_str().expect("expected");
-        let edits: Vec<TextEdit> = case["edits"]
-            .as_sequence()
-            .expect("edits")
-            .iter()
-            .map(|e| {
-                let start = usize::try_from(e["range"]["start"].as_u64().expect("start")).unwrap();
-                let end = usize::try_from(e["range"]["end"].as_u64().expect("end")).unwrap();
-                let repl = e["replacement"].as_str().expect("replacement");
-                TextEdit::new(Span::new(start, end), repl)
-            })
-            .collect();
-        let actual = apply_edits(source, &edits)
-            .unwrap_or_else(|err| panic!("vector {name:?} failed: {err}"));
-        assert_eq!(actual, expected, "vector {name:?}");
+    // Run every shared format-contract vector in tests/vectors/edit-order.json when running inside
+    // the repository; skip only the external vector file when unpacked from a published `.crate`.
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let vectors_path = manifest_dir.join("../../tests/vectors/edit-order.json");
+    if vectors_path.is_file() {
+        let vectors = std::fs::read_to_string(&vectors_path)
+            .unwrap_or_else(|err| panic!("reading {}: {err}", vectors_path.display()));
+        let parsed = parse_value(&vectors).expect("edit-order.json parses");
+        let cases = parsed["cases"].as_sequence().expect("cases sequence");
+        assert_ne!(cases.len(), 0);
+        for case in cases {
+            let name = case["name"].as_str().expect("name");
+            let source = case["source"].as_str().expect("source");
+            let expected = case["expected"].as_str().expect("expected");
+            let edits: Vec<TextEdit> = case["edits"]
+                .as_sequence()
+                .expect("edits")
+                .iter()
+                .map(|e| {
+                    let start =
+                        usize::try_from(e["range"]["start"].as_u64().expect("start")).unwrap();
+                    let end = usize::try_from(e["range"]["end"].as_u64().expect("end")).unwrap();
+                    let repl = e["replacement"].as_str().expect("replacement");
+                    TextEdit::new(Span::new(start, end), repl)
+                })
+                .collect();
+            let actual = apply_edits(source, &edits)
+                .unwrap_or_else(|err| panic!("vector {name:?} failed: {err}"));
+            assert_eq!(actual, expected, "vector {name:?}");
+        }
+    } else {
+        assert!(
+            manifest_dir.join("Cargo.toml.orig").is_file(),
+            "{} is missing outside an unpacked package",
+            vectors_path.display()
+        );
     }
 
     // Compact first key with an intervening comment refuses removal instead of deleting the comment.

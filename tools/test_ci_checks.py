@@ -32,6 +32,11 @@ import check_scheduled_runs
 import check_unsafe_census
 import run_kani
 from test_docs_check import DocsCheck  # noqa: F401
+from test_multi_crate_release import (  # noqa: F401
+    MultiCrateGitHubReleaseScriptTests,
+    MultiCrateReleaseChecksTests,
+    MultiCrateUnsafeCensusTests,
+)
 
 NO_UNSAFE = {
     kind: {"safe": 1, "unsafe_": 0}
@@ -1587,18 +1592,28 @@ class ScannerDependencyPolicy(unittest.TestCase):
     def test_main_enforces_direct_transitive_target_and_scanner_checks(self) -> None:
         ok_direct = set(check_deps.ALLOWED_DIRECT)
         ok_graph = set(check_deps.ALLOWED_DIRECT) | set(check_deps.ALLOWED_TRANSITIVE)
+        ok_edit_direct = set(check_deps.ALLOWED_EDIT_DIRECT)
+        ok_edit_graph = ok_edit_direct | ok_graph
 
         def run(
             manifest_deps: set[str] = ok_direct,
             direct_deps: set[str] = ok_direct,
             graph_deps: set[str] = ok_graph,
+            edit_manifest_deps: set[str] = ok_edit_direct,
+            edit_direct_deps: set[str] = ok_edit_direct,
+            edit_graph_deps: set[str] = ok_edit_graph,
             scanner_err: str | None = None,
         ) -> int:
-            def fake_pkg(*extra: str) -> set[str]:
+            def fake_manifest(path: Path) -> set[str]:
+                return edit_manifest_deps if "ayaml-edit" in path.parts else manifest_deps
+
+            def fake_pkg(*extra: str, package: str = "ayaml") -> set[str]:
+                if package == "ayaml-edit":
+                    return edit_direct_deps if "--depth" in extra else edit_graph_deps
                 return direct_deps if "--depth" in extra else graph_deps
 
             with (
-                mock.patch.object(check_deps, "manifest_direct_dependencies", return_value=manifest_deps),
+                mock.patch.object(check_deps, "manifest_direct_dependencies", side_effect=fake_manifest),
                 mock.patch.object(check_deps, "package_names", side_effect=fake_pkg),
                 mock.patch.object(check_deps, "scanner_problem", return_value=scanner_err),
                 mock.patch("builtins.print"),
@@ -1609,6 +1624,9 @@ class ScannerDependencyPolicy(unittest.TestCase):
         self.assertEqual(run(manifest_deps=ok_direct | {"libc"}), 1)
         self.assertEqual(run(direct_deps=ok_direct | {"anyhow"}), 1)
         self.assertEqual(run(graph_deps=ok_graph | {"smallvec"}), 1)
+        self.assertEqual(run(edit_manifest_deps=ok_edit_direct | {"regex"}), 1)
+        self.assertEqual(run(edit_direct_deps=ok_edit_direct | {"anyhow"}), 1)
+        self.assertEqual(run(edit_graph_deps=ok_edit_graph | {"smallvec"}), 1)
         self.assertEqual(run(scanner_err="disallowed"), 1)
 
 

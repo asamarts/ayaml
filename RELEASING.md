@@ -8,38 +8,43 @@ setup, no crates.io API token can publish the crate.
 ## What the workflow binds together
 
 1. **Gate.** The whole of `ci.yml` runs on the tag's commit, as it does on a pull request. That
-   includes the public API comparison (`tools/check_public_api.py`), which builds listings of the
-   public API for the default crate and for `libyaml-compat` with the pinned `public-api` tool
-   (`tools/install-public-api.sh`) and its paired nightly toolchain, and compares them against the
-   last released `vMAJOR.MINOR.PATCH` tag before `HEAD`. Any removed item or changed signature,
-   trait implementation, or associated type fails the gate unless the active `### Changed` section
-   of `CHANGELOG.md` names it. The `public-api` archive version/checksum and its nightly toolchain
-   move together by hand, like `cargo-semver-checks` and its toolchain.
+   includes the public API comparison (`tools/check_public_api.py` for both `ayaml` and
+   `ayaml-edit`), which builds listings of the public API for the default crate, `libyaml-compat`,
+   and `ayaml-edit` with the pinned `public-api` tool (`tools/install-public-api.sh`) and its
+   paired nightly toolchain, and compares them against the last released `vMAJOR.MINOR.PATCH` tag
+   before `HEAD`. Any removed item or changed signature, trait implementation, or associated type
+   fails the gate unless the active `### Changed` section of `CHANGELOG.md` names it. The
+   `public-api` archive version/checksum and its nightly toolchain move together by hand, like
+   `cargo-semver-checks` and its toolchain.
 2. **Tag.** The package job scans the annotated tag message and name with the leak gate.
    `tools/check_release.py tag` checks that the tag is annotated and names
    `vMAJOR.MINOR.PATCH`, that the checkout is that commit and is clean, that the commit is on
-   `main`, that the package declares the tag's version, and that `CHANGELOG.md` has a non-empty
+   `main`, that both `crates/ayaml` and `crates/ayaml-edit` declare the tag's version (with
+   `ayaml-edit` pinning `ayaml = "=VERSION"`), and that `CHANGELOG.md` has a non-empty
    section headed `## [VERSION] — YYYY-MM-DD`.
 3. **Package.** `cargo package`, with the toolchain that `RELEASE_TOOLCHAIN` pins, and then
-   `tools/check_release.py package`. The package must hold exactly the commit's files under
-   `crates/ayaml`, the workspace `README.md` and `CHANGELOG.md`, and what cargo generates,
-   and its `.cargo_vcs_info.json` must name the commit and no dirty state.
+   `tools/check_release.py package` for both `ayaml` and `ayaml-edit`. Each package must hold
+   exactly the commit's files under its crate directory (plus the workspace `README.md` for
+   `ayaml`) and what cargo generates, and its `.cargo_vcs_info.json` must name the commit and no
+   dirty state. The unpacked `ayaml-edit` crate is compiled and tested against the freshly packaged
+   `ayaml` crate without crates.io credentials.
 4. **Publish.** Only for a tag pushed to `asamarts/ayaml`, in the `release` environment.
-   The job packages the tag again and checks that the package's digest is step 3's.
-   crates.io Trusted Publishing then mints a token that lasts minutes and is revoked when the
-   job ends, and `cargo publish` runs. A version crates.io already has isn't published again.
-   Neither command builds the package to verify it, as they would by default: that runs the
-   dependencies' build scripts, and this job holds the credentials that mint the token. Step 3
-   built the same bytes without them.
+   The job packages both crates again and checks that each digest matches step 3's.
+   crates.io Trusted Publishing mints a short-lived OIDC token and publishes `ayaml` (skipping if
+   already published). After step 5 confirms `ayaml` is live on the sparse index, a fresh Trusted
+   Publishing token is minted and `cargo publish -p ayaml-edit --locked --no-verify` publishes
+   `ayaml-edit` (skipping if already published). Neither command builds the package to verify it:
+   that runs dependencies' build scripts beside the credentials that mint the token, and step 3
+   already built and tested the identical bytes without them.
 5. **Registry.** `tools/check_release.py registry` waits up to ten minutes for the sparse index
-   to list the version. It then checks that the index's checksum and the bytes crates.io serves
-   are step 3's package.
-6. **Release.** The crate is downloaded from crates.io and checked against step 3's digest,
-   and its SHA256SUMS line is written. `actions/attest-build-provenance` then signs a SLSA
-   build provenance v1 attestation for it through Sigstore, and the attestation is verified
-   with the command the release notes give. Last, `gh release create --verify-tag` attaches
-   the crate and SHA256SUMS. The notes are the changelog's section and a verification record:
-   the digest, repository, ref, commit, signing workflow, certificate identity, and issuer.
+   to list `ayaml` (before `ayaml-edit` publishes) and then `ayaml-edit`. For each crate, it checks
+   that the index's checksum and the bytes crates.io serves match step 3's package.
+6. **Release.** Both crates are downloaded from crates.io and checked against step 3's digests,
+   and their `SHA256SUMS` lines are written. `actions/attest-build-provenance` then signs a SLSA
+   build provenance v1 attestation for each `.crate` through Sigstore, and each attestation is
+   verified with the command the release notes give. Last, `gh release create --verify-tag`
+   attaches both `.crate` archives and `SHA256SUMS`. The notes hold the changelog's section and a
+   verification record covering both artifacts.
 
 The workflow never publishes from a pull request, a fork, a branch, or a dirty checkout. It
 refuses a tag whose commit isn't on `main`. That check runs from the tagged commit's own
@@ -203,19 +208,20 @@ attestation. Rebuilt with cargo 1.99.1, the 0.1.1 tag gives the bytes crates.io 
 
 ## Publishing `ayaml-edit`
 
-`ayaml-edit` lives in `crates/ayaml-edit` and depends only on `ayaml`'s public API. Because it is a
-separate crates.io package, its initial publication and Trusted Publisher setup follow the same
-sequence as `ayaml`:
+`ayaml-edit` lives in `crates/ayaml-edit`, depends only on `ayaml`'s public API (`ayaml = "=X.Y.Z"`),
+and is packaged, verified, published, attested, and attached to the GitHub release automatically by
+[`.github/workflows/release.yml`](.github/workflows/release.yml) immediately after `ayaml` is live on
+the crates.io sparse index. No workstation publish is used.
 
-1. **First publish.** Publish the initial version of `ayaml-edit` only after the matching `ayaml`
-   version is live on crates.io (`cargo publish -p ayaml-edit --locked` once, or via the release
-   workflow after adding `ayaml-edit` to the publish job).
-2. **crates.io Trusted Publisher.** On crates.io, open `ayaml-edit`'s Settings → Trusted
-   Publishing and add a GitHub publisher matching `ayaml`:
+One-time crates.io web-UI setup by an owner before the first tag that publishes `ayaml-edit`:
+
+1. **crates.io Trusted Publisher.** In crates.io Account Settings → Trusted Publishing, register a
+   GitHub Trusted Publisher for `ayaml-edit` matching `ayaml`:
+   - crate name `ayaml-edit`;
    - repository owner `asamarts`;
    - repository `ayaml`;
    - workflow `release.yml`;
    - environment `release`.
-3. **Lock down token publishing.** After the first workflow-driven publish of `ayaml-edit`, enable
-   "Trusted Publishing only" (`trustpub_only: true`) in `ayaml-edit`'s crates.io settings and
-   revoke any temporary API token used for step 1.
+2. **Lock down token publishing.** After the first workflow-driven publish of `ayaml-edit`, open
+   `ayaml-edit`'s Settings → Trusted Publishing and enable "Trusted Publishing only"
+   (`trustpub_only: true`), matching `ayaml`.
