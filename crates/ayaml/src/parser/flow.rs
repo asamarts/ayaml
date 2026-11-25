@@ -576,8 +576,13 @@ impl<'a> Parser<'a> {
     /// The error for a flow collection that fails at `index` of `tokens`, or at the end of the
     /// input past the last of them. Inside a collection it names the failure and the opening.
     #[cold]
-    pub(super) fn flow_error(&self, tokens: Run, index: usize, lack: FlowLack) -> Error {
+    pub(super) fn flow_error(&mut self, tokens: Run, index: usize, lack: FlowLack) -> Error {
         let failure = self.token_at(tokens, index).map(|token| token.span);
+        if failure.is_none()
+            && let Some(error) = self.scanner_error.take()
+        {
+            return error;
+        }
         let span = failure.unwrap_or_else(|| self.end_of_input());
         let code = match &lack {
             FlowLack::Separator if failure.is_none() => ErrorCode::UnterminatedFlowCollection,

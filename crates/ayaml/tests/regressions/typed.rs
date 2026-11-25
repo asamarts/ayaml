@@ -603,10 +603,33 @@ fn compat_reads_what_default_mode_and_libyaml_read() {
     assert!(compat("[?!!!,]").as_sequence().is_some());
 
     // A name that stops on `?` or `:` must not leave a token that fails. These read as default
-    // mode reads the whole name.
-    for input in ["[&a:a?]", "{&a:b?}", "&a\u{85}?"] {
+    // mode reads the whole name, with or without trailing whitespace/newlines.
+    for input in [
+        "[&a:a?]",
+        "[&a:a? ]",
+        "{&a:b?}",
+        "&a\u{85}?",
+        "&a\u{85}?\n",
+        "&?",
+        "&?\n",
+        "---\n&? foo\n",
+    ] {
         assert_eq!(compat(input), default(input), "{input:?}");
     }
+
+    // A compat-only directive comment containing a BOM paired with a trailing-`?` anchor
+    // round-trips through `to_string_events` back into the compatibility reader.
+    let compat_directive_and_q = "%FOO #\u{feff}\n---\n&?";
+    let events = ayaml::compat::parse_events_eager_with(
+        compat_directive_and_q,
+        &ayaml::compat::ParseOptions::new(),
+    )
+    .expect("compat parse");
+    let rendered = ayaml::to_string_events(&events).expect("emit events");
+    let reparsed =
+        ayaml::compat::parse_events_eager_with(&rendered, &ayaml::compat::ParseOptions::new())
+            .expect("compat reparse");
+    assert_eq!(reparsed.len(), events.len(), "rendered={rendered:?}");
 
     // A block scalar may sit at the parent's column under an anchored `:` key, as libyaml reads
     // it.

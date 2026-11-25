@@ -152,7 +152,7 @@ pub(super) fn only_properties(text: &str, compat: bool) -> bool {
 
 /// Whether compat ends an anchor or alias name at a `?` before `after`.
 pub(super) fn compat_question_stops_name(after: Option<char>) -> bool {
-    after.is_some_and(|next| !matches!(next, '[' | ']' | '{' | '}' | ','))
+    after.is_some_and(|next| !is_blank(next) && !matches!(next, '[' | ']' | '{' | '}' | ','))
 }
 
 /// Whether compat ends an anchor or alias name at a `:` before `after`.

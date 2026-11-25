@@ -158,9 +158,31 @@ struct Lines<'a> {
     stream_start: Option<Span>,
     stream_end: Option<Span>,
     positions: LineStarts,
+    /// A non-limit scanner failure deferred until the parser checks earlier tokens, so raising
+    /// `max_depth` cannot swap an earlier parser error for a later scanner error.
+    scanner_error: Option<Error>,
     /// How many times the token arena was reallocated, which the tests bound.
     #[cfg(test)]
     growths: usize,
+}
+
+fn is_limit_error(error: &Error) -> bool {
+    error.kind() == ErrorKind::Limit || error.limit().is_some()
+}
+
+/// Whether `tokens` contains a flow collection opener (`[` or `{`).
+///
+/// The scanner only stops early at `max_depth` on a flow opener (`stop_after`), so deferring a
+/// later non-limit scanner error precisely when a flow opener was already scanned keeps error
+/// reporting monotonic across all `max_depth` ceilings while preserving eager scanner errors when
+/// no flow opener precedes them.
+fn has_flow_start(tokens: &[Token<'_>]) -> bool {
+    tokens.iter().any(|token| {
+        matches!(
+            token.kind,
+            TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart
+        )
+    })
 }
 
 /// The token arena capacity to reserve before scanning a mid-sized document, or `None` to grow
@@ -278,9 +300,21 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
     let mut line_start = 0;
     let mut stream_start = None;
     let mut stream_end = None;
+    let mut scanner_error = None;
     #[cfg(test)]
     let mut growths = 0;
-    while let Some(token) = scanner.next_token()? {
+    loop {
+        let token = match scanner.next_token() {
+            Ok(Some(token)) => token,
+            Ok(None) => break,
+            Err(error) => {
+                if is_limit_error(&error) || !has_flow_start(&tokens) {
+                    return Err(error);
+                }
+                scanner_error = Some(error);
+                break;
+            }
+        };
         match token.kind {
             TokenKind::StreamStart => stream_start = Some(token.span),
             TokenKind::StreamEnd => {
@@ -375,6 +409,7 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
         stream_start,
         stream_end,
         positions: scanner.line_index().clone(),
+        scanner_error,
         #[cfg(test)]
         growths,
     })
@@ -484,6 +519,8 @@ struct Parser<'a> {
     /// Where the lines end: the stream end, or for one document of a lazy read, the next
     /// document's first token. An empty node after the last line is placed here.
     end: usize,
+    /// Deferred non-limit scanner failure recorded after earlier tokens were scanned.
+    scanner_error: Option<Error>,
 }
 
 /// Pair every flow collection's opening token with its closing token.
@@ -556,6 +593,7 @@ fn parse_lines<'a>(
         single_document: false,
         stop_at_second: false,
         end,
+        scanner_error: lines.scanner_error,
     };
     parser.parse_stream()?;
     match parser.sink {
@@ -630,6 +668,7 @@ pub(crate) fn parse_document_typed<'a>(
         stream_start,
         stream_end,
         positions,
+        scanner_error,
         ..
     } = read_lines(&mut scanner)?;
     let flow_ends = flow_ends(&tokens);
@@ -648,6 +687,7 @@ pub(crate) fn parse_document_typed<'a>(
         single_document: true,
         stop_at_second: true,
         end,
+        scanner_error,
     };
     parser.emit(Event::StreamStart {
         span: stream_start.unwrap_or_else(|| Span::empty(0)),
@@ -676,6 +716,7 @@ pub(crate) fn parse_document_with_consumer<'a>(
         stream_start,
         stream_end,
         positions,
+        scanner_error,
         ..
     } = read_lines(&mut scanner)?;
     let flow_ends = flow_ends(&tokens);
@@ -694,6 +735,7 @@ pub(crate) fn parse_document_with_consumer<'a>(
         single_document: true,
         stop_at_second: true,
         end,
+        scanner_error,
     };
     parser.emit(Event::StreamStart {
         span: stream_start.unwrap_or_else(|| Span::empty(0)),
@@ -722,6 +764,7 @@ fn parse_events_with_compat<'a>(
         stream_start,
         stream_end,
         positions,
+        scanner_error,
         ..
     } = read_lines(&mut scanner)?;
 
@@ -742,6 +785,7 @@ fn parse_events_with_compat<'a>(
         single_document,
         stop_at_second,
         end,
+        scanner_error,
     };
     parser.emit(Event::StreamStart {
         span: stream_start.unwrap_or_else(|| Span::empty(0)),
@@ -783,6 +827,7 @@ pub(crate) fn parse_documents(
         single_document,
         stop_at_second: false,
         end: lines.stream_end.map_or(input.len(), Span::start),
+        scanner_error: lines.scanner_error,
     };
     // The composer ignores the stream events, but they count as an event parse counts them.
     parser.emit(Event::StreamStart {
@@ -876,6 +921,9 @@ impl<'a> Parser<'a> {
                 }
             };
         }
+        if let Some(error) = self.scanner_error.take() {
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -908,6 +956,9 @@ impl<'a> Parser<'a> {
             }
         }
         if index >= self.lines.len() {
+            if let Some(error) = self.scanner_error.take() {
+                return Err(error);
+            }
             if saw_directive {
                 return Err(self.error(
                     self.empty_span(index),
@@ -1390,7 +1441,7 @@ impl<'a> Parser<'a> {
     /// Fail unless a node consumed all of `run`.
     /// A flow key or value that stops short has something after it where `,` or a closing bracket
     /// belongs.
-    fn expect_flow_consumed(&self, run: Run, consumed: usize) -> Result<(), Error> {
+    fn expect_flow_consumed(&mut self, run: Run, consumed: usize) -> Result<(), Error> {
         if consumed == run.len() {
             Ok(())
         } else {

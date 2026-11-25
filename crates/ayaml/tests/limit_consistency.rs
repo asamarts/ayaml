@@ -1069,3 +1069,58 @@ fn invalid_limits_take_precedence_over_input_size_and_root_size_hint_is_clamped(
     let err = ayaml::from_str_with::<HintProbe>(&wide_flow, &tight).expect_err("over entries");
     assert_eq!(err.code(), ayaml::ErrorCode::CollectionEntriesLimit);
 }
+
+/// Raising `max_depth` must never swap an earlier non-limit parser error for a later scanner
+/// error (regression from scheduled proptest `invariants::limits_are_monotonic`).
+#[test]
+fn raising_max_depth_keeps_earlier_parser_error_before_later_scanner_error() {
+    // At `max_depth = 0`, the scanner stops at `{` before `![bad` and the parser reports `}}-x`.
+    // Raising `max_depth` to 2 must still report `}}-x` rather than swapping to `InvalidTag`.
+    let default_input = "}}-x\n{ ![bad }\n";
+    let lo_opts = ParseOptions::new().with_limits(Limits::default().with_max_depth(0));
+    let hi_opts = ParseOptions::new().with_limits(Limits::default().with_max_depth(2));
+    for (label, lo, hi) in [
+        (
+            "parse_value_with",
+            ayaml::parse_value_with(default_input, &lo_opts).unwrap_err(),
+            ayaml::parse_value_with(default_input, &hi_opts).unwrap_err(),
+        ),
+        (
+            "from_str_with",
+            ayaml::from_str_with::<Value>(default_input, &lo_opts).unwrap_err(),
+            ayaml::from_str_with::<Value>(default_input, &hi_opts).unwrap_err(),
+        ),
+        (
+            "parse_documents_with",
+            ayaml::parse_documents_with(default_input, &lo_opts).unwrap_err(),
+            ayaml::parse_documents_with(default_input, &hi_opts).unwrap_err(),
+        ),
+        (
+            "parse_events_with",
+            ayaml::parse_events_with(default_input, &lo_opts)
+                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                .unwrap_err(),
+            ayaml::parse_events_with(default_input, &hi_opts)
+                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                .unwrap_err(),
+        ),
+    ] {
+        assert_eq!(lo.kind(), hi.kind(), "{label}: {lo:?} -> {hi:?}");
+        assert_eq!(lo.code(), hi.code(), "{label}: {lo:?} -> {hi:?}");
+        assert_eq!(lo.span(), hi.span(), "{label}: {lo:?} -> {hi:?}");
+    }
+
+    #[cfg(feature = "libyaml-compat")]
+    {
+        let compat_input = "\u{feff}---\n!local\na: {'café 日本語': !<tag:example.com,2000:node> {'explicit_a': ![custom \"plain line\\n  indented line\\n- list looking\"}, name: !<tag:example.com,2000:node> [!custom \"- list looking\\nplain line\"]}\n";
+        let compat_lo =
+            ayaml::compat::ParseOptions::new().with_limits(Limits::default().with_max_depth(0));
+        let compat_hi =
+            ayaml::compat::ParseOptions::new().with_limits(Limits::default().with_max_depth(2));
+        let lo = ayaml::compat::from_str_with::<Value>(compat_input, &compat_lo).unwrap_err();
+        let hi = ayaml::compat::from_str_with::<Value>(compat_input, &compat_hi).unwrap_err();
+        assert_eq!(lo.kind(), hi.kind(), "{lo:?} -> {hi:?}");
+        assert_eq!(lo.code(), hi.code(), "{lo:?} -> {hi:?}");
+        assert_eq!(lo.span(), hi.span(), "{lo:?} -> {hi:?}");
+    }
+}

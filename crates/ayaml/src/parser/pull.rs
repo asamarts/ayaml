@@ -57,6 +57,7 @@ impl<'a> DocumentEvents<'a> {
             stream_start,
             stream_end,
             positions,
+            scanner_error,
             ..
         } = read_lines(&mut scanner)?;
         let flow_ends = flow_ends(&tokens);
@@ -79,6 +80,7 @@ impl<'a> DocumentEvents<'a> {
                 single_document: true,
                 stop_at_second: true,
                 end,
+                scanner_error,
             },
             state: State::Start,
             step: None,
@@ -324,7 +326,12 @@ impl<'a> DocumentEvents<'a> {
                 State::Between(index) if index < self.parser.lines.len() => {
                     self.open(index, false)?
                 }
-                State::Between(_) => self.end()?,
+                State::Between(_) => {
+                    if let Some(error) = self.parser.scanner_error.take() {
+                        return Err(error);
+                    }
+                    self.end()?
+                }
                 // Past the last line too: directives with no document after them are an error.
                 State::Directives(index) => self.open(index, true)?,
                 State::Root { block } => self.root(block)?,

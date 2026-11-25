@@ -3,6 +3,7 @@
 use std::error::Error as StdError;
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
+use std::panic::UnwindSafe;
 
 use ayaml::{
     Anchor, Chomping, CollectionStyle, ColumnEncoding, Deserializer, DocumentDeserializer,
@@ -16,6 +17,7 @@ use ayaml::{
 fn assert_send<T: Send>() {}
 fn assert_send_sync<T: Send + Sync>() {}
 fn assert_unpin<T: Unpin>() {}
+fn assert_unwind_safe<T: UnwindSafe>() {}
 fn assert_copy<T: Copy>() {}
 fn assert_default<T: Default>() {}
 fn assert_ord<T: Ord>() {}
@@ -141,8 +143,10 @@ fn public_api_auto_traits_and_standard_derives_are_frozen_for_v1() {
     assert_unpin::<LineIndex<'_>>();
     assert_send::<EventStream<'_>>();
     assert_unpin::<EventStream<'_>>();
+    assert_unwind_safe::<EventStream<'_>>();
     assert_send::<Deserializer<'_>>();
     assert_unpin::<Deserializer<'_>>();
+    assert_unwind_safe::<Deserializer<'_>>();
     assert_send::<DocumentDeserializer<'_>>();
     assert_unpin::<DocumentDeserializer<'_>>();
     assert_deserializer::<DocumentDeserializer<'_>>();
