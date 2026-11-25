@@ -80,7 +80,7 @@ fn shared_edit_order_vectors_pass_and_edge_cases_are_rejected() {
     let vectors = include_str!("../../../tests/vectors/edit-order.json");
     let parsed = parse_value(vectors).expect("edit-order.json parses");
     let cases = parsed["cases"].as_sequence().expect("cases sequence");
-    assert!(!cases.is_empty());
+    assert_ne!(cases.len(), 0);
     for case in cases {
         let name = case["name"].as_str().expect("name");
         let source = case["source"].as_str().expect("source");

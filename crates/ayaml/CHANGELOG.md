@@ -42,7 +42,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `SpannedTree::lookup` now returns `Some(alias_node)` (with `SpannedNode::is_alias() == true`
   and `entry_span() == None`) for alias values instead of `None`, and `SpannedTree` now provides
-  exact `entry_span` values for compact mapping first keys on `- ` lines (when no intervening
+  exact `entry_span` values for compact mapping first keys on sequence-item (`-`) lines (when no intervening
   comment would be deleted) and entries following safe block scalars.
 - `SpannedTree::parse_with` with `ParseOptions::with_merge_keys(true)` conservatively suppresses
   `entry_span` across the tree so deleting a merged entry cannot mutate an anchored source
