@@ -272,7 +272,7 @@ pub enum ErrorCode {
     /// Event stream handed to an event writer is malformed or has a dangling alias or invalid
     /// directive (`yaml.invalid-emit-event`).
     InvalidEmitEvent,
-    /// Underlying `std::io::Write` returned an I/O error (`yaml.io`).
+    /// Underlying `std::io::Read` or `std::io::Write` returned an I/O error (`yaml.io`).
     Io,
 }
 

@@ -789,10 +789,13 @@ pub struct EventStream<'a> {
 }
 
 impl<'a> EventStream<'a> {
-    pub(crate) fn next_document(&mut self) -> Result<Option<Vec<Event<'a>>>, Error> {
+    pub(crate) fn next_document(
+        &mut self,
+        budget: &mut limits::AliasBudget,
+    ) -> Result<Option<Vec<Event<'a>>>, Error> {
         match &mut self.inner {
             EventStreamInner::Cursor(cursor) => cursor.next_document(),
-            EventStreamInner::Merged(merged) => merged.next_document(),
+            EventStreamInner::Merged(merged) => merged.next_document_with_budget(budget),
         }
     }
 }
@@ -952,7 +955,7 @@ impl<'a> Deserializer<'a> {
         if self.finished {
             return Ok(None);
         }
-        match self.events.next_document() {
+        match self.events.next_document(&mut self.budget) {
             Ok(Some(events)) => Ok(Some(events)),
             Ok(None) => {
                 self.finished = true;
@@ -1168,8 +1171,8 @@ fn parse_stream_documents(input: &str, limits: &Limits) -> Result<Vec<Value>, Er
 ///
 /// An input of more than 4 KiB is read into the target as it is parsed. The value and the
 /// error are what they would be otherwise, but the target's `Deserialize` may have run on the
-/// start of a document that is then refused, and a collection other than a root flow
-/// collection tells its visitor no size.
+/// start of a document that is then refused, and collection size hints are bounded by the
+/// parser's lookahead window (exact for root flow collections).
 ///
 /// # Errors
 ///
@@ -1185,6 +1188,9 @@ pub fn from_str<T: serde::de::DeserializeOwned>(input: &str) -> Result<T, Error>
 /// # Errors
 ///
 /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+#[deprecated(
+    note = "use `from_str_with` with `ParseOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn from_str_with_limits<T: serde::de::DeserializeOwned>(
     input: &str,
     limits: &Limits,
@@ -1336,6 +1342,9 @@ pub fn from_slice<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, Err
 /// # Errors
 ///
 /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+#[deprecated(
+    note = "use `from_slice_with` with `ParseOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn from_slice_borrowed_with_limits<'de, T: serde::Deserialize<'de>>(
     input: &'de [u8],
     limits: &Limits,
@@ -1351,6 +1360,9 @@ pub fn from_slice_borrowed_with_limits<'de, T: serde::Deserialize<'de>>(
 /// # Errors
 ///
 /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+#[deprecated(
+    note = "use `from_slice_with` with `ParseOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn from_slice_with_limits<T: serde::de::DeserializeOwned>(
     input: &[u8],
     limits: &Limits,
@@ -1401,7 +1413,7 @@ pub fn from_slice_with<'de, T: serde::Deserialize<'de>>(
 pub fn from_reader<R: std::io::Read, T: serde::de::DeserializeOwned>(
     reader: R,
 ) -> Result<T, Error> {
-    from_reader_with_limits(reader, &Limits::default_profile())
+    from_reader_with(reader, &ParseOptions::new())
 }
 
 /// Deserialize one UTF-8 YAML document from an I/O reader with explicit parse options.
@@ -1437,6 +1449,9 @@ pub fn from_reader_with<R: std::io::Read, T: serde::de::DeserializeOwned>(
 /// when `limits` is invalid or a configured limit is exceeded,
 /// [`ErrorKind::InvalidEncoding`] when the input is not valid UTF-8, or a parse/Serde
 /// error when the document or target is invalid.
+#[deprecated(
+    note = "use `from_reader_with` with `ParseOptions`; deprecated through 0.x and will be removed in 1.0"
+)]
 pub fn from_reader_with_limits<R: std::io::Read, T: serde::de::DeserializeOwned>(
     reader: R,
     limits: &Limits,

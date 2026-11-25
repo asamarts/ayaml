@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ["0/12", "1/12", "2/12", "3/12", "4/12", "5/12", "6/12", "7/12", "8/12", "9/12", "10/12", "11/12"]
+        shard: ["0/16", "1/16", "2/16", "3/16", "4/16", "5/16", "6/16", "7/16", "8/16", "9/16", "10/16", "11/16", "12/16", "13/16", "14/16", "15/16"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -41,7 +41,9 @@ jobs:
         run: |
           set +e
           (
-            ulimit -v 8388608
+            # Run one mutant at a time under a 6 GiB per-process cap so infinite-allocation loop
+            # mutants cannot stack across parallel jobs and OOM-kill the 16 GiB hosted runner VM.
+            ulimit -v 6291456
             timeout -k 10 2700 nice -n 10 cargo mutants \
               --package ayaml \
               --file crates/ayaml/src/span.rs \
@@ -50,8 +52,8 @@ jobs:
               --file crates/ayaml/src/spanned.rs \
               --file crates/ayaml/src/emitter.rs \
               --shard "$SHARD" \
-              --timeout 60 \
-              --jobs 2 \
+              --timeout 30 \
+              --jobs 1 \
               --gitignore=true
           )
           status=$?

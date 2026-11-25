@@ -166,3 +166,59 @@ fn opt_in_merge_keys_rejects_merge_bombs_on_typed_and_event_readers() {
         );
     });
 }
+
+/// Alias-bomb mapping keys (`? *a8 : 1` beside `<<: {}`) cannot bypass `AliasBudget` during
+/// merge-key deduplication, and deeply nested anchors without aliases cannot amplify memory.
+#[test]
+fn opt_in_merge_keys_blocks_alias_bomb_keys_and_nested_anchor_amplification() {
+    in_child!(|| {
+        use std::fmt::Write as _;
+
+        // 1. Billion-laughs alias bomb inside an explicit mapping key beside an empty merge.
+        let mut key_bomb = String::from("a0: &a0 [1,1,1,1,1,1,1,1,1,1]\n");
+        for level in 1..=8 {
+            let prev = level - 1;
+            let _ = writeln!(
+                key_bomb,
+                "a{level}: &a{level} [*a{prev},*a{prev},*a{prev},*a{prev},*a{prev},*a{prev},*a{prev},*a{prev},*a{prev},*a{prev}]"
+            );
+        }
+        key_bomb.push_str("t:\n  ? *a8\n  : 1\n  <<: {}\n");
+
+        let opts = ParseOptions::new().with_merge_keys(true);
+        for err in [
+            ayaml::parse_events_with(&key_bomb, &opts)
+                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                .expect_err("key bomb events"),
+            ayaml::parse_value_with(&key_bomb, &opts).expect_err("key bomb value"),
+            ayaml::from_str_with::<Value>(&key_bomb, &opts).expect_err("key bomb typed"),
+            ayaml::DocumentDeserializer::from_str_with(&key_bomb, &opts)
+                .expect_err("key bomb doc_de"),
+            ayaml::SpannedTree::parse_with(&key_bomb, &opts).expect_err("key bomb spanned"),
+        ] {
+            assert_eq!(err.kind(), ErrorKind::Limit, "{err:?}");
+        }
+
+        // 2. 120 nested anchors wrapping a 100k-item sequence with zero aliases/merges must share
+        //    subtrees via Arc without 120x cloning amplification.
+        let mut nested = String::with_capacity(260_000);
+        for level in 0..120 {
+            let _ = write!(nested, "&a{level} [");
+        }
+        for i in 0..100_000 {
+            if i > 0 {
+                nested.push(',');
+            }
+            nested.push('1');
+        }
+        for _ in 0..120 {
+            nested.push(']');
+        }
+        nested.push('\n');
+        let events: Vec<_> = ayaml::parse_events_with(&nested, &opts)
+            .expect("nested anchors stream")
+            .collect::<Result<_, _>>()
+            .expect("nested anchors events");
+        assert!(events.len() > 100_000);
+    });
+}

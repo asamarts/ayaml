@@ -20,8 +20,8 @@ What ayaml runs today:
   which the contract makes the default, so the three sources that open with a mark are checked
   against their `without_bom` answers. The byte-relative form of those three, where the mark's
   bytes are columns, is not offered.
-- `edit-order.json`: nothing yet. ayaml has no text-edit API; the `ayaml-edit` crate (AY-050)
-  will run it.
+- `edit-order.json`: `crates/ayaml-edit/tests/edits.rs` checks `ayaml_edit::apply_edits` against
+  every edit-order vector case.
 - `github-escaping.json` and the two report schemas: nothing. ayaml has no command-line tool.
 
 [`docs/interface.md`](../../docs/interface.md) says what ayaml offers at each layer of the

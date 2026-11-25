@@ -38,10 +38,12 @@ Each layer has a narrow responsibility:
   of the document: a scalar is read and dropped, and a collection is read entry
   by entry. It builds a tree only of what is read whole or again: a node with an
   anchor, a collection that keeps its tag, a mapping key, and what an enum
-  reads. A target can tell the two readers apart in two ways only: a collection
-  read from events tells it no size, and it has read the start of a document
-  that is then refused (D95). A smaller read, and the `Deserializer`, build the document's tree and
-  read from that, and every read reports the error that the tree gives (D95).
+  reads. A target can tell the two readers apart in two ways only: collection
+  size hints are bounded by the parser's lookahead window (exact for root flow
+  collections), and it may have read the start of a document that is then
+  refused (D95). A smaller read builds the document's tree and reads from that,
+  `Deserializer` decodes each document directly from spanned events, and every
+  read reports the error that the tree gives (D95).
   An error below the document's root also names the
   path to what failed, as in `tasks[0].limits.cpu`. The path is built only as an
   error travels outwards, so a read from the input that succeeds allocates and

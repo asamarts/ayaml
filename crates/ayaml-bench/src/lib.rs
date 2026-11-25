@@ -235,14 +235,14 @@ pub fn stream_cluster_borrowed(
     Ok(docs)
 }
 
-/// Exercise `LineIndex` position/offset conversions across UTF-8, UTF-16, and scalar columns.
+/// Exercise `LineIndex` position/offset conversions across UTF-8, UTF-16, and scalar columns
+/// using a pre-built [`LineIndex`].
 ///
 /// # Panics
 ///
 /// Panics if a valid UTF-8 boundary offset fails to round-trip through `LineIndex`.
 #[must_use]
-pub fn probe_line_index(input: &str) -> usize {
-    let index = LineIndex::new(input);
+pub fn probe_line_index_queries(input: &str, index: &LineIndex<'_>) -> usize {
     let mut checksum = 0_usize;
     let step = (input.len() / 64).max(1);
     let mut offset = 0_usize;
@@ -263,13 +263,20 @@ pub fn probe_line_index(input: &str) -> usize {
                 let back = index
                     .to_offset(pos, encoding)
                     .expect("valid position converts back to offset");
-                assert_eq!(back, offset, "LineIndex round-trip mismatch");
+                debug_assert_eq!(back, offset, "LineIndex round-trip mismatch");
                 checksum = checksum.wrapping_add(back);
             }
         }
         offset = offset.saturating_add(step);
     }
     checksum
+}
+
+/// Construct a [`LineIndex`] and exercise position/offset conversions across all encodings.
+#[must_use]
+pub fn probe_line_index(input: &str) -> usize {
+    let index = LineIndex::new(input);
+    probe_line_index_queries(input, &index)
 }
 
 /// Pre-timing semantic validation covering every benchmarked read, emit, span, boundary, scaling,

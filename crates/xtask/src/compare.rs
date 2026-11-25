@@ -326,6 +326,10 @@ pub(crate) fn evaluate_speed_gate(
     for base in baseline {
         let key = base.key();
         let Some(cur) = cur_map.get(&key) else {
+            violations.push(format!(
+                "{} [{}]: missing from current speed run",
+                base.scenario, base.operation
+            ));
             continue;
         };
         if base.fixture_sha256 != cur.fixture_sha256 {
@@ -358,7 +362,7 @@ pub(crate) fn evaluate_speed_gate(
 pub(crate) fn render_report(dir: &Path, title: &str) -> Result<String, String> {
     let mut out = format!("# {title}\n\n");
     if let Some(fp) = read_any_fingerprint(dir)? {
-        let sha_short = &fp.git_sha[..fp.git_sha.len().min(12)];
+        let sha_short: String = fp.git_sha.chars().take(12).collect();
         let _ = writeln!(
             out,
             "- **Platform:** `{}/{}` ({}, {} logical CPUs)\n\

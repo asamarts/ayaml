@@ -8,3 +8,5 @@ typed	tiny	8	AY-096: the chunked event feed adds a branch per event to keep larg
 typed	short-sequence	7	AY-104: a typed read builds its value from events it takes from the parser one by one, and keeps no tree of the document; that costs about 160 instructions an item here, and an untyped decode of short scalars peaks 15% to 32% lower
 typed	mapping-1000	7	AY-104: as for the short sequence, about 400 instructions an entry, part of them for a map that is no longer told its size
 typed	aliases-1000	7	AY-104: as for the short sequence; each alias is still read from the anchored tree
+emit	aliases-1000	6	pre-1.0 hardening PR: emitter.rs is untouched (Ir +0.00%); binary code layout shift from merge/frontmatter/Spanned hardening adds +5.25% simulated Callgrind EstCycles
+emit	nested-keys	6	pre-1.0 hardening PR: emitter.rs is untouched (Ir +0.09%); binary code layout shift from merge/frontmatter/Spanned hardening adds +5.61% simulated Callgrind EstCycles

@@ -99,9 +99,24 @@ pub fn run_structured(data: &[u8]) {
 
     let _unused = ayaml::parse_value_with(&rendered, &parse_opts);
     let _unused = ayaml::from_str_borrowed::<Value>(&rendered);
+    let _unused = ayaml::from_reader_with::<_, Value>(rendered.as_bytes(), &parse_opts);
     let _unused = ayaml::compat::from_str::<Value>(&rendered);
+    let _unused = ayaml::split_frontmatter_with(&rendered, &parse_opts);
+    let _unused = ayaml::parse_frontmatter_value_with(&rendered, &parse_opts);
 
     if let Ok(docs) = ayaml::parse_documents_with(&rendered, &parse_opts) {
+        if docs.len() <= 1
+            && let Ok(doc_de) = ayaml::DocumentDeserializer::from_str_with(&rendered, &parse_opts)
+        {
+            let via_doc_de: Result<ayaml::Spanned<Value>, _> =
+                serde::Deserialize::deserialize(doc_de);
+            if let Ok(spanned_val) = via_doc_de {
+                assert!(
+                    spanned_val.span().slice(&rendered).is_some(),
+                    "Spanned<Value> span must lie on valid UTF-8 boundaries"
+                );
+            }
+        }
         if let Ok(emitted) = ayaml::to_string_documents_with(&docs, &emit_opts) {
             let reparsed = ayaml::parse_documents_with(&emitted, &parse_opts)
                 .expect("structured value emission must reparse");
@@ -190,19 +205,8 @@ fn check_spanned_tree(
             &input[..entry_span.start()],
             &input[entry_span.end()..]
         );
-        match ayaml::parse_value(&edited) {
-            Ok(_) => {}
-            Err(err) if err.kind() == ErrorKind::Alias => {
-                // Deleting an entry that defines an anchor can leave a later alias dangling;
-                // the edited document must still remain syntactically valid YAML.
-                let _events: Vec<_> = ayaml::parse_events(&edited)
-                    .expect("deleting entry_span must stay syntactically valid")
-                    .collect::<Result<_, _>>()
-                    .expect("deleting entry_span must stay syntactically valid");
-            }
-            Err(err) => {
-                panic!("deleting entry_span must stay valid: {err}");
-            }
+        if let Err(err) = ayaml::parse_value(&edited) {
+            panic!("deleting entry_span must stay valid: {err}");
         }
     }
 
@@ -345,9 +349,29 @@ pub fn run_spanned(data: &[u8]) {
 
     let _unused = SpannedTree::parse_compat(&input);
     if let (Ok(tree), Ok(value)) = (SpannedTree::parse(&input), ayaml::parse_value(&input)) {
-        assert_eq!(tree.documents().len(), 1);
-        let mut path = Vec::new();
-        check_spanned_tree(&input, &tree, &value, &mut path, None);
+        assert!(
+            tree.documents().len() <= 1,
+            "single-document parse_value succeeded on {} documents",
+            tree.documents().len()
+        );
+        if tree.documents().is_empty() {
+            assert_eq!(value, Value::Null);
+        } else {
+            let mut path = Vec::new();
+            check_spanned_tree(&input, &tree, &value, &mut path, None);
+        }
+    }
+
+    // Exercise opt-in merge-key expansion on SpannedTree: entry_span must always stay None.
+    let merge_opts = ParseOptions::new().with_merge_keys(true);
+    if let Ok(merged_tree) = SpannedTree::parse_with(&input, &merge_opts) {
+        for doc in merged_tree.documents() {
+            check_span_bounds(&input, doc.span());
+            assert!(
+                doc.entry_span().is_none(),
+                "merged SpannedTree must suppress entry_span"
+            );
+        }
     }
 }
 
@@ -412,6 +436,23 @@ pub fn run_merge_keys(data: &[u8]) {
         if let Ok(parsed) = ayaml::parse_value(&rendered) {
             check_value(&parsed);
         }
+        // Also exercise opt-in event-level merge expansion across all reader paths with tight
+        // and default limits.
+        for lim in [&limits_lo, &limits_hi] {
+            let merge_opts = ParseOptions::new()
+                .with_limits(lim.clone())
+                .with_merge_keys(true);
+            let _unused = ayaml::parse_events_with(&rendered, &merge_opts)
+                .and_then(Iterator::collect::<Result<Vec<_>, _>>);
+            let _unused = ayaml::parse_value_with(&rendered, &merge_opts);
+            let _unused = ayaml::from_str_with::<Value>(&rendered, &merge_opts);
+            if let Ok(doc_de) = ayaml::DocumentDeserializer::from_str_with(&rendered, &merge_opts) {
+                let _unused: Result<Value, _> = serde::Deserialize::deserialize(doc_de);
+            }
+            if let Ok(mut cursor) = ayaml::Deserializer::from_str_with(&rendered, &merge_opts) {
+                while matches!(cursor.next_borrowed::<Value>(), Ok(Some(_))) {}
+            }
+        }
     }
 }
 
@@ -446,7 +487,7 @@ pub fn run_masked_errors(data: &[u8]) {
         return;
     };
     let s = &case.secret;
-    let err: Option<Error> = match case.scenario % 20 {
+    let err: Option<Error> = match case.scenario % 25 {
         0 => ayaml::parse_value(&format!("k: \"{s}")).err(),
         1 => ayaml::parse_value(&format!("k: \"{s}\\q\"")).err(),
         2 => ayaml::parse_value(&format!("@{s}\n")).err(),
@@ -494,16 +535,31 @@ pub fn run_masked_errors(data: &[u8]) {
             root.apply_merge_keys_with_limits(&Limits::default().with_max_collection_entries(1))
                 .err()
         }
-        _ => ayaml::to_string_with(
+        19 => ayaml::to_string_with(
             s,
             &EmitOptions::new().with_limits(Limits::default().with_max_output_bytes(4)),
         )
         .err(),
+        20 => {
+            let mut bad = format!("k: {s}").into_bytes();
+            bad.push(0xFF);
+            ayaml::from_reader::<_, Value>(bad.as_slice()).err()
+        }
+        21 => ayaml::parse_frontmatter::<StrictConfig>(&format!("---\n{s}: 1\n---\nbody\n")).err(),
+        22 => ayaml::DocumentDeserializer::from_str(&format!("{s}: {s}\n"))
+            .and_then(<StrictConfig as serde::Deserialize>::deserialize)
+            .err(),
+        23 => ayaml::parse_value_with(
+            &format!("m:\n  <<: {s}\n"),
+            &ParseOptions::new().with_merge_keys(true),
+        )
+        .err(),
+        _ => ayaml::from_value::<ayaml::Spanned<String>>(Value::from(s.clone())).err(),
     };
     let error = err.unwrap_or_else(|| {
         panic!(
             "masked_errors scenario {} unexpectedly succeeded",
-            case.scenario % 20
+            case.scenario % 25
         )
     });
     assert_masked_clean(&error, s);
@@ -654,12 +710,107 @@ pub fn run_typed_equiv(data: &[u8]) {
     );
 }
 
-/// Target 7 (`edit`): `ayaml_edit::replace_scalar` and `remove_entry` never panic and every
-/// returned `VerifiedEdit` parses cleanly and matches `apply_edits`.
+fn collect_edit_paths(
+    value: &Value,
+    prefix: &mut Vec<PathSegment>,
+    out: &mut Vec<Vec<PathSegment>>,
+) {
+    if out.len() >= 8 {
+        return;
+    }
+    match value.untag_ref() {
+        Value::Mapping(mapping) => {
+            for (k, v) in mapping.iter().take(4) {
+                prefix.push(PathSegment::Key(k.clone()));
+                out.push(prefix.clone());
+                collect_edit_paths(v, prefix, out);
+                prefix.pop();
+                if out.len() >= 8 {
+                    break;
+                }
+            }
+        }
+        Value::Sequence(items) => {
+            for (idx, v) in items.iter().take(4).enumerate() {
+                prefix.push(PathSegment::Index(idx));
+                out.push(prefix.clone());
+                collect_edit_paths(v, prefix, out);
+                prefix.pop();
+                if out.len() >= 8 {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn value_at<'a>(mut value: &'a Value, path: &[PathSegment]) -> Option<&'a Value> {
+    for seg in path {
+        match (value, seg) {
+            (Value::Mapping(m), PathSegment::Key(k)) => value = m.get(k)?,
+            (Value::Sequence(items), PathSegment::Index(idx)) => value = items.get(*idx)?,
+            _ => return None,
+        }
+    }
+    Some(value)
+}
+
+fn replace_expected(value: &Value, path: &[PathSegment], replacement: &Value) -> Option<Value> {
+    let Some((first, rest)) = path.split_first() else {
+        return Some(replacement.clone());
+    };
+    let mut updated = value.clone();
+    match (&mut updated, first) {
+        (Value::Mapping(m), PathSegment::Key(k)) => {
+            let inner = m.get_mut(k)?;
+            *inner = replace_expected(inner, rest, replacement)?;
+        }
+        (Value::Sequence(items), PathSegment::Index(idx)) => {
+            let inner = items.get_mut(*idx)?;
+            *inner = replace_expected(inner, rest, replacement)?;
+        }
+        _ => return None,
+    }
+    Some(updated)
+}
+
+fn remove_expected(value: &Value, path: &[PathSegment]) -> Option<Value> {
+    let (first, rest) = path.split_first()?;
+    let mut updated = value.clone();
+    match (&mut updated, first) {
+        (Value::Mapping(m), PathSegment::Key(k)) => {
+            if rest.is_empty() {
+                m.shift_remove(k)?;
+            } else {
+                let inner = m.get_mut(k)?;
+                *inner = remove_expected(inner, rest)?;
+            }
+        }
+        (Value::Sequence(items), PathSegment::Index(idx)) => {
+            if rest.is_empty() {
+                if *idx >= items.len() {
+                    return None;
+                }
+                items.remove(*idx);
+            } else {
+                let inner = items.get_mut(*idx)?;
+                *inner = remove_expected(inner, rest)?;
+            }
+        }
+        _ => return None,
+    }
+    Some(updated)
+}
+
+/// Target 7 (`edit`): `ayaml_edit::replace_scalar`, `remove_entry`, and `apply_batch` never panic
+/// and every returned `VerifiedEdit` parses cleanly, matches `apply_edits`, and preserves every
+/// unrelated value in the document.
 ///
 /// # Panics
 ///
-/// Panics if a returned `VerifiedEdit` fails to re-parse or disagrees with `apply_edits`.
+/// Panics if a returned `VerifiedEdit` fails to re-parse, disagrees with `apply_edits`, or alters
+/// unrelated values.
 pub fn run_edit(data: &[u8]) {
     let mut u = Unstructured::new(data);
     let Ok(doc) = FuzzDoc::arbitrary(&mut u) else {
@@ -669,29 +820,58 @@ pub fn run_edit(data: &[u8]) {
     let Ok(original) = ayaml::parse_value(&input) else {
         return;
     };
-    let Some(mapping) = original.as_mapping() else {
-        return;
+    let replacement = match u.int_in_range(0_u8..=4).unwrap_or(0) {
+        0 => Value::from("edited"),
+        1 => Value::from("a, b"),
+        2 => Value::from("true"),
+        3 => Value::from("{id}"),
+        _ => Value::from(42_i64),
     };
-    for (k, _) in mapping.iter().take(4) {
-        let path = [PathSegment::Key(k.clone())];
-        if let Ok(verified) = ayaml_edit::replace_scalar(&input, &path, &Value::from("edited")) {
+    let mut paths = Vec::new();
+    let mut prefix = Vec::new();
+    collect_edit_paths(&original, &mut prefix, &mut paths);
+    for path in &paths {
+        if let Ok(verified) = ayaml_edit::replace_scalar(&input, path, &replacement) {
             let applied = ayaml_edit::apply_edits(&input, verified.edits())
                 .expect("verified edits must apply cleanly");
             assert_eq!(applied, verified.output());
             let reparsed = ayaml::parse_value(verified.output())
                 .expect("verified replace_scalar output must parse");
+            let expected = replace_expected(&original, path, &replacement)
+                .expect("target path exists in original");
             assert_eq!(
-                reparsed.as_mapping().and_then(|m| m.get(k)),
-                Some(&Value::from("edited"))
+                reparsed, expected,
+                "replace_scalar changed unrelated values"
             );
+            assert_eq!(value_at(&reparsed, path), Some(&replacement));
         }
-        if let Ok(verified) = ayaml_edit::remove_entry(&input, &path) {
+        if let Ok(verified) = ayaml_edit::remove_entry(&input, path) {
             let applied = ayaml_edit::apply_edits(&input, verified.edits())
                 .expect("verified edits must apply cleanly");
             assert_eq!(applied, verified.output());
             let reparsed = ayaml::parse_value(verified.output())
                 .expect("verified remove_entry output must parse");
-            assert!(reparsed.as_mapping().and_then(|m| m.get(k)).is_none());
+            let expected =
+                remove_expected(&original, path).expect("target path exists in original");
+            assert_eq!(reparsed, expected, "remove_entry changed unrelated values");
+        }
+    }
+    if paths.len() >= 2 {
+        let ops = [
+            ayaml_edit::EditOp::ReplaceScalar {
+                path: paths[0].clone(),
+                value: replacement,
+            },
+            ayaml_edit::EditOp::RemoveEntry {
+                path: paths[1].clone(),
+            },
+        ];
+        if let Ok(verified) = ayaml_edit::apply_batch(&input, &ops) {
+            let applied = ayaml_edit::apply_edits(&input, verified.edits())
+                .expect("verified batch edits must apply cleanly");
+            assert_eq!(applied, verified.output());
+            let _reparsed =
+                ayaml::parse_value(verified.output()).expect("verified batch output must parse");
         }
     }
 }

@@ -21,7 +21,8 @@ impl<'a> Parser<'a> {
         if depth == 0
             && let Some(entries) = self.flow_entries(tokens, start)
         {
-            self.sink.reserve_collection(entries);
+            self.sink
+                .reserve_collection(entries.min(self.limits.max_collection_entries));
         }
         self.emit(Event::SequenceStart {
             tag,
@@ -287,7 +288,8 @@ impl<'a> Parser<'a> {
         if depth == 0
             && let Some(entries) = self.flow_entries(tokens, start)
         {
-            self.sink.reserve_collection(entries);
+            self.sink
+                .reserve_collection(entries.min(self.limits.max_collection_entries));
         }
         self.emit(Event::MappingStart {
             tag,

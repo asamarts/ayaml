@@ -343,7 +343,9 @@ pub(crate) fn run_memory(
 /// Returns an error if Valgrind Callgrind is missing, fails, or records a regression.
 pub(crate) fn run_det(repo_root: &Path, base_rev: &str, out_dir: &Path) -> Result<(), String> {
     fs::create_dir_all(out_dir).map_err(|e| format!("creating {}: {e}", out_dir.display()))?;
-    let jsonl_path = out_dir.join("callgrind.jsonl");
+    let abs_out_dir =
+        fs::canonicalize(out_dir).map_err(|e| format!("resolving {}: {e}", out_dir.display()))?;
+    let jsonl_path = abs_out_dir.join("callgrind.jsonl");
     let status = Command::new("python3")
         .current_dir(repo_root)
         .args([
@@ -520,6 +522,9 @@ pub(crate) fn run_gate(
     with_scale: bool,
     thresholds: GateThresholds,
 ) -> Result<(), String> {
+    if baseline_dir.is_some() != current_dir.is_some() {
+        return Err("gate requires both --baseline DIR and --current DIR together".to_owned());
+    }
     if let (Some(base), Some(cur)) = (baseline_dir, current_dir) {
         let mut violations = Vec::new();
         let mut checked = 0_usize;

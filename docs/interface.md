@@ -20,7 +20,7 @@ This page says what ayaml offers at each layer today, and which task holds what 
 | Typed, with Serde | `from_str`, `from_slice`, `to_string`, `to_writer`, `from_value`, `to_value` | Offered. |
 | Options | one options value per operation | Offered (D98): `ParseOptions`, `compat::ParseOptions`, and `EmitOptions` are `#[non_exhaustive]` structs with `const` presets and `with_*` builders, passed to one `*_with` function per operation. Older `*_with_limits`, `*_with_options`, and `*_with_styles` functions are deprecated through `0.x` until removal in `1.0`. |
 | Locate | a byte span for a value or an entry | Offered by `SpannedTree`: `span_at`, `entry_span_at`, `scalar_text_at`, and `scalar_encoding_at`. An entry span is given only where its removal is exact (D92). |
-| Edit | `edit`, returning verified edits | Not offered. The `ayaml-edit` crate is planned (AY-050), and will run the shared edit-order vectors. |
+| Edit | `edit`, returning verified edits | Offered by the companion `ayaml-edit` crate (`replace_scalar*`, `remove_entry*`, `apply_batch*`, `apply_edits`), checked against the shared `edit-order.json` vectors. |
 | Format | `format` | Not offered. It needs a lossless layer. |
 | Compare | `compare`, `portability` | Not offered. |
 | Effects | behind a feature or in another crate | ayaml reads no file, environment variable, or network address. Its features add a reader, `libyaml-compat`, and entry points for its own benchmarks, `bench-internals`, and no effect. |

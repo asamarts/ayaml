@@ -229,7 +229,7 @@ fn prefix_token_capacity(
         0
     };
     let estimate = overall.max(recent);
-    let estimate = usize::try_from(estimate + estimate / 64).unwrap_or(usize::MAX);
+    let estimate = usize::try_from(estimate.saturating_add(estimate / 64)).unwrap_or(usize::MAX);
     let cap = input_len
         .min(most)
         .min(tokens.saturating_mul(TOKEN_ARENA_AHEAD));

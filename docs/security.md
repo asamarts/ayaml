@@ -12,8 +12,9 @@ and YAML emission:
 - never read files, environment variables, the working directory, or the network;
 - never execute code, evaluate shell or template commands, or instantiate arbitrary types
   from YAML tags;
-- never apply YAML 1.1 merge keys (`<<`) implicitly during parsing (`Value::apply_merge_keys`
-  is explicit);
+- never apply YAML 1.1 merge keys (`<<`) implicitly during parsing (opt in via
+  `ParseOptions::with_merge_keys(true)` or `Value::apply_merge_keys*`, both bounded by
+  `Limits`);
 - never use `unsafe` code in published crates (`#![forbid(unsafe_code)]`, checked in CI by
   `cargo-geiger`);
 - never link against a native C library or third-party YAML parser; and
@@ -25,9 +26,10 @@ Hostile YAML can try to exhaust stack space, heap memory, or CPU time through de
 quadratic scanning or hashing, tag-handle expansion, or exponential alias expansion
 ("billion laughs"). `ayaml` defends against each of these by default:
 
-- **UTF-8 validation.** Byte-slice entry points (`from_slice`, `from_slice_with`,
-  `from_slice_borrowed`) reject invalid UTF-8 with `ErrorCode::InvalidUtf8` rather than
-  replacing bytes.
+- **UTF-8 validation and bounded I/O reads.** Byte-slice (`from_slice*`) and reader
+  (`from_reader*`) entry points enforce `max_input_bytes` before UTF-8 validation (`from_reader*`
+  reads at most `max_input_bytes + 1` bytes) and reject invalid UTF-8 with
+  `ErrorCode::InvalidUtf8` rather than replacing bytes.
 - **No input-controlled recursion.** The scanner, parser, composer, typed builder, and
   emitters use explicit heap stacks where input controls nesting, so hostile nesting cannot
   overflow the native call stack. `Limits::max_depth` defaults to 128, which is also the hard
@@ -91,8 +93,9 @@ per-reader accounting rules.
 - `crates/ayaml/tests/adversarial.rs` runs hostile inputs (alias bombs, deep nesting,
   quadratic-time probes, zero node cost, and memory bounds) in isolated child processes with
   time and address-space ceilings.
-- Continuous fuzzing covers `parse`, `emit`, and `borrowed` targets. A bounded fuzz run is
-  evidence rather than a proof of absence of bugs.
+- Continuous fuzzing covers all ten targets (`parse`, `emit`, `borrowed`, `structured`,
+  `spanned`, `merge_keys`, `masked_errors`, `event_emit`, `typed_equiv`, and `edit`). A bounded
+  fuzz run is evidence rather than a proof of absence of bugs.
 
 ## What errors may contain
 

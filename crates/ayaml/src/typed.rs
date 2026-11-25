@@ -378,6 +378,7 @@ fn parse_document<'de>(
     limits: &Limits,
     options: NodeOptions,
 ) -> Result<Node<'de>, Error> {
+    limits.validate()?;
     // The location is set here: finding it from the span would index the lines of an input
     // that is over the limit, which is the work the limit exists to refuse.
     limits.check_input(input.len()).map_err(|error| {

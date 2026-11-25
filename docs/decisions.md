@@ -1112,12 +1112,13 @@ feature flag, error code, and deprecation across both crates:
 - Keep `ErrorCode` (`yaml.<kebab-name>`), `ErrorKind`, `LimitKind`, `ParseOptions`,
   `compat::ParseOptions`, `EmitOptions`, `Limits`, `Event`, `ScalarStyle`, `CollectionStyle`,
   `ColumnEncoding`, `PositionError`, `PathSegment`, `Chomping`, `NodeStyle`, `compat::GlobalTags`,
-  `ayaml_edit::EditErrorKind`, `ayaml_edit::EditOptions`, and `ayaml_edit::EditOp` marked
-  `#[non_exhaustive]` so `1.x` remains strictly additive.
+  `ParsedFrontmatter`, `ayaml_edit::EditErrorKind`, `ayaml_edit::EditOptions`, and
+  `ayaml_edit::EditOp` marked `#[non_exhaustive]` so `1.x` remains strictly additive.
 - Keep `libyaml-compat` as an additive opt-in feature and `bench-internals` / `ayaml::internals`
   explicitly outside SemVer.
-- Keep legacy `*_with_limits`, `*_with_options`, `*_with_styles` shims and `Marker` deprecated
-  through `0.2.x` and scheduled for removal in `1.0.0`.
+- Keep legacy `*_with_limits`, `*_with_options`, `*_with_styles` parse/emit shims and `Marker`
+  deprecated through `0.2.x` and scheduled for removal in `1.0.0`, while keeping
+  `Value::apply_merge_keys_with_limits` (which takes no `ParseOptions`) stable in `1.0.0`.
 - Document the `1.0` support, MSRV (Rust 1.88, minor bump required to raise in `1.x`), and
   error-code stability guarantees in `docs/stability.md`.
 

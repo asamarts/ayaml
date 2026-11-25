@@ -83,6 +83,7 @@ impl<'a> Frontmatter<'a> {
 
 /// A decoded leading YAML frontmatter value paired with the remaining non-YAML body slice.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct ParsedFrontmatter<'a, T> {
     /// The decoded frontmatter value.
     pub frontmatter: T,
@@ -141,7 +142,14 @@ pub(crate) fn split_frontmatter_with_limits<'a>(
             break;
         }
         let rest = &input[pos..];
-        if let Some(close) = match_delimiter_line(rest, false, None) {
+        let remaining = max_bytes - pos;
+        if let Some(close) = match_delimiter_line(rest, false, Some(remaining)) {
+            if close.exceeded_limit {
+                return Err(input_limit_error(
+                    limits,
+                    pos.saturating_add(close.next_offset),
+                ));
+            }
             let body_offset = pos + close.next_offset;
             return Ok(Some(Frontmatter {
                 yaml: &input[..pos],
@@ -152,7 +160,6 @@ pub(crate) fn split_frontmatter_with_limits<'a>(
                 body_offset,
             }));
         }
-        let remaining = max_bytes - pos;
         let Some(step) = next_line_len_bounded(rest, remaining) else {
             return Err(input_limit_error(
                 limits,
@@ -267,27 +274,37 @@ fn match_delimiter_line(
     }
 
     if i == bytes.len() {
+        let exceeded_limit = max_len.is_some_and(|max| i > max);
         return Some(MatchedDelimiter {
             kind,
             next_offset: i,
             has_newline: false,
-            exceeded_limit: false,
+            exceeded_limit,
         });
     }
     if bytes[i] == b'\n' {
+        let next_offset = i + 1;
+        let exceeded_limit = max_len.is_some_and(|max| next_offset > max);
         return Some(MatchedDelimiter {
             kind,
-            next_offset: i + 1,
+            next_offset,
             has_newline: true,
-            exceeded_limit: false,
+            exceeded_limit,
         });
     }
-    if bytes[i] == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
+    if bytes[i] == b'\r' {
+        let step = if bytes.get(i + 1) == Some(&b'\n') {
+            2
+        } else {
+            1
+        };
+        let next_offset = i + step;
+        let exceeded_limit = max_len.is_some_and(|max| next_offset > max);
         return Some(MatchedDelimiter {
             kind,
-            next_offset: i + 2,
+            next_offset,
             has_newline: true,
-            exceeded_limit: false,
+            exceeded_limit,
         });
     }
     None
@@ -312,15 +329,22 @@ fn input_limit_error(limits: &Limits, actual: usize) -> Error {
     }
 }
 
-/// Byte length of the first line of `s` (including its `\n`), bounded to at most `max_len` bytes.
+/// Byte length of the first line of `s` (including its `\r\n`, `\n`, or `\r`), bounded to at most
+/// `max_len` bytes.
 ///
-/// Returns `None` if the line exceeds `max_len` bytes without reaching `\n` or EOF.
+/// Returns `None` if the line exceeds `max_len` bytes without reaching a line break or EOF.
 fn next_line_len_bounded(s: &str, max_len: usize) -> Option<usize> {
     let bytes = s.as_bytes();
     let limit = bytes.len().min(max_len);
     let mut i = 0;
     while i < limit {
         if bytes[i] == b'\n' {
+            return Some(i + 1);
+        }
+        if bytes[i] == b'\r' {
+            if bytes.get(i + 1) == Some(&b'\n') {
+                return (i + 2 <= max_len).then_some(i + 2);
+            }
             return Some(i + 1);
         }
         i += 1;

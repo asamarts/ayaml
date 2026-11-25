@@ -319,5 +319,25 @@ fn frontmatter_enforces_limits_and_alias_bombs_boundedly() {
         );
         let err = ayaml::parse_frontmatter_value(&deep).expect_err("deep frontmatter");
         assert_eq!(err.code(), ErrorCode::DepthLimit);
+
+        // Oversized comment or whitespace on the closing delimiter line cannot bypass
+        // `max_input_bytes`.
+        let huge_close_comment = format!("---\na: 1\n--- #{}\nbody\n", "c".repeat(1_000_000));
+        let err = ayaml::split_frontmatter_with(&huge_close_comment, &tight)
+            .expect_err("oversized closing comment");
+        assert_eq!(err.kind(), ErrorKind::Limit);
+        assert_eq!(
+            err.limit().map(ayaml::LimitExceeded::kind),
+            Some(LimitKind::InputBytes)
+        );
+
+        let huge_close_ws = format!("---\na: 1\n---{}x\nbody\n", " ".repeat(1_000_000));
+        let err = ayaml::split_frontmatter_with(&huge_close_ws, &tight)
+            .expect_err("oversized closing whitespace");
+        assert_eq!(err.kind(), ErrorKind::Limit);
+        assert_eq!(
+            err.limit().map(ayaml::LimitExceeded::kind),
+            Some(LimitKind::InputBytes)
+        );
     });
 }

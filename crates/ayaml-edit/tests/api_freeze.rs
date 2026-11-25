@@ -7,6 +7,8 @@ use std::hash::Hash;
 use ayaml_edit::{EditError, EditErrorKind, EditOp, EditOptions, TextEdit, VerifiedEdit};
 
 fn assert_send_sync_unpin<T: Send + Sync + Unpin>() {}
+fn assert_copy<T: Copy>() {}
+fn assert_default<T: Default>() {}
 fn assert_value_traits<T: Clone + Debug + PartialEq + Eq>() {}
 fn assert_hash_traits<T: Clone + Debug + PartialEq + Eq + Hash>() {}
 fn assert_error_traits<T: StdError + Send + Sync + Clone + Debug + Display + PartialEq + Eq>() {}
@@ -22,6 +24,8 @@ fn ayaml_edit_public_api_traits_are_frozen_for_v1() {
     assert_send_sync_unpin::<EditOptions>();
     assert_send_sync_unpin::<EditOp>();
 
+    assert_copy::<EditErrorKind>();
+    assert_default::<EditOptions>();
     assert_hash_traits::<TextEdit>();
     assert_value_traits::<VerifiedEdit>();
     assert_hash_traits::<EditErrorKind>();

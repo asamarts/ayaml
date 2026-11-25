@@ -1,16 +1,19 @@
+#![forbid(unsafe_code)]
+#![warn(rustdoc::all)]
+
 //! Verified, source-preserving edits for YAML documents built on [`ayaml`]'s public API.
 //!
 //! Every edit returned by this crate is reparsed and checked against both the expected
 //! [`Value`] tree and the [`Event`] stream before it is returned.
 //! Constructs whose source-preserving edit rules are not yet proven exact — anchors, aliases,
-//! tags, block scalars, multiple documents, and ambiguous comment placement — are refused
-//! conservatively.
+//! tags, block scalars, multiple documents, merge-key expansion, and ambiguous comment placement
+//! — are refused conservatively.
 
 use std::cmp::Ordering;
 use std::fmt;
 
 use ayaml::{
-    EmitOptions, Event, ParseOptions, PathSegment, ScalarStyle, Span, SpannedTree, Value,
+    EmitOptions, Event, Limits, ParseOptions, PathSegment, ScalarStyle, Span, SpannedTree, Value,
     parse_events_with, parse_value_with, to_string_value_with,
 };
 
@@ -355,8 +358,10 @@ pub fn apply_batch_with(
     options: &EditOptions,
 ) -> Result<VerifiedEdit, EditError> {
     if ops.is_empty() {
-        // Still validate that the input is a single supported document.
+        // Still validate that the input is a single supported document with no duplicate keys or
+        // invalid core-schema scalars.
         let _unused = inspect_document(input, &options.parse)?;
+        let _unused_val = parse_value_with(input, &options.parse).map_err(EditError::parse)?;
         return Ok(VerifiedEdit {
             output: input.to_owned(),
             edits: Vec::new(),
@@ -377,7 +382,7 @@ pub fn apply_batch_with(
     for op in ops {
         let edit = match op {
             EditOp::ReplaceScalar { path, value } => {
-                plan_replace_scalar(input, &tree, path, value)?
+                plan_replace_scalar(input, &tree, path, value, &options.parse.limits)?
             }
             EditOp::RemoveEntry { path } => plan_remove_entry(&tree, path)?,
         };
@@ -434,25 +439,41 @@ pub fn apply_batch_with(
         )
     })?;
 
-    if ops.len() == 1 {
-        let ok = match &ops[0] {
+    let ok = if ops.len() == 1 {
+        match &ops[0] {
             EditOp::ReplaceScalar { .. } => one_scalar_changed(&before_events, &after_events),
             EditOp::RemoveEntry { .. } => one_run_removed(&before_events, &after_events),
-        };
-        if !ok {
-            return Err(EditError::new(
-                EditErrorKind::VerificationFailed,
-                "edited document changed unexpected events outside the target span",
-            ));
         }
+    } else {
+        let replace_count = ops
+            .iter()
+            .filter(|op| matches!(op, EditOp::ReplaceScalar { .. }))
+            .count();
+        let remove_count = ops
+            .iter()
+            .filter(|op| matches!(op, EditOp::RemoveEntry { .. }))
+            .count();
+        batch_events_match(&before_events, &after_events, replace_count, remove_count)
+    };
+    if !ok {
+        return Err(EditError::new(
+            EditErrorKind::VerificationFailed,
+            "edited document changed unexpected events outside the target span",
+        ));
     }
 
     Ok(VerifiedEdit { output, edits })
 }
 
 /// Parse `input`'s events and refuse documents with multiple documents, anchors, aliases,
-/// tags, or block scalars.
+/// tags, block scalars, or opt-in merge-key expansion.
 fn inspect_document(input: &str, options: &ParseOptions) -> Result<Vec<String>, EditError> {
+    if options.merge_keys {
+        return Err(EditError::new(
+            EditErrorKind::Unsupported,
+            "documents with merge-key expansion enabled are not supported",
+        ));
+    }
     let mut doc_count = 0usize;
     let mut canonical = Vec::new();
     let stream = parse_events_with(input, options).map_err(EditError::parse)?;
@@ -561,6 +582,7 @@ fn plan_replace_scalar(
     tree: &SpannedTree<'_>,
     path: &[PathSegment],
     replacement: &Value,
+    limits: &Limits,
 ) -> Result<TextEdit, EditError> {
     if !matches!(
         replacement,
@@ -606,26 +628,40 @@ fn plan_replace_scalar(
         ));
     }
 
-    let formatted = format_inline_scalar(replacement)?;
+    let formatted = format_inline_scalar(replacement, limits)?;
     Ok(TextEdit::new(span, formatted))
 }
 
-fn format_inline_scalar(value: &Value) -> Result<String, EditError> {
-    let emit_options = EmitOptions::new().with_flow(true);
-    let emitted = to_string_value_with(value, &emit_options).map_err(|error| {
+fn format_inline_scalar(value: &Value, limits: &Limits) -> Result<String, EditError> {
+    // Emit inside a 1-element flow sequence so `ayaml`'s emitter uses flow-context quoting
+    // (quoting strings with `,`, `[`, `]`, `{`, `}` as well as block-unsafe indicators).
+    let emit_options = EmitOptions::new()
+        .with_flow(true)
+        .with_limits(limits.clone());
+    let wrapped = Value::Sequence(vec![value.clone()]);
+    let emitted = to_string_value_with(&wrapped, &emit_options).map_err(|error| {
         EditError::new(
             EditErrorKind::Unsupported,
             format!("could not format replacement scalar: {error}"),
         )
     })?;
-    let trimmed = emitted.trim_end_matches(['\n', '\r']).to_owned();
-    if trimmed.is_empty() || trimmed.contains(['\n', '\r']) {
+    let trimmed = emitted.trim_end_matches(['\n', '\r']);
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .ok_or_else(|| {
+            EditError::new(
+                EditErrorKind::Unsupported,
+                "replacement scalar cannot be formatted on a single line",
+            )
+        })?;
+    if inner.is_empty() || inner.contains(['\n', '\r']) {
         return Err(EditError::new(
             EditErrorKind::Unsupported,
             "replacement scalar cannot be formatted on a single line",
         ));
     }
-    Ok(trimmed)
+    Ok(inner.to_owned())
 }
 
 fn plan_remove_entry(tree: &SpannedTree<'_>, path: &[PathSegment]) -> Result<TextEdit, EditError> {
@@ -723,4 +759,152 @@ fn one_run_removed(before: &[String], after: &[String]) -> bool {
         .take_while(same)
         .count();
     after.len() < before.len() && prefix + suffix == after.len()
+}
+
+/// Verify that `after` can be obtained from `before` by at most `max_replaces` scalar-to-scalar
+/// substitutions and at most `max_removals` contiguous deleted event runs (and zero insertions or
+/// structural changes elsewhere).
+fn batch_events_match(
+    before: &[String],
+    after: &[String],
+    max_replaces: usize,
+    max_removals: usize,
+) -> bool {
+    const INF: (usize, usize) = (usize::MAX, usize::MAX);
+    if after.len() > before.len() {
+        return false;
+    }
+    if max_removals == 0 {
+        if before.len() != after.len() {
+            return false;
+        }
+        let mut diffs = 0usize;
+        for (b, a) in before.iter().zip(after) {
+            if b != a {
+                if !b.starts_with("scalar ") || !a.starts_with("scalar ") {
+                    return false;
+                }
+                diffs += 1;
+                if diffs > max_replaces {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+    // Dynamic alignment tracking (before_idx, after_idx, in_removed_run) -> min (replaces, runs).
+    // Even for large documents, `after.len() <= before.len()` and `max_removals` is small;
+    // keep the state bounded by matching common prefix and suffix first.
+    let same = |pair: &(&String, &String)| pair.0 == pair.1;
+    let prefix = before.iter().zip(after).take_while(same).count();
+    let suffix = before[prefix..]
+        .iter()
+        .rev()
+        .zip(after[prefix..].iter().rev())
+        .take_while(same)
+        .count();
+    let b = &before[prefix..before.len() - suffix];
+    let a = &after[prefix..after.len() - suffix];
+    let max_skip = b.len() - a.len();
+    let cols = max_skip + 1;
+    // Bound DP work for very large multi-op batches; fall back to greedy alignment if the
+    // mismatch window would exceed 1M DP cells.
+    if (a.len() + 1).saturating_mul(cols) > 1_000_000 {
+        return batch_events_match_greedy(b, a, max_replaces, max_removals);
+    }
+    // Rolling 2-row DP over (skip in 0..=max_skip, in_run in 0..=1) storing min
+    // (removals_used, replaces_used) with `usize::MAX` meaning unreachable.
+    let mut curr = vec![[INF; 2]; cols];
+    let mut next = vec![[INF; 2]; cols];
+    curr[0][0] = (0, 0);
+    for j in 0..=a.len() {
+        next.fill([INF; 2]);
+        for skip in 0..=max_skip {
+            let i = j + skip;
+            let best_not_in = curr[skip][0];
+            let best_in = curr[skip][1];
+            // Option 1: delete `b[i]` (advance `skip` by 1, enter/stay in removed run).
+            if skip < max_skip && i < b.len() {
+                if best_not_in.0 < max_removals {
+                    let cand = (best_not_in.0 + 1, best_not_in.1);
+                    if cand < curr[skip + 1][1] {
+                        curr[skip + 1][1] = cand;
+                    }
+                }
+                if best_in != INF && best_in < curr[skip + 1][1] {
+                    curr[skip + 1][1] = best_in;
+                }
+            }
+            // Option 2: match or replace `b[i]` with `a[j]` (advance `j` by 1, exit removed run).
+            if j < a.len() && i < b.len() {
+                let best = best_not_in.min(best_in);
+                if best != INF {
+                    if b[i] == a[j] {
+                        if best < next[skip][0] {
+                            next[skip][0] = best;
+                        }
+                    } else if b[i].starts_with("scalar ")
+                        && a[j].starts_with("scalar ")
+                        && best.1 < max_replaces
+                    {
+                        let cand = (best.0, best.1 + 1);
+                        if cand < next[skip][0] {
+                            next[skip][0] = cand;
+                        }
+                    }
+                }
+            }
+        }
+        if j < a.len() {
+            std::mem::swap(&mut curr, &mut next);
+        }
+    }
+    let final_cost = curr[max_skip][0].min(curr[max_skip][1]);
+    final_cost.0 <= max_removals && final_cost.1 <= max_replaces
+}
+
+fn batch_events_match_greedy(
+    before: &[String],
+    after: &[String],
+    max_replaces: usize,
+    max_removals: usize,
+) -> bool {
+    let mut i = 0usize;
+    let mut j = 0usize;
+    let mut replaces = 0usize;
+    let mut removals = 0usize;
+    let mut in_run = false;
+    while i < before.len() && j < after.len() {
+        if before[i] == after[j] {
+            in_run = false;
+            i += 1;
+            j += 1;
+            continue;
+        }
+        let rem_skip = (before.len() - i).saturating_sub(after.len() - j);
+        if rem_skip > 0 && (in_run || removals < max_removals) {
+            if !in_run {
+                removals += 1;
+                in_run = true;
+            }
+            i += 1;
+        } else if before[i].starts_with("scalar ")
+            && after[j].starts_with("scalar ")
+            && replaces < max_replaces
+        {
+            in_run = false;
+            replaces += 1;
+            i += 1;
+            j += 1;
+        } else {
+            return false;
+        }
+    }
+    if j != after.len() {
+        return false;
+    }
+    if i < before.len() && !in_run {
+        removals += 1;
+    }
+    removals <= max_removals && replaces <= max_replaces
 }

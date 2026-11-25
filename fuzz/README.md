@@ -13,6 +13,7 @@ cargo +nightly fuzz run merge_keys --target x86_64-unknown-linux-gnu -- -rss_lim
 cargo +nightly fuzz run masked_errors --target x86_64-unknown-linux-gnu -- -rss_limit_mb=2048
 cargo +nightly fuzz run event_emit --target x86_64-unknown-linux-gnu -- -rss_limit_mb=2048
 cargo +nightly fuzz run typed_equiv --target x86_64-unknown-linux-gnu -- -rss_limit_mb=2048
+cargo +nightly fuzz run edit --target x86_64-unknown-linux-gnu -- -rss_limit_mb=2048
 ```
 
 Targets:
@@ -35,6 +36,9 @@ Targets:
   writers and verifies identical output/refusals and reparse soundness.
 - `typed_equiv` compares `from_str_by_tree_with` and `from_str_by_events_with` over
   structure-aware YAML, default/compat modes, tight limits, and multiple deserialization targets.
+- `edit` exercises `ayaml_edit::replace_scalar`, `remove_entry`, and `apply_batch` over
+  structure-aware YAML, checking `apply_edits` equivalence, reparsing, and preservation of all
+  unrelated values.
 
 The target harness bodies live in `fuzz/src/lib.rs`, so deterministic unit tests cover them on
 stable Rust without linking libFuzzer:

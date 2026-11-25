@@ -27,7 +27,18 @@ import json
 import subprocess
 import sys
 
-WATCHED = ("fuzz.yml", "advisories.yml", "proptest.yml")
+# (workflow, freshness_window_hours, check_green_artifacts)
+WATCHED_SPECS = (
+    ("fuzz.yml", 36, True),
+    ("advisories.yml", 36, True),
+    ("proptest.yml", 36, True),
+    ("miri.yml", 36, True),
+    ("kani.yml", 36, True),
+    # Weekly schedule (Tuesday) — allow 8 days (192h) and do not treat its intentional
+    # `mutants-shard-*` summary artifacts on green runs as sealed crash files.
+    ("mutants.yml", 192, False),
+)
+WATCHED = tuple(name for name, _, _ in WATCHED_SPECS)
 # A daily schedule has run up to 8 hours late, so a shorter window would report a late run, and
 # this one still reports a single missed run.
 WINDOW_HOURS = 36
@@ -35,9 +46,24 @@ ISSUE_TITLE = "A scheduled workflow failed or stopped running"
 RUN_FIELDS = "conclusion,createdAt,databaseId,event,status,url"
 
 
+def window_hours_for(workflow: str) -> int:
+    for name, hours, _ in WATCHED_SPECS:
+        if name == workflow:
+            return hours
+    return WINDOW_HOURS
+
+
+def checks_artifacts_for(workflow: str) -> bool:
+    for name, _, check_artifacts in WATCHED_SPECS:
+        if name == workflow:
+            return check_artifacts
+    return True
+
+
 def problems(workflow: str, runs: list[dict], now: datetime) -> list[str]:
     """What's wrong with one workflow, given its recent runs."""
-    window = timedelta(hours=WINDOW_HOURS)
+    hours = window_hours_for(workflow)
+    window = timedelta(hours=hours)
     recent = [
         run for run in runs if now - datetime.fromisoformat(run["createdAt"]) <= window
     ]
@@ -46,7 +72,7 @@ def problems(workflow: str, runs: list[dict], now: datetime) -> list[str]:
         # a later one.
         last = max((run["createdAt"] for run in runs), default=None)
         since = f", and the last was at {last}" if last else ""
-        return [f"{workflow} has had no run in the last {WINDOW_HOURS} hours{since}"]
+        return [f"{workflow} has had no run in the last {hours} hours{since}"]
     found = []
     for run in recent:
         # A run started by hand shows that the workflow still runs, but its result says
@@ -81,8 +107,11 @@ def recent_runs(workflow: str, now: datetime) -> list[dict]:
             RUN_FIELDS,
         )
     )
-    # A green run says nothing of what it left, such as a slow unit, so ask for its artifacts.
-    window = timedelta(hours=WINDOW_HOURS)
+    # A green run says nothing of what it left, such as a slow unit, so ask for its artifacts
+    # when the workflow should leave none on success.
+    if not checks_artifacts_for(workflow):
+        return runs
+    window = timedelta(hours=window_hours_for(workflow))
     for run in runs:
         if (
             run["event"] == "schedule"

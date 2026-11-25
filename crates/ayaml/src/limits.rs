@@ -559,6 +559,20 @@ impl AliasBudget {
         self.charge_limits(limits, input_len, size)
             .map_err(Error::from)
     }
+
+    /// Charge estimated expanded bytes without incrementing the dereference count (used while
+    /// materializing nodes already inside an alias expansion).
+    pub(crate) fn charge_bytes(
+        &mut self,
+        limits: &Limits,
+        input_len: usize,
+        size: usize,
+    ) -> Result<(), Error> {
+        self.bytes = self.bytes.saturating_add(size);
+        limits
+            .check_alias_expansion(input_len, self.bytes)
+            .map_err(Error::from)
+    }
 }
 
 fn check(kind: LimitKind, limit: usize, observed: usize) -> Result<(), LimitExceeded> {
