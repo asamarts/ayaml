@@ -356,28 +356,55 @@ fn allocation_budgets_include_total_bytes() {
     assert!(rows > 0, "no allocation workloads found");
 }
 
-/// CI runs `tools/test_ci_checks.py` as a script, and `unittest.main()` exits when it returns, so
-/// a test class defined after that call never runs. The call must be the last thing in the file.
+/// CI runs every `tools/test_*.py` script unconditionally, and `unittest.main()` exits when it
+/// returns, so a test class defined after that call never runs. The call must be the last thing
+/// in each file.
 #[test]
 fn the_ci_check_tests_all_run() {
     let Some(root) = repository_root() else {
         return;
     };
-    let tests = read(&root, "tools/test_ci_checks.py");
-    let (_, after) = tests
-        .split_once("if __name__ == \"__main__\":")
-        .expect("the file runs its tests when it is a script");
-    assert_eq!(
-        after.trim(),
-        "unittest.main()",
-        "nothing may follow the call that runs the tests"
+    let ci_wf = read(&root, ".github/workflows/ci.yml");
+    let mut test_scripts: Vec<String> = std::fs::read_dir(root.join("tools"))
+        .expect("tools directory")
+        .filter_map(|entry| {
+            let path = entry.expect("tools entry").path();
+            let name = path.file_name()?.to_str()?;
+            let is_py = path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("py"));
+            (name.starts_with("test_") && is_py).then(|| name.to_owned())
+        })
+        .collect();
+    test_scripts.sort();
+    assert!(
+        !test_scripts.is_empty(),
+        "expected Python test scripts under tools/"
     );
-    // A second call, earlier and outside that condition, would end the run where it stands.
-    assert_eq!(
-        tests.matches("unittest.main(").count(),
-        1,
-        "one call runs the tests"
-    );
+
+    for name in test_scripts {
+        let rel = format!("tools/{name}");
+        let tests = read(&root, &rel);
+        let (_, after) = tests
+            .split_once("if __name__ == \"__main__\":")
+            .unwrap_or_else(|| panic!("{rel} must run its tests when invoked as a script"));
+        assert_eq!(
+            after.trim(),
+            "unittest.main()",
+            "{rel}: nothing may follow the call that runs the tests"
+        );
+        // A second call, earlier and outside that condition, would end the run where it stands.
+        assert_eq!(
+            tests.matches("unittest.main(").count(),
+            1,
+            "{rel}: one call runs the tests"
+        );
+        let cmd = format!("python3 {rel}");
+        let runs = steps_that_run(&ci_wf, &|step| {
+            step["run"].as_str().map(str::trim) == Some(cmd.as_str())
+        });
+        assert_eq!(runs, Ok(1), "CI must run `{cmd}` unconditionally once");
+    }
 }
 
 /// Every place that repeats the workspace version states the one in `Cargo.toml`, so a release
@@ -523,6 +550,17 @@ fn every_place_that_repeats_the_version_agrees_with_the_workspace() {
         assert!(
             text.contains(&format!("name = \"ayaml\"\nversion = \"{version}\"\n")),
             "{name} holds another version of ayaml than {version}"
+        );
+        assert!(
+            text.contains(&format!("name = \"ayaml-edit\"\nversion = \"{version}\"\n")),
+            "{name} holds another version of ayaml-edit than {version}"
+        );
+    }
+    for legal in ["LICENSE-APACHE", "LICENSE-MIT", "NOTICE"] {
+        assert_eq!(
+            read(&root, &format!("crates/ayaml-edit/{legal}")),
+            read(&root, legal),
+            "crates/ayaml-edit/{legal} must match the workspace root {legal}"
         );
     }
 }
@@ -1087,4 +1125,44 @@ fn fuzz_targets_and_harness_unit_tests_are_wired_in_ci() {
         Ok(1),
         "CI must run fuzz harness unit tests unconditionally"
     );
+}
+
+/// Companion crate `ayaml-edit` stays wired into CI packaging, cross-check, unsafe census,
+/// semver checks, markdownlint, and multi-crate Trusted Publishing release automation (AY-163).
+#[test]
+fn ayaml_edit_ci_and_release_automation_is_wired() {
+    let Some(root) = repository_root() else {
+        return;
+    };
+    let ci_wf = read(&root, ".github/workflows/ci.yml");
+    for needle in [
+        "cargo package -p ayaml-edit --locked --no-verify",
+        "python3 tools/check_release.py package --package ayaml-edit",
+        "cargo check -p ayaml -p ayaml-edit --locked --all-features --target",
+        "crates/ayaml-edit/Cargo.toml",
+        "cargo semver-checks --package ayaml-edit",
+        "crates/ayaml-edit/README.md",
+    ] {
+        assert!(
+            ci_wf.contains(needle),
+            ".github/workflows/ci.yml must include {needle:?}"
+        );
+    }
+
+    let release_wf = read(&root, ".github/workflows/release.yml");
+    for needle in [
+        "cargo +\"$RELEASE_TOOLCHAIN\" package -p ayaml-edit --locked --no-verify",
+        "check_release.py package --package ayaml-edit",
+        "check_release.py published --package ayaml-edit",
+        "cargo +\"$RELEASE_TOOLCHAIN\" publish -p ayaml-edit --locked --no-verify",
+        "check_release.py registry --package ayaml-edit",
+        "ayaml-edit-${{ needs.package.outputs.version }}.crate",
+        "--extra ayaml-edit",
+        "ayaml-edit=$EDIT_DIGEST",
+    ] {
+        assert!(
+            release_wf.contains(needle),
+            ".github/workflows/release.yml must include {needle:?}"
+        );
+    }
 }

@@ -300,6 +300,10 @@ job_features() {
 job_policy() {
   step "test the checks" python3 tools/test_ci_checks.py
   # Mirrors: python3 tools/test_ci_checks.py
+  step "test the docs check" python3 tools/test_docs_check.py
+  # Mirrors: python3 tools/test_docs_check.py
+  step "test the multi-crate release checks" python3 tools/test_multi_crate_release.py
+  # Mirrors: python3 tools/test_multi_crate_release.py
   step "test the public API check" python3 tools/test_public_api.py
   # Mirrors: python3 tools/test_public_api.py
   step "classify dependencies" python3 tools/check_deps.py
@@ -460,6 +464,8 @@ PY
   local src edit_src
   src="$(find "$work" -maxdepth 1 -mindepth 1 -type d -name 'ayaml-*' ! -name 'ayaml-edit-*' | head -1)"
   edit_src="$(find "$work" -maxdepth 1 -mindepth 1 -type d -name 'ayaml-edit-*' | head -1)"
+  test_step "test the unpacked ayaml package" cargo test --manifest-path "$src/Cargo.toml" --all-features --locked --target-dir "$work/target"
+  test_step "test the unpacked ayaml-edit package" cargo test --manifest-path "$edit_src/Cargo.toml" --config "patch.crates-io.ayaml.path=\"$src\"" --all-features --target-dir "$work/target"
   mkdir -p "$work/consumer/src"
   cat >"$work/consumer/Cargo.toml" <<EOF
 [package]
@@ -500,7 +506,7 @@ fn main() {
 }
 EOF
   cp Cargo.lock "$work/consumer/Cargo.lock" 2>/dev/null || true
-  timed_step "downstream consumer smoke" cargo run --quiet --offline --manifest-path "$work/consumer/Cargo.toml" --target-dir "$work/target"
+  timed_step "downstream consumer smoke" cargo run --quiet --manifest-path "$work/consumer/Cargo.toml" --target-dir "$work/target"
   rm -rf "$work"
 }
 
@@ -509,8 +515,8 @@ job_cross() {
   local t
   for t in aarch64-apple-darwin x86_64-apple-darwin x86_64-pc-windows-msvc x86_64-pc-windows-gnu; do
     if have_target "$STABLE" "$t"; then
-      step "check --all-features --target $t" cargo "+$STABLE" check --locked --all-features --target "$t"
-      # Mirrors: cargo check --locked --all-features --target TARGET
+      step "check --all-features --target $t" cargo "+$STABLE" check -p ayaml -p ayaml-edit --locked --all-features --target "$t"
+      # Mirrors: cargo check -p ayaml -p ayaml-edit --locked --all-features --target TARGET
     else
       skip "target $t not installed for $STABLE"
     fi

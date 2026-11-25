@@ -68,15 +68,21 @@ export const v023SpeedRows: SpeedRow[] = readJsonl<SpeedRow>('v023-speed.jsonl')
 export const v023MemoryRows: MemoryRow[] = readJsonl<MemoryRow>('v023-memory.jsonl');
 
 // Build-time data integrity assertions: fail fast if pinned files ever drift.
-if (speedRows.length !== fingerprint.speed_rows) {
+if (speedRows.length === 0 || speedRows.length !== fingerprint.speed_rows) {
   throw new Error(
     `bench.ts: speed.jsonl has ${speedRows.length} rows, fingerprint expects ${fingerprint.speed_rows}`,
   );
 }
-if (memoryRows.length !== fingerprint.memory_rows) {
+if (memoryRows.length === 0 || memoryRows.length !== fingerprint.memory_rows) {
   throw new Error(
     `bench.ts: memory.jsonl has ${memoryRows.length} rows, fingerprint expects ${fingerprint.memory_rows}`,
   );
+}
+if (v023SpeedRows.length === 0) {
+  throw new Error('bench.ts: v023-speed.jsonl contains no rows');
+}
+if (v023MemoryRows.length === 0) {
+  throw new Error('bench.ts: v023-memory.jsonl contains no rows');
 }
 
 const speedMap = new Map<string, SpeedRow>();
@@ -215,6 +221,12 @@ export function computeTierComparison(
       if (bMem && pMem && bMem.allocations > 0 && pMem.allocations > 0) {
         allocRatios.push(pMem.allocations / bMem.allocations);
       }
+    }
+
+    if (timeRatios.length === 0) {
+      throw new Error(
+        `bench.ts: no shared speed scenarios between ${baseImpl}/${baseOp} and ${peer.impl}/${peer.op}`,
+      );
     }
 
     return {
@@ -390,6 +402,9 @@ export function getTypedDecodeRows(scenario: string): TypedDecodeRow[] {
       isAyaml: spec.isAyaml,
     });
   }
+  if (out.length === 0) {
+    throw new Error(`bench.ts: no typed decode rows found for scenario ${scenario}`);
+  }
   return out.sort((a, b) => a.medianUs - b.medianUs);
 }
 
@@ -426,6 +441,9 @@ export function getEmitRows(scenario: string): EmitRow[] {
       isAyaml: spec.isAyaml,
       isUnsafeArena: spec.isUnsafeArena,
     });
+  }
+  if (out.length === 0) {
+    throw new Error(`bench.ts: no emit rows found for scenario ${scenario}`);
   }
   return out.sort((a, b) => b.throughput - a.throughput);
 }
@@ -582,6 +600,13 @@ export const HEADLINE = (() => {
     if (curRow && curRow.peak_bytes > 0 && oldRow.peak_bytes > 0) {
       v023PeakRatios.push(oldRow.peak_bytes / curRow.peak_bytes);
     }
+  }
+
+  if (v023SpeedRatios.length === 0) {
+    throw new Error('bench.ts: no shared v0.2.3 speed rows for overall speedup');
+  }
+  if (v023PeakRatios.length === 0) {
+    throw new Error('bench.ts: no shared v0.2.3 memory rows for peak improvement');
   }
 
   return {

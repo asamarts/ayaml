@@ -1212,7 +1212,7 @@ impl<'a> Scanner<'a> {
             // this scanner wouldn't, so stopping would match neither reading.
             if self.compat_flow && ch == '?' {
                 let after = self.input[self.pos + 1..].chars().next();
-                if compat_question_stops_name(after) {
+                if compat_question_stops_name(after, self.flow_level > 0) {
                     break;
                 }
             }

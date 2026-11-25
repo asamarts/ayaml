@@ -23,6 +23,7 @@ sys.path.insert(0, str(TOOLS_DIR))
 
 import check_release
 import check_unsafe_census
+from _release_test_fakes import FAKE_CHECK_RELEASE, FAKE_GH
 
 NO_UNSAFE = {
     kind: {"safe": 1, "unsafe_": 0}
@@ -273,13 +274,55 @@ class MultiCrateReleaseChecksTests(unittest.TestCase):
         self.assertIn("ayaml-edit-0.2.0.crate", out_reh.getvalue())
         self.assertNotIn("attestation record:", out_reh.getvalue())
 
+        # Duplicate package names in --extra are refused.
+        for bad_args in (
+            ["record", "v0.2.0", self.commit, d1, "--extra", "ayaml", d2],
+            [
+                "record",
+                "v0.2.0",
+                self.commit,
+                d1,
+                "--extra",
+                "ayaml-edit",
+                d2,
+                "--extra",
+                "ayaml-edit",
+                d2,
+            ],
+        ):
+            with self.subTest(bad_args=bad_args), mock.patch("sys.stderr", io.StringIO()):
+                self.assertEqual(check_release.main(bad_args), 1)
+
+    def test_published_cli_rejects_malformed_flags_and_versions_with_exit_2(self) -> None:
+        # Exit 1 triggers a publish in release.yml, so malformed CLI invocations must exit 2.
+        for bad_args in (
+            ["published", "--package"],
+            ["published", "--package="],
+            ["published", "--package", "-v"],
+            ["published", "--unknown", "0.2.0"],
+            ["published", "v0.2.0"],
+            ["published", "--package=ayaml-edit", "not-a-semver"],
+        ):
+            with (
+                self.subTest(bad_args=bad_args),
+                mock.patch("sys.stderr", io.StringIO()),
+                mock.patch.object(check_release, "published", side_effect=AssertionError("should not query crates.io")),
+            ):
+                self.assertEqual(check_release.main(bad_args), 2)
+
+        # `--package=ayaml-edit` with valid semver routes cleanly to published().
+        with (
+            mock.patch("sys.stdout", io.StringIO()),
+            mock.patch.object(check_release, "published", return_value=True) as mocked,
+        ):
+            self.assertEqual(check_release.main(["published", "--package=ayaml-edit", "0.2.0"]), 0)
+            mocked.assert_called_once_with("0.2.0", package="ayaml-edit")
+
 
 class MultiCrateGitHubReleaseScriptTests(unittest.TestCase):
     """tools/github_release.sh fetches, checksums, uploads, and verifies both crates together."""
 
     def test_fetch_and_release_handle_ayaml_and_ayaml_edit(self) -> None:
-        from test_ci_checks import FAKE_CHECK_RELEASE, FAKE_GH
-
         fake_multi_curl = r'''#!/usr/bin/env python3
 import os, shutil, sys
 from pathlib import Path
@@ -365,11 +408,55 @@ shutil.copy(src, out)
                 text=True,
             )
             self.assertEqual(rel.returncode, 0, rel.stderr)
+            self.assertIn(f"ayaml-0.2.0.crate ({d1})", rel.stdout)
+            self.assertIn(f"ayaml-edit-0.2.0.crate ({d2})", rel.stdout)
             uploaded = sorted(p.name for p in (state / "releases/v0.2.0/assets").iterdir())
             self.assertEqual(
                 uploaded,
                 ["SHA256SUMS", "ayaml-0.2.0.crate", "ayaml-edit-0.2.0.crate"],
             )
+
+            # Duplicate package spec in fetch is refused.
+            dup = subprocess.run(
+                [
+                    "bash",
+                    str(root / "tools/github_release.sh"),
+                    "fetch",
+                    "0.2.0",
+                    d1,
+                    str(root / "dup_dist"),
+                    f"ayaml-edit={d2}",
+                    f"ayaml-edit={d2}",
+                ],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(dup.returncode, 0)
+            self.assertIn("duplicate package", dup.stderr)
+
+            # Missing crate files in dist fails release immediately instead of silently uploading empty list.
+            empty_dist = root / "empty_dist"
+            empty_dist.mkdir()
+            (empty_dist / "SHA256SUMS").write_text("", encoding="utf-8")
+            empty_rel = subprocess.run(
+                [
+                    "bash",
+                    str(root / "tools/github_release.sh"),
+                    "release",
+                    "v0.2.1",
+                    "0.2.1",
+                    str(empty_dist),
+                    str(notes),
+                ],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(empty_rel.returncode, 0)
+            self.assertIn("no *-0.2.1.crate files found", empty_rel.stderr)
 
 
 if __name__ == "__main__":

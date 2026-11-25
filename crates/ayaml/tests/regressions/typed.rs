@@ -603,22 +603,35 @@ fn compat_reads_what_default_mode_and_libyaml_read() {
     assert!(compat("[?!!!,]").as_sequence().is_some());
 
     // A name that stops on `?` or `:` must not leave a token that fails. These read as default
-    // mode reads the whole name, with or without trailing whitespace/newlines.
+    // mode reads the whole name, with or without trailing whitespace/newlines, aliases, or
+    // block-context NEL/LS/PS.
     for input in [
         "[&a:a?]",
         "[&a:a? ]",
         "{&a:b?}",
         "&a\u{85}?",
         "&a\u{85}?\n",
+        "&a?\u{85}",
+        "&a?\u{85}\n  b",
         "&?",
         "&?\n",
+        "&?\r",
+        "&?\r\n",
+        "&?\tfoo",
         "---\n&? foo\n",
+        "- &? foo\n- *?\n",
+        "- &a? foo\n- *a?\n",
+        "[&? 1, *? ]",
+        "[&? 1, *?]",
     ] {
         assert_eq!(compat(input), default(input), "{input:?}");
     }
+    // Outside whitespace, `#` after `?` is text in YAML, so compat stops at `?` (matching libyaml).
+    assert!(ayaml::compat::from_str::<ayaml::Value>("[&?#]").is_err());
 
     // A compat-only directive comment containing a BOM paired with a trailing-`?` anchor
-    // round-trips through `to_string_events` back into the compatibility reader.
+    // round-trips through `to_string_events` back into the compatibility reader with the same
+    // anchor name preserved.
     let compat_directive_and_q = "%FOO #\u{feff}\n---\n&?";
     let events = ayaml::compat::parse_events_eager_with(
         compat_directive_and_q,
@@ -630,6 +643,13 @@ fn compat_reads_what_default_mode_and_libyaml_read() {
         ayaml::compat::parse_events_eager_with(&rendered, &ayaml::compat::ParseOptions::new())
             .expect("compat reparse");
     assert_eq!(reparsed.len(), events.len(), "rendered={rendered:?}");
+    assert!(
+        reparsed.iter().any(|event| matches!(
+            event,
+            ayaml::Event::Scalar { anchor: Some(anchor), .. } if anchor.as_str() == "?"
+        )),
+        "expected anchor `?` in reparsed events: {reparsed:?}"
+    );
 
     // A block scalar may sit at the parent's column under an anchored `:` key, as libyaml reads
     // it.

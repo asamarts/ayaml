@@ -149,10 +149,12 @@ fn public_api_auto_traits_and_standard_derives_are_frozen_for_v1() {
     assert_unwind_safe::<Deserializer<'_>>();
     assert_send::<DocumentDeserializer<'_>>();
     assert_unpin::<DocumentDeserializer<'_>>();
+    assert_unwind_safe::<DocumentDeserializer<'_>>();
     assert_deserializer::<DocumentDeserializer<'_>>();
     assert_deserializer::<&mut DocumentDeserializer<'_>>();
     assert_send::<ayaml::Emitter<'_>>();
     assert_unpin::<ayaml::Emitter<'_>>();
+    assert_unwind_safe::<ayaml::Emitter<'_>>();
 
     // Spanned<T> supports DerefMut as well as Deref/AsRef/AsMut.
     let mut spanned = Spanned::new(Span::new(0, 1), 10_u32);

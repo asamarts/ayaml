@@ -42,7 +42,16 @@ pub(crate) struct MergedEventStream<'a> {
 impl<'a> MergedEventStream<'a> {
     pub(crate) fn new(input: &'a str, limits: &Limits) -> Result<Self, Error> {
         let cursor = EventCursor::new(input, limits)?;
-        Ok(Self {
+        Ok(Self::from_cursor(cursor, input, limits))
+    }
+
+    fn new_single_document(input: &'a str, limits: &Limits) -> Result<Self, Error> {
+        let cursor = EventCursor::new_single_document(input, limits)?;
+        Ok(Self::from_cursor(cursor, input, limits))
+    }
+
+    fn from_cursor(cursor: EventCursor<'a>, input: &'a str, limits: &Limits) -> Self {
+        Self {
             cursor,
             limits: limits.clone(),
             input,
@@ -51,7 +60,7 @@ impl<'a> MergedEventStream<'a> {
             stream_started: false,
             stream_ended: false,
             emitted_events: 0,
-        })
+        }
     }
 
     fn start_stream(&mut self) -> Result<Span, Error> {
@@ -171,7 +180,7 @@ pub(crate) fn expand_single_document<'a>(
     input: &'a str,
     limits: &Limits,
 ) -> Result<(Vec<Event<'a>>, AliasBudget), Error> {
-    let mut stream = MergedEventStream::new(input, limits)?;
+    let mut stream = MergedEventStream::new_single_document(input, limits)?;
     let _start = stream.start_stream()?;
     let first = match stream.cursor.next_document()? {
         Some(raw_events) => Some(

@@ -73,6 +73,7 @@ class DocsCheck(unittest.TestCase):
             "implementation": "ayaml",
             "bytes": 1000,
             "peak_bytes": 4000,
+            "live_bytes": 2000,
             "allocations": 12,
             "fixture_sha256": SAMPLE_SHA,
         }
@@ -115,13 +116,17 @@ class DocsCheck(unittest.TestCase):
         self.assertTrue(any("missing link target 'missing.md'" in msg for msg in found), found)
         self.assertTrue(any("escapes docs/" in msg for msg in found), found)
 
-    def test_ayaml_edit_readme_broken_link_fails(self) -> None:
+    def test_ayaml_edit_readme_broken_link_and_fences_fail(self) -> None:
         root = self.make_tree()
         edit_dir = root / "crates/ayaml-edit"
         edit_dir.mkdir(parents=True)
-        (edit_dir / "README.md").write_text("# ayaml-edit\n\nSee [Missing](missing.md).\n", encoding="utf-8")
+        (edit_dir / "README.md").write_text(
+            "# ayaml-edit\n\nSee [Missing](missing.md).\n\n```\nuntagged\n```\n",
+            encoding="utf-8",
+        )
         found = check_docs.problems(root)
         self.assertTrue(any("crates/ayaml-edit/README.md: missing link target 'missing.md'" in msg for msg in found), found)
+        self.assertTrue(any("crates/ayaml-edit/README.md" in msg and "no language tag" in msg for msg in found), found)
 
     def test_ignored_or_no_run_or_untagged_fence_fails_for_backticks_and_tildes(self) -> None:
         for fence, expected in (
@@ -173,17 +178,50 @@ class DocsCheck(unittest.TestCase):
         found = check_docs.problems(root)
         self.assertTrue(any("fixture_sha256 mismatch for scenario 'openapi'" in msg for msg in found), found)
 
-        # Missing required JSONL field fails.
-        del mem["peak_bytes"]
+        # Missing required JSONL field (including live_bytes) fails.
+        del mem["live_bytes"]
         mem["fixture_sha256"] = SAMPLE_SHA
         mem_path.write_text(json.dumps(mem) + "\n", encoding="utf-8")
         found = check_docs.problems(root)
-        self.assertTrue(any("missing field 'peak_bytes'" in msg for msg in found), found)
+        self.assertTrue(any("missing field 'live_bytes'" in msg for msg in found), found)
+
+        # v023-*.jsonl SHA-256 mismatch is caught across files.
+        mem["live_bytes"] = 2000
+        mem_path.write_text(json.dumps(mem) + "\n", encoding="utf-8")
+        v023_speed = bench_dir / "v023-speed.jsonl"
+        row = json.loads(v023_speed.read_text(encoding="utf-8").strip())
+        row["fixture_sha256"] = ALT_SHA
+        v023_speed.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        found = check_docs.problems(root)
+        self.assertTrue(any("v023-speed.jsonl: fixture_sha256 mismatch" in msg for msg in found), found)
+
+        # Empty benchmark JSONL fails both empty check and fingerprint row-count check.
+        row["fixture_sha256"] = SAMPLE_SHA
+        v023_speed.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        (bench_dir / "speed.jsonl").write_text("", encoding="utf-8")
+        found = check_docs.problems(root)
+        self.assertTrue(any("speed.jsonl: benchmark file contains no rows" in msg for msg in found), found)
+        self.assertTrue(any("speed_rows=1 != speed.jsonl count 0" in msg for msg in found), found)
+
+        # Non-object JSON in fingerprint.json or JSONL fails cleanly without crashing.
+        (bench_dir / "speed.jsonl").write_text("[]\n", encoding="utf-8")
+        found = check_docs.problems(root)
+        self.assertTrue(any("speed.jsonl:1: expected JSON object" in msg for msg in found), found)
+        fp_path.write_text("[]\n", encoding="utf-8")
+        found = check_docs.problems(root)
+        self.assertTrue(any("fingerprint.json: expected JSON object" in msg for msg in found), found)
 
         # Missing fingerprint.json fails when benchmarks directory exists.
         fp_path.unlink()
         found = check_docs.problems(root)
         self.assertTrue(any("missing fingerprint metadata" in msg for msg in found), found)
+
+        # Missing benchmarks directory fails if site/src/lib/bench.ts is present.
+        root2 = self.make_tree()
+        (root2 / "site/src/lib").mkdir(parents=True)
+        (root2 / "site/src/lib/bench.ts").write_text("export {};\n", encoding="utf-8")
+        found2 = check_docs.problems(root2)
+        self.assertTrue(any("missing benchmark data directory" in msg for msg in found2), found2)
 
     def test_repository_tree_passes(self) -> None:
         repo = Path(__file__).resolve().parent.parent

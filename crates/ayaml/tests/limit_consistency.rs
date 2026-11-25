@@ -947,6 +947,10 @@ fn lazy_and_eager_events_match() {
         "a: [b\n",
         "a:\n---\n[\n",
         "a: 1\n---\nb: [\n",
+        "[1]\n---\n}}-x\n@\n",
+        "[1]\n...\n}}-x\n@\n",
+        "[1]\n---\n@\n",
+        "[1]\n--- @\n",
     ] {
         let options = ParseOptions::new();
         let eager = ayaml::internals::parse_events(input, &options.limits);
@@ -961,6 +965,28 @@ fn lazy_and_eager_events_match() {
             ),
             (lazy, eager) => panic!("{input:?}: lazy {lazy:?}, eager {eager:?}"),
         }
+    }
+
+    // Tight limits on multi-document / deferred-scanner-error streams also match between lazy and
+    // eager event readers (including `max_documents` and `self.end` span placement).
+    for (input, limits) in [
+        ("[1]\n--- @\n", Limits::default().with_max_documents(1)),
+        ("[1]\n---\n@\n", Limits::default().with_max_documents(1)),
+        (
+            "? [1]\n? a\n@\n",
+            Limits::default().with_max_collection_entries(1),
+        ),
+    ] {
+        let options = ParseOptions::new().with_limits(limits.clone());
+        let eager = ayaml::internals::parse_events(input, &limits).expect_err("eager fails");
+        let lazy = ayaml::parse_events_with(input, &options)
+            .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+            .expect_err("lazy fails");
+        assert_eq!(
+            (lazy.kind(), lazy.code(), lazy.span(), lazy.to_string()),
+            (eager.kind(), eager.code(), eager.span(), eager.to_string()),
+            "{input:?}"
+        );
     }
 }
 
@@ -1070,45 +1096,229 @@ fn invalid_limits_take_precedence_over_input_size_and_root_size_hint_is_clamped(
     assert_eq!(err.code(), ayaml::ErrorCode::CollectionEntriesLimit);
 }
 
-/// Raising `max_depth` must never swap an earlier non-limit parser error for a later scanner
-/// error (regression from scheduled proptest `invariants::limits_are_monotonic`).
+/// Raising `max_depth` must never swap an earlier non-limit error for a later scanner error
+/// (including later scanner *limit* errors such as block-sequence depth or scalar byte limits),
+/// across every default, streaming (> 4 KiB), merge-key, and compat reader.
 #[test]
 fn raising_max_depth_keeps_earlier_parser_error_before_later_scanner_error() {
-    // At `max_depth = 0`, the scanner stops at `{` before `![bad` and the parser reports `}}-x`.
-    // Raising `max_depth` to 2 must still report `}}-x` rather than swapping to `InvalidTag`.
-    let default_input = "}}-x\n{ ![bad }\n";
-    let lo_opts = ParseOptions::new().with_limits(Limits::default().with_max_depth(0));
-    let hi_opts = ParseOptions::new().with_limits(Limits::default().with_max_depth(2));
-    for (label, lo, hi) in [
+    use serde::Deserialize as _;
+
+    // Inputs where a tighter `max_depth` triggers scanner `stop_after` on a flow opener so an
+    // earlier parser/semantic error fires first; raising `max_depth` must never swap that
+    // non-limit error for a later scanner non-limit or scanner limit error.
+    let small_cases: &[(&str, &str, Limits, Limits, ayaml::ErrorCode)] = &[
         (
-            "parse_value_with",
-            ayaml::parse_value_with(default_input, &lo_opts).unwrap_err(),
-            ayaml::parse_value_with(default_input, &hi_opts).unwrap_err(),
+            "later non-limit scanner error",
+            "}}-x\n{ ![bad }\n",
+            Limits::default().with_max_depth(0),
+            Limits::default().with_max_depth(2),
+            ayaml::ErrorCode::UnexpectedToken,
         ),
         (
-            "from_str_with",
-            ayaml::from_str_with::<Value>(default_input, &lo_opts).unwrap_err(),
-            ayaml::from_str_with::<Value>(default_input, &hi_opts).unwrap_err(),
+            "later block-run DepthLimit",
+            "}}-x\n{ }\n- -\n",
+            Limits::default().with_max_depth(0),
+            Limits::default().with_max_depth(1),
+            ayaml::ErrorCode::UnexpectedToken,
         ),
         (
-            "parse_documents_with",
-            ayaml::parse_documents_with(default_input, &lo_opts).unwrap_err(),
-            ayaml::parse_documents_with(default_input, &hi_opts).unwrap_err(),
+            "later scanner ScalarSizeLimit",
+            "[ !a !b [ 1234567890 ]",
+            Limits::default().with_max_depth(1).with_max_scalar_bytes(5),
+            Limits::default().with_max_depth(2).with_max_scalar_bytes(5),
+            ayaml::ErrorCode::DuplicateNodeProperties,
         ),
         (
-            "parse_events_with",
-            ayaml::parse_events_with(default_input, &lo_opts)
-                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
-                .unwrap_err(),
-            ayaml::parse_events_with(default_input, &hi_opts)
-                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
-                .unwrap_err(),
+            "later scanner error after doc boundary",
+            "}}-x\n{ }\n---\n@\n",
+            Limits::default().with_max_depth(0),
+            Limits::default().with_max_depth(2),
+            ayaml::ErrorCode::UnexpectedToken,
+        ),
+    ];
+
+    for (name, raw_input, lo_limits, hi_limits, expected_code) in small_cases {
+        // Check both the small-input path and the >4 KiB streaming `DocumentEvents` (`pull.rs`) path.
+        let large_input = after_comments(raw_input, 4_200);
+        for (size_label, input) in [("small", *raw_input), ("large", large_input.as_str())] {
+            let lo_opts = ParseOptions::new().with_limits(lo_limits.clone());
+            let hi_opts = ParseOptions::new().with_limits(hi_limits.clone());
+            let lo_merge = lo_opts.clone().with_merge_keys(true);
+            let hi_merge = hi_opts.clone().with_merge_keys(true);
+
+            let mut results: Vec<(&str, Error, Error)> = vec![
+                (
+                    "parse_value_with",
+                    ayaml::parse_value_with(input, &lo_opts).unwrap_err(),
+                    ayaml::parse_value_with(input, &hi_opts).unwrap_err(),
+                ),
+                (
+                    "parse_value_with(merge)",
+                    ayaml::parse_value_with(input, &lo_merge).unwrap_err(),
+                    ayaml::parse_value_with(input, &hi_merge).unwrap_err(),
+                ),
+                (
+                    "from_str_with",
+                    ayaml::from_str_with::<Value>(input, &lo_opts).unwrap_err(),
+                    ayaml::from_str_with::<Value>(input, &hi_opts).unwrap_err(),
+                ),
+                (
+                    "from_str_with(IgnoredAny)",
+                    ayaml::from_str_with::<IgnoredAny>(input, &lo_opts).unwrap_err(),
+                    ayaml::from_str_with::<IgnoredAny>(input, &hi_opts).unwrap_err(),
+                ),
+                (
+                    "DocumentDeserializer",
+                    ayaml::DocumentDeserializer::from_str_with(input, &lo_opts)
+                        .and_then(Value::deserialize)
+                        .unwrap_err(),
+                    ayaml::DocumentDeserializer::from_str_with(input, &hi_opts)
+                        .and_then(Value::deserialize)
+                        .unwrap_err(),
+                ),
+                (
+                    "parse_documents_with",
+                    ayaml::parse_documents_with(input, &lo_opts).unwrap_err(),
+                    ayaml::parse_documents_with(input, &hi_opts).unwrap_err(),
+                ),
+                (
+                    "parse_events_with",
+                    ayaml::parse_events_with(input, &lo_opts)
+                        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                        .unwrap_err(),
+                    ayaml::parse_events_with(input, &hi_opts)
+                        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                        .unwrap_err(),
+                ),
+                (
+                    "Deserializer::next_borrowed",
+                    Deserializer::from_str_with(input, &lo_opts)
+                        .and_then(|mut c| {
+                            while c.next_borrowed::<Value>()?.is_some() {}
+                            Ok(())
+                        })
+                        .unwrap_err(),
+                    Deserializer::from_str_with(input, &hi_opts)
+                        .and_then(|mut c| {
+                            while c.next_borrowed::<Value>()?.is_some() {}
+                            Ok(())
+                        })
+                        .unwrap_err(),
+                ),
+                (
+                    "SpannedTree::parse_with",
+                    SpannedTree::parse_with(input, &lo_opts).unwrap_err(),
+                    SpannedTree::parse_with(input, &hi_opts).unwrap_err(),
+                ),
+            ];
+            #[cfg(feature = "libyaml-compat")]
+            {
+                let c_lo = ayaml::compat::ParseOptions::new().with_limits(lo_limits.clone());
+                let c_hi = ayaml::compat::ParseOptions::new().with_limits(hi_limits.clone());
+                results.extend([
+                    (
+                        "compat::from_str_with",
+                        ayaml::compat::from_str_with::<Value>(input, &c_lo).unwrap_err(),
+                        ayaml::compat::from_str_with::<Value>(input, &c_hi).unwrap_err(),
+                    ),
+                    (
+                        "compat::parse_events_with",
+                        ayaml::compat::parse_events_with(input, &c_lo)
+                            .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                            .unwrap_err(),
+                        ayaml::compat::parse_events_with(input, &c_hi)
+                            .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                            .unwrap_err(),
+                    ),
+                    (
+                        "compat::parse_events_eager_with",
+                        ayaml::compat::parse_events_eager_with(input, &c_lo).unwrap_err(),
+                        ayaml::compat::parse_events_eager_with(input, &c_hi).unwrap_err(),
+                    ),
+                ]);
+            }
+            for (label, lo, hi) in results {
+                assert_ne!(
+                    lo.kind(),
+                    ErrorKind::Limit,
+                    "{name}/{size_label}/{label}: expected non-limit, got {lo:?}"
+                );
+                assert_eq!(
+                    lo.code(),
+                    *expected_code,
+                    "{name}/{size_label}/{label}: {lo:?}"
+                );
+                assert_eq!(
+                    lo.kind(),
+                    hi.kind(),
+                    "{name}/{size_label}/{label}: {lo:?} -> {hi:?}"
+                );
+                assert_eq!(
+                    lo.code(),
+                    hi.code(),
+                    "{name}/{size_label}/{label}: {lo:?} -> {hi:?}"
+                );
+                assert_eq!(
+                    lo.span(),
+                    hi.span(),
+                    "{name}/{size_label}/{label}: {lo:?} -> {hi:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Earlier semantic errors before a flow opener and a later scanner limit error remain monotonic
+/// when `max_depth` is raised, and single-document `merge_keys` matches plain `parse_value`.
+#[test]
+fn raising_max_depth_keeps_earlier_semantic_error_and_merge_parity() {
+    for (input, expected_code) in [
+        (
+            "a: 1\na: 2\nb: [[1]]\n- - -\n",
+            ayaml::ErrorCode::DuplicateKey,
+        ),
+        (
+            "a: *missing\nb: [[1]]\n- - -\n",
+            ayaml::ErrorCode::UnknownAnchor,
+        ),
+        (
+            "a: !!int bad\nb: [[1]]\n- - -\n",
+            ayaml::ErrorCode::InvalidIntScalar,
         ),
     ] {
-        assert_eq!(lo.kind(), hi.kind(), "{label}: {lo:?} -> {hi:?}");
-        assert_eq!(lo.code(), hi.code(), "{label}: {lo:?} -> {hi:?}");
-        assert_eq!(lo.span(), hi.span(), "{label}: {lo:?} -> {hi:?}");
+        let lo_opts = ParseOptions::new().with_limits(Limits::default().with_max_depth(1));
+        let hi_opts = ParseOptions::new().with_limits(Limits::default().with_max_depth(2));
+        for (label, lo, hi) in [
+            (
+                "parse_value_with",
+                ayaml::parse_value_with(input, &lo_opts).unwrap_err(),
+                ayaml::parse_value_with(input, &hi_opts).unwrap_err(),
+            ),
+            (
+                "from_str_with",
+                ayaml::from_str_with::<Value>(input, &lo_opts).unwrap_err(),
+                ayaml::from_str_with::<Value>(input, &hi_opts).unwrap_err(),
+            ),
+            (
+                "parse_documents_with",
+                ayaml::parse_documents_with(input, &lo_opts).unwrap_err(),
+                ayaml::parse_documents_with(input, &hi_opts).unwrap_err(),
+            ),
+        ] {
+            assert_eq!(lo.code(), expected_code, "{label}: {lo:?}");
+            assert_eq!(hi.code(), expected_code, "{label}: {lo:?} -> {hi:?}");
+            assert_eq!(lo.span(), hi.span(), "{label}: {lo:?} -> {hi:?}");
+        }
     }
+
+    // Single-document merge_keys=true matches merge_keys=false on trailing documents after flow.
+    let trailing = "[1]\n---\n@\n";
+    let plain = ayaml::parse_value(trailing).unwrap_err();
+    let merged =
+        ayaml::parse_value_with(trailing, &ParseOptions::new().with_merge_keys(true)).unwrap_err();
+    assert_eq!(plain.code(), ayaml::ErrorCode::TrailingDocuments);
+    assert_eq!(merged.code(), plain.code());
+    assert_eq!(merged.span(), plain.span());
 
     #[cfg(feature = "libyaml-compat")]
     {
@@ -1119,6 +1329,7 @@ fn raising_max_depth_keeps_earlier_parser_error_before_later_scanner_error() {
             ayaml::compat::ParseOptions::new().with_limits(Limits::default().with_max_depth(2));
         let lo = ayaml::compat::from_str_with::<Value>(compat_input, &compat_lo).unwrap_err();
         let hi = ayaml::compat::from_str_with::<Value>(compat_input, &compat_hi).unwrap_err();
+        assert_ne!(lo.kind(), ErrorKind::Limit);
         assert_eq!(lo.kind(), hi.kind(), "{lo:?} -> {hi:?}");
         assert_eq!(lo.code(), hi.code(), "{lo:?} -> {hi:?}");
         assert_eq!(lo.span(), hi.span(), "{lo:?} -> {hi:?}");

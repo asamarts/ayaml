@@ -59,6 +59,7 @@ export function extractDescription(body, title) {
   let inFence = false;
   let fenceChar = '';
   let fenceLen = 0;
+  let inHtmlComment = false;
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -75,16 +76,20 @@ export function extractDescription(body, title) {
       if (closeRe.test(trimmed)) inFence = false;
       continue;
     }
+    if (inHtmlComment) {
+      if (trimmed.includes('-->')) inHtmlComment = false;
+      continue;
+    }
+    if (trimmed.startsWith('<!--')) {
+      if (!trimmed.includes('-->')) inHtmlComment = true;
+      if (para.length > 0) break;
+      continue;
+    }
     if (!trimmed) {
       if (para.length > 0) break;
       continue;
     }
-    if (
-      trimmed.startsWith('#') ||
-      trimmed.startsWith('|') ||
-      trimmed.startsWith('>') ||
-      trimmed.startsWith('<!--')
-    ) {
+    if (trimmed.startsWith('#') || trimmed.startsWith('|') || trimmed.startsWith('>')) {
       if (para.length > 0) break;
       continue;
     }
@@ -210,8 +215,28 @@ function rewriteProseLine(line, relDir, urlPrefix) {
         j++;
       }
       if (depth === 0 && j < n && line[j] === '(') {
-        const closeParen = line.indexOf(')', j + 1);
-        if (closeParen !== -1) {
+        let k = j + 1;
+        let parenDepth = 1;
+        let titleQuote = null;
+        while (k < n && parenDepth > 0) {
+          const c = line[k];
+          if (c === '\\' && k + 1 < n) {
+            k += 2;
+            continue;
+          }
+          if (titleQuote) {
+            if (c === titleQuote) titleQuote = null;
+          } else if (c === '"' || c === "'") {
+            titleQuote = c;
+          } else if (c === '(') {
+            parenDepth++;
+          } else if (c === ')') {
+            parenDepth--;
+          }
+          k++;
+        }
+        if (parenDepth === 0) {
+          const closeParen = k - 1;
           const label = line.slice(i, j);
           const rawTarget = line.slice(j + 1, closeParen);
           const rewritten = rewriteSingleTarget(rawTarget, relDir, urlPrefix);
@@ -246,10 +271,103 @@ function rewriteProseLine(line, relDir, urlPrefix) {
   return out;
 }
 
+const CHAR_LITERAL_RE = /^'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\}|.)|[^'\\])'/;
+
+/**
+ * Advance a minimal Rust lexical state across one line, tracking nested block comments,
+ * line comments, character literals, raw string literals (`r#"..."#`), and normal strings
+ * so rustdoc `# ` stripping never desynchronizes on quotes inside comments or raw strings.
+ */
+function advanceRustLexer(line, state) {
+  const n = line.length;
+  let i = 0;
+  while (i < n) {
+    if (state.stringMode === 'normal') {
+      if (line[i] === '\\') {
+        i += 2;
+        continue;
+      }
+      if (line[i] === '"') {
+        state.stringMode = null;
+      }
+      i++;
+      continue;
+    }
+    if (state.stringMode === 'raw') {
+      if (line[i] === '"') {
+        let hashes = 0;
+        while (hashes < state.rawHashes && line[i + 1 + hashes] === '#') {
+          hashes++;
+        }
+        if (hashes === state.rawHashes) {
+          state.stringMode = null;
+          i += 1 + hashes;
+          continue;
+        }
+      }
+      i++;
+      continue;
+    }
+    if (state.blockCommentDepth > 0) {
+      if (line[i] === '/' && line[i + 1] === '*') {
+        state.blockCommentDepth++;
+        i += 2;
+        continue;
+      }
+      if (line[i] === '*' && line[i + 1] === '/') {
+        state.blockCommentDepth--;
+        i += 2;
+        continue;
+      }
+      i++;
+      continue;
+    }
+
+    const ch = line[i];
+    if (ch === '/' && line[i + 1] === '/') {
+      break;
+    }
+    if (ch === '/' && line[i + 1] === '*') {
+      state.blockCommentDepth++;
+      i += 2;
+      continue;
+    }
+    // Raw string literal: `r"..."`, `r#"..."#`, `br#"..."#`, `cr#"..."#`.
+    const prevIsIdent = i > 0 && /[A-Za-z0-9_]/.test(line[i - 1]);
+    if (!prevIsIdent) {
+      let rPos = -1;
+      if (ch === 'r') rPos = i;
+      else if ((ch === 'b' || ch === 'c') && line[i + 1] === 'r') rPos = i + 1;
+      if (rPos !== -1) {
+        let k = rPos + 1;
+        while (k < n && line[k] === '#') k++;
+        if (k < n && line[k] === '"') {
+          state.stringMode = 'raw';
+          state.rawHashes = k - (rPos + 1);
+          i = k + 1;
+          continue;
+        }
+      }
+    }
+    // Character or byte-character literal (does not match lifetimes like `'a`).
+    if (ch === "'") {
+      const m = CHAR_LITERAL_RE.exec(line.slice(i));
+      if (m) {
+        i += m[0].length;
+        continue;
+      }
+    }
+    if (ch === '"') {
+      state.stringMode = 'normal';
+    }
+    i++;
+  }
+}
+
 /**
  * Rewrite relative `.md` links (using `urlPrefix`, e.g. `"/ayaml"` or
  * `"https://asamarts.github.io/ayaml"`) and strip rustdoc hidden `# ` lines
- * inside Rust code blocks while keeping multiline string literals intact.
+ * inside Rust code blocks while keeping multiline string literals and comments intact.
  */
 export function transformDocsMarkdown(body, relPath, urlPrefix) {
   const relDir = posix.dirname(relPath.replace(/^\.\//, ''));
@@ -259,7 +377,7 @@ export function transformDocsMarkdown(body, relPath, urlPrefix) {
   let fenceChar = '';
   let fenceLen = 0;
   let inRustFence = false;
-  let inRustString = false;
+  let rustState = { blockCommentDepth: 0, stringMode: null, rawHashes: 0 };
 
   for (const line of lines) {
     const leading = line.trimStart();
@@ -270,10 +388,11 @@ export function transformDocsMarkdown(body, relPath, urlPrefix) {
         fenceChar = m[1][0];
         fenceLen = m[1].length;
         const info = m[2].trim();
-        inRustFence = /^rust(?=$|[\s,])/.test(info);
-        inRustString = false;
-        // Strip rustdoc comma directives (e.g., `rust,should_panic`) for clean syntax highlighting.
-        if (inRustFence && info.includes(',')) {
+        const tokens = info.split(/[\s,]+/).filter(Boolean);
+        inRustFence = tokens.some((tok) => tok.toLowerCase() === 'rust');
+        rustState = { blockCommentDepth: 0, stringMode: null, rawHashes: 0 };
+        // Normalize rustdoc fence attributes (e.g., `rust,should_panic`, `rust should_panic`) to `rust`.
+        if (inRustFence && (tokens.length > 1 || info.includes(','))) {
           const indent = line.slice(0, line.length - leading.length);
           out.push(`${indent}${m[1]}rust`);
         } else {
@@ -287,53 +406,23 @@ export function transformDocsMarkdown(body, relPath, urlPrefix) {
       if (closeRe.test(leading)) {
         inFence = false;
         inRustFence = false;
-        inRustString = false;
+        rustState = { blockCommentDepth: 0, stringMode: null, rawHashes: 0 };
         out.push(line);
         continue;
       }
       if (inRustFence) {
-        if (!inRustString) {
+        if (rustState.stringMode === null && rustState.blockCommentDepth === 0) {
           // Rustdoc hidden lines: `#` or `# ...` (with optional leading whitespace), not `#[attr]` / `#![attr]`.
           if (/^\s*#(?:$|\s)/.test(line)) {
             continue;
           }
           // Rustdoc escaped literal hash: `## ` -> `# `.
           const unescaped = line.replace(/^(\s*)##(\s|$)/, '$1#$2');
-          // Track unclosed double-quoted multiline string literals so `# comment` inside YAML strings survives.
-          let escaped = false;
-          for (let i = 0; i < unescaped.length; i++) {
-            const ch = unescaped[i];
-            if (escaped) {
-              escaped = false;
-              continue;
-            }
-            if (ch === '\\' && inRustString) {
-              escaped = true;
-              continue;
-            }
-            if (ch === '"') {
-              inRustString = !inRustString;
-            }
-          }
+          advanceRustLexer(unescaped, rustState);
           out.push(unescaped);
           continue;
         }
-        // Inside multiline Rust string literal: scan for closing quote.
-        let escaped = false;
-        for (let i = 0; i < line.length; i++) {
-          const ch = line[i];
-          if (escaped) {
-            escaped = false;
-            continue;
-          }
-          if (ch === '\\') {
-            escaped = true;
-            continue;
-          }
-          if (ch === '"') {
-            inRustString = !inRustString;
-          }
-        }
+        advanceRustLexer(line, rustState);
       }
       out.push(line);
     }

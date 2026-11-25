@@ -161,45 +161,55 @@ can't be completed becomes the next patch version.
   ten minutes, and a rerun waits again.
 - **crates.io serves other bytes than the package.** This shouldn't happen, because the job
   compares two packages of the tag before it publishes. If it does, don't create the release.
-  Yank the version with `cargo yank --version X.Y.Z ayaml`, record why in the changelog, and
-  release the next patch version. crates.io never lets a version be published twice.
-- **The release job fails.** Rerun it. It downloads the crate from crates.io and attests it
-  again, which adds a second attestation for the same digest. If the release exists, the job
-  checks that it holds exactly the crate and SHA256SUMS, with these bytes, and changes nothing.
-  `gh` creates a release as a draft, uploads its assets, and then publishes it, so a run stopped
-  in between can leave a draft. One that holds both assets with these bytes is published. One
-  that holds anything else fails the job: delete the draft and rerun the job. If gh can't say
-  whether the release is there, which isn't the same as gh finding none, the job changes nothing
-  and fails. Rerun it.
+  Yank any published version (`cargo yank --version X.Y.Z ayaml`, and
+  `cargo yank --version X.Y.Z ayaml-edit` if `ayaml-edit` was published too), record why in
+  the changelog, and release the next patch version. crates.io never lets a version be
+  published twice.
+- **The release job fails.** Rerun it. It downloads the crate(s) from crates.io and attests
+  them again, which adds a second attestation for each digest. If the release exists, the job
+  checks that it holds exactly the crate(s) and SHA256SUMS, with these bytes, and changes
+  nothing. `gh` creates a release as a draft, uploads its assets, and then publishes it, so a
+  run stopped in between can leave a draft. One that holds the expected assets with these
+  bytes is published. One that holds anything else fails the job: delete the draft and rerun
+  the job. If gh can't say whether the release is there, which isn't the same as gh finding
+  none, the job changes nothing and fails. Rerun it.
 
 ## Verifying a release
 
-Each release's notes give its digest and the exact command. For version X.Y.Z, from the
-release's assets or from crates.io:
+Each release's notes give its digest(s) and the exact command(s). For version X.Y.Z, from the
+release's assets or from crates.io (include `ayaml-edit` for releases that ship it):
 
 ```sh
 curl -sSfLO https://static.crates.io/crates/ayaml/ayaml-X.Y.Z.crate
+curl -sSfLO https://static.crates.io/crates/ayaml-edit/ayaml-edit-X.Y.Z.crate
 gh release download vX.Y.Z -R asamarts/ayaml -p SHA256SUMS
 sha256sum --check SHA256SUMS
-gh attestation verify ayaml-X.Y.Z.crate --repo asamarts/ayaml \
-  --cert-identity https://github.com/asamarts/ayaml/.github/workflows/release.yml@refs/tags/vX.Y.Z \
-  --cert-oidc-issuer https://token.actions.githubusercontent.com \
-  --source-ref refs/tags/vX.Y.Z --source-digest COMMIT \
-  --deny-self-hosted-runners
+for crate in ayaml-X.Y.Z.crate ayaml-edit-X.Y.Z.crate; do
+  gh attestation verify "$crate" --repo asamarts/ayaml \
+    --cert-identity https://github.com/asamarts/ayaml/.github/workflows/release.yml@refs/tags/vX.Y.Z \
+    --cert-oidc-issuer https://token.actions.githubusercontent.com \
+    --source-ref refs/tags/vX.Y.Z --source-digest COMMIT \
+    --deny-self-hosted-runners
+done
 ```
 
 `COMMIT` is the commit the release notes name, which `git rev-parse vX.Y.Z^{commit}` also
 gives. The attestation's predicate is `https://slsa.dev/provenance/v1`, `gh`'s default.
 
-To rebuild the package from the tag and compare it with crates.io, from a checkout of `main`,
-whose `tools/check_release.py` a release before 0.1.2 doesn't have:
+To rebuild the package(s) from the tag and compare them with crates.io, from a checkout of
+`main`, whose `tools/check_release.py` a release before 0.1.2 doesn't have:
 
 ```sh
 git worktree add ../ayaml-vX.Y.Z vX.Y.Z
-(cd ../ayaml-vX.Y.Z && cargo +1.99.1 package -p ayaml --locked)   # that tag's RELEASE_TOOLCHAIN
+(cd ../ayaml-vX.Y.Z && cargo +1.99.1 package -p ayaml --locked)                 # that tag's RELEASE_TOOLCHAIN
+(cd ../ayaml-vX.Y.Z && cargo +1.99.1 package -p ayaml-edit --locked --no-verify)
+commit="$(git rev-parse 'vX.Y.Z^{commit}')"
 crate=../ayaml-vX.Y.Z/target/package/ayaml-X.Y.Z.crate
-python3 tools/check_release.py package "$crate" "$(git rev-parse 'vX.Y.Z^{commit}')"
+edit_crate=../ayaml-vX.Y.Z/target/package/ayaml-edit-X.Y.Z.crate
+python3 tools/check_release.py package "$crate" "$commit"
 python3 tools/check_release.py registry "$crate" X.Y.Z 0
+python3 tools/check_release.py package --package ayaml-edit "$edit_crate" "$commit"
+python3 tools/check_release.py registry --package ayaml-edit "$edit_crate" X.Y.Z 0
 ```
 
 Releases up to 0.1.1 were published by hand, before this workflow, so they have no
@@ -211,17 +221,46 @@ attestation. Rebuilt with cargo 1.99.1, the 0.1.1 tag gives the bytes crates.io 
 `ayaml-edit` lives in `crates/ayaml-edit`, depends only on `ayaml`'s public API (`ayaml = "=X.Y.Z"`),
 and is packaged, verified, published, attested, and attached to the GitHub release automatically by
 [`.github/workflows/release.yml`](.github/workflows/release.yml) immediately after `ayaml` is live on
-the crates.io sparse index. No workstation publish is used.
+the crates.io sparse index.
 
-One-time crates.io web-UI setup by an owner before the first tag that publishes `ayaml-edit`:
+### One-time initial bootstrap for `ayaml-edit`
 
-1. **crates.io Trusted Publisher.** In crates.io Account Settings → Trusted Publishing, register a
-   GitHub Trusted Publisher for `ayaml-edit` matching `ayaml`:
-   - crate name `ayaml-edit`;
-   - repository owner `asamarts`;
-   - repository `ayaml`;
-   - workflow `release.yml`;
-   - environment `release`.
-2. **Lock down token publishing.** After the first workflow-driven publish of `ayaml-edit`, open
-   `ayaml-edit`'s Settings → Trusted Publishing and enable "Trusted Publishing only"
-   (`trustpub_only: true`), matching `ayaml`.
+crates.io only allows configuring a Trusted Publisher on a crate that already exists on crates.io
+(it does not support pending Trusted Publishers for unregistered crate names). Therefore, the very
+first publish of `ayaml-edit` requires a one-time owner bootstrap, after which no API token is ever
+used again:
+
+1. **Ensure the matching `ayaml X.Y.Z` version is live on crates.io.** When cutting the first
+   release tag that includes `ayaml-edit`, the workflow's `publish` job publishes `ayaml X.Y.Z`
+   via Trusted Publishing, verifies it on the sparse index, and then stops on `Mint a crates.io
+   token for ayaml-edit` because `ayaml-edit` does not exist on crates.io yet.
+2. **One-time initial publish from a clean tag checkout.** Create a temporary crates.io API token
+   with the narrowest scope (`publish-new` only) and shortest expiry, check out the exact tagged
+   commit with `RELEASE_TOOLCHAIN`, verify the packaged bytes match the workflow's `edit_digest`,
+   and upload the initial `ayaml-edit` release once:
+
+   ```sh
+   git worktree add ../ayaml-bootstrap vX.Y.Z
+   (cd ../ayaml-bootstrap && cargo +1.99.1 package -p ayaml-edit --locked --no-verify)
+   sha256sum ../ayaml-bootstrap/target/package/ayaml-edit-X.Y.Z.crate   # must match package job's edit_digest
+   (cd ../ayaml-bootstrap && CARGO_REGISTRY_TOKEN=... cargo +1.99.1 publish -p ayaml-edit --locked --no-verify)
+   ```
+
+3. **Configure Trusted Publishing and lock down token publishing immediately.** Open
+   `https://crates.io/crates/ayaml-edit/settings` → Trusted Publishing:
+   - Add a GitHub publisher matching `ayaml`:
+     - repository owner `asamarts`;
+     - repository `ayaml`;
+     - workflow `release.yml`;
+     - environment `release`.
+   - Enable **"Trusted Publishing only"** (`trustpub_only: true`), so no API token can publish
+     `ayaml-edit`.
+   - **Revoke the temporary crates.io API token immediately.**
+4. **Rerun the failed `publish` job in GitHub Actions.** Because `release.yml` checks
+   `check_release.py published` for each crate before uploading, rerunning `publish` sees both
+   `ayaml` and `ayaml-edit` already on crates.io, verifies both packages byte-for-byte against the
+   sparse index and download CDN, and runs the `release` job to sign SLSA provenance attestations
+   and publish the GitHub release for both crates.
+
+Every subsequent release publishes both `ayaml` and `ayaml-edit` solely through crates.io Trusted
+Publishing with no workstation publish and no stored tokens.

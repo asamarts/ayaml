@@ -220,8 +220,9 @@ these places, on purpose:
 - A byte-order mark past the start of the stream behaves as described above.
 - Anchor and alias names may hold any `ns-anchor-char`, where libyaml takes only
   alphanumerics, `_`, and `-`, so `&a: b` differs. As in libyaml, a `?` ends a name
-  when text follows it; a trailing `?` before white space, a flow indicator, or the
-  end stays in the name, as default mode reads it. Outside a flow collection, a `:` followed by text or
+  when text follows it; a trailing `?` before white space, a line break, a flow
+  indicator, or the end (or before NEL, LS, or PS outside a flow collection) stays
+  in the name, as default mode reads it. Outside a flow collection, a `:` followed by text or
   a flow indicator ends a name, so `&a:b` is the string `:b` here and `&r:}` is `:}`;
   a `:` before NEL, LS, or PS stays, as default mode reads it.
 - As in libyaml, an alias directly followed by `:` is a mapping key, so `*a: 1` has the key

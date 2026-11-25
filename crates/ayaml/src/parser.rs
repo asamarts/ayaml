@@ -158,31 +158,25 @@ struct Lines<'a> {
     stream_start: Option<Span>,
     stream_end: Option<Span>,
     positions: LineStarts,
-    /// A non-limit scanner failure deferred until the parser checks earlier tokens, so raising
-    /// `max_depth` cannot swap an earlier parser error for a later scanner error.
+    /// A scanner failure deferred until the parser checks earlier tokens, so raising
+    /// `max_depth` cannot swap an earlier error for a later scanner error.
     scanner_error: Option<Error>,
     /// How many times the token arena was reallocated, which the tests bound.
     #[cfg(test)]
     growths: usize,
 }
 
-fn is_limit_error(error: &Error) -> bool {
-    error.kind() == ErrorKind::Limit || error.limit().is_some()
-}
-
-/// Whether `tokens` contains a flow collection opener (`[` or `{`).
+/// Whether `kind` opens a flow collection (`[` or `{`).
 ///
-/// The scanner only stops early at `max_depth` on a flow opener (`stop_after`), so deferring a
-/// later non-limit scanner error precisely when a flow opener was already scanned keeps error
-/// reporting monotonic across all `max_depth` ceilings while preserving eager scanner errors when
-/// no flow opener precedes them.
-fn has_flow_start(tokens: &[Token<'_>]) -> bool {
-    tokens.iter().any(|token| {
-        matches!(
-            token.kind,
-            TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart
-        )
-    })
+/// The scanner stops early without returning an error when `flow_level > max_depth`
+/// (`stop_after`), so deferring any subsequent scanner error once a flow opener has been
+/// scanned keeps error reporting monotonic across all `max_depth` ceilings while preserving
+/// immediate scanner errors when no flow opener precedes them.
+const fn is_flow_start(kind: &TokenKind<'_>) -> bool {
+    matches!(
+        kind,
+        TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart
+    )
 }
 
 /// The token arena capacity to reserve before scanning a mid-sized document, or `None` to grow
@@ -300,6 +294,7 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
     let mut line_start = 0;
     let mut stream_start = None;
     let mut stream_end = None;
+    let mut seen_flow_start = false;
     let mut scanner_error = None;
     #[cfg(test)]
     let mut growths = 0;
@@ -308,13 +303,16 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
             Ok(Some(token)) => token,
             Ok(None) => break,
             Err(error) => {
-                if is_limit_error(&error) || !has_flow_start(&tokens) {
+                if !seen_flow_start {
                     return Err(error);
                 }
                 scanner_error = Some(error);
                 break;
             }
         };
+        if is_flow_start(&token.kind) {
+            seen_flow_start = true;
+        }
         match token.kind {
             TokenKind::StreamStart => stream_start = Some(token.span),
             TokenKind::StreamEnd => {
@@ -567,16 +565,23 @@ fn flow_entry_count(tokens: &[Token<'_>], open: usize, close: usize) -> usize {
     entries + usize::from(content)
 }
 
-/// Parse one document's lines for the pull cursor. Its events count on from the `counted` events
-/// before them, and the count after them comes back with them. `end` is where the lines stop.
+/// Parse one document's lines for the pull cursor. Its events and document count continue from
+/// the `counted` events and `documents` already seen before them, and the updated counts come
+/// back with them. `end` is where the lines stop.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "internal pull-cursor handoff mirrors Parser's initial state directly"
+)]
 fn parse_lines<'a>(
     lines: Lines<'a>,
     limits: &Limits,
     input: &'a str,
     counted: usize,
+    documents: usize,
+    single_document: bool,
     end: usize,
     compat: bool,
-) -> Result<(Vec<Event<'a>>, usize), Error> {
+) -> Result<(Vec<Event<'a>>, usize, usize), Error> {
     let event_capacity = event_capacity(&lines.lines, &lines.tokens);
     let flow_ends = flow_ends(&lines.tokens);
     let mut parser = Parser {
@@ -588,16 +593,16 @@ fn parse_lines<'a>(
         input,
         positions: lines.positions,
         compat,
-        documents: 0,
+        documents,
         emitted: counted,
-        single_document: false,
+        single_document,
         stop_at_second: false,
         end,
         scanner_error: lines.scanner_error,
     };
     parser.parse_stream()?;
     match parser.sink {
-        EventSink::Events(events) => Ok((events, parser.emitted)),
+        EventSink::Events(events) => Ok((events, parser.emitted, parser.documents)),
         _ => unreachable!("event sink kind changed during parsing"),
     }
 }

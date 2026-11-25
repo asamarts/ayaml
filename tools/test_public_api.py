@@ -715,5 +715,37 @@ class LiveReleaseRegression(unittest.TestCase):
                     tmp_path.unlink(missing_ok=True)
 
 
+class MultiCratePublicApiHelpers(unittest.TestCase):
+    def test_hyphenated_crate_aliases_and_removed_const_owner_matching(self) -> None:
+        aliases = cpa.path_aliases("ayaml_edit::Edit", {"Edit"}, crate_ident="ayaml_edit")
+        self.assertIn("ayaml_edit::Edit", aliases)
+        self.assertIn("ayaml-edit::Edit", aliases)
+        self.assertIn("Edit", aliases)
+
+        # Removing a parent type/module covers its associated consts and nested declarations.
+        self.assertEqual(
+            cpa.item_owner_type("pub const ayaml_edit::Edit::MAX_BYTES: usize"),
+            "ayaml_edit::Edit",
+        )
+        self.assertEqual(
+            cpa.item_owner_type("pub struct ayaml_edit::ops::Patch"),
+            "ayaml_edit::ops",
+        )
+        entry = cpa.ApiBreak(
+            kind="removed",
+            feature_set="default",
+            old="pub const ayaml_edit::Edit::MAX_BYTES: usize",
+        )
+        self.assertTrue(
+            cpa.is_documented(
+                entry,
+                ["- Removed `ayaml-edit::Edit`."],
+                {"Edit"},
+                {"ayaml_edit::Edit"},
+                crate_ident="ayaml_edit",
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
