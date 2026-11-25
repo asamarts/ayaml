@@ -5,16 +5,18 @@ on:
     branches: ["main"]
     paths:
       - "docs/**"
-      - "book.toml"
+      - "site/**"
       - "README.md"
+      - "Cargo.toml"
       - "tools/check_docs.py"
       - "crates/ayaml-conformance/src/lib.rs"
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
       - "docs/**"
-      - "book.toml"
+      - "site/**"
       - "README.md"
+      - "Cargo.toml"
       - "tools/check_docs.py"
       - "crates/ayaml-conformance/src/lib.rs"
       - ".github/workflows/docs.yml"
@@ -29,7 +31,7 @@ concurrency:
 
 jobs:
   build:
-    name: build book
+    name: build docs site
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -38,22 +40,27 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
-      - name: Install mdBook
-        run: cargo install mdbook --version 0.5.4 --locked
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
       - name: Check documentation links and coverage
         run: python3 tools/check_docs.py
-      - name: Build mdBook
-        run: mdbook build
-      - name: Doctest every book page
+      - name: Install site dependencies
+        run: npm --prefix site install --no-audit --no-fund
+      - name: Build Astro + Starlight site
+        run: npm --prefix site run build
+      - name: Check built site internal links and fragments
+        run: npm --prefix site run check:links
+      - name: Doctest every documentation page
         run: cargo test --doc -p ayaml-conformance --all-features --locked
       - name: Upload Pages artifact
         if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: target/book
+          path: site/dist
 
   deploy:
-    name: deploy book
+    name: deploy docs site
     needs: build
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04

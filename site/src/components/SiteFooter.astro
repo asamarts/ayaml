@@ -1,0 +1,164 @@
+---
+import { BASE, CRATES_IO_URL, DOCS_RS_AYAML, DOCS_RS_EDIT, GITHUB_URL, WORKSPACE_VERSION } from '../lib/site';
+
+const columns: Array<{ title: string; links: Array<[string, string, boolean?]> }> = [
+  {
+    title: 'Documentation',
+    links: [
+      ['Introduction', `${BASE}/docs/`],
+      ['Getting started', `${BASE}/docs/getting-started/`],
+      ['Cookbook', `${BASE}/docs/cookbook/`],
+      ['Surgical editing (ayaml-edit)', `${BASE}/docs/editing/`],
+      ['API reference', `${BASE}/docs/api-reference/`],
+      ['Error codes', `${BASE}/docs/error-codes/`],
+    ],
+  },
+  {
+    title: 'Migrating',
+    links: [
+      ['From serde_yaml', `${BASE}/docs/migrating-from/serde-yaml/`],
+      ['From serde_yml / yaml-serde', `${BASE}/docs/migrating-from/serde-yml-and-forks/`],
+      ['From yaml-rust2 / saphyr', `${BASE}/docs/migrating-from/yaml-rust2-and-saphyr/`],
+      ['From YAML 1.1', `${BASE}/docs/migration/`],
+      ['Compatibility profile', `${BASE}/docs/compatibility/`],
+    ],
+  },
+  {
+    title: 'Engineering',
+    links: [
+      ['Benchmarks showcase', `${BASE}/benchmarks/`],
+      ['Benchmark methodology', `${BASE}/docs/benchmarks/`],
+      ['Security & limits', `${BASE}/docs/security/`],
+      ['Developer tools', `${BASE}/docs/tools/`],
+      ['Stability & SemVer', `${BASE}/docs/stability/`],
+    ],
+  },
+  {
+    title: 'Resources',
+    links: [
+      ['docs.rs/ayaml', DOCS_RS_AYAML, true],
+      ['docs.rs/ayaml-edit', DOCS_RS_EDIT, true],
+      ['crates.io/crates/ayaml', CRATES_IO_URL, true],
+      ['GitHub repository', GITHUB_URL, true],
+      ['llms.txt', `${BASE}/llms.txt`],
+    ],
+  },
+];
+---
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <a class="mark" href={`${BASE}/`}>
+          <span class="bar" aria-hidden="true"></span>ayaml
+        </a>
+        <p class="blurb">
+          Safe, fast, pure-Rust YAML 1.2.2 parser, spanned event stream, generic value model,
+          Serde codec, deterministic emitter, and format-preserving editor.
+        </p>
+        <p class="meta">
+          Current crate: <code>v{WORKSPACE_VERSION}</code> &middot; MSRV Rust 1.88 &middot; MIT OR Apache-2.0.
+        </p>
+      </div>
+      <div class="footer-cols">
+        {
+          columns.map((col) => (
+            <nav class="footer-col" aria-label={col.title}>
+              <h2>{col.title}</h2>
+              <ul role="list">
+                {col.links.map(([label, href, ext]) => (
+                  <li>
+                    <a
+                      href={href}
+                      target={ext ? '_blank' : undefined}
+                      rel={ext ? 'noopener noreferrer' : undefined}
+                    >
+                      {label}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </nav>
+          ))
+        }
+      </div>
+    </div>
+  </div>
+</footer>
+
+<style>
+  .site-footer {
+    padding-block: var(--s7) var(--s6);
+    border-top: 1px solid var(--rule);
+    background: var(--surface);
+    font-size: var(--t-small);
+  }
+  .footer-grid {
+    display: grid;
+    gap: var(--s6);
+  }
+  @media (min-width: 960px) {
+    .footer-grid {
+      grid-template-columns: minmax(0, 1.05fr) minmax(0, 2fr);
+      gap: var(--s7);
+    }
+  }
+  .mark {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--ink);
+    font-size: 1.22rem;
+    font-weight: 760;
+    letter-spacing: -0.03em;
+    text-decoration: none;
+  }
+  .mark .bar {
+    width: 3.5px;
+    height: 19px;
+    border-radius: 2px;
+    background: var(--accent);
+  }
+  .blurb {
+    margin-top: var(--s3);
+    max-width: 28rem;
+    color: var(--muted);
+    line-height: 1.55;
+  }
+  .meta {
+    margin-top: var(--s3);
+    color: var(--muted);
+    font-size: var(--t-note);
+  }
+  .footer-cols {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: var(--s5);
+  }
+  .footer-col h2 {
+    margin: 0 0 var(--s3);
+    color: var(--ink);
+    font-size: 0.85rem;
+    font-weight: 650;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+  .footer-col ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .footer-col a {
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 0.88rem;
+  }
+  .footer-col a:hover {
+    color: var(--ink);
+    text-decoration: underline;
+  }
+</style>

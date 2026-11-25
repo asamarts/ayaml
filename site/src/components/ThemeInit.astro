@@ -1,0 +1,20 @@
+---
+// Applies the saved Starlight/site theme before first paint so switching
+// between marketing pages (/ayaml/, /ayaml/benchmarks/) and Starlight docs
+// (/ayaml/docs/**) never flashes the wrong color scheme.
+---
+<script is:inline>
+  (() => {
+    document.documentElement.classList.add('js');
+    let theme;
+    try {
+      theme = localStorage.getItem('starlight-theme');
+    } catch {
+      theme = null;
+    }
+    if (theme !== 'light' && theme !== 'dark') {
+      theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    document.documentElement.dataset.theme = theme;
+  })();
+</script>

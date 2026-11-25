@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "os": "linux",
+  "arch": "x86_64",
+  "cpu": "x86_64 quad-core (8 threads) @ 2.6 GHz",
+  "cpu_count": 8,
+  "cpu_pin": 2,
+  "governor": "performance",
+  "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+  "fixture_manifest_sha256": "2fe11ea22b2e089e01642ddd9455e164a8705037fbb2f60da1fe78f89e080c00",
+  "public_git_sha": "47d2485631e97997da288190b0883772ce90dc32",
+  "baseline_v023_git_sha": "79e1368e785064ca9dcad667be56f064c902e18c",
+  "captured_date": "2026-11-24",
+  "speed_rows": 501,
+  "memory_rows": 523
+}

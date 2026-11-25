@@ -180,7 +180,7 @@ job_sync() {
     for wf in .github/workflows/ci.yml .github/workflows/fuzz.yml .github/workflows/docs.yml; do
       while IFS= read -r cmd; do
         case "$cmd" in
-          "cargo install cargo-geiger --version 0.14.0 --locked"|"cargo install cargo-fuzz --version 0.13.2 --locked"|"cargo install aplan --version 0.6.0 --locked"|"cargo install mdbook --version 0.5.4 --locked"|"sudo rm -f /var/lib/man-db/auto-update && sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind"|"tools/install-semver-checks.sh \"\$TMPDIR/semver-checks\" >> \"\$GITHUB_PATH\""|"tools/install-cargo-deny.sh \"\$TMPDIR/cargo-deny\" >> \"\$GITHUB_PATH\""|"tools/install-public-api.sh \"\$TMPDIR/public-api\" >> \"\$GITHUB_PATH\"") continue ;;
+          "cargo install cargo-geiger --version 0.14.0 --locked"|"cargo install cargo-fuzz --version 0.13.2 --locked"|"cargo install aplan --version 0.6.0 --locked"|"npm --prefix site install --no-audit --no-fund"|"sudo rm -f /var/lib/man-db/auto-update && sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind"|"tools/install-semver-checks.sh \"\$TMPDIR/semver-checks\" >> \"\$GITHUB_PATH\""|"tools/install-cargo-deny.sh \"\$TMPDIR/cargo-deny\" >> \"\$GITHUB_PATH\""|"tools/install-public-api.sh \"\$TMPDIR/public-api\" >> \"\$GITHUB_PATH\"") continue ;;
         esac
         if ! grep -qF -- "$cmd" tools/ci-local.sh; then
           echo "not mirrored ($wf): $cmd"; missing=1
@@ -400,18 +400,14 @@ job_docs-lint() {
   fi
   step "check documentation links and book coverage" python3 tools/check_docs.py
   # Mirrors: python3 tools/check_docs.py
-  local mdbook_bin=""
-  if command -v mdbook >/dev/null 2>&1; then
-    mdbook_bin="mdbook"
-  elif [ -x "${CARGO_HOME:-$HOME/.cargo}/bin/mdbook" ]; then
-    mdbook_bin="${CARGO_HOME:-$HOME/.cargo}/bin/mdbook"
-  fi
-  if [ -n "$mdbook_bin" ]; then
-    step "mdbook build" "$mdbook_bin" build
+  if command -v npm >/dev/null 2>&1 && [ -d site/node_modules ]; then
+    step "build Astro + Starlight site" npm --prefix site run build
+    step "check built site internal links" npm --prefix site run check:links
   else
-    skip "mdbook not installed"
+    skip "npm or site/node_modules not installed"
   fi
-  # Mirrors: mdbook build
+  # Mirrors: npm --prefix site run build
+  # Mirrors: npm --prefix site run check:links
   test_step "doctest every book page" cargo "+$STABLE" test --doc -p ayaml-conformance --all-features --locked
   # Mirrors: cargo test --doc -p ayaml-conformance --all-features --locked
 }

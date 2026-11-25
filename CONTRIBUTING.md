@@ -18,8 +18,8 @@ To report a vulnerability, follow [`SECURITY.md`](SECURITY.md) instead.
 You need stable Rust and Rust 1.88, the oldest version ayaml supports. Fuzzing needs
 nightly and `cargo-fuzz`, the instruction check needs `valgrind`, the unsafe census needs
 `cargo-geiger` 0.14.0, plan changes need `aplan`
-(`cargo install aplan --version 0.6.0 --locked`), and building the documentation book needs
-`mdbook` 0.5.4 (`cargo install mdbook --version 0.5.4 --locked`).
+(`cargo install aplan --version 0.6.0 --locked`), and building the documentation site needs
+Node.js 22+ (`npm --prefix site install --no-audit --no-fund && npm --prefix site run build`).
 
 The repository lint needs alint 0.22.0. Install the pinned release from its own script:
 

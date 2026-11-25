@@ -2,7 +2,7 @@
 id: M-site-and-docs
 title: Launch refreshed documentation site with benchmarks showcase and tested migration guides
 phase: 9
-status: todo
+status: done
 blocked_by:
 - AY-158
 - AY-159
@@ -12,6 +12,13 @@ blocked_by:
 tags:
 - milestone
 - docs
+evidence:
+- kind: file
+  ref: site/astro.config.mjs
+- kind: file
+  ref: site/src/pages/benchmarks.astro
+- kind: test
+  ref: docs_book_and_reference_pages_are_complete_and_doctested_in_ci
 ---
 
 ## Why
@@ -22,5 +29,5 @@ for production adopters.
 
 ## Acceptance criteria
 
-- [ ] every member is closed with passing site builds, link checks, and doctests
-- [ ] `https://asamarts.github.io/ayaml/` deploys cleanly from `main`
+- [x] every member is closed with passing site builds, link checks, and doctests
+- [x] `https://asamarts.github.io/ayaml/` deploys cleanly from `main`

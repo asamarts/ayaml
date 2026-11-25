@@ -435,6 +435,18 @@ fn every_place_that_repeats_the_version_agrees_with_the_workspace() {
         [version],
         "docs/migration.md's install line"
     );
+    let editing = read(&root, "docs/editing.md");
+    assert_eq!(
+        dependency_versions(&editing),
+        [version],
+        "docs/editing.md's install line"
+    );
+    let serde_yaml_guide = read(&root, "docs/migrating-from/serde-yaml.md");
+    assert_eq!(
+        dependency_versions(&serde_yaml_guide),
+        [version, version],
+        "docs/migrating-from/serde-yaml.md's install lines"
+    );
     assert!(
         guide.contains(&format!(
             "ayaml = {{ version = \"{version}\", features = [\"libyaml-compat\"] }}"
@@ -471,6 +483,7 @@ fn every_place_that_repeats_the_version_agrees_with_the_workspace() {
     }
     for (name, dep) in [
         ("crates/ayaml-bench/Cargo.toml", "ayaml-fixtures = {"),
+        ("crates/ayaml-conformance/Cargo.toml", "ayaml-edit = {"),
         ("crates/xtask/Cargo.toml", "ayaml-fixtures = {"),
         ("fuzz/Cargo.toml", "ayaml-edit = {"),
     ] {
@@ -821,15 +834,23 @@ fn docs_book_and_reference_pages_are_complete_and_doctested_in_ci() {
     let Some(root) = repository_root() else {
         return;
     };
-    let book = read(&root, "book.toml");
-    assert!(book.contains("src = \"docs\""));
-    assert!(book.contains("build-dir = \"target/book\""));
-    assert!(book.contains("create-missing = false"));
+    let astro_cfg = read(&root, "site/astro.config.mjs");
+    assert!(astro_cfg.contains("site: 'https://asamarts.github.io'"));
+    assert!(astro_cfg.contains("base: '/ayaml'"));
+    let site_pkg = read(&root, "site/package.json");
+    assert!(site_pkg.contains("\"@astrojs/starlight\""));
+    assert!(site_pkg.contains("\"check:links\""));
 
     let summary = read(&root, "docs/SUMMARY.md");
     for required in [
         "(index.md)",
         "(getting-started.md)",
+        "(editing.md)",
+        "(migrating-from/serde-yaml.md)",
+        "(migrating-from/serde-yml-and-forks.md)",
+        "(migrating-from/yaml-rust2-and-saphyr.md)",
+        "(api-reference.md)",
+        "(tools.md)",
         "(error-codes.md)",
         "(security.md)",
         "(stability.md)",
@@ -893,7 +914,9 @@ fn docs_book_and_reference_pages_are_complete_and_doctested_in_ci() {
 
     let docs_wf = read(&root, ".github/workflows/docs.yml");
     for needle in [
-        "mdbook build",
+        "npm --prefix site install --no-audit --no-fund",
+        "npm --prefix site run build",
+        "npm --prefix site run check:links",
         "python3 tools/check_docs.py",
         "cargo test --doc -p ayaml-conformance --all-features --locked",
         "actions/upload-pages-artifact@",

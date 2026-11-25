@@ -187,16 +187,24 @@ budget formula.
 
 ## Documentation
 
-- [Documentation book](https://asamarts.github.io/ayaml/)
-- [Getting started](https://github.com/asamarts/ayaml/blob/main/docs/getting-started.md)
-- [Error codes and masked errors](https://github.com/asamarts/ayaml/blob/main/docs/error-codes.md)
-- [Security and untrusted input](https://github.com/asamarts/ayaml/blob/main/docs/security.md)
-- [Stability and versioning](https://github.com/asamarts/ayaml/blob/main/docs/stability.md)
-- [Compatibility profile](https://github.com/asamarts/ayaml/blob/main/docs/compatibility.md)
-- [Resource limits](https://github.com/asamarts/ayaml/blob/main/docs/limits.md)
-- [Design](https://github.com/asamarts/ayaml/blob/main/docs/design.md)
-- [Dependency policy](https://github.com/asamarts/ayaml/blob/main/docs/dependencies.md)
-- [Benchmark methodology](https://github.com/asamarts/ayaml/blob/main/docs/benchmarks.md)
+- [Documentation site](https://asamarts.github.io/ayaml/)
+- [Interactive benchmarks & performance showcase](https://asamarts.github.io/ayaml/benchmarks/)
+- [Getting started](https://asamarts.github.io/ayaml/docs/getting-started/)
+- [Cookbook](https://asamarts.github.io/ayaml/docs/cookbook/)
+- [Surgical editing with `ayaml-edit`](https://asamarts.github.io/ayaml/docs/editing/)
+- Migration guides:
+  - [Migrating from `serde_yaml`](https://asamarts.github.io/ayaml/docs/migrating-from/serde-yaml/)
+  - [Migrating from `serde_yml`, `serde_yaml_ng`, and `yaml-serde`](https://asamarts.github.io/ayaml/docs/migrating-from/serde-yml-and-forks/)
+  - [Migrating from `yaml-rust2`, `saphyr`, and `serde-saphyr`](https://asamarts.github.io/ayaml/docs/migrating-from/yaml-rust2-and-saphyr/)
+  - [Migrating from YAML 1.1](https://asamarts.github.io/ayaml/docs/migration/)
+- [API reference and caveats](https://asamarts.github.io/ayaml/docs/api-reference/) ([docs.rs/ayaml](https://docs.rs/ayaml), [docs.rs/ayaml-edit](https://docs.rs/ayaml-edit))
+- [Error codes and masked errors](https://asamarts.github.io/ayaml/docs/error-codes/)
+- [Security and untrusted input](https://asamarts.github.io/ayaml/docs/security/)
+- [Stability and versioning](https://asamarts.github.io/ayaml/docs/stability/)
+- [Compatibility profile](https://asamarts.github.io/ayaml/docs/compatibility/)
+- [Resource limits](https://asamarts.github.io/ayaml/docs/limits/) and [sizing guide](https://asamarts.github.io/ayaml/docs/limits-sizing/)
+- [Developer tooling and verification](https://asamarts.github.io/ayaml/docs/tools/)
+- [Benchmark methodology](https://asamarts.github.io/ayaml/docs/benchmarks/)
 - [Changelog](https://github.com/asamarts/ayaml/blob/main/CHANGELOG.md)
 
 ## Minimum supported Rust version

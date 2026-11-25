@@ -1,0 +1,36 @@
+---
+import SiteNav from './SiteNav.astro';
+import Search from '@astrojs/starlight/components/Search.astro';
+import ThemeToggle from './ThemeToggle.astro';
+---
+
+<SiteNav as="div">
+  <div slot="search" class="docs-search">
+    <Search />
+  </div>
+  <ThemeToggle slot="end" />
+</SiteNav>
+
+<style>
+  .docs-search {
+    display: flex;
+    align-items: center;
+  }
+  .docs-search :global(button[data-open-modal]) {
+    border-radius: var(--radius-sm);
+    border-color: var(--rule);
+    background: var(--surface);
+    color: var(--muted);
+    height: 34px;
+    font-size: 0.84rem;
+  }
+  @media (max-width: 49.99rem) {
+    :global(:root[data-has-sidebar] .header .site-nav) {
+      padding-inline-end: calc(var(--gutter) + var(--sl-menu-button-size) + 8px);
+    }
+    :global(:root[data-has-sidebar] .header .nav-version),
+    :global(:root[data-has-sidebar] .header .nav-icon) {
+      display: none;
+    }
+  }
+</style>
