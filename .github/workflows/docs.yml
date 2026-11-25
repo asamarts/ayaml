@@ -9,6 +9,7 @@ on:
       - "README.md"
       - "Cargo.toml"
       - "tools/check_docs.py"
+      - "crates/ayaml-conformance/Cargo.toml"
       - "crates/ayaml-conformance/src/lib.rs"
       - ".github/workflows/docs.yml"
   pull_request:
@@ -18,6 +19,7 @@ on:
       - "README.md"
       - "Cargo.toml"
       - "tools/check_docs.py"
+      - "crates/ayaml-conformance/Cargo.toml"
       - "crates/ayaml-conformance/src/lib.rs"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
@@ -27,12 +29,13 @@ permissions:
 
 concurrency:
   group: docs-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
     name: build docs site
     runs-on: ubuntu-26.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -54,7 +57,7 @@ jobs:
       - name: Doctest every documentation page
         run: cargo test --doc -p ayaml-conformance --all-features --locked
       - name: Upload Pages artifact
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site/dist
@@ -64,6 +67,7 @@ jobs:
     needs: build
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     permissions:
       contents: read
       pages: write

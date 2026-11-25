@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Most of .github/workflows/{ci,fuzz}.yml, run locally so that failures show up before
+# Most of .github/workflows/{ci,docs,fuzz}.yml, run locally so that failures show up before
 # a push. Hosted CI on the pull request is the gate; this script is a convenience.
 #
 # Usage: tools/ci-local.sh [--list] [--release] [job ...]
@@ -394,11 +394,11 @@ job_suite() {
 
 job_docs-lint() {
   if command -v npx >/dev/null; then
-    step "markdownlint" npx --yes markdownlint-cli2@0.23.3 README.md CHANGELOG.md CONTRIBUTING.md AGENTS.md RELEASING.md SECURITY.md fuzz/README.md tools/leak-scan/README.md tests/fixtures/compat/README.md tests/real-world/README.md "docs/**/*.md"
+    step "markdownlint" npx --yes markdownlint-cli2@0.23.3 README.md CHANGELOG.md CONTRIBUTING.md AGENTS.md RELEASING.md SECURITY.md crates/ayaml-edit/README.md fuzz/README.md tools/leak-scan/README.md tests/fixtures/compat/README.md tests/real-world/README.md "docs/**/*.md"
   else
     skip "npx not installed"
   fi
-  step "check documentation links and book coverage" python3 tools/check_docs.py
+  step "check documentation links and coverage" python3 tools/check_docs.py
   # Mirrors: python3 tools/check_docs.py
   if command -v npm >/dev/null 2>&1 && [ -d site/node_modules ]; then
     step "build Astro + Starlight site" npm --prefix site run build
@@ -408,7 +408,7 @@ job_docs-lint() {
   fi
   # Mirrors: npm --prefix site run build
   # Mirrors: npm --prefix site run check:links
-  test_step "doctest every book page" cargo "+$STABLE" test --doc -p ayaml-conformance --all-features --locked
+  test_step "doctest every documentation page" cargo "+$STABLE" test --doc -p ayaml-conformance --all-features --locked
   # Mirrors: cargo test --doc -p ayaml-conformance --all-features --locked
 }
 

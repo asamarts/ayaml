@@ -148,7 +148,7 @@ a:hover {
 .btn:hover {
   background: var(--accent-strong);
   border-color: var(--accent-strong);
-  color: #ffffff;
+  color: var(--paper);
 }
 .btn-ghost {
   background: transparent;
@@ -430,4 +430,48 @@ a:hover {
 }
 .callout p + p {
   margin-top: var(--s3);
+}
+
+.nojs-panel-title {
+  display: none;
+}
+
+/* Progressive enhancement when JavaScript is disabled */
+:root:not(.js) [data-tabs] [role='tablist'],
+:root:not(.js) [data-copy],
+:root:not(.js) [data-theme-toggle] {
+  display: none;
+}
+:root:not(.js) [data-tabs] [role='tabpanel'][hidden] {
+  display: block;
+  margin-top: var(--s4);
+}
+:root:not(.js) .nojs-panel-title {
+  display: block;
+  margin: 0 0 var(--s2);
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

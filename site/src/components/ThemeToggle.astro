@@ -32,6 +32,14 @@
   .theme-toggle .sun {
     display: none;
   }
+  @media (prefers-color-scheme: dark) {
+    :global(:root:not([data-theme='light'])) .theme-toggle .sun {
+      display: inline;
+    }
+    :global(:root:not([data-theme='light'])) .theme-toggle .moon {
+      display: none;
+    }
+  }
   :global(:root[data-theme='dark']) .theme-toggle .sun {
     display: inline;
   }
@@ -42,8 +50,10 @@
 
 <script is:inline>
   (() => {
-    const syncLabel = () => {
+    const syncUi = () => {
       const dark = document.documentElement.dataset.theme === 'dark';
+      const meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute('content', dark ? '#101216' : '#ffffff');
       for (const b of document.querySelectorAll('[data-theme-toggle]')) {
         const text = dark ? 'Switch to light theme' : 'Switch to dark theme';
         b.setAttribute('aria-label', text);
@@ -64,10 +74,11 @@
         if (window.StarlightThemeProvider) {
           window.StarlightThemeProvider.updatePickers(next);
         }
+        syncUi();
       });
     }
-    syncLabel();
-    new MutationObserver(syncLabel).observe(document.documentElement, {
+    syncUi();
+    new MutationObserver(syncUi).observe(document.documentElement, {
       attributes: true,
       attributeFilter: ['data-theme'],
     });

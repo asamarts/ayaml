@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Check the Astro + Starlight site configuration, page coverage, doctest coverage, and relative links."""
+"""Check the Astro + Starlight site configuration, pinned benchmark JSONL artifacts,
+page coverage, doctest coverage, code fences, and relative links."""
 
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ LINK_PATTERN = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 HTML_HREF_PATTERN = re.compile(r'href="([^"]+)"')
 INCLUDE_DOC_PATTERN = re.compile(r'include_str!\("\.\./\.\./\.\./([^"]+)"\)')
 HEADING_PATTERN = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def strip_fenced_code_blocks(text: str) -> str:
@@ -42,7 +44,7 @@ def strip_fenced_code_blocks(text: str) -> str:
 
 
 def heading_slugs(text: str) -> set[str]:
-    """Compute GitHub/mdBook-style heading anchors from Markdown prose."""
+    """Compute GitHub-style heading anchors from Markdown prose."""
     prose = strip_fenced_code_blocks(text)
     counts: dict[str, int] = {}
     slugs: set[str] = set()
@@ -89,33 +91,122 @@ def check_site_config(root: Path) -> list[str]:
     return errors
 
 
+def check_benchmark_data(root: Path) -> list[str]:
+    """Validate pinned benchmark JSONL artifacts and fingerprint metadata under site/src/data/benchmarks/."""
+    bench_dir = root / "site/src/data/benchmarks"
+    if not bench_dir.is_dir():
+        return []
+    errors: list[str] = []
+    fp_path = bench_dir / "fingerprint.json"
+    if not fp_path.is_file():
+        return ["site/src/data/benchmarks/fingerprint.json: missing fingerprint metadata"]
+    try:
+        fp = json.loads(fp_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        return [f"site/src/data/benchmarks/fingerprint.json: invalid JSON: {error}"]
+
+    if fp.get("schema_version") != 1:
+        errors.append("site/src/data/benchmarks/fingerprint.json: expected schema_version == 1")
+    manifest_sha = fp.get("fixture_manifest_sha256", "")
+    if not isinstance(manifest_sha, str) or not SHA256_RE.match(manifest_sha):
+        errors.append("site/src/data/benchmarks/fingerprint.json: invalid fixture_manifest_sha256")
+
+    def load_jsonl(name: str, required_keys: tuple[str, ...]) -> list[dict]:
+        path = bench_dir / name
+        if not path.is_file():
+            errors.append(f"site/src/data/benchmarks/{name}: missing benchmark file")
+            return []
+        rows: list[dict] = []
+        for idx, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as error:
+                errors.append(f"site/src/data/benchmarks/{name}:{idx}: invalid JSON: {error}")
+                continue
+            if row.get("schema_version") != 1:
+                errors.append(f"site/src/data/benchmarks/{name}:{idx}: expected schema_version == 1")
+            for key in required_keys:
+                if key not in row:
+                    errors.append(f"site/src/data/benchmarks/{name}:{idx}: missing field {key!r}")
+            sha = row.get("fixture_sha256", "")
+            if not isinstance(sha, str) or not SHA256_RE.match(sha):
+                errors.append(f"site/src/data/benchmarks/{name}:{idx}: invalid fixture_sha256")
+            rows.append(row)
+        return rows
+
+    speed_keys = ("scenario", "operation", "implementation", "bytes", "median_ns", "throughput_mib_s")
+    mem_keys = ("scenario", "operation", "implementation", "bytes", "peak_bytes", "allocations")
+    speed_rows = load_jsonl("speed.jsonl", speed_keys)
+    mem_rows = load_jsonl("memory.jsonl", mem_keys)
+    load_jsonl("v023-speed.jsonl", speed_keys)
+    load_jsonl("v023-memory.jsonl", mem_keys)
+
+    if speed_rows and fp.get("speed_rows") != len(speed_rows):
+        errors.append(
+            f"site/src/data/benchmarks/fingerprint.json: speed_rows={fp.get('speed_rows')} "
+            f"!= speed.jsonl count {len(speed_rows)}"
+        )
+    if mem_rows and fp.get("memory_rows") != len(mem_rows):
+        errors.append(
+            f"site/src/data/benchmarks/fingerprint.json: memory_rows={fp.get('memory_rows')} "
+            f"!= memory.jsonl count {len(mem_rows)}"
+        )
+
+    scenario_hashes: dict[str, str] = {}
+    for label, rows in (("speed.jsonl", speed_rows), ("memory.jsonl", mem_rows)):
+        for row in rows:
+            sc = row.get("scenario")
+            sha = row.get("fixture_sha256")
+            if isinstance(sc, str) and isinstance(sha, str):
+                prev = scenario_hashes.setdefault(sc, sha)
+                if prev != sha:
+                    errors.append(
+                        f"site/src/data/benchmarks/{label}: fixture_sha256 mismatch for scenario {sc!r}"
+                    )
+                    break
+    return errors
+
+
 def check_rust_fences(root: Path, path: Path, text: str) -> list[str]:
-    """Ensure every code fence in book pages and README is tagged and no Rust block is skipped."""
+    """Ensure every code fence (backtick or tilde) in docs pages and README is tagged and no Rust block is skipped."""
     errors: list[str] = []
     rel = path.relative_to(root)
     in_fence = False
+    fence_char = ""
+    fence_len = 0
     for line_no, line in enumerate(text.splitlines(), 1):
         stripped = line.lstrip()
         if not in_fence:
-            if stripped.startswith("```"):
-                info = stripped[3:].strip()
-                in_fence = True
-                if not info:
-                    errors.append(
-                        f"{rel}:{line_no}: fenced code block has no language tag "
-                        "(rustdoc treats untagged fences as Rust)"
-                    )
-                    continue
-                tokens = [tok.strip().lower() for tok in re.split(r"[,\s]+", info) if tok.strip()]
-                if "rust" in tokens:
-                    for forbidden in ("ignore", "no_run"):
-                        if forbidden in tokens:
-                            errors.append(
-                                f"{rel}:{line_no}: Rust example uses '{forbidden}' ({info!r}); "
-                                "book examples must compile and run as doctests"
-                            )
-        elif stripped.startswith("```"):
-            in_fence = False
+            if stripped.startswith(("```", "~~~")):
+                ch = stripped[0]
+                count = len(stripped) - len(stripped.lstrip(ch))
+                if count >= 3:
+                    info = stripped[count:].strip()
+                    in_fence = True
+                    fence_char = ch
+                    fence_len = count
+                    if not info:
+                        errors.append(
+                            f"{rel}:{line_no}: fenced code block has no language tag "
+                            "(rustdoc treats untagged fences as Rust)"
+                        )
+                        continue
+                    tokens = [tok.strip().lower() for tok in re.split(r"[,\s]+", info) if tok.strip()]
+                    if "rust" in tokens:
+                        for forbidden in ("ignore", "no_run"):
+                            if forbidden in tokens:
+                                errors.append(
+                                    f"{rel}:{line_no}: Rust example uses '{forbidden}' ({info!r}); "
+                                    "documentation examples must compile and run as doctests"
+                                )
+        else:
+            if stripped.startswith(fence_char * fence_len) and stripped.strip() == fence_char * len(
+                stripped.strip()
+            ):
+                in_fence = False
     return errors
 
 
@@ -166,7 +257,7 @@ def check_links(root: Path, docs_dir: Path, files: list[Path]) -> list[str]:
             ):
                 errors.append(
                     f"{path.relative_to(root)}: relative link {raw_target!r} escapes docs/; "
-                    "use a full GitHub URL for links outside the book"
+                    "use a full GitHub URL for links outside docs/"
                 )
                 continue
             if fragment and resolved.is_file() and resolved.suffix == ".md":
@@ -238,6 +329,7 @@ def check_summary_and_doctests(root: Path, docs_dir: Path) -> list[str]:
 def problems(root: Path) -> list[str]:
     docs_dir = root / "docs"
     errors = check_site_config(root)
+    errors.extend(check_benchmark_data(root))
     if not docs_dir.is_dir():
         return errors + ["docs/: missing directory"]
     files = [
@@ -247,6 +339,7 @@ def problems(root: Path) -> list[str]:
             root / "CONTRIBUTING.md",
             root / "RELEASING.md",
             root / "SECURITY.md",
+            root / "crates/ayaml-edit/README.md",
             *sorted(docs_dir.rglob("*.md")),
         ]
         if path.is_file()
@@ -264,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"FAIL: {problem}", file=sys.stderr)
         return 1
     doc_count = len(list((root / "docs").rglob("*.md")))
-    print(f"OK: site config, SUMMARY.md, book_doctests, and links verified across {doc_count} docs files")
+    print(f"OK: site config, benchmark artifacts, SUMMARY.md, book_doctests, and links verified across {doc_count} docs files")
     return 0
 
 

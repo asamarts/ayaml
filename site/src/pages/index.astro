@@ -1,4 +1,5 @@
 ---
+import { Code } from 'astro:components';
 import BaseLayout from '../layouts/BaseLayout.astro';
 import { BASE, DOCS_RS_AYAML, DOCS_RS_EDIT, SITE_URL, WORKSPACE_VERSION } from '../lib/site';
 import { HEADLINE, TIER2_PEERS, fingerprint } from '../lib/bench';
@@ -7,8 +8,17 @@ const TITLE = 'ayaml — Safe, fast, pure-Rust YAML 1.2.2';
 const DESCRIPTION =
   'A safe, pure-Rust YAML 1.2.2 parser, spanned event stream, generic value model, Serde codec, deterministic emitter, and format-preserving editor.';
 
-const tier2Rust = TIER2_PEERS.filter((r) => !r.isUnsafeArena && (r.lang === 'Rust' || r.impl === 'fkyaml'));
+const tier2Rust = TIER2_PEERS.filter(
+  (r) => !r.isUnsafeArena && (r.lang === 'Rust' || r.impl === 'fkyaml'),
+);
 const maxRatio = Math.max(...tier2Rust.map((r) => r.speedRatio));
+
+const INSTALL_SNIPPET = `[dependencies]
+ayaml = "${WORKSPACE_VERSION}"
+serde = { version = "1", features = ["derive"] }
+
+# Optional format-preserving edits:
+# ayaml-edit = "${WORKSPACE_VERSION}"`;
 
 const EXAMPLES = [
   {
@@ -51,7 +61,8 @@ let loc = Location::from(pos); // line 1, column 7`,
     id: 'security',
     label: 'Limits & masked errors',
     filename: 'src/untrusted.rs',
-    code: `use ayaml::{ErrorCode, Limits, ParseOptions, from_reader_with};
+    code: `use std::io::Cursor;
+use ayaml::{ErrorCode, Limits, ParseOptions, Value, from_reader_with};
 
 const UNTRUSTED: ParseOptions = ParseOptions::new().with_limits(
     Limits::new()
@@ -60,16 +71,17 @@ const UNTRUSTED: ParseOptions = ParseOptions::new().with_limits(
         .with_max_alias_expansion_bytes(1024 * 1024),
 );
 
-let err = from_reader_with::<_, serde_json::Value>(reader, &UNTRUSTED).unwrap_err();
-assert_eq!(err.code(), ErrorCode::InvalidType);
+let deep = "[".repeat(40);
+let err = from_reader_with::<_, Value>(Cursor::new(deep.as_bytes()), &UNTRUSTED).unwrap_err();
+assert_eq!(err.code(), ErrorCode::DepthLimit);
 // Never leaks document contents or secret keys into logs:
-tracing::warn!("{}", err.masked());`,
+eprintln!("{}", err.masked());`,
   },
   {
     id: 'merge',
     label: 'Opt-in merge keys',
     filename: 'src/merge.rs',
-    code: `use ayaml::{ParseOptions, from_str_with};
+    code: `use ayaml::{ParseOptions, parse_value_with};
 
 let input = "\\
 defaults: &def
@@ -82,7 +94,8 @@ build:
 
 // YAML 1.2.2 keeps \`<<\` literal by default; opt in explicitly:
 let opts = ParseOptions::new().with_merge_keys(true);
-let doc: ayaml::Value = ayaml::parse_value_with(input, &opts)?;`,
+let doc = parse_value_with(input, &opts)?;
+assert_eq!(doc["build"]["image"].as_str(), Some("rust:1.88"));`,
   },
   {
     id: 'edit',
@@ -95,8 +108,11 @@ let src = "# Keep comments, blank lines, and indentation\\nservice:\\n  port: 80
 let path = [PathSegment::key("service"), PathSegment::key("port")];
 let verified = replace_scalar(src, &path, &Value::from(9090_u64))?;
 
-// Verified against canonical event diff before returning:
-assert_eq!(verified.output(), "# Keep comments, blank lines, and indentation\\nservice:\\n  port: 9090\\n");`,
+// Verified against Value tree & canonical event diff before returning:
+assert_eq!(
+    verified.output(),
+    "# Keep comments, blank lines, and indentation\\nservice:\\n  port: 9090\\n",
+);`,
   },
   {
     id: 'frontmatter',
@@ -114,6 +130,8 @@ struct Post<'a> {
 
 let doc = "---\\ntitle: Release 1.0\\ndraft: false\\n---\\n# Hello\\n";
 let parsed = parse_frontmatter_with::<Post<'_>>(doc, &ParseOptions::new())?.unwrap();
+assert_eq!(parsed.frontmatter.title.span().slice(doc), Some("Release 1.0"));
+assert!(!parsed.frontmatter.draft);
 assert_eq!(parsed.body, "# Hello\\n");`,
   },
 ];
@@ -150,7 +168,7 @@ const GUARANTEES = [
   {
     badge: 'Zero-copy & streaming',
     title: 'Fastest pure-Rust YAML stack',
-    body: `Leads every measured Rust YAML library by ${HEADLINE.vsYamlRust2.toFixed(2)}x–${HEADLINE.vsSerdeSaphyr.toFixed(2)}x on geometric mean across ${HEADLINE.scenarioCount} fixtures, with ${HEADLINE.vsYamlSerdeAllocs.toFixed(1)}x fewer allocations than yaml-serde.`,
+    body: `Leads every measured Rust YAML library by ${HEADLINE.vsYamlRust2.toFixed(2)}x–${HEADLINE.vsSerdeSaphyr.toFixed(2)}x on geometric mean across shared fixtures (up to ${HEADLINE.scenarioCount}), with ${HEADLINE.vsYamlSerdeAllocs.toFixed(1)}x fewer allocations than yaml-serde.`,
     href: `${BASE}/benchmarks/`,
     linkText: 'Explore benchmarks',
   },
@@ -166,20 +184,22 @@ const GUARANTEES = [
 const MIGRATIONS = [
   {
     from: 'serde_yaml',
-    tag: 'Archived libyaml Serde crate',
-    summary: 'Drop-in API table, YAML 1.1 scalar changes, duplicate keys, merge keys, and Error::masked() upgrades.',
+    tag: 'Archived unsafe-libyaml crate',
+    summary:
+      'Drop-in API table, YAML 1.1 scalar changes, duplicate keys, merge keys, and Error::masked() upgrades.',
     href: `${BASE}/docs/migrating-from/serde-yaml/`,
   },
   {
     from: 'serde_yml / serde_yaml_ng / yaml-serde',
-    tag: 'libyaml C FFI forks',
-    summary: 'Remove unsafe C FFI, cut allocations by 3.8x, adopt zero-copy borrowed decoding, and use ayaml::compat if needed.',
+    tag: 'C-transpiled libyaml forks',
+    summary: `Remove unsafe libyaml code, cut allocations by ${HEADLINE.vsYamlSerdeAllocs.toFixed(1)}x vs yaml-serde, adopt zero-copy borrowed decoding, and use ayaml::compat if needed.`,
     href: `${BASE}/docs/migrating-from/serde-yml-and-forks/`,
   },
   {
     from: 'yaml-rust2 / saphyr / serde-saphyr',
     tag: 'Pure-Rust YAML 1.2 crates',
-    summary: 'Move from YamlLoader / MarkedYaml / EventReceiver to SpannedTree, Spanned<T>, and faster pull events.',
+    summary:
+      'Move from YamlLoader / MarkedYaml / EventReceiver to SpannedTree, Spanned<T>, and faster pull events.',
     href: `${BASE}/docs/migrating-from/yaml-rust2-and-saphyr/`,
   },
 ];
@@ -216,12 +236,12 @@ const MIGRATIONS = [
               Copy cargo add
             </button>
           </div>
-          <pre><code>{`[dependencies]
-ayaml = "${WORKSPACE_VERSION}"
-serde = { version = "1", features = ["derive"] }
-
-# Optional format-preserving edits:
-# ayaml-edit = "${WORKSPACE_VERSION}"`}</code></pre>
+          <Code
+            code={INSTALL_SNIPPET}
+            lang="toml"
+            themes={{ light: 'github-light', dark: 'github-dark' }}
+            defaultColor={false}
+          />
         </div>
         <div class="hero-checks">
           <span><strong>0</strong> unsafe blocks</span>
@@ -233,15 +253,20 @@ serde = { version = "1", features = ["derive"] }
 
     <div class="kpi-grid hero-kpis">
       <div class="kpi-card">
-        <div class="kpi-val accent">{HEADLINE.vsYamlRust2.toFixed(2)}x–{HEADLINE.vsSerdeSaphyr.toFixed(2)}x</div>
+        <div class="kpi-val accent">
+          {HEADLINE.vsYamlRust2.toFixed(2)}x–{HEADLINE.vsSerdeSaphyr.toFixed(2)}x
+        </div>
         <div class="kpi-label">Faster than pure-Rust peers</div>
         <div class="kpi-sub">
-          Geometric mean across {HEADLINE.scenarioCount} pinned fixtures vs <code>yaml-rust2</code>,
-          <code>saphyr</code>, <code>noyalib</code>, <code>fast-yaml-core</code>, and <code>serde-saphyr</code>.
+          Geometric mean across shared pinned fixtures (up to {HEADLINE.scenarioCount}) vs
+          <code>yaml-rust2</code>, <code>saphyr</code>, <code>noyalib</code>,
+          <code>fast-yaml-core</code>, and <code>serde-saphyr</code>.
         </div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-val">{HEADLINE.vsLibyamlEvents.toFixed(2)}x / {HEADLINE.vsLibfyamlEvents.toFixed(2)}x</div>
+        <div class="kpi-val">
+          {HEADLINE.vsLibyamlEvents.toFixed(2)}x / {HEADLINE.vsLibfyamlEvents.toFixed(2)}x
+        </div>
         <div class="kpi-label">Faster than C libyaml &amp; libfyaml</div>
         <div class="kpi-sub">
           Spanned <code>ayaml</code> event stream vs C <code>libyaml</code> ({HEADLINE.vsLibyamlEvents.toFixed(2)}x)
@@ -253,7 +278,7 @@ serde = { version = "1", features = ["derive"] }
         <div class="kpi-label">Large-scalar throughput</div>
         <div class="kpi-sub">
           Over {HEADLINE.largeScalarVsRyml.toFixed(1)}x faster than C++ <code>rapidyaml</code> on
-          1 MiB scalars; up to {HEADLINE.ciEmitMib.toFixed(0)} MiB/s deterministic YAML emission.
+          1 MiB scalars; up to {HEADLINE.emitMaxMib.toFixed(0)} MiB/s deterministic YAML emission.
         </div>
       </div>
       <div class="kpi-card">
@@ -305,6 +330,7 @@ serde = { version = "1", features = ["derive"] }
               aria-labelledby={`tab-${ex.id}`}
               hidden={i !== 0}
             >
+              <p class="nojs-panel-title">{ex.label}</p>
               <div class="code-frame">
                 <div class="code-bar">
                   <span>{ex.filename}</span>
@@ -312,7 +338,12 @@ serde = { version = "1", features = ["derive"] }
                     Copy snippet
                   </button>
                 </div>
-                <pre><code>{ex.code}</code></pre>
+                <Code
+                  code={ex.code}
+                  lang="rust"
+                  themes={{ light: 'github-light', dark: 'github-dark' }}
+                  defaultColor={false}
+                />
               </div>
             </div>
           ))
@@ -324,12 +355,13 @@ serde = { version = "1", features = ["derive"] }
   <section class="sec">
     <div class="wrap">
       <div class="sec-head">
-        <span class="sec-kicker">Performance snapshot</span>
+        <span class="sec-kicker">Performance snapshot &middot; Shorter bar = faster</span>
         <h2>Fastest safe Rust YAML parser — verified by pinned data</h2>
         <p class="sec-lede">
-          Relative parse time across all {HEADLINE.scenarioCount} shared fixtures in the
-          <code>ayaml-fixtures</code> catalog (lower bar = faster; <code>1.00x</code> = <code>ayaml value</code>).
-          Measured on {fingerprint.cpu} with pinned CPU affinity and SHA-256 verified inputs.
+          Relative geometric-mean parse time across shared fixtures (up to {HEADLINE.scenarioCount})
+          in the <code>ayaml-fixtures</code> catalog (shorter bar = faster; <code>1.00x</code> =
+          <code>ayaml value</code>). Measured on {fingerprint.cpu} with pinned CPU affinity and
+          SHA-256 verified inputs.
         </p>
       </div>
 
@@ -339,7 +371,9 @@ serde = { version = "1", features = ["derive"] }
             <div class:list={['bar-row', { 'is-ayaml': row.isAyaml }]}>
               <div class="bar-name">
                 <span>{row.label}</span>
-                <span class="bar-sub">{row.safety}</span>
+                <span class="bar-sub">
+                  {row.safety} &middot; {row.sharedScenarios} shared
+                </span>
               </div>
               <div class="bar-track" aria-hidden="true">
                 <div
@@ -356,8 +390,9 @@ serde = { version = "1", features = ["derive"] }
       <div class="bench-cta">
         <a class="btn" href={`${BASE}/benchmarks/`}>Explore full interactive benchmarks</a>
         <span class="bench-note">
-          Includes Tier 1 C/C++ comparisons (including <code>rapidyaml</code> architectural trade-offs),
-          typed Serde decode, emission, peak heap, 10x linear scaling, and reproduction commands.
+          Includes Tier 1 C/C++ comparisons (including <code>rapidyaml</code> architectural
+          trade-offs), typed Serde decode, emission, peak heap, 10x linear scaling, and
+          reproduction commands.
         </span>
       </div>
     </div>
@@ -414,8 +449,12 @@ serde = { version = "1", features = ["derive"] }
           <span>Browse complete trait signatures, builder methods, and examples on docs.rs.</span>
         </div>
         <div class="ref-links">
-          <a class="btn btn-ghost" href={DOCS_RS_AYAML} target="_blank" rel="noopener noreferrer">docs.rs/ayaml</a>
-          <a class="btn btn-ghost" href={DOCS_RS_EDIT} target="_blank" rel="noopener noreferrer">docs.rs/ayaml-edit</a>
+          <a class="btn btn-ghost" href={DOCS_RS_AYAML} target="_blank" rel="noopener noreferrer">
+            docs.rs/ayaml
+          </a>
+          <a class="btn btn-ghost" href={DOCS_RS_EDIT} target="_blank" rel="noopener noreferrer">
+            docs.rs/ayaml-edit
+          </a>
           <a class="btn btn-ghost" href={`${BASE}/docs/api-reference/`}>API map</a>
         </div>
       </div>
@@ -424,6 +463,23 @@ serde = { version = "1", features = ["derive"] }
 </BaseLayout>
 
 <style>
+  /* Shiki dual-theme CSS variables */
+  :global(.astro-code),
+  :global(.astro-code span) {
+    color: var(--shiki-light);
+    background-color: transparent !important;
+  }
+  @media (prefers-color-scheme: dark) {
+    :global(:root:not([data-theme='light']) .astro-code),
+    :global(:root:not([data-theme='light']) .astro-code span) {
+      color: var(--shiki-dark);
+    }
+  }
+  :global(:root[data-theme='dark'] .astro-code),
+  :global(:root[data-theme='dark'] .astro-code span) {
+    color: var(--shiki-dark);
+  }
+
   .hero {
     padding-block: clamp(44px, 6vw, 84px) var(--s8);
   }
@@ -472,6 +528,7 @@ serde = { version = "1", features = ["derive"] }
     display: flex;
     flex-direction: column;
     gap: var(--s3);
+    min-width: 0;
   }
   .hero-checks {
     display: flex;
@@ -504,7 +561,7 @@ serde = { version = "1", features = ["derive"] }
   }
   .feature-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(290px, 100%), 1fr));
     gap: var(--s4);
   }
   .feature-card {
@@ -534,7 +591,7 @@ serde = { version = "1", features = ["derive"] }
   }
   .migration-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
     gap: var(--s4);
   }
   .migration-card {

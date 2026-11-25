@@ -1,11 +1,11 @@
-//! Workspace-only conformance helpers and documentation book doctests.
+//! Workspace-only conformance helpers and documentation doctests.
 //!
 //! `ayaml-conformance` is not published to crates.io, so doctesting `README.md`
-//! and the mdBook pages under `docs/` here keeps every Rust example verified in
+//! and the documentation pages under `docs/` here keeps every Rust example verified in
 //! `cargo test --workspace --all-features` without coupling the packaged `ayaml`
 //! `.crate` tarball to repository-level Markdown files.
 
-/// Compile and execute every Rust example in `README.md` and the mdBook under `docs/`.
+/// Compile and execute every Rust example in `README.md` and the documentation pages under `docs/`.
 ///
 /// Every page in `docs/` (other than `docs/SUMMARY.md`) must be listed here; `tools/check_docs.py`
 /// and `crates/ayaml/tests/repository_policy.rs` enforce that no page is omitted.

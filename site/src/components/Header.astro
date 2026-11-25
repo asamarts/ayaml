@@ -24,6 +24,22 @@ import ThemeToggle from './ThemeToggle.astro';
     height: 34px;
     font-size: 0.84rem;
   }
+  @media (max-width: 1180px) and (min-width: 50rem) {
+    .docs-search :global(button[data-open-modal]) {
+      min-width: 0;
+      width: 9.5rem;
+    }
+  }
+  @media (max-width: 960px) and (min-width: 50rem) {
+    .docs-search :global(button[data-open-modal]) {
+      width: auto;
+      padding-inline: 8px;
+    }
+    .docs-search :global(button[data-open-modal] > span),
+    .docs-search :global(button[data-open-modal] kbd) {
+      display: none;
+    }
+  }
   @media (max-width: 49.99rem) {
     :global(:root[data-has-sidebar] .header .site-nav) {
       padding-inline-end: calc(var(--gutter) + var(--sl-menu-button-size) + 8px);

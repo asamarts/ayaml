@@ -77,7 +77,8 @@ These are done in the web interfaces by an owner. Each is recorded here once don
 
 1. In a pull request, set the workspace version in `Cargo.toml` and in each place that repeats
    it: the current release and the two install lines in `README.md`, the install lines in
-   `docs/index.md`, `docs/getting-started.md`, `docs/compatibility.md`, and `docs/migration.md`,
+   `docs/index.md`, `docs/getting-started.md`, `docs/compatibility.md`, `docs/migration.md`,
+   `docs/editing.md`, and `docs/migrating-from/*.md`,
    and the exact `ayaml` / `ayaml-edit` / `ayaml-fixtures` requirements in
    `crates/ayaml-bench/Cargo.toml`, `crates/ayaml-conformance/Cargo.toml`,
    `crates/ayaml-edit/Cargo.toml`, `crates/ayaml-fixtures/Cargo.toml`,

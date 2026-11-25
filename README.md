@@ -121,14 +121,16 @@ fn main() -> Result<(), ayaml::Error> {
 
 | Need | Entry points |
 | --- | --- |
-| One document as a value | `parse_value`, `parse_value_with` |
+| One document as a value | `parse_value`, `parse_value_with` (with opt-in `ParseOptions::with_merge_keys`) |
 | A document stream as values | `parse_documents`, `parse_documents_with` |
 | Spanned events | `parse_events`, `parse_events_with`, `EventStream` |
 | Compatibility events | `compat::parse_events`, `compat::parse_events_with`, and the eager `compat::parse_events_eager_with` |
-| Spanned tree | `SpannedTree::parse`, `SpannedTree::parse_with`, `SpannedNode`, path lookup, entry spans, and scalar source text |
-| Typed decoding | `from_str`, `from_str_with`, `from_slice`, `from_slice_with`, `from_str_borrowed`, `from_str_seed`, `from_str_seed_with`, `Deserializer` |
+| Spanned tree & typed spans | `SpannedTree::parse`, `SpannedTree::parse_with`, `SpannedNode`, `Spanned<T>`, `LineIndex` |
+| Typed decoding & middleware | `from_str`, `from_str_with`, `from_str_borrowed`, `from_slice`, `from_slice_with`, `from_slice_borrowed`, `from_reader`, `from_reader_with`, `from_str_seed`, `from_str_seed_with`, `Deserializer`, `DocumentDeserializer` |
+| Markdown frontmatter | `split_frontmatter`, `split_frontmatter_with`, `parse_frontmatter`, `parse_frontmatter_with`, `parse_frontmatter_value`, `parse_frontmatter_value_with` |
 | Value/Serde conversion | `from_value`, `from_value_seed`, `to_value` |
 | Emission | `to_string`, `to_string_with`, `to_writer`, `to_writer_with`, `to_string_value_with`, `to_string_documents_with`, `to_string_events_with`, `Emitter` |
+| Surgical editing | Companion crate `ayaml-edit`: `replace_scalar`, `remove_entry`, `apply_batch`, `apply_edits` |
 | Compatibility | `ayaml::compat` with `compat::ParseOptions` and the `libyaml-compat` feature |
 
 `ParseOptions`, `compat::ParseOptions`, `EmitOptions`, and `Limits` are

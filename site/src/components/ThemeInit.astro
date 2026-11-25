@@ -1,20 +1,36 @@
 ---
-// Applies the saved Starlight/site theme before first paint so switching
-// between marketing pages (/ayaml/, /ayaml/benchmarks/) and Starlight docs
-// (/ayaml/docs/**) never flashes the wrong color scheme.
+// Applies the saved Starlight/site theme before first paint and keeps
+// <meta name="theme-color"> synchronized across manual toggles and OS changes.
 ---
 <script is:inline>
   (() => {
     document.documentElement.classList.add('js');
-    let theme;
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const syncMeta = (theme) => {
+      const meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute('content', theme === 'dark' ? '#101216' : '#ffffff');
+    };
+    let saved = null;
     try {
-      theme = localStorage.getItem('starlight-theme');
+      saved = localStorage.getItem('starlight-theme');
     } catch {
-      theme = null;
+      saved = null;
     }
-    if (theme !== 'light' && theme !== 'dark') {
-      theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-    }
+    const theme = saved === 'light' || saved === 'dark' ? saved : mq.matches ? 'dark' : 'light';
     document.documentElement.dataset.theme = theme;
+    syncMeta(theme);
+    mq.addEventListener?.('change', (e) => {
+      let currentSaved = null;
+      try {
+        currentSaved = localStorage.getItem('starlight-theme');
+      } catch {
+        currentSaved = null;
+      }
+      if (currentSaved !== 'light' && currentSaved !== 'dark') {
+        const next = e.matches ? 'dark' : 'light';
+        document.documentElement.dataset.theme = next;
+        syncMeta(next);
+      }
+    });
   })();
 </script>
