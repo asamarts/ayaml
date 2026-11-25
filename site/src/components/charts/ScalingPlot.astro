@@ -1,0 +1,302 @@
+---
+import type { ScalingFamilySeries } from '../../lib/bench';
+
+interface Props {
+  id: string;
+  title: string;
+  description: string;
+  series: ScalingFamilySeries[];
+  caption?: string;
+}
+
+const { id, title, description, series, caption } = Astro.props;
+
+const WIDTH = 760;
+const HEIGHT = 252;
+
+// Left panel: log-log Peak Heap vs Input Size
+const L_X = 60;
+const L_Y = 38;
+const L_W = 296;
+const L_H = 154;
+
+const xMinKib = 8;
+const xMaxKib = 1800;
+const yMinKib = 80;
+const yMaxKib = 45000;
+
+const lx = (bytes: number): number => {
+  const kib = Math.min(Math.max(bytes / 1024, xMinKib), xMaxKib);
+  return L_X + ((Math.log10(kib) - Math.log10(xMinKib)) / (Math.log10(xMaxKib) - Math.log10(xMinKib))) * L_W;
+};
+const ly = (bytes: number): number => {
+  const kib = Math.min(Math.max(bytes / 1024, yMinKib), yMaxKib);
+  return L_Y + L_H - ((Math.log10(kib) - Math.log10(yMinKib)) / (Math.log10(yMaxKib) - Math.log10(yMinKib))) * L_H;
+};
+
+const xTicks = [
+  { bytes: 10 * 1024, label: '10 KiB' },
+  { bytes: 100 * 1024, label: '100 KiB' },
+  { bytes: 1024 * 1024, label: '1 MiB' },
+];
+const yTicks = [
+  { bytes: 100 * 1024, label: '100 KiB' },
+  { bytes: 1024 * 1024, label: '1 MiB' },
+  { bytes: 10 * 1024 * 1024, label: '10 MiB' },
+];
+
+const FAMILY_STYLES: Record<string, { color: string; shape: 'circle' | 'square' | 'diamond' }> = {
+  map: { color: 'var(--accent)', shape: 'circle' },
+  seq: { color: 'var(--blue)', shape: 'square' },
+  openapi: { color: 'var(--green)', shape: 'diamond' },
+};
+
+// O(n) reference slope placed cleanly in upper-left whitespace above all three curves:
+// peak = 52 * input from 10 KiB (520 KiB) to 700 KiB (36.4 MiB).
+const refX1 = lx(10 * 1024);
+const refY1 = ly(520 * 1024);
+const refX2 = lx(700 * 1024);
+const refY2 = ly(36400 * 1024);
+
+// Right panel: normalized 10x step ratios around 1.00x ideal O(n)
+const R_LABEL_X = 486;
+const R_X = 496;
+const R_Y = 38;
+const R_W = 244;
+const R_H = 154;
+const R_MIN = 0.5;
+const R_MAX = 1.8;
+
+const rx = (v: number): number =>
+  R_X + ((Math.min(Math.max(v, R_MIN), R_MAX) - R_MIN) / (R_MAX - R_MIN)) * R_W;
+const rTicks = [0.5, 1.0, 1.5];
+const rRowH = R_H / series.length;
+---
+
+<figure class="chart-fig">
+  <div class="chart-scroll">
+    <svg
+      class="chart-svg"
+      data-chart="scaling-plot"
+      role="img"
+      aria-labelledby={`${id}-title ${id}-desc`}
+      viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+    >
+      <title id={`${id}-title`}>{title}</title>
+      <desc id={`${id}-desc`}>{description}</desc>
+
+      {/* Panel titles */}
+      <text x={L_X} y="18" font-size="11.5" font-weight="700" fill="var(--ink)">
+        Peak heap vs. input size (log-log)
+      </text>
+      <text x={R_X + R_W} y="18" font-size="11.5" font-weight="700" fill="var(--ink)" text-anchor="end">
+        Normalized 10x step ratio (1.00x = O(n))
+      </text>
+
+      {/* LEFT PANEL: Grid and axes */}
+      {
+        yTicks.map((t) => {
+          const y = ly(t.bytes);
+          return (
+            <g>
+              <line x1={L_X} y1={y.toFixed(1)} x2={L_X + L_W} y2={y.toFixed(1)} stroke="var(--rule)" stroke-dasharray="2 3" />
+              <text class="ch-mono" x={L_X - 7} y={(y + 3.5).toFixed(1)} font-size="10" fill="var(--muted)" text-anchor="end">
+                {t.label}
+              </text>
+            </g>
+          );
+        })
+      }
+      {
+        xTicks.map((t) => {
+          const x = lx(t.bytes);
+          return (
+            <g>
+              <line x1={x.toFixed(1)} y1={L_Y} x2={x.toFixed(1)} y2={L_Y + L_H} stroke="var(--rule)" stroke-dasharray="2 3" />
+              <text class="ch-mono" x={x.toFixed(1)} y={L_Y + L_H + 15} font-size="10" fill="var(--muted)" text-anchor="middle">
+                {t.label}
+              </text>
+            </g>
+          );
+        })
+      }
+      <rect x={L_X} y={L_Y} width={L_W} height={L_H} fill="none" stroke="var(--rule)" stroke-width="1" />
+
+      {/* Ideal O(n) slope guide */}
+      <line
+        x1={refX1.toFixed(1)}
+        y1={refY1.toFixed(1)}
+        x2={refX2.toFixed(1)}
+        y2={refY2.toFixed(1)}
+        stroke="var(--ctl)"
+        stroke-width="1.25"
+        stroke-dasharray="5 4"
+      />
+      <text
+        class="ch-mono"
+        x={(refX1 + 12).toFixed(1)}
+        y={(refY1 - 22).toFixed(1)}
+        font-size="9.5"
+        fill="var(--muted)"
+      >
+        O(n) slope
+      </text>
+
+      {/* Family polylines & markers */}
+      {
+        series.map((s) => {
+          const st = FAMILY_STYLES[s.id] ?? { color: 'var(--accent)', shape: 'circle' };
+          const pts = s.points.map((p) => `${lx(p.sizeBytes).toFixed(1)},${ly(p.peakBytes).toFixed(1)}`).join(' ');
+          return (
+            <g>
+              <polyline fill="none" stroke={st.color} stroke-width="2" points={pts} />
+              {s.points.map((p) => {
+                const cx = lx(p.sizeBytes);
+                const cy = ly(p.peakBytes);
+                if (st.shape === 'square') {
+                  return <rect x={(cx - 3.5).toFixed(1)} y={(cy - 3.5).toFixed(1)} width="7" height="7" fill={st.color} />;
+                }
+                if (st.shape === 'diamond') {
+                  return (
+                    <polygon
+                      points={`${cx.toFixed(1)},${(cy - 4.5).toFixed(1)} ${(cx + 4.5).toFixed(1)},${cy.toFixed(1)} ${cx.toFixed(1)},${(cy + 4.5).toFixed(1)} ${(cx - 4.5).toFixed(1)},${cy.toFixed(1)}`}
+                      fill={st.color}
+                    />
+                  );
+                }
+                return <circle cx={cx.toFixed(1)} cy={cy.toFixed(1)} r="3.8" fill={st.color} />;
+              })}
+            </g>
+          );
+        })
+      }
+
+      {/* Left panel legend (lines + matching marker shapes) */}
+      {
+        series.map((s, idx) => {
+          const st = FAMILY_STYLES[s.id] ?? { color: 'var(--accent)', shape: 'circle' };
+          const x = 40 + idx * 114;
+          const y = 234;
+          const cy = y - 3;
+          const cx = x + 7;
+          return (
+            <g>
+              <line x1={x} y1={cy} x2={x + 14} y2={cy} stroke={st.color} stroke-width="2" />
+              {st.shape === 'square' ? (
+                <rect x={cx - 3} y={cy - 3} width="6" height="6" fill={st.color} />
+              ) : st.shape === 'diamond' ? (
+                <polygon
+                  points={`${cx},${cy - 4} ${cx + 4},${cy} ${cx},${cy + 4} ${cx - 4},${cy}`}
+                  fill={st.color}
+                />
+              ) : (
+                <circle cx={cx} cy={cy} r="3.3" fill={st.color} />
+              )}
+              <text x={x + 18} y={y} font-size="10" fill="var(--text)">{s.family}</text>
+            </g>
+          );
+        })
+      }
+
+      {/* RIGHT PANEL: Normalized 10x step ratios */}
+      {
+        rTicks.map((t) => {
+          const x = rx(t);
+          const isOne = Math.abs(t - 1.0) < 1e-6;
+          return (
+            <g>
+              <line
+                x1={x.toFixed(1)}
+                y1={R_Y}
+                x2={x.toFixed(1)}
+                y2={R_Y + R_H}
+                stroke={isOne ? 'var(--accent)' : 'var(--rule)'}
+                stroke-width={isOne ? '1.5' : '1'}
+                stroke-dasharray={isOne ? '4 3' : '2 3'}
+              />
+              <text
+                class="ch-mono"
+                x={x.toFixed(1)}
+                y={R_Y + R_H + 15}
+                font-size="10"
+                font-weight={isOne ? '700' : '500'}
+                fill={isOne ? 'var(--accent-strong)' : 'var(--muted)'}
+                text-anchor="middle"
+              >
+                {t.toFixed(1)}x
+              </text>
+            </g>
+          );
+        })
+      }
+      <rect x={R_X} y={R_Y} width={R_W} height={R_H} fill="none" stroke="var(--rule)" stroke-width="1" />
+
+      {
+        series.map((s, idx) => {
+          const yMid = R_Y + idx * rRowH + rRowH / 2;
+          const xBase = rx(1.0);
+          const xTime = s.time10to100 !== null ? rx(s.time10to100) : null;
+          const xPeak1 = rx(s.peak10to100);
+          const xPeak2 = rx(s.peak100to1m);
+
+          const labelSide = (x: number) =>
+            x < xBase - 4
+              ? { tx: x - 7, anchor: 'end' as const }
+              : { tx: x + 7, anchor: 'start' as const };
+          const p1Lbl = labelSide(xPeak1);
+          const p2Lbl = labelSide(xPeak2);
+          const tLbl = xTime !== null ? labelSide(xTime) : null;
+
+          return (
+            <g>
+              {idx > 0 && (
+                <line x1={R_X} y1={(R_Y + idx * rRowH).toFixed(1)} x2={R_X + R_W} y2={(R_Y + idx * rRowH).toFixed(1)} stroke="var(--rule)" opacity="0.5" />
+              )}
+              <text x={R_LABEL_X} y={(yMid + 4).toFixed(1)} font-size="11" font-weight="600" fill="var(--ink)" text-anchor="end">
+                {s.family}
+              </text>
+
+              {/* Connecting guide from 1.00x to peak10to100 */}
+              <line x1={xBase.toFixed(1)} y1={(yMid - 13).toFixed(1)} x2={xPeak1.toFixed(1)} y2={(yMid - 13).toFixed(1)} stroke="var(--blue)" stroke-width="1.5" opacity="0.55" />
+              <rect x={(xPeak1 - 3.5).toFixed(1)} y={(yMid - 16.5).toFixed(1)} width="7" height="7" fill="var(--paper)" stroke="var(--blue)" stroke-width="2" />
+              <text class="ch-mono" x={p1Lbl.tx.toFixed(1)} y={(yMid - 10).toFixed(1)} font-size="9.5" fill="var(--blue)" text-anchor={p1Lbl.anchor}>
+                {s.peak10to100.toFixed(2)}x
+              </text>
+
+              {/* 10 -> 100 KiB time */}
+              {xTime !== null && tLbl !== null && (
+                <g>
+                  <circle cx={xTime.toFixed(1)} cy={yMid.toFixed(1)} r="4" fill="var(--accent)" />
+                  <text class="ch-mono" x={tLbl.tx.toFixed(1)} y={(yMid + 3).toFixed(1)} font-size="9.5" font-weight="700" fill="var(--accent-strong)" text-anchor={tLbl.anchor}>
+                    {s.time10to100!.toFixed(2)}x
+                  </text>
+                </g>
+              )}
+
+              {/* 100 KiB -> 1 MiB peak */}
+              <line x1={xBase.toFixed(1)} y1={(yMid + 13).toFixed(1)} x2={xPeak2.toFixed(1)} y2={(yMid + 13).toFixed(1)} stroke="var(--green)" stroke-width="1.5" opacity="0.6" />
+              <polygon
+                points={`${xPeak2.toFixed(1)},${(yMid + 8.5).toFixed(1)} ${(xPeak2 + 4.5).toFixed(1)},${(yMid + 13).toFixed(1)} ${xPeak2.toFixed(1)},${(yMid + 17.5).toFixed(1)} ${(xPeak2 - 4.5).toFixed(1)},${(yMid + 13).toFixed(1)}`}
+                fill="var(--green)"
+              />
+              <text class="ch-mono" x={p2Lbl.tx.toFixed(1)} y={(yMid + 16.5).toFixed(1)} font-size="9.5" font-weight="600" fill="var(--green)" text-anchor={p2Lbl.anchor}>
+                {s.peak100to1m.toFixed(2)}x
+              </text>
+            </g>
+          );
+        })
+      }
+
+      {/* Right panel legend */}
+      <g>
+        <circle cx="430" cy="231" r="3.5" fill="var(--accent)" />
+        <text x="438" y="234" font-size="10" fill="var(--text)">10&rarr;100K time</text>
+        <rect x="526" y="227.5" width="7" height="7" fill="var(--paper)" stroke="var(--blue)" stroke-width="1.8" />
+        <text x="538" y="234" font-size="10" fill="var(--text)">10&rarr;100K peak</text>
+        <polygon points="632,226.5 636.5,231 632,235.5 627.5,231" fill="var(--green)" />
+        <text x="641" y="234" font-size="10" fill="var(--text)">100K&rarr;1M peak</text>
+      </g>
+    </svg>
+  </div>
+  {caption && <figcaption class="chart-cap">{caption}</figcaption>}
+</figure>

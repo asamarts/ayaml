@@ -1,8 +1,9 @@
 ---
 import { Code } from 'astro:components';
 import BaseLayout from '../layouts/BaseLayout.astro';
+import DivergingRatioChart from '../components/charts/DivergingRatioChart.astro';
 import { BASE, DOCS_RS_AYAML, DOCS_RS_EDIT, SITE_URL, WORKSPACE_VERSION } from '../lib/site';
-import { HEADLINE, TIER2_PEERS, fingerprint } from '../lib/bench';
+import { HEADLINE, TIER2_PEERS, compareNullableAsc, fingerprint } from '../lib/bench';
 
 const TITLE = 'ayaml | Safe, pure-Rust YAML 1.2.2';
 const DESCRIPTION =
@@ -11,7 +12,53 @@ const DESCRIPTION =
 const tier2Rust = TIER2_PEERS.filter(
   (r) => !r.isUnsafeArena && (r.lang === 'Rust' || r.impl === 'fkyaml'),
 );
-const maxRatio = Math.max(...tier2Rust.map((r) => r.speedRatio));
+const sortByRatio = (fn: (r: (typeof tier2Rust)[number]) => number | null) =>
+  [...tier2Rust].sort((a, b) => compareNullableAsc(fn(a), fn(b)));
+
+const HOME_BENCH_TABS = [
+  {
+    id: 'time',
+    label: 'Parse time',
+    leftHint: 'Faster than ayaml',
+    rightHint: 'Slower than ayaml',
+    ticks: [0.5, 1, 2, 4],
+    rows: sortByRatio((r) => r.speedRatio).map((r) => ({
+      label: r.label,
+      ratio: r.speedRatio,
+      isAyaml: r.isAyaml,
+      isBaseline: r.impl === 'ayaml' && r.op === 'value',
+    })),
+    caption: `Geometric-mean parse time across shared pinned fixtures (up to ${HEADLINE.scenarioCount}), normalized to ayaml (Value DOM) = 1.00x on a log scale.`,
+  },
+  {
+    id: 'peak',
+    label: 'Peak heap',
+    leftHint: 'Less peak heap',
+    rightHint: 'More peak heap',
+    ticks: [0.25, 0.5, 1, 2],
+    rows: sortByRatio((r) => r.peakRatio).map((r) => ({
+      label: r.label,
+      ratio: r.peakRatio,
+      isAyaml: r.isAyaml,
+      isBaseline: r.impl === 'ayaml' && r.op === 'value',
+    })),
+    caption: 'Geometric-mean peak heap bytes across shared memory fixtures, normalized to ayaml (Value DOM) = 1.00x.',
+  },
+  {
+    id: 'allocs',
+    label: 'Allocations',
+    leftHint: 'Fewer allocations',
+    rightHint: 'More allocations',
+    ticks: [0.5, 1, 2, 4],
+    rows: sortByRatio((r) => r.allocRatio).map((r) => ({
+      label: r.label,
+      ratio: r.allocRatio,
+      isAyaml: r.isAyaml,
+      isBaseline: r.impl === 'ayaml' && r.op === 'value',
+    })),
+    caption: 'Geometric-mean heap allocation count across shared memory fixtures, normalized to ayaml (Value DOM) = 1.00x.',
+  },
+];
 
 const INSTALL_SNIPPET = `[dependencies]
 ayaml = "${WORKSPACE_VERSION}"
@@ -352,33 +399,55 @@ const MIGRATIONS = [
   <section class="sec">
     <div class="wrap">
       <div class="sec-head">
-        <span class="sec-kicker">Performance snapshot &middot; Shorter bar = faster</span>
-        <h2>Comparative parse speed on pinned fixtures</h2>
+        <span class="sec-kicker">Performance snapshot &middot; Log scale vs ayaml (1.00x)</span>
+        <h2>Comparative parse speed and memory on pinned fixtures</h2>
         <p class="sec-lede">
-          Relative geometric-mean parse time across shared fixtures (up to {HEADLINE.scenarioCount})
-          in the <code>ayaml-fixtures</code> catalog (shorter bar = faster; <code>1.00x</code> =
-          <code>ayaml value</code>). Measured on {fingerprint.cpu} with pinned CPU affinity and
-          SHA-256 verified inputs.
+          Geometric-mean ratios across shared fixtures (up to {HEADLINE.scenarioCount}) in the
+          <code>ayaml-fixtures</code> catalog relative to <code>ayaml (Value DOM) = 1.00x</code>.
+          Measured on {fingerprint.cpu} with pinned CPU affinity and SHA-256 verified inputs.
         </p>
       </div>
 
-      <div class="bar-chart">
+      <div data-tabs>
+        <div class="tab-list" role="tablist" aria-label="Homepage benchmark metric">
+          {
+            HOME_BENCH_TABS.map((tab, i) => (
+              <button
+                class="tab-btn"
+                type="button"
+                role="tab"
+                id={`home-bench-tab-${tab.id}`}
+                aria-selected={i === 0 ? 'true' : 'false'}
+                aria-controls={`home-bench-panel-${tab.id}`}
+                tabindex={i === 0 ? 0 : -1}
+              >
+                {tab.label}
+              </button>
+            ))
+          }
+        </div>
         {
-          tier2Rust.map((row) => (
-            <div class:list={['bar-row', { 'is-ayaml': row.isAyaml }]}>
-              <div class="bar-name">
-                <span>{row.label}</span>
-                <span class="bar-sub">
-                  {row.safety} &middot; {row.sharedScenarios} shared
-                </span>
-              </div>
-              <div class="bar-track" aria-hidden="true">
-                <div
-                  class="bar-fill"
-                  style={`width: ${((row.speedRatio / maxRatio) * 100).toFixed(1)}%`}
-                />
-              </div>
-              <div class="bar-val">{row.speedRatio.toFixed(2)}x time</div>
+          HOME_BENCH_TABS.map((tab, i) => (
+            <div
+              id={`home-bench-panel-${tab.id}`}
+              role="tabpanel"
+              aria-labelledby={`home-bench-tab-${tab.id}`}
+              tabindex="0"
+              hidden={i !== 0}
+            >
+              <p class="nojs-panel-title">{tab.label}</p>
+              <DivergingRatioChart
+                id={`home-tier2-${tab.id}`}
+                title={`Tier 2 ${tab.label.toLowerCase()} comparison vs ayaml value`}
+                description={tab.caption}
+                baselineLabel="Baseline: ayaml (1.00x)"
+                leftHint={tab.leftHint}
+                rightHint={tab.rightHint}
+                ticks={tab.ticks}
+                rows={tab.rows}
+                caption={tab.caption}
+                includeSrTable={true}
+              />
             </div>
           ))
         }

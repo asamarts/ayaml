@@ -1,0 +1,257 @@
+---
+import { fmtBytes, fmtTimeUs, type TypedDecodeRow } from '../../lib/bench';
+
+interface Props {
+  id: string;
+  title: string;
+  description: string;
+  rows: TypedDecodeRow[];
+  throughputMax: number;
+  peakKibMax: number;
+  caption?: string;
+}
+
+const { id, title, description, rows, throughputMax, peakKibMax, caption } = Astro.props;
+
+const WIDTH = 760;
+const LABEL_X = 194;
+
+// Panel 1: Throughput (MiB/s, higher is faster)
+const P1_X = 208;
+const P1_W = 196;
+const P1_VAL_X = 460;
+
+// Panel 2: Peak heap (KiB, lower is better) + allocation count
+const P2_X = 480;
+const P2_W = 152;
+const P2_VAL_X = 752;
+
+const TOP = 42;
+const ROW_H = 30;
+const BOTTOM = 16;
+const HEIGHT = TOP + rows.length * ROW_H + BOTTOM;
+
+function niceAxisTicks(maxVal: number): number[] {
+  for (const intervals of [3, 4, 5, 2]) {
+    if (maxVal % intervals === 0) {
+      const step = maxVal / intervals;
+      return Array.from({ length: intervals + 1 }, (_, i) => i * step);
+    }
+  }
+  return [0, Math.round(maxVal / 2), maxVal];
+}
+
+const speedTicks = niceAxisTicks(throughputMax);
+const peakTicks = niceAxisTicks(peakKibMax);
+
+const xSpeed = (v: number): number => P1_X + (Math.min(Math.max(v, 0), throughputMax) / throughputMax) * P1_W;
+const xPeak = (kib: number): number => P2_X + (Math.min(Math.max(kib, 0), peakKibMax) / peakKibMax) * P2_W;
+---
+
+<figure class="chart-fig">
+  <div class="chart-scroll">
+    <svg
+      class="chart-svg"
+      data-chart="dual-metric-bar"
+      role="img"
+      aria-labelledby={`${id}-title ${id}-desc`}
+      viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+    >
+      <title id={`${id}-title`}>{title}</title>
+      <desc id={`${id}-desc`}>{description}</desc>
+
+      {/* Panel headers */}
+      <text x={P1_X} y="15" font-size="11" font-weight="700" fill="var(--ink)">
+        Throughput (MiB/s, higher = faster)
+      </text>
+      <text x={P2_X} y="15" font-size="11" font-weight="700" fill="var(--ink)">
+        Peak heap (KiB, lower = better) &middot; allocs
+      </text>
+
+      {/* Panel 1 ticks and vertical grid */}
+      {
+        speedTicks.map((t) => {
+          const x = xSpeed(t);
+          return (
+            <g>
+              <line
+                x1={x.toFixed(1)}
+                y1={TOP - 6}
+                x2={x.toFixed(1)}
+                y2={HEIGHT - BOTTOM + 2}
+                stroke="var(--rule)"
+                stroke-width="1"
+                stroke-dasharray={t === 0 ? undefined : '2 3'}
+              />
+              <text
+                class="ch-mono"
+                x={x.toFixed(1)}
+                y={TOP - 11}
+                font-size="10"
+                fill="var(--muted)"
+                text-anchor="middle"
+              >
+                {t}
+              </text>
+            </g>
+          );
+        })
+      }
+
+      {/* Panel 2 ticks and vertical grid */}
+      {
+        peakTicks.map((t) => {
+          const x = xPeak(t);
+          return (
+            <g>
+              <line
+                x1={x.toFixed(1)}
+                y1={TOP - 6}
+                x2={x.toFixed(1)}
+                y2={HEIGHT - BOTTOM + 2}
+                stroke="var(--rule)"
+                stroke-width="1"
+                stroke-dasharray={t === 0 ? undefined : '2 3'}
+              />
+              <text
+                class="ch-mono"
+                x={x.toFixed(1)}
+                y={TOP - 11}
+                font-size="10"
+                fill="var(--muted)"
+                text-anchor="middle"
+              >
+                {t}
+              </text>
+            </g>
+          );
+        })
+      }
+
+      {/* Header dividers */}
+      <line x1={P1_X} y1={TOP - 6} x2={P1_X + P1_W} y2={TOP - 6} stroke="var(--rule)" stroke-width="1" />
+      <line x1={P2_X} y1={TOP - 6} x2={P2_X + P2_W} y2={TOP - 6} stroke="var(--rule)" stroke-width="1" />
+
+      {/* Rows */}
+      {
+        rows.map((r, idx) => {
+          const yTop = TOP + idx * ROW_H;
+          const yMid = yTop + ROW_H / 2;
+          const barH = 14;
+          const barY = yMid - barH / 2;
+          const peakKib = r.peakBytes / 1024;
+          const speedW = Math.max(2, xSpeed(r.throughput) - P1_X);
+          const peakW = Math.max(2, xPeak(peakKib) - P2_X);
+
+          return (
+            <g>
+              {r.isAyaml ? (
+                <rect
+                  x="4"
+                  y={yTop + 1}
+                  width={WIDTH - 8}
+                  height={ROW_H - 2}
+                  rx="4"
+                  fill="var(--accent-wash)"
+                />
+              ) : idx % 2 === 1 ? (
+                <rect
+                  x="4"
+                  y={yTop + 1}
+                  width={WIDTH - 8}
+                  height={ROW_H - 2}
+                  rx="4"
+                  fill="var(--surface)"
+                  opacity="0.7"
+                />
+              ) : null}
+
+              <text
+                x={LABEL_X}
+                y={yMid + 4}
+                font-size="11.5"
+                font-weight={r.isAyaml ? '700' : '500'}
+                fill={r.isAyaml ? 'var(--ink)' : 'var(--text)'}
+                text-anchor="end"
+              >
+                {r.label}
+              </text>
+
+              {/* Throughput bar + value */}
+              <rect
+                x={P1_X}
+                y={barY.toFixed(1)}
+                width={speedW.toFixed(1)}
+                height={barH}
+                rx="3"
+                fill={r.isAyaml ? 'var(--accent)' : 'var(--ctl)'}
+                opacity="0.92"
+              />
+              <text
+                class="ch-mono"
+                x={P1_VAL_X}
+                y={yMid + 4}
+                font-size="11"
+                font-weight={r.isAyaml ? '700' : '600'}
+                fill={r.isAyaml ? 'var(--accent-strong)' : 'var(--ink)'}
+                text-anchor="end"
+              >
+                {r.throughput.toFixed(1)}
+              </text>
+
+              {/* Peak heap bar + value/allocs */}
+              <rect
+                x={P2_X}
+                y={barY.toFixed(1)}
+                width={peakW.toFixed(1)}
+                height={barH}
+                rx="3"
+                fill={r.isAyaml ? 'var(--green)' : 'var(--blue)'}
+                opacity={r.isAyaml ? '0.92' : '0.68'}
+              />
+              <text
+                class="ch-mono"
+                x={P2_VAL_X}
+                y={yMid + 4}
+                font-size="10.5"
+                font-weight={r.isAyaml ? '700' : '500'}
+                fill={r.isAyaml ? 'var(--ink)' : 'var(--muted)'}
+                text-anchor="end"
+              >
+                {peakKib.toFixed(1)} KiB &middot; {r.allocations.toLocaleString('en-US')}
+              </text>
+            </g>
+          );
+        })
+      }
+    </svg>
+  </div>
+  <table class="sr-only">
+    <caption>{title}</caption>
+    <thead>
+      <tr>
+        <th>Implementation</th>
+        <th>Throughput</th>
+        <th>Median latency</th>
+        <th>Peak heap</th>
+        <th>Live heap</th>
+        <th>Allocations</th>
+      </tr>
+    </thead>
+    <tbody>
+      {
+        rows.map((r) => (
+          <tr>
+            <td>{r.label}</td>
+            <td>{r.throughput.toFixed(1)} MiB/s</td>
+            <td>{fmtTimeUs(r.medianUs)}</td>
+            <td>{fmtBytes(r.peakBytes)}</td>
+            <td>{fmtBytes(r.liveBytes)}</td>
+            <td>{r.allocations.toLocaleString('en-US')}</td>
+          </tr>
+        ))
+      }
+    </tbody>
+  </table>
+  {caption && <figcaption class="chart-cap">{caption}</figcaption>}
+</figure>

@@ -273,78 +273,42 @@ a:hover {
   color: var(--paper);
 }
 
-/* Horizontal bar charts */
-.bar-chart {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.bar-row {
-  display: grid;
-  grid-template-columns: minmax(150px, 230px) minmax(0, 1fr) minmax(90px, 140px);
-  align-items: center;
-  gap: 12px;
-  padding: 8px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  border: 1px solid transparent;
-}
-.bar-row.is-ayaml {
-  border-color: color-mix(in oklab, var(--accent) 45%, var(--rule));
-  background: var(--accent-wash);
-}
-.bar-row.is-arena {
-  background: var(--wash);
-}
-.bar-name {
-  font-size: 0.88rem;
-  font-weight: 600;
-  color: var(--ink);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.bar-sub {
-  font-size: 0.75rem;
-  font-weight: 400;
-  color: var(--muted);
-}
-.bar-track {
-  height: 16px;
-  border-radius: 4px;
-  background: var(--well);
+/* Zero-JS inline SVG charts */
+.chart-fig {
+  margin: 0;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--paper);
   overflow: hidden;
-  position: relative;
 }
-.bar-fill {
-  height: 100%;
-  border-radius: 4px;
-  background: var(--ctl);
-  min-width: 4px;
+.chart-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 12px 14px 10px;
 }
-.bar-row.is-ayaml .bar-fill {
-  background: var(--accent);
+.chart-svg {
+  display: block;
+  width: 100%;
+  min-width: 560px;
+  max-width: 840px;
+  margin-inline: auto;
+  height: auto;
+  font-family: var(--font-body);
 }
-.bar-row.is-arena .bar-fill {
-  background: var(--blue);
-  opacity: 0.72;
+.chart-svg text {
+  font-variant-numeric: tabular-nums;
 }
-.bar-val {
-  text-align: right;
+.chart-svg .ch-mono {
   font-family: var(--font-code);
-  font-size: 0.83rem;
-  font-weight: 600;
-  color: var(--ink);
-  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
-@media (max-width: 700px) {
-  .bar-row {
-    grid-template-columns: 1fr auto;
-    grid-template-rows: auto auto;
-  }
-  .bar-track {
-    grid-column: 1 / -1;
-  }
+.chart-cap {
+  padding: 8px 14px 10px;
+  border-top: 1px solid var(--rule);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
 }
 
 /* Data tables */

@@ -1,0 +1,302 @@
+---
+import { formatRatio } from '../../lib/bench';
+
+export interface DivergingRow {
+  label: string;
+  ratio: number | null;
+  isAyaml: boolean;
+  isBaseline?: boolean;
+  isUnsafeArena?: boolean;
+}
+
+interface Props {
+  id: string;
+  title: string;
+  description: string;
+  baselineLabel: string;
+  leftHint: string;
+  rightHint: string;
+  ticks: number[];
+  rows: DivergingRow[];
+  caption?: string;
+  includeSrTable?: boolean;
+}
+
+const {
+  id,
+  title,
+  description,
+  baselineLabel,
+  leftHint,
+  rightHint,
+  ticks,
+  rows,
+  caption,
+  includeSrTable = false,
+} = Astro.props;
+
+const WIDTH = 760;
+const LABEL_X = 206;
+const PLOT_X = 220;
+const PLOT_W = 456;
+const VAL_X = 750;
+const TOP = 42;
+const ROW_H = 26;
+const BOTTOM = 18;
+const HEIGHT = TOP + rows.length * ROW_H + BOTTOM;
+
+const minTick = ticks[0];
+const maxTick = ticks[ticks.length - 1];
+const logMin = Math.log(minTick);
+const logMax = Math.log(maxTick);
+const logSpan = logMax - logMin;
+
+const xFor = (v: number): number => {
+  const clamped = Math.min(Math.max(v, minTick), maxTick);
+  return PLOT_X + ((Math.log(clamped) - logMin) / logSpan) * PLOT_W;
+};
+
+const baseX = xFor(1);
+
+const fmtTick = (t: number): string => {
+  if (t >= 1) return `${Number.isInteger(t) ? t : t.toFixed(1)}x`;
+  if (t >= 0.1) return `${Number(t.toFixed(2))}x`;
+  return `${Number(t.toFixed(3))}x`;
+};
+---
+
+<figure class="chart-fig">
+  <div class="chart-scroll">
+    <svg
+      class="chart-svg"
+      data-chart="diverging-ratio"
+      role="img"
+      aria-labelledby={`${id}-title ${id}-desc`}
+      viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+    >
+      <title id={`${id}-title`}>{title}</title>
+      <desc id={`${id}-desc`}>{description}</desc>
+
+      {/* Directional guidance and baseline label above axis (non-overlapping for any spine position) */}
+      <text
+        x={LABEL_X}
+        y="15"
+        font-size="10.5"
+        font-weight="700"
+        fill="var(--accent-strong)"
+        text-anchor="end"
+      >
+        {baselineLabel}
+      </text>
+      <text
+        x={PLOT_X}
+        y="15"
+        font-size="10.5"
+        font-weight="600"
+        fill="var(--muted)"
+        text-anchor="start"
+      >
+        &larr; {leftHint}
+      </text>
+      <text
+        x={PLOT_X + PLOT_W}
+        y="15"
+        font-size="10.5"
+        font-weight="600"
+        fill="var(--muted)"
+        text-anchor="end"
+      >
+        {rightHint} &rarr;
+      </text>
+
+      {/* Vertical gridlines & log tick labels */}
+      {
+        ticks.map((t) => {
+          const x = xFor(t);
+          const isOne = Math.abs(t - 1) < 1e-9;
+          return (
+            <g>
+              <line
+                x1={x.toFixed(1)}
+                y1={TOP - 6}
+                x2={x.toFixed(1)}
+                y2={HEIGHT - BOTTOM + 2}
+                stroke={isOne ? 'var(--accent)' : 'var(--rule)'}
+                stroke-width={isOne ? '1.5' : '1'}
+                stroke-dasharray={isOne ? undefined : '2 3'}
+              />
+              <text
+                class="ch-mono"
+                x={x.toFixed(1)}
+                y={TOP - 11}
+                font-size="10"
+                font-weight={isOne ? '700' : '500'}
+                fill={isOne ? 'var(--accent-strong)' : 'var(--muted)'}
+                text-anchor="middle"
+              >
+                {fmtTick(t)}
+              </text>
+            </g>
+          );
+        })
+      }
+
+      {/* Top baseline divider */}
+      <line
+        x1={PLOT_X}
+        y1={TOP - 6}
+        x2={PLOT_X + PLOT_W}
+        y2={TOP - 6}
+        stroke="var(--rule)"
+        stroke-width="1"
+      />
+
+      {/* Data rows */}
+      {
+        rows.map((row, idx) => {
+          const yTop = TOP + idx * ROW_H;
+          const yMid = yTop + ROW_H / 2;
+          const barH = 14;
+          const barY = yMid - barH / 2;
+
+          const hasVal = row.ratio !== null && Number.isFinite(row.ratio) && row.ratio > 0;
+          const r = hasVal ? (row.ratio as number) : 1;
+          const isBaseline = Boolean(row.isBaseline);
+          const xVal = hasVal ? xFor(r) : baseX;
+          const barX = xVal < baseX ? Math.min(xVal, baseX - 2) : baseX;
+          const barW = xVal < baseX ? baseX - barX : Math.max(2, xVal - baseX);
+          const clampedLeft = hasVal && r < minTick;
+          const clampedRight = hasVal && r > maxTick;
+
+          let fill = 'var(--ctl)';
+          if (row.isAyaml) fill = 'var(--accent)';
+          else if (row.isUnsafeArena) fill = 'var(--blue)';
+          else if (hasVal && r < 1) fill = 'var(--green)';
+
+          const valText = formatRatio(row.ratio);
+
+          return (
+            <g>
+              {row.isAyaml ? (
+                <rect
+                  x="4"
+                  y={yTop + 1}
+                  width={WIDTH - 8}
+                  height={ROW_H - 2}
+                  rx="4"
+                  fill="var(--accent-wash)"
+                />
+              ) : idx % 2 === 1 ? (
+                <rect
+                  x="4"
+                  y={yTop + 1}
+                  width={WIDTH - 8}
+                  height={ROW_H - 2}
+                  rx="4"
+                  fill="var(--surface)"
+                  opacity="0.7"
+                />
+              ) : null}
+
+              <text
+                x={LABEL_X}
+                y={yMid + 4}
+                font-size="11.5"
+                font-weight={row.isAyaml ? '700' : '500'}
+                fill={row.isAyaml ? 'var(--ink)' : 'var(--text)'}
+                text-anchor="end"
+              >
+                {row.label}
+              </text>
+
+              {!hasVal ? (
+                <line
+                  x1={PLOT_X + 6}
+                  y1={yMid}
+                  x2={PLOT_X + PLOT_W - 6}
+                  y2={yMid}
+                  stroke="var(--rule)"
+                  stroke-width="1"
+                  stroke-dasharray="2 4"
+                />
+              ) : isBaseline ? (
+                <polygon
+                  points={`${baseX.toFixed(1)},${(yMid - 6).toFixed(1)} ${(baseX + 6).toFixed(1)},${yMid.toFixed(1)} ${baseX.toFixed(1)},${(yMid + 6).toFixed(1)} ${(baseX - 6).toFixed(1)},${yMid.toFixed(1)}`}
+                  fill="var(--accent)"
+                />
+              ) : (
+                <g>
+                  <rect
+                    x={barX.toFixed(1)}
+                    y={barY.toFixed(1)}
+                    width={barW.toFixed(1)}
+                    height={barH}
+                    rx="3"
+                    fill={fill}
+                    opacity={row.isUnsafeArena ? '0.82' : '0.92'}
+                  />
+                  {clampedLeft && (
+                    <polygon
+                      points={`${(PLOT_X - 7).toFixed(1)},${yMid.toFixed(1)} ${(PLOT_X - 1).toFixed(1)},${(yMid - 4.5).toFixed(1)} ${(PLOT_X - 1).toFixed(1)},${(yMid + 4.5).toFixed(1)}`}
+                      fill={fill}
+                    />
+                  )}
+                  {clampedRight && (
+                    <polygon
+                      points={`${(PLOT_X + PLOT_W + 7).toFixed(1)},${yMid.toFixed(1)} ${(PLOT_X + PLOT_W + 1).toFixed(1)},${(yMid - 4.5).toFixed(1)} ${(PLOT_X + PLOT_W + 1).toFixed(1)},${(yMid + 4.5).toFixed(1)}`}
+                      fill={fill}
+                    />
+                  )}
+                </g>
+              )}
+
+              <text
+                class="ch-mono"
+                x={VAL_X}
+                y={yMid + 4}
+                font-size="11.5"
+                font-weight={row.isAyaml ? '700' : '600'}
+                fill={!hasVal ? 'var(--muted)' : row.isAyaml ? 'var(--accent-strong)' : 'var(--ink)'}
+                text-anchor="end"
+              >
+                {valText}
+              </text>
+            </g>
+          );
+        })
+      }
+
+      {/* Re-draw 1.00x baseline crisp over bars */}
+      <line
+        x1={baseX.toFixed(1)}
+        y1={TOP - 6}
+        x2={baseX.toFixed(1)}
+        y2={HEIGHT - BOTTOM + 2}
+        stroke="var(--accent)"
+        stroke-width="1.5"
+      />
+    </svg>
+  </div>
+  {
+    includeSrTable && (
+      <table class="sr-only">
+        <caption>{title}</caption>
+        <thead>
+          <tr>
+            <th>Implementation</th>
+            <th>Ratio vs baseline</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr>
+              <td>{r.label}</td>
+              <td>{formatRatio(r.ratio)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    )
+  }
+  {caption && <figcaption class="chart-cap">{caption}</figcaption>}
+</figure>

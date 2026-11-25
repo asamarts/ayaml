@@ -1,6 +1,11 @@
 # Benchmark methodology
 
-ayaml includes deterministic fixtures, timing benchmarks, counting-allocator
+> **Looking for charts and results?** See the
+> [Benchmarks & Performance](https://asamarts.github.io/ayaml/benchmarks/) page
+> for CPU, peak-heap, allocation, emission, v0.2.3 speedup, and 10x scaling
+> charts generated directly from pinned JSONL artifacts.
+
+`ayaml` includes deterministic fixtures, timing benchmarks, counting-allocator
 probes, steady-state Callgrind checks, and a `cargo xtask` CLI so that
 performance and memory behavior can be verified separately from correctness.
 Benchmark results are environment-specific and are not a compatibility

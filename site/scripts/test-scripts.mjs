@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   checkHtmlNoEmDashes,
   checkLlmsFullContent,
+  checkSvgCharts,
   checkTextNoEmDashes,
 } from './check-links.mjs';
 import {
@@ -171,4 +172,44 @@ test('checkTextNoEmDashes and checkLlmsFullContent catch edge cases and report a
     ),
     [],
   );
+});
+
+test('checkSvgCharts validates accessibility semantics and rejects invalid geometry or text', () => {
+  const valid =
+    '<svg data-chart="diverging-ratio" role="img" aria-labelledby="c-t c-d" viewBox="0 0 760 200">' +
+    '<title id="c-t">Chart title</title><desc id="c-d">Chart summary</desc>' +
+    '<rect x="10" y="20" width="100" height="14" /><text x="10" y="14">1.40x</text></svg>';
+  assert.deepEqual(checkSvgCharts(valid, '/ayaml/benchmarks/'), { count: 1, errors: [] });
+
+  // Non-chart icon SVGs are ignored.
+  assert.deepEqual(checkSvgCharts('<svg width="16" height="16"><path d="M0 0"/></svg>', '/ayaml/'), {
+    count: 0,
+    errors: [],
+  });
+
+  // NaN / Infinity attributes, negative dimensions, bad viewBox, bad text, and missing semantics fail.
+  const broken =
+    '<svg data-chart="scaling-plot" viewBox="0 0 -760 NaN">' +
+    '<rect x="10" width="-5" height="Infinity" transform="translate(NaN,0)" />' +
+    '<polygon points="0,0 NaN,5 1,1" /><text x="1" y="1">NaNx</text></svg>';
+  const res = checkSvgCharts(broken, '/ayaml/benchmarks/');
+  assert.equal(res.count, 1);
+  assert.ok(res.errors.some((e) => e.includes('role="img"')));
+  assert.ok(res.errors.some((e) => e.includes('aria-labelledby')));
+  assert.ok(res.errors.some((e) => e.includes('invalid viewBox')));
+  assert.ok(res.errors.some((e) => e.includes('negative dimension')));
+  assert.ok(res.errors.some((e) => e.includes('height="Infinity"')));
+  assert.ok(res.errors.some((e) => e.includes('transform="translate(NaN,0)"')));
+  assert.ok(res.errors.some((e) => e.includes('points="0,0 NaN,5 1,1"')));
+  assert.ok(res.errors.some((e) => e.includes('invalid text label: NaNx')));
+
+  // Dangling aria-labelledby IDs and duplicate chart IDs on one page fail.
+  const danglingAndDup =
+    '<svg data-chart="grouped-bar" role="img" aria-labelledby="t d missing-id" viewBox="0 0 100 100">' +
+    '<title id="t">Title</title><desc id="d">Desc</desc></svg>' +
+    '<svg data-chart="grouped-bar" role="img" aria-labelledby="t d" viewBox="0 0 100 100">' +
+    '<title id="t">Title 2</title><desc id="d">Desc 2</desc></svg>';
+  const dupRes = checkSvgCharts(danglingAndDup, '/ayaml/benchmarks/');
+  assert.ok(dupRes.errors.some((e) => e.includes('missing id "missing-id"')));
+  assert.ok(dupRes.errors.some((e) => e.includes('duplicates id "t"')));
 });

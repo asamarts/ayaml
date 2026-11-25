@@ -494,41 +494,6 @@ export function getProgressSinceV023(): ProgressRow[] {
     .sort((a, b) => b.speedup - a.speedup);
 }
 
-export interface ScalingStep {
-  family: string;
-  from: string;
-  to: string;
-  sizeRatio: number;
-  timeNorm: number | null;
-  peakNorm: number;
-}
-
-export function getScalingSteps(): ScalingStep[] {
-  const pairs = [
-    { family: 'Block mapping', from: 'scale-map-10kb', to: 'scale-map-100kb' },
-    { family: 'Block mapping (memory)', from: 'scale-map-100kb', to: 'scale-map-1mb' },
-    { family: 'Block sequence', from: 'scale-seq-10kb', to: 'scale-seq-100kb' },
-    { family: 'Block sequence (memory)', from: 'scale-seq-100kb', to: 'scale-seq-1mb' },
-    { family: 'Nested OpenAPI', from: 'scale-openapi-10kb', to: 'scale-openapi-100kb' },
-    { family: 'Nested OpenAPI (memory)', from: 'scale-openapi-100kb', to: 'scale-openapi-1mb' },
-  ];
-  return pairs.map((p) => {
-    const mA = mustMemory('ayaml', 'value', p.from);
-    const mB = mustMemory('ayaml', 'value', p.to);
-    const sA = getSpeed('ayaml', 'value', p.from);
-    const sB = getSpeed('ayaml', 'value', p.to);
-    const sizeRatio = mB.bytes / mA.bytes;
-    return {
-      family: p.family,
-      from: p.from,
-      to: p.to,
-      sizeRatio,
-      timeNorm: sA && sB ? sB.median_ns / sA.median_ns / sizeRatio : null,
-      peakNorm: mB.peak_bytes / mA.peak_bytes / sizeRatio,
-    };
-  });
-}
-
 export function fmtBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
@@ -539,6 +504,152 @@ export function fmtTimeUs(us: number): string {
   if (us < 1000) return `${us.toFixed(1)} µs`;
   return `${(us / 1000).toFixed(2)} ms`;
 }
+
+export function formatRatio(ratio: number | null): string {
+  if (ratio === null || !Number.isFinite(ratio)) return 'n/a';
+  if (ratio < 0.01) return '<0.01x';
+  if (ratio < 10) return `${ratio.toFixed(2)}x`;
+  if (ratio < 100) return `${ratio.toFixed(1)}x`;
+  return `${Math.round(ratio)}x`;
+}
+
+export function compareNullableAsc(a: number | null, b: number | null): number {
+  const aValid = a !== null && Number.isFinite(a);
+  const bValid = b !== null && Number.isFinite(b);
+  if (aValid && bValid) return (a as number) - (b as number);
+  if (aValid) return -1;
+  if (bValid) return 1;
+  return 0;
+}
+
+export interface ScalingPoint {
+  scenario: string;
+  sizeBytes: number;
+  peakBytes: number;
+  timeMs: number | null;
+}
+
+export interface ScalingFamilySeries {
+  id: string;
+  family: string;
+  points: ScalingPoint[];
+  time10to100: number | null;
+  peak10to100: number;
+  peak100to1m: number;
+}
+
+export function getScalingSeries(): ScalingFamilySeries[] {
+  const families = [
+    {
+      id: 'map',
+      family: 'Block mapping',
+      scenarios: ['scale-map-10kb', 'scale-map-100kb', 'scale-map-1mb'],
+    },
+    {
+      id: 'seq',
+      family: 'Block sequence',
+      scenarios: ['scale-seq-10kb', 'scale-seq-100kb', 'scale-seq-1mb'],
+    },
+    {
+      id: 'openapi',
+      family: 'Nested OpenAPI',
+      scenarios: ['scale-openapi-10kb', 'scale-openapi-100kb', 'scale-openapi-1mb'],
+    },
+  ] as const;
+
+  return families.map((f) => {
+    const points: ScalingPoint[] = f.scenarios.map((sc) => {
+      const m = mustMemory('ayaml', 'value', sc);
+      const s = getSpeed('ayaml', 'value', sc);
+      return {
+        scenario: sc,
+        sizeBytes: m.bytes,
+        peakBytes: m.peak_bytes,
+        timeMs: s ? s.median_ns / 1_000_000 : null,
+      };
+    });
+    const [p10, p100, p1m] = points;
+    const sizeRatio1 = p100.sizeBytes / p10.sizeBytes;
+    const sizeRatio2 = p1m.sizeBytes / p100.sizeBytes;
+    return {
+      id: f.id,
+      family: f.family,
+      points,
+      time10to100:
+        p10.timeMs !== null && p100.timeMs !== null
+          ? p100.timeMs / p10.timeMs / sizeRatio1
+          : null,
+      peak10to100: p100.peakBytes / p10.peakBytes / sizeRatio1,
+      peak100to1m: p1m.peakBytes / p100.peakBytes / sizeRatio2,
+    };
+  });
+}
+
+export const SCENARIO_DOT_PEERS = [
+  { id: 'rapidyaml', impl: 'rapidyaml', op: 'resolve-typed', label: 'rapidyaml (C++)', shape: 'diamond-hollow', color: 'var(--blue)' },
+  { id: 'fkyaml', impl: 'fkyaml', op: 'parse', label: 'fkYAML (C++)', shape: 'square', color: 'var(--muted)' },
+  { id: 'yaml-rust2', impl: 'yaml-rust2', op: 'parse', label: 'yaml-rust2', shape: 'circle', color: 'var(--green)' },
+  { id: 'saphyr', impl: 'saphyr', op: 'parse', label: 'saphyr', shape: 'triangle', color: 'var(--ochre)' },
+  { id: 'yaml-serde', impl: 'yaml-serde', op: 'value', label: 'yaml-serde', shape: 'diamond', color: 'var(--accent)' },
+  { id: 'serde-saphyr', impl: 'serde-saphyr', op: 'serde-json', label: 'serde-saphyr', shape: 'ring', color: 'var(--ink)' },
+] as const;
+
+export interface ScenarioDotRow {
+  id: string;
+  label: string;
+  category: ScenarioMeta['category'];
+  bytes: number;
+  points: Array<{
+    peerId: string;
+    label: string;
+    ratio: number;
+    shape: (typeof SCENARIO_DOT_PEERS)[number]['shape'];
+    color: string;
+  }>;
+}
+
+export function getScenarioDotRows(): ScenarioDotRow[] {
+  return ALL_SCENARIOS.map((sc) => {
+    const base = mustSpeed('ayaml', 'value', sc.id);
+    const points: ScenarioDotRow['points'] = [];
+    for (const peer of SCENARIO_DOT_PEERS) {
+      const sp = getSpeed(peer.impl, peer.op, sc.id);
+      if (sp && sp.median_ns > 0 && base.median_ns > 0) {
+        points.push({
+          peerId: peer.id,
+          label: peer.label,
+          ratio: sp.median_ns / base.median_ns,
+          shape: peer.shape,
+          color: peer.color,
+        });
+      }
+    }
+    return {
+      id: sc.id,
+      label: sc.label,
+      category: sc.category,
+      bytes: sc.bytes,
+      points,
+    };
+  });
+}
+
+export const TYPED_AXIS = (() => {
+  const allRows = TYPED_SCENARIOS.flatMap((sc) => getTypedDecodeRows(sc.id));
+  const maxThroughput = Math.max(...allRows.map((r) => r.throughput));
+  const maxPeakKib = Math.max(...allRows.map((r) => r.peakBytes / 1024));
+  return {
+    throughputMax: Math.ceil(maxThroughput / 10) * 10,
+    peakKibMax: Math.ceil(maxPeakKib / 50) * 50,
+  };
+})();
+
+export const EMIT_AXIS = (() => {
+  const allRows = EMIT_SCENARIOS.flatMap((sc) => getEmitRows(sc));
+  const maxThroughput = Math.max(...allRows.map((r) => r.throughput));
+  const tickMax = Math.ceil(maxThroughput / 50) * 50;
+  return { tickMax };
+})();
 
 // Headline stats used across homepage, benchmarks page, and llms*.txt (computed from JSONL).
 export const HEADLINE = (() => {
@@ -585,6 +696,9 @@ export const HEADLINE = (() => {
     const ys = mustMemory('yaml-serde', 'typed', sc.id).peak_bytes;
     return ys / ay;
   });
+  const below4kPeak = mustMemory('ayaml', 'borrowed', 'boundary-4kb-below').peak_bytes;
+  const above4kPeak = mustMemory('ayaml', 'borrowed', 'boundary-4kb-above').peak_bytes;
+  const typedStreamingHeapDropPct = ((below4kPeak - above4kPeak) / below4kPeak) * 100;
 
   // Compute overall v0.2.3 -> current geomean across every shared speed & memory row.
   const v023SpeedRatios: number[] = [];
@@ -624,6 +738,7 @@ export const HEADLINE = (() => {
     emitVsYamlSerdeMin: Math.min(...emitYamlSerde),
     emitVsYamlSerdeMax: Math.max(...emitYamlSerde),
     typedMaxPeakSavingsVsYamlSerde: Math.max(...typedPeakSavings),
+    typedStreamingHeapDropPct,
     vsYamlRust2: vsYamlRust2.speedRatio,
     vsSaphyr: vsSaphyr.speedRatio,
     vsYamlSerde: vsYamlSerde.speedRatio,
