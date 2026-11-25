@@ -168,8 +168,8 @@ struct Lines<'a> {
 
 /// Whether `kind` opens a flow collection (`[` or `{`).
 ///
-/// The scanner stops early without returning an error when `flow_level > max_depth`
-/// (`stop_after`), so deferring any subsequent scanner error once a flow opener has been
+/// The scanner stops early without returning an error immediately when `flow_level > max_depth`
+/// (`stop_error`), so deferring any subsequent scanner error once a flow opener has been
 /// scanned keeps error reporting monotonic across all `max_depth` ceilings while preserving
 /// immediate scanner errors when no flow opener precedes them.
 const fn is_flow_start(kind: &TokenKind<'_>) -> bool {
@@ -177,6 +177,23 @@ const fn is_flow_start(kind: &TokenKind<'_>) -> bool {
         kind,
         TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart
     )
+}
+
+/// Drop any half-scanned block line from `tokens[line_start..]` when a deferred scanner error
+/// halted scanning outside a flow collection. Preserves a leading `---` or `...` document marker
+/// so `max_documents` and `TrailingDocuments` still fire on the second document boundary.
+pub(super) fn drop_truncated_block_line(tokens: &mut Vec<Token<'_>>, line_start: usize) {
+    if tokens.len() <= line_start {
+        return;
+    }
+    if matches!(
+        tokens[line_start].kind,
+        TokenKind::DocumentStart { .. } | TokenKind::DocumentEnd
+    ) {
+        tokens.truncate(line_start + 1);
+    } else {
+        tokens.truncate(line_start);
+    }
 }
 
 /// The token arena capacity to reserve before scanning a mid-sized document, or `None` to grow
@@ -305,6 +322,9 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
             Err(error) => {
                 if !seen_flow_start {
                     return Err(error);
+                }
+                if scanner.flow_level() == 0 {
+                    drop_truncated_block_line(&mut tokens, line_start);
                 }
                 scanner_error = Some(error);
                 break;
@@ -906,6 +926,18 @@ impl<'a> Parser<'a> {
         Some(flow_entry_count(&self.token_arena, open, close))
     }
 
+    /// Surface a deferred scanner error once parsing reaches the truncated EOF boundary, before
+    /// synthesizing an empty node or closing a block collection at EOF.
+    #[inline]
+    pub(super) fn check_truncated_eof(&mut self, index: usize) -> Result<(), Error> {
+        if index >= self.lines.len()
+            && let Some(error) = self.scanner_error.take()
+        {
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Read every document of the stream.
     fn parse_stream(&mut self) -> Result<(), Error> {
         let mut index = 0;
@@ -1091,6 +1123,7 @@ impl<'a> Parser<'a> {
                 block,
             })
         } else {
+            self.check_truncated_eof(index)?;
             let span = self.empty_span(index);
             self.emit(self.null_scalar(span))?;
             Ok(Opening::Root {

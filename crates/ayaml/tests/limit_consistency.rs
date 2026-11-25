@@ -1320,6 +1320,41 @@ fn raising_max_depth_keeps_earlier_semantic_error_and_merge_parity() {
     assert_eq!(merged.code(), plain.code());
     assert_eq!(merged.span(), plain.span());
 
+    // Mid-line scanner limit after a flow opener must never fabricate a synthetic TrailingContent
+    // or InvalidIntScalar error at a tighter limit (regression from CI proptest on max_events,
+    // plus truncated flow-key and tagged-parent-at-EOF cases).
+    let mid_line_events = "!custom\nb: {a: !custom {}, b: !custom alpha}\nc: [!custom alpha]\na: !custom\n  a: alpha\n  b: !custom alpha # inline\n  c: alpha\n---\na: alpha\n";
+    for limit in [28_usize, 33] {
+        let opts = ParseOptions::new().with_limits(Limits::default().with_max_events(limit));
+        let err = ayaml::parse_value_with(mid_line_events, &opts).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Limit, "max_events={limit}: {err:?}");
+        assert_eq!(
+            err.code(),
+            ayaml::ErrorCode::EventCountLimit,
+            "max_events={limit}: {err:?}"
+        );
+    }
+    let truncated_flow_key = "a: 1\n[[1]]: 2\n";
+    let depth_lo = ParseOptions::new().with_limits(Limits::default().with_max_depth(1));
+    let depth_hi = ParseOptions::new().with_limits(Limits::default().with_max_depth(3));
+    let err = ayaml::parse_value_with(truncated_flow_key, &depth_lo).unwrap_err();
+    assert_eq!(err.code(), ayaml::ErrorCode::DepthLimit, "{err:?}");
+    assert!(ayaml::parse_value_with(truncated_flow_key, &depth_hi).is_ok());
+
+    let tagged_eof = "x: [1]\na: !!int\n  b: 2\n";
+    let ev_lo = ParseOptions::new().with_limits(Limits::default().with_max_events(10));
+    let ev_hi = ParseOptions::new().with_limits(Limits::default().with_max_events(30));
+    let err = ayaml::parse_value_with(tagged_eof, &ev_lo).unwrap_err();
+    assert_eq!(err.code(), ayaml::ErrorCode::EventCountLimit, "{err:?}");
+    assert!(ayaml::parse_value_with(tagged_eof, &ev_hi).is_ok());
+
+    let nested_flow_key = "%YAML 1.2\n%TAG !e! tag:example.com,2000:\n---\n{a: &a0 !custom {a: &a1 {[0]: alpha, yes: !custom alpha, a: alpha}, b: !custom alpha}, b: []}\n...\n%YAML 1.2\n---\n!custom [&a0 !custom [alpha, [alpha, alpha, alpha], [!custom alpha, alpha]], !custom {}]\n---\n&a0 [!custom {c: &a1 [&a2 alpha], a: &a3 !custom alpha, b: [alpha, !custom alpha]}, &a4 !custom alpha, !custom alpha, !custom []]\n---\n!custom\n-\n  a: &a0 !custom alpha\n  [0]: alpha\n";
+    let nfk_lo = ParseOptions::new().with_limits(Limits::default().with_max_events(119));
+    let nfk_hi = ParseOptions::new().with_limits(Limits::default().with_max_events(128));
+    let err = ayaml::parse_documents_with(nested_flow_key, &nfk_lo).unwrap_err();
+    assert_eq!(err.code(), ayaml::ErrorCode::EventCountLimit, "{err:?}");
+    assert!(ayaml::parse_documents_with(nested_flow_key, &nfk_hi).is_ok());
+
     #[cfg(feature = "libyaml-compat")]
     {
         let compat_input = "\u{feff}---\n!local\na: {'café 日本語': !<tag:example.com,2000:node> {'explicit_a': ![custom \"plain line\\n  indented line\\n- list looking\"}, name: !<tag:example.com,2000:node> [!custom \"- list looking\\nplain line\"]}\n";

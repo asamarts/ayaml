@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 
-use super::{Line, Lines, is_flow_start, parse_lines};
+use super::{Line, Lines, drop_truncated_block_line, is_flow_start, parse_lines};
 use crate::error::Error;
 use crate::event::{Event, ScalarStyle};
 use crate::limits::Limits;
@@ -378,6 +378,9 @@ impl<'a> EventCursor<'a> {
                 Err(error) => {
                     if !self.seen_flow_start {
                         return Err(error);
+                    }
+                    if self.scanner.flow_level() == 0 {
+                        drop_truncated_block_line(out, start);
                     }
                     self.eof = true;
                     self.scanner_error = Some(AssertUnwindSafe(error));
