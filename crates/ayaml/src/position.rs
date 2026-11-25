@@ -372,21 +372,7 @@ impl LineStarts {
     #[inline]
     #[must_use]
     pub(crate) fn line_start(&self, index: usize) -> usize {
-        let mut line = self.last_line.get();
-        if index >= self.starts[line] {
-            if line + 1 >= self.starts.len() || index < self.starts[line + 1] {
-                return self.starts[line];
-            }
-            if line + 2 >= self.starts.len() || index < self.starts[line + 2] {
-                line += 1;
-                self.last_line.set(line);
-                return self.starts[line];
-            }
-        }
-        line = self
-            .starts
-            .partition_point(|&start| start <= index)
-            .saturating_sub(1);
+        let line = lookup_line_index(&self.starts, self.last_line.get(), index);
         self.last_line.set(line);
         self.starts[line]
     }
@@ -396,6 +382,25 @@ impl LineStarts {
     pub(crate) fn line_count(&self) -> usize {
         self.starts.len()
     }
+}
+
+/// Pure cached-cursor line lookup over strictly increasing `starts` (beginning with `0`).
+///
+/// Checks `last_line` and `last_line + 1` in O(1) for sequential token scans before falling back
+/// to binary search (`partition_point`).
+#[inline]
+fn lookup_line_index(starts: &[usize], last_line: usize, index: usize) -> usize {
+    if index >= starts[last_line] {
+        if last_line + 1 >= starts.len() || index < starts[last_line + 1] {
+            return last_line;
+        }
+        if last_line + 2 >= starts.len() || index < starts[last_line + 2] {
+            return last_line + 1;
+        }
+    }
+    starts
+        .partition_point(|&start| start <= index)
+        .saturating_sub(1)
 }
 
 /// A line index over one input, for converting between byte offsets and positions.
@@ -1115,5 +1120,39 @@ mod kani_proofs {
             };
             assert_eq!(actual, expected);
         }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn verify_line_starts_cursor_cache_matches_binary_search() {
+        let s1: usize = kani::any();
+        let s2: usize = kani::any();
+        let s3: usize = kani::any();
+        kani::assume(0 < s1 && s1 < s2 && s2 < s3);
+        let starts = [0_usize, s1, s2, s3];
+
+        let init_cursor: usize = kani::any();
+        kani::assume(init_cursor < starts.len());
+
+        let idx1: usize = kani::any();
+        let line1 = super::lookup_line_index(&starts, init_cursor, idx1);
+        let expected1 = starts
+            .partition_point(|&start| start <= idx1)
+            .saturating_sub(1);
+        assert_eq!(line1, expected1);
+        assert!(line1 < starts.len());
+        assert!(starts[line1] <= idx1);
+        assert!(line1 + 1 == starts.len() || idx1 < starts[line1 + 1]);
+
+        // Sequential lookup reusing the updated cursor matches binary search for any second offset.
+        let idx2: usize = kani::any();
+        let line2 = super::lookup_line_index(&starts, line1, idx2);
+        let expected2 = starts
+            .partition_point(|&start| start <= idx2)
+            .saturating_sub(1);
+        assert_eq!(line2, expected2);
+        assert!(line2 < starts.len());
+        assert!(starts[line2] <= idx2);
+        assert!(line2 + 1 == starts.len() || idx2 < starts[line2 + 1]);
     }
 }

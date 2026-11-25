@@ -53,14 +53,47 @@ impl TextEdit {
     }
 }
 
-/// Ordering for [`TextEdit`]: ascending start offset, with insertions ordered before
+/// Pure span ordering: ascending start offset, with zero-width insertions ordered before
 /// replacements starting at the same byte offset, then ascending end offset.
+fn span_order(a: Span, b: Span) -> Ordering {
+    a.start()
+        .cmp(&b.start())
+        .then_with(|| b.is_empty().cmp(&a.is_empty()))
+        .then_with(|| a.end().cmp(&b.end()))
+}
+
+/// Ordering for [`TextEdit`]: delegates to [`span_order`].
 fn edit_order(a: &TextEdit, b: &TextEdit) -> Ordering {
-    a.span
-        .start()
-        .cmp(&b.span.start())
-        .then_with(|| b.is_insertion().cmp(&a.is_insertion()))
-        .then_with(|| a.span.end().cmp(&b.span.end()))
+    span_order(a.span, b.span)
+}
+
+/// Validate a single edit span against `input` bounds, UTF-8 character boundaries, and `prev_end`.
+fn validate_edit_span(input: &str, span: Span, prev_end: usize) -> Result<usize, &'static str> {
+    let start = span.start();
+    let end = span.end();
+    if start > end || end > input.len() {
+        return Err("text edit span is out of bounds");
+    }
+    if !input.is_char_boundary(start) || !input.is_char_boundary(end) {
+        return Err("text edit span does not lie on UTF-8 character boundaries");
+    }
+    if start < prev_end {
+        return Err("text edits must be sorted and non-overlapping");
+    }
+    Ok(end)
+}
+
+/// Validate ordering and non-overlap between two adjacent edit spans.
+fn validate_adjacent_spans(prev: Span, next: Span) -> Result<(), &'static str> {
+    if span_order(prev, next) == Ordering::Greater {
+        return Err(
+            "text edits must be sorted with insertions before replacements at the same offset",
+        );
+    }
+    if prev.start() == next.start() && !prev.is_empty() && !next.is_empty() {
+        return Err("overlapping text edits at the same offset");
+    }
+    Ok(())
 }
 
 /// The verified result of one or more YAML edits.
@@ -223,44 +256,12 @@ pub enum EditOp {
 pub fn apply_edits(input: &str, edits: &[TextEdit]) -> Result<String, EditError> {
     let mut prev_end = 0;
     for edit in edits {
-        let start = edit.span.start();
-        let end = edit.span.end();
-        if start > end || end > input.len() {
-            return Err(EditError::new(
-                EditErrorKind::InvalidEdit,
-                "text edit span is out of bounds",
-            ));
-        }
-        if !input.is_char_boundary(start) || !input.is_char_boundary(end) {
-            return Err(EditError::new(
-                EditErrorKind::InvalidEdit,
-                "text edit span does not lie on UTF-8 character boundaries",
-            ));
-        }
-        if start < prev_end {
-            return Err(EditError::new(
-                EditErrorKind::InvalidEdit,
-                "text edits must be sorted and non-overlapping",
-            ));
-        }
-        prev_end = end;
+        prev_end = validate_edit_span(input, edit.span, prev_end)
+            .map_err(|msg| EditError::new(EditErrorKind::InvalidEdit, msg))?;
     }
     for pair in edits.windows(2) {
-        if edit_order(&pair[0], &pair[1]) == Ordering::Greater {
-            return Err(EditError::new(
-                EditErrorKind::InvalidEdit,
-                "text edits must be sorted with insertions before replacements at the same offset",
-            ));
-        }
-        if pair[0].span.start() == pair[1].span.start()
-            && !pair[0].is_insertion()
-            && !pair[1].is_insertion()
-        {
-            return Err(EditError::new(
-                EditErrorKind::InvalidEdit,
-                "overlapping text edits at the same offset",
-            ));
-        }
+        validate_adjacent_spans(pair[0].span, pair[1].span)
+            .map_err(|msg| EditError::new(EditErrorKind::InvalidEdit, msg))?;
     }
 
     let mut output = String::with_capacity(input.len());
@@ -907,4 +908,119 @@ fn batch_events_match_greedy(
         removals += 1;
     }
     removals <= max_removals && replaces <= max_replaces
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cmp::Ordering;
+
+    use ayaml::Span;
+
+    use super::{span_order, validate_adjacent_spans, validate_edit_span};
+
+    #[test]
+    fn span_order_and_validation_helpers_enforce_bounds_and_ordering() {
+        let ins = Span::new(2, 2);
+        let rep = Span::new(2, 5);
+        assert_eq!(span_order(ins, rep), Ordering::Less);
+        assert_eq!(span_order(rep, ins), Ordering::Greater);
+        assert_eq!(span_order(rep, rep), Ordering::Equal);
+
+        let sample = "aé🚀\n";
+        assert_eq!(validate_edit_span(sample, Span::new(0, 1), 0), Ok(1));
+        assert_eq!(validate_edit_span(sample, Span::new(1, 3), 1), Ok(3));
+        assert!(validate_edit_span(sample, Span::new(2, 3), 0).is_err());
+        assert!(validate_edit_span(sample, Span::new(3, 1), 0).is_err());
+        assert!(validate_edit_span(sample, Span::new(0, 99), 0).is_err());
+        assert!(validate_edit_span(sample, Span::new(1, 3), 2).is_err());
+
+        assert!(validate_adjacent_spans(ins, rep).is_ok());
+        assert!(validate_adjacent_spans(rep, ins).is_err());
+        assert!(validate_adjacent_spans(Span::new(1, 3), Span::new(1, 5)).is_err());
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use std::cmp::Ordering;
+
+    use ayaml::Span;
+
+    use super::{span_order, validate_adjacent_spans, validate_edit_span};
+
+    fn validate_edit_spans(input: &str, spans: &[Span]) -> Result<(), &'static str> {
+        let mut prev_end = 0;
+        for &span in spans {
+            prev_end = validate_edit_span(input, span, prev_end)?;
+        }
+        for pair in spans.windows(2) {
+            validate_adjacent_spans(pair[0], pair[1])?;
+        }
+        Ok(())
+    }
+
+    #[kani::proof]
+    fn verify_span_order_is_strict_total_order() {
+        let a = Span::new(kani::any(), kani::any());
+        let b = Span::new(kani::any(), kani::any());
+        let c = Span::new(kani::any(), kani::any());
+
+        // Reflexive.
+        assert_eq!(span_order(a, a), Ordering::Equal);
+        // Antisymmetric.
+        assert_eq!(span_order(a, b), span_order(b, a).reverse());
+        // Transitive.
+        let ab = span_order(a, b);
+        let bc = span_order(b, c);
+        let ac = span_order(a, c);
+        if ab != Ordering::Greater && bc != Ordering::Greater {
+            assert_ne!(ac, Ordering::Greater);
+            if ab == Ordering::Less || bc == Ordering::Less {
+                assert_eq!(ac, Ordering::Less);
+            }
+        }
+        // Zero-width insertions always sort before non-empty replacements at the same start offset.
+        if a.start() == b.start() && a.is_empty() && !b.is_empty() {
+            assert_eq!(span_order(a, b), Ordering::Less);
+            assert_eq!(span_order(b, a), Ordering::Greater);
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn verify_apply_edits_span_validation_guarantees_safe_slicing() {
+        // Multi-byte UTF-8 input exercising 1-, 2-, 3-, and 4-byte UTF-8 sequences (11 bytes).
+        let input = "aé€🚀\n";
+        let mut spans = [Span::new(0, 0); 3];
+        for slot in &mut spans {
+            let start: usize = kani::any();
+            let end: usize = kani::any();
+            kani::assume(start <= 13 && end <= 13);
+            *slot = Span::new(start, end);
+        }
+
+        if validate_edit_spans(input, &spans).is_ok() {
+            // Validated spans are strictly ordered, non-overlapping, on char boundaries, and
+            // guarantee that `apply_edits`'s slicing cursor cannot panic.
+            let mut cursor = 0;
+            for span in spans {
+                assert!(cursor <= span.start());
+                assert!(span.start() <= span.end());
+                assert!(span.end() <= input.len());
+                assert!(input.is_char_boundary(cursor));
+                assert!(input.is_char_boundary(span.start()));
+                assert!(input.is_char_boundary(span.end()));
+                let _ = &input[cursor..span.start()];
+                cursor = span.end();
+            }
+            let _ = &input[cursor..];
+            for pair in spans.windows(2) {
+                assert_ne!(span_order(pair[0], pair[1]), Ordering::Greater);
+                assert!(pair[0].end() <= pair[1].start());
+                if pair[0].start() == pair[1].start() {
+                    assert!(pair[0].is_empty() || pair[1].is_empty());
+                }
+            }
+        }
+    }
 }

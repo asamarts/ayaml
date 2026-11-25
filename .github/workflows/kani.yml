@@ -1,6 +1,7 @@
 name: kani
 
-# Daily bounded model-checking run verifying the five pure kernels in `crates/ayaml` (AY-135, AY-156).
+# Daily bounded model-checking run verifying pure arithmetic and slice-bound kernels in
+# `crates/ayaml` and `crates/ayaml-edit` (AY-135, AY-156, AY-164).
 # Every harness runs sequentially inside `tools/run_kani.py` under a strict virtual-memory cap,
 # peak-RSS budget, and per-harness process-group timeout.
 on:
@@ -33,11 +34,22 @@ jobs:
           set -euo pipefail
           cargo install --locked kani-verifier --version 0.67.0
           cargo kani setup
-      - name: Verify Kani proof harnesses under memory and time bounds
+      - name: Verify ayaml Kani proof harnesses under memory and time bounds
         run: |
           set -euo pipefail
-          timeout -k 10 2100 python3 tools/run_kani.py \
+          timeout -k 10 1800 python3 tools/run_kani.py \
             --package ayaml \
+            --all-features \
+            --codegen-vmem-mib 8192 \
+            --harness-vmem-mib 3072 \
+            --max-rss-mib 2048 \
+            --harness-timeout 120 \
+            --step-summary
+      - name: Verify ayaml-edit Kani proof harnesses under memory and time bounds
+        run: |
+          set -euo pipefail
+          timeout -k 10 600 python3 tools/run_kani.py \
+            --package ayaml-edit \
             --all-features \
             --codegen-vmem-mib 8192 \
             --harness-vmem-mib 3072 \
