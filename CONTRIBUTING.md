@@ -21,12 +21,12 @@ nightly and `cargo-fuzz`, the instruction check needs `valgrind`, the unsafe cen
 (`cargo install aplan --version 0.6.0 --locked`), and building the documentation site needs
 Node.js 22+ (`npm --prefix site install --no-audit --no-fund && npm --prefix site run build`).
 
-The repository lint needs alint 0.22.0. Install the pinned release from its own script:
+The repository lint needs alint 0.23.0. Install the pinned release from its own script:
 
 ```sh
 work="$(mktemp -d)"
-curl -fsSL https://raw.githubusercontent.com/asamarts/alint/v0.22.0/install.sh -o "$work/install.sh"
-ALINT_VERSION=v0.22.0 bash "$work/install.sh"
+curl -fsSL https://raw.githubusercontent.com/asamarts/alint/v0.23.0/install.sh -o "$work/install.sh"
+ALINT_VERSION=v0.23.0 bash "$work/install.sh"
 rm -rf "$work"
 ```
 
@@ -117,10 +117,10 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --all-features
 
 ## Repository lint
 
-`.alint.yml` requires alint 0.22.0 and extends the bundled `oss-baseline`, `rust`,
+`.alint.yml` requires alint 0.23.0 and extends the bundled `oss-baseline`, `rust`,
 `ci/github-actions`, `hygiene/no-tracked-artifacts`, `tooling/editorconfig`,
 `agent-hygiene`, and `agent-context` v1 rulesets. The hosted `repository lint` job runs
-the official action pinned to the v0.22.0 commit with `--fail-on-warning`; local CI runs
+the official action pinned to the v0.23.0 commit with `--fail-on-warning`; local CI runs
 the same check, and a release run fails if the local binary is missing or a different
 version.
 
