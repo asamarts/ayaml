@@ -190,7 +190,20 @@ fn check_spanned_tree(
             &input[..entry_span.start()],
             &input[entry_span.end()..]
         );
-        let _reparsed = ayaml::parse_value(&edited).expect("deleting entry_span must stay valid");
+        match ayaml::parse_value(&edited) {
+            Ok(_) => {}
+            Err(err) if err.kind() == ErrorKind::Alias => {
+                // Deleting an entry that defines an anchor can leave a later alias dangling;
+                // the edited document must still remain syntactically valid YAML.
+                let _events: Vec<_> = ayaml::parse_events(&edited)
+                    .expect("deleting entry_span must stay syntactically valid")
+                    .collect::<Result<_, _>>()
+                    .expect("deleting entry_span must stay syntactically valid");
+            }
+            Err(err) => {
+                panic!("deleting entry_span must stay valid: {err}");
+            }
+        }
     }
 
     if node.is_alias() {
