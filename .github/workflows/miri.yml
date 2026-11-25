@@ -48,6 +48,7 @@ jobs:
               --skip the_end_is_the_input_length \
               --skip a_dense_prefix_reserves_no_arena_for_a_sparse_rest \
               --skip a_document_of_even_density_takes_few_reservations \
+              --skip a_megabyte_sparse_head_before_a_dense_tail_takes_few_reservations \
               --skip a_sparse_prefix_grows_to_a_dense_rest_in_few_steps \
               --skip events_on_demand_are_the_events_that_are_collected \
               --skip few_events_wait_for_a_reader_that_takes_them_one_at_a_time \
