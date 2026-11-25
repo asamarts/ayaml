@@ -412,14 +412,20 @@ impl<'a> Parser<'a> {
                     || self.lines[current_index].indent != state.indent
                     || !is_mapping_line(self.line_tokens(current_index))
                 {
-                    self.check_mapping_exit_scanner_error(current_index, state.indent)?;
-                    self.emit(Event::MappingEnd {
-                        span: self.last_span(current_index),
-                    })?;
-                    return Ok(Step::Return(current_index));
+                    if self.is_truncated_mapping_key_line(current_index, state.indent) {
+                        state.current_index += 1;
+                        self.line_run(current_index)
+                    } else {
+                        self.check_truncated_eof(current_index)?;
+                        self.emit(Event::MappingEnd {
+                            span: self.last_span(current_index),
+                        })?;
+                        return Ok(Step::Return(current_index));
+                    }
+                } else {
+                    state.current_index += 1;
+                    self.line_run(current_index)
                 }
-                state.current_index += 1;
-                self.line_run(current_index)
             };
             let (indent, depth) = (state.indent, state.depth);
 
@@ -659,10 +665,6 @@ impl<'a> Parser<'a> {
         Ok(Step::Return(current_index))
     }
 
-    #[allow(
-        clippy::needless_pass_by_ref_mut,
-        reason = "the signature mirrors the surrounding grammar dispatch even where this path does not mutate"
-    )]
     pub(super) fn mapping_after_implicit_key(
         &mut self,
         mut state: BlockState,
@@ -670,18 +672,19 @@ impl<'a> Parser<'a> {
         value_index: Option<usize>,
         stack: &mut Vec<Cont>,
     ) -> Result<Step<'a>, Error> {
-        state.entries += 1;
-        let span = self.token(tokens, 0).span;
-        self.limits
-            .check_collection_entries(state.entries)
-            .map_err(|error| self.limit_at(span, error))?;
         let Some(value_index) = value_index else {
+            self.check_truncated_run_end(tokens, tokens.len())?;
             return Err(self.error(
                 self.token(tokens, 0).span,
                 ErrorCode::MissingMappingColon,
                 "explicit mapping key must be followed by a ':' line",
             ));
         };
+        state.entries += 1;
+        let span = self.token(tokens, 0).span;
+        self.limits
+            .check_collection_entries(state.entries)
+            .map_err(|error| self.limit_at(span, error))?;
         let (current_index, indent, depth) = (state.current_index, state.indent, state.depth);
         stack.push(Cont::MappingEntry(state));
         Ok(Step::Call(Call::MappingValue {
@@ -817,6 +820,7 @@ impl<'a> Parser<'a> {
             index = count;
         }
         if index >= tokens.len() {
+            self.check_truncated_run_end(tokens, index)?;
             if index > 0 {
                 let span = Span::empty(self.token(tokens, index - 1).span.end());
                 self.emit(self.null_scalar_with(span, tag, anchor))?;

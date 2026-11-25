@@ -235,10 +235,16 @@ fn match_delimiter_line(
     } else {
         return None;
     };
+    if let Some(&next) = bytes.get(3)
+        && !matches!(next, b' ' | b'\t' | b'\n' | b'\r')
+    {
+        return None;
+    }
 
     let limit = max_len.unwrap_or(bytes.len()).min(bytes.len());
     let mut i = 3;
     let mut saw_whitespace = false;
+    let mut saw_comment = false;
     while i < bytes.len() {
         if max_len.is_some() && i > limit {
             return Some(MatchedDelimiter {
@@ -254,22 +260,36 @@ fn match_delimiter_line(
                 i += 1;
             }
             b'#' if saw_whitespace => {
-                // Skip comment through end of line (bounded when max_len is set).
-                while i < bytes.len() && bytes[i] != b'\n' && bytes[i] != b'\r' {
-                    if max_len.is_some() && i > limit {
-                        return Some(MatchedDelimiter {
-                            kind,
-                            next_offset: i,
-                            has_newline: false,
-                            exceeded_limit: true,
-                        });
-                    }
-                    i += 1;
-                }
+                saw_comment = true;
                 break;
             }
             b'\n' | b'\r' => break,
             _ => return None,
+        }
+    }
+    if saw_comment {
+        // Skip comment through end of line (bounded when max_len is set).
+        while i < bytes.len() && bytes[i] != b'\n' && bytes[i] != b'\r' {
+            if max_len.is_some() && i > limit {
+                // Advance past at most 3 UTF-8 continuation bytes so `next_offset` is
+                // always a valid UTF-8 character boundary into `s`.
+                if (bytes[i] & 0b1100_0000) == 0b1000_0000 {
+                    i += 1;
+                }
+                if i < bytes.len() && (bytes[i] & 0b1100_0000) == 0b1000_0000 {
+                    i += 1;
+                }
+                if i < bytes.len() && (bytes[i] & 0b1100_0000) == 0b1000_0000 {
+                    i += 1;
+                }
+                return Some(MatchedDelimiter {
+                    kind,
+                    next_offset: i,
+                    has_newline: false,
+                    exceeded_limit: true,
+                });
+            }
+            i += 1;
         }
     }
 
@@ -375,6 +395,8 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::unwind(8)]
     fn verify_next_line_len_bounded_invariants() {
+        // Constant-offset symbolic fill with an optional 2-byte UTF-8 `'é'` (`0xC3, 0xA9`)
+        // at any valid interior position so `is_char_boundary` is checked non-vacuously.
         let mut buf = [0_u8; 6];
         for slot in &mut buf {
             *slot = match kani::any::<u8>() & 3 {
@@ -386,6 +408,12 @@ mod kani_proofs {
         }
         let len: usize = kani::any();
         kani::assume(len <= buf.len());
+        if kani::any::<bool>() && len >= 2 {
+            let mb_pos: usize = kani::any();
+            kani::assume(mb_pos <= len - 2);
+            buf[mb_pos] = 0xC3;
+            buf[mb_pos + 1] = 0xA9;
+        }
         let max_len: usize = kani::any();
         let Ok(s) = std::str::from_utf8(&buf[..len]) else {
             return;
@@ -420,10 +448,19 @@ mod kani_proofs {
     }
 
     #[kani::proof]
-    #[kani::unwind(10)]
+    #[kani::unwind(9)]
     fn verify_match_delimiter_line_bounds() {
+        // Constant-offset symbolic buffer up to 7 bytes with optional 2-byte UTF-8 `'é'`
+        // (`0xC3, 0xA9`) placed at any valid position >= 3, covering `--- #é`, `----\n`,
+        // `...\t#é`, and arbitrary non-delimiter prefixes without nested loop blowup.
         let mut buf = [0_u8; 7];
-        for slot in &mut buf {
+        match kani::any::<u8>() & 3 {
+            0 => buf[0..3].copy_from_slice(b"---"),
+            1 => buf[0..3].copy_from_slice(b"..."),
+            2 => buf[0..3].copy_from_slice(b"--x"),
+            _ => buf[0..3].copy_from_slice(b"xyz"),
+        }
+        for slot in &mut buf[3..] {
             *slot = match kani::any::<u8>() & 7 {
                 0 => b'-',
                 1 => b'.',
@@ -437,6 +474,12 @@ mod kani_proofs {
         }
         let len: usize = kani::any();
         kani::assume(len <= buf.len());
+        if kani::any::<bool>() && len >= 5 {
+            let mb_pos: usize = kani::any();
+            kani::assume((3..=len - 2).contains(&mb_pos));
+            buf[mb_pos] = 0xC3;
+            buf[mb_pos + 1] = 0xA9;
+        }
         let opening_only: bool = kani::any();
         let max_len: Option<usize> = if kani::any() {
             let max: usize = kani::any();
@@ -455,6 +498,9 @@ mod kani_proofs {
             }
             assert!(matched.next_offset <= len);
             assert!(s.is_char_boundary(matched.next_offset));
+            if len > 3 {
+                assert!(matches!(buf[3], b' ' | b'\t' | b'\n' | b'\r'));
+            }
             if !matched.exceeded_limit {
                 assert!(matched.next_offset >= 3);
                 if let Some(max) = max_len {
@@ -475,5 +521,35 @@ mod kani_proofs {
                 assert!(max_len.is_some());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::match_delimiter_line;
+
+    #[test]
+    fn match_delimiter_line_keeps_utf8_char_boundary_on_over_limit_comment() {
+        let input = "--- #é\n";
+        let matched = match_delimiter_line(input, true, Some(5)).expect("delimiter match");
+        assert!(matched.exceeded_limit);
+        assert!(input.is_char_boundary(matched.next_offset));
+        assert_eq!(matched.next_offset, 7);
+
+        // 4-byte UTF-8 character (`🦀`) at every interior continuation offset.
+        let emoji = "--- #🦀\n";
+        for max in [5, 6, 7] {
+            let m = match_delimiter_line(emoji, true, Some(max)).expect("delimiter match");
+            assert!(m.exceeded_limit);
+            assert!(emoji.is_char_boundary(m.next_offset), "max={max}");
+            assert_eq!(m.next_offset, 9, "max={max}");
+        }
+    }
+
+    #[test]
+    fn match_delimiter_line_rejects_four_hyphens_even_under_tiny_limit() {
+        assert!(match_delimiter_line("----\nbody\n", true, Some(2)).is_none());
+        assert!(match_delimiter_line("...x\nbody\n", false, Some(2)).is_none());
+        assert!(match_delimiter_line("---#comment\n", true, Some(2)).is_none());
     }
 }

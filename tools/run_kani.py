@@ -29,22 +29,35 @@ MIB = 1024 * 1024
 _ACTIVE_PGID: int | None = None
 
 
-def _kill_pgid(pgid: int, grace_s: float = 1.0) -> None:
+def _kill_pgid(
+    pgid: int,
+    grace_s: float = 1.0,
+    reap_pid: int | None = None,
+) -> tuple[int, resource.struct_rusage] | None:
     try:
         os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
-        return
+        return None
+    reaped: tuple[int, resource.struct_rusage] | None = None
     deadline = time.monotonic() + grace_s
     while time.monotonic() < deadline:
+        if reap_pid is not None and reaped is None:
+            try:
+                pid, status, rusage = os.wait4(reap_pid, os.WNOHANG)
+                if pid != 0:
+                    reaped = (status, rusage)
+            except ChildProcessError:
+                reaped = (0, resource.getrusage(resource.RUSAGE_CHILDREN))
         try:
             os.killpg(pgid, 0)
         except ProcessLookupError:
-            return
+            return reaped
         time.sleep(0.05)
     try:
         os.killpg(pgid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    return reaped
 
 
 def _handle_signal(signum: int, _frame: object) -> None:
@@ -107,8 +120,11 @@ def run_bounded(
                     break
                 if time.monotonic() >= deadline:
                     timed_out = True
-                    _kill_pgid(proc.pid, grace_s=1.0)
-                    _, status, rusage = os.wait4(proc.pid, 0)
+                    reaped = _kill_pgid(proc.pid, grace_s=1.0, reap_pid=proc.pid)
+                    if reaped is not None:
+                        status, rusage = reaped
+                    else:
+                        _, status, rusage = os.wait4(proc.pid, 0)
                     rc = 124
                     proc.returncode = rc
                     break

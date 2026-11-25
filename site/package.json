@@ -10,6 +10,7 @@
     "build": "node scripts/sync-docs.mjs && astro build",
     "preview": "astro preview",
     "check:links": "node scripts/check-links.mjs",
+    "test:scripts": "node --test scripts/test-scripts.mjs",
     "astro": "astro"
   },
   "dependencies": {

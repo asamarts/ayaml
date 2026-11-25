@@ -444,8 +444,20 @@ fn merge_keys_preserves_lexical_scoping_tags_inline_validation_and_stream_parity
     assert_eq!(val.as_mapping().expect("map").len(), 3);
 }
 
+fn proptest_config() -> ProptestConfig {
+    let default_cases = if cfg!(miri) { 2 } else { 128 };
+    let cases = std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default_cases);
+    ProptestConfig {
+        cases,
+        ..ProptestConfig::default()
+    }
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(128))]
+    #![proptest_config(proptest_config())]
 
     #[test]
     fn merge_keys_property_matches_expected_precedence_and_preserves_spans(

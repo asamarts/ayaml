@@ -253,8 +253,34 @@ fn rejects_missing_closing_delimiter_and_enforces_limits() {
     );
 }
 
+fn proptest_config() -> ProptestConfig {
+    let default_cases = if cfg!(miri) { 2 } else { 128 };
+    let cases = std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default_cases);
+    ProptestConfig {
+        cases,
+        ..ProptestConfig::default()
+    }
+}
+
+#[test]
+fn split_frontmatter_rejects_four_hyphens_even_under_tiny_input_limit() {
+    let opts = ParseOptions::new().with_limits(Limits::new().with_max_input_bytes(2));
+    assert_eq!(
+        ayaml::split_frontmatter_with("----\nbody\n", &opts),
+        Ok(None)
+    );
+    let bom_opts = ParseOptions::new().with_limits(Limits::new().with_max_input_bytes(5));
+    assert_eq!(
+        ayaml::split_frontmatter_with("\u{feff}----\nbody\n", &bom_opts),
+        Ok(None)
+    );
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(128))]
+    #![proptest_config(proptest_config())]
 
     #[test]
     fn round_trips_frontmatter_and_aligns_line_index_spans(

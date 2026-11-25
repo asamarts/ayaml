@@ -14,6 +14,9 @@ pub mod book_doctests {
     #[doc = include_str!("../../../README.md")]
     pub struct Readme;
 
+    #[doc = include_str!("../../../crates/ayaml-edit/README.md")]
+    pub struct AyamlEditReadme;
+
     #[doc = include_str!("../../../docs/index.md")]
     pub struct Index;
 

@@ -413,11 +413,13 @@ job_docs-lint() {
   step "check documentation links and coverage" python3 tools/check_docs.py
   # Mirrors: python3 tools/check_docs.py
   if command -v npm >/dev/null 2>&1 && [ -d site/node_modules ]; then
+    step "test site Markdown and link-checker scripts" npm --prefix site run test:scripts
     step "build Astro + Starlight site" npm --prefix site run build
     step "check built site internal links" npm --prefix site run check:links
   else
     skip "npm or site/node_modules not installed"
   fi
+  # Mirrors: npm --prefix site run test:scripts
   # Mirrors: npm --prefix site run build
   # Mirrors: npm --prefix site run check:links
   test_step "doctest every documentation page" cargo "+$STABLE" test --doc -p ayaml-conformance --all-features --locked

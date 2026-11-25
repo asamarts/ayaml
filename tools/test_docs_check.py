@@ -127,6 +127,10 @@ class DocsCheck(unittest.TestCase):
         found = check_docs.problems(root)
         self.assertTrue(any("crates/ayaml-edit/README.md: missing link target 'missing.md'" in msg for msg in found), found)
         self.assertTrue(any("crates/ayaml-edit/README.md" in msg and "no language tag" in msg for msg in found), found)
+        self.assertTrue(
+            any("crates/ayaml-edit/README.md: not included in" in msg for msg in found),
+            found,
+        )
 
     def test_ignored_or_no_run_or_untagged_fence_fails_for_backticks_and_tildes(self) -> None:
         for fence, expected in (

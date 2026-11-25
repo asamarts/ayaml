@@ -8,6 +8,7 @@ members = [
     "crates/ayaml-fixtures",
     "crates/xtask",
 ]
+exclude = ["target"]
 default-members = ["crates/ayaml"]
 
 [workspace.package]

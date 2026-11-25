@@ -63,6 +63,15 @@ export function extractDescription(body, title) {
 
   for (const line of lines) {
     const trimmed = line.trim();
+    if (inHtmlComment) {
+      if (trimmed.includes('-->')) inHtmlComment = false;
+      continue;
+    }
+    if (!inFence && trimmed.startsWith('<!--')) {
+      if (!trimmed.includes('-->')) inHtmlComment = true;
+      if (para.length > 0) break;
+      continue;
+    }
     if (!inFence) {
       const m = /^(`{3,}|~{3,})/.exec(trimmed);
       if (m) {
@@ -74,15 +83,6 @@ export function extractDescription(body, title) {
     } else {
       const closeRe = new RegExp(`^${fenceChar}{${fenceLen},}\\s*$`);
       if (closeRe.test(trimmed)) inFence = false;
-      continue;
-    }
-    if (inHtmlComment) {
-      if (trimmed.includes('-->')) inHtmlComment = false;
-      continue;
-    }
-    if (trimmed.startsWith('<!--')) {
-      if (!trimmed.includes('-->')) inHtmlComment = true;
-      if (para.length > 0) break;
       continue;
     }
     if (!trimmed) {
@@ -226,7 +226,7 @@ function rewriteProseLine(line, relDir, urlPrefix) {
           }
           if (titleQuote) {
             if (c === titleQuote) titleQuote = null;
-          } else if (c === '"' || c === "'") {
+          } else if ((c === '"' || c === "'") && k > j + 1 && /\s/.test(line[k - 1])) {
             titleQuote = c;
           } else if (c === '(') {
             parenDepth++;
@@ -271,14 +271,76 @@ function rewriteProseLine(line, relDir, urlPrefix) {
   return out;
 }
 
-const CHAR_LITERAL_RE = /^'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\}|.)|[^'\\])'/;
+/**
+ * Strip fenced code blocks and equal-length backtick inline code spans from
+ * Markdown text so prose checks ignore code examples without losing prose
+ * between multi-backtick spans.
+ */
+export function stripMarkdownCode(markdown) {
+  const out = [];
+  let inFence = false;
+  let fenceChar = '';
+  let fenceLen = 0;
+  for (const line of markdown.split('\n')) {
+    const trimmed = line.trimStart();
+    if (!inFence) {
+      const m = /^(`{3,}|~{3,})/.exec(trimmed);
+      if (m) {
+        inFence = true;
+        fenceChar = m[1][0];
+        fenceLen = m[1].length;
+        continue;
+      }
+      let stripped = '';
+      let i = 0;
+      const n = line.length;
+      while (i < n) {
+        if (line[i] === '`') {
+          let ticks = 0;
+          while (i + ticks < n && line[i + ticks] === '`') ticks++;
+          let j = i + ticks;
+          let closed = -1;
+          while (j < n) {
+            if (line[j] === '`') {
+              let run = 0;
+              while (j + run < n && line[j + run] === '`') run++;
+              if (run === ticks) {
+                closed = j + run;
+                break;
+              }
+              j += run;
+            } else {
+              j++;
+            }
+          }
+          if (closed !== -1) {
+            i = closed;
+            continue;
+          }
+          stripped += line.slice(i, i + ticks);
+          i += ticks;
+          continue;
+        }
+        stripped += line[i];
+        i++;
+      }
+      out.push(stripped);
+    } else {
+      const closeRe = new RegExp(`^${fenceChar}{${fenceLen},}\\s*$`);
+      if (closeRe.test(trimmed)) inFence = false;
+    }
+  }
+  return out.join('\n');
+}
+
+const CHAR_LITERAL_RE = /^'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\}|.)|[^'\\])'/u;
 
 /**
  * Advance a minimal Rust lexical state across one line, tracking nested block comments,
  * line comments, character literals, raw string literals (`r#"..."#`), and normal strings
  * so rustdoc `# ` stripping never desynchronizes on quotes inside comments or raw strings.
  */
-function advanceRustLexer(line, state) {
+export function advanceRustLexer(line, state) {
   const n = line.length;
   let i = 0;
   while (i < n) {
@@ -411,18 +473,20 @@ export function transformDocsMarkdown(body, relPath, urlPrefix) {
         continue;
       }
       if (inRustFence) {
-        if (rustState.stringMode === null && rustState.blockCommentDepth === 0) {
+        if (
+          rustState.stringMode === null &&
+          rustState.blockCommentDepth === 0 &&
+          /^\s*#(?:$|\s)/.test(line)
+        ) {
           // Rustdoc hidden lines: `#` or `# ...` (with optional leading whitespace), not `#[attr]` / `#![attr]`.
-          if (/^\s*#(?:$|\s)/.test(line)) {
-            continue;
-          }
-          // Rustdoc escaped literal hash: `## ` -> `# `.
-          const unescaped = line.replace(/^(\s*)##(\s|$)/, '$1#$2');
-          advanceRustLexer(unescaped, rustState);
-          out.push(unescaped);
           continue;
         }
-        advanceRustLexer(line, rustState);
+        // Rustdoc escaped literal hash (`##` -> `#`) applies on every line inside a Rust fence,
+        // including multiline string literals and block comments, matching `librustdoc`.
+        const unescaped = line.replace(/^(\s*)##(\s|$)/, '$1#$2');
+        advanceRustLexer(unescaped, rustState);
+        out.push(unescaped);
+        continue;
       }
       out.push(line);
     }

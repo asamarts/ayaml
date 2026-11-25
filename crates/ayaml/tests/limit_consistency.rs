@@ -1135,6 +1135,41 @@ fn raising_max_depth_keeps_earlier_parser_error_before_later_scanner_error() {
             Limits::default().with_max_depth(2),
             ayaml::ErrorCode::UnexpectedToken,
         ),
+        (
+            "single-line duplicate props before flow and later block-run depth limit",
+            "!a !b [[1]] - - -\n",
+            Limits::default().with_max_depth(1),
+            Limits::default().with_max_depth(2),
+            ayaml::ErrorCode::DuplicateNodeProperties,
+        ),
+        (
+            "single-line unexpected token before flow and later block-run depth limit",
+            "}} [[1]] - - -\n",
+            Limits::default().with_max_depth(1),
+            Limits::default().with_max_depth(2),
+            ayaml::ErrorCode::UnexpectedToken,
+        ),
+        (
+            "single-line unexpected token before flow and later scanner indicator",
+            "}} [[1]] @\n",
+            Limits::default().with_max_depth(1),
+            Limits::default().with_max_depth(2),
+            ayaml::ErrorCode::UnexpectedToken,
+        ),
+        (
+            "mapping exit with earlier parser error before flow and later scanner error",
+            "a: 1\n'foo' [ @ ]\n",
+            Limits::default().with_max_depth(1),
+            Limits::default().with_max_depth(2),
+            ayaml::ErrorCode::UnexpectedToken,
+        ),
+        (
+            "mapping exit with duplicate props inside truncated flow key",
+            "a: 1\n[ !a !b @ ]\n",
+            Limits::default().with_max_depth(2),
+            Limits::default().with_max_depth(3),
+            ayaml::ErrorCode::DuplicateNodeProperties,
+        ),
     ];
 
     for (name, raw_input, lo_limits, hi_limits, expected_code) in small_cases {
@@ -1369,4 +1404,180 @@ fn raising_max_depth_keeps_earlier_semantic_error_and_merge_parity() {
         assert_eq!(lo.code(), hi.code(), "{lo:?} -> {hi:?}");
         assert_eq!(lo.span(), hi.span(), "{lo:?} -> {hi:?}");
     }
+}
+
+/// Truncated flow runs after node properties or omitted keys/values must surface the deferred
+/// scanner error instead of synthesizing empty scalars that fail with resolver errors or
+/// premature event limits, and multi-document marker lines keep earlier syntax errors.
+#[test]
+fn truncated_flow_and_document_marker_lines_surface_exact_errors() {
+    use serde::Deserialize as _;
+
+    // Multi-document marker lines with an earlier parser error before a flow collection and a
+    // later scanner limit error must remain monotonic across `max_depth`.
+    for (input, lo_limits, hi_limits, expected_code) in [
+        (
+            "[1]\n--- - [[1]] - - -\n",
+            Limits::default().with_max_depth(1),
+            Limits::default().with_max_depth(2),
+            ayaml::ErrorCode::InvalidDocumentStart,
+        ),
+        (
+            "[1]\n... 'x' [[1]] 1234567890\n",
+            Limits::default().with_max_depth(1).with_max_scalar_bytes(5),
+            Limits::default().with_max_depth(2).with_max_scalar_bytes(5),
+            ayaml::ErrorCode::ContentAfterDocumentEnd,
+        ),
+    ] {
+        let lo_opts = ParseOptions::new().with_limits(lo_limits);
+        let hi_opts = ParseOptions::new().with_limits(hi_limits);
+        for (label, lo, hi) in [
+            (
+                "parse_documents_with",
+                ayaml::parse_documents_with(input, &lo_opts).unwrap_err(),
+                ayaml::parse_documents_with(input, &hi_opts).unwrap_err(),
+            ),
+            (
+                "parse_events_with",
+                ayaml::parse_events_with(input, &lo_opts)
+                    .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                    .unwrap_err(),
+                ayaml::parse_events_with(input, &hi_opts)
+                    .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                    .unwrap_err(),
+            ),
+        ] {
+            assert_eq!(lo.code(), expected_code, "{label}: {lo:?}");
+            assert_eq!(hi.code(), expected_code, "{label}: {lo:?} -> {hi:?}");
+            assert_eq!(lo.span(), hi.span(), "{label}: {lo:?} -> {hi:?}");
+        }
+    }
+
+    // Valid YAML whose flow scalar/anchor/event hits a scanner limit after `!!int` must report
+    // the scanner limit error rather than fabricating `InvalidIntScalar`.
+    let limit_cases: &[(&str, Limits, Limits, ayaml::ErrorCode)] = &[
+        (
+            "[!!int 1234567890]",
+            Limits::default().with_max_scalar_bytes(5),
+            Limits::default().with_max_scalar_bytes(20),
+            ayaml::ErrorCode::ScalarSizeLimit,
+        ),
+        (
+            "{a: !!int 1234567890}",
+            Limits::default().with_max_scalar_bytes(5),
+            Limits::default().with_max_scalar_bytes(20),
+            ayaml::ErrorCode::ScalarSizeLimit,
+        ),
+        (
+            "{!!int 1234567890: 1}",
+            Limits::default().with_max_scalar_bytes(5),
+            Limits::default().with_max_scalar_bytes(20),
+            ayaml::ErrorCode::ScalarSizeLimit,
+        ),
+        (
+            "[? !!int 1234567890]",
+            Limits::default().with_max_scalar_bytes(5),
+            Limits::default().with_max_scalar_bytes(20),
+            ayaml::ErrorCode::ScalarSizeLimit,
+        ),
+        (
+            "[a: !!int 1234567890]",
+            Limits::default().with_max_scalar_bytes(5),
+            Limits::default().with_max_scalar_bytes(20),
+            ayaml::ErrorCode::ScalarSizeLimit,
+        ),
+        (
+            "[!!int &a 1]",
+            Limits::default().with_max_anchors(0),
+            Limits::default().with_max_anchors(1),
+            ayaml::ErrorCode::AnchorCountLimit,
+        ),
+        (
+            "[1,2,3,4,5,6,7,8,!!int 1]",
+            Limits::default().with_max_events(18),
+            Limits::default().with_max_events(32),
+            ayaml::ErrorCode::EventCountLimit,
+        ),
+        (
+            "[? 1234567890]",
+            Limits::default()
+                .with_max_scalar_bytes(5)
+                .with_max_events(6),
+            Limits::default()
+                .with_max_scalar_bytes(20)
+                .with_max_events(20),
+            ayaml::ErrorCode::ScalarSizeLimit,
+        ),
+        (
+            "{? 1234567890}",
+            Limits::default()
+                .with_max_scalar_bytes(5)
+                .with_max_events(6),
+            Limits::default()
+                .with_max_scalar_bytes(20)
+                .with_max_events(20),
+            ayaml::ErrorCode::ScalarSizeLimit,
+        ),
+        (
+            "[a: 1234567890]",
+            Limits::default()
+                .with_max_scalar_bytes(5)
+                .with_max_events(6),
+            Limits::default()
+                .with_max_scalar_bytes(20)
+                .with_max_events(20),
+            ayaml::ErrorCode::ScalarSizeLimit,
+        ),
+        (
+            "{a: 1234567890}",
+            Limits::default()
+                .with_max_scalar_bytes(5)
+                .with_max_events(6),
+            Limits::default()
+                .with_max_scalar_bytes(20)
+                .with_max_events(20),
+            ayaml::ErrorCode::ScalarSizeLimit,
+        ),
+    ];
+
+    for (input, lo_limits, hi_limits, expected_code) in limit_cases {
+        let lo_opts = ParseOptions::new().with_limits(lo_limits.clone());
+        let hi_opts = ParseOptions::new().with_limits(hi_limits.clone());
+        for (label, err) in [
+            (
+                "parse_value_with",
+                ayaml::parse_value_with(input, &lo_opts).unwrap_err(),
+            ),
+            (
+                "parse_documents_with",
+                ayaml::parse_documents_with(input, &lo_opts).unwrap_err(),
+            ),
+            (
+                "from_str_with",
+                ayaml::from_str_with::<Value>(input, &lo_opts).unwrap_err(),
+            ),
+            (
+                "DocumentDeserializer",
+                ayaml::DocumentDeserializer::from_str_with(input, &lo_opts)
+                    .and_then(Value::deserialize)
+                    .unwrap_err(),
+            ),
+        ] {
+            assert_eq!(err.kind(), ErrorKind::Limit, "{input}/{label}: {err:?}");
+            assert_eq!(err.code(), *expected_code, "{input}/{label}: {err:?}");
+        }
+        assert!(
+            ayaml::parse_value_with(input, &hi_opts).is_ok(),
+            "{input}: expected Ok at wider limit"
+        );
+    }
+
+    // Default limits: `[!!int @]` must agree between value and event readers (`ReservedIndicator`).
+    let val_err = ayaml::parse_value("[!!int @]").unwrap_err();
+    let ev_err = ayaml::parse_events("[!!int @]")
+        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+        .unwrap_err();
+    assert_eq!(val_err.code(), ayaml::ErrorCode::ReservedIndicator);
+    assert_eq!(val_err.code(), ev_err.code());
+    assert_eq!(val_err.span(), ev_err.span());
 }

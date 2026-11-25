@@ -1010,10 +1010,15 @@ fn docs_book_and_reference_pages_are_complete_and_doctested_in_ci() {
         book_doctests.contains("../../../README.md"),
         "README.md is missing from book_doctests"
     );
+    assert!(
+        book_doctests.contains("../../../crates/ayaml-edit/README.md"),
+        "crates/ayaml-edit/README.md is missing from book_doctests"
+    );
 
     let docs_wf = read(&root, ".github/workflows/docs.yml");
     for needle in [
         "npm --prefix site install --no-audit --no-fund",
+        "npm --prefix site run test:scripts",
         "npm --prefix site run build",
         "npm --prefix site run check:links",
         "python3 tools/check_docs.py",
@@ -1143,9 +1148,13 @@ fn ayaml_edit_ci_and_release_automation_is_wired() {
         "cargo semver-checks --package ayaml-edit",
         "crates/ayaml-edit/README.md",
     ] {
-        assert!(
-            ci_wf.contains(needle),
-            ".github/workflows/ci.yml must include {needle:?}"
+        let count = steps_that_run(&ci_wf, &|step| {
+            step["run"].as_str().is_some_and(|run| run.contains(needle))
+        });
+        assert_eq!(
+            count,
+            Ok(1),
+            ".github/workflows/ci.yml must run {needle:?} in one unconditional step"
         );
     }
 
@@ -1174,8 +1183,36 @@ fn miri_and_kani_workflows_cover_post_023_apis_and_ayaml_edit() {
         return;
     };
     let miri_wf = read(&root, ".github/workflows/miri.yml");
+    let miri_doc = parse_value(&miri_wf).expect(".github/workflows/miri.yml parses");
+    let miri_steps = miri_doc["jobs"]["miri"]["steps"]
+        .as_sequence()
+        .expect("miri steps sequence");
+    let miri_runs: Vec<&str> = miri_steps
+        .iter()
+        .filter_map(|step| {
+            assert!(
+                step.get("if").is_none(),
+                "miri step must not be conditional"
+            );
+            assert!(
+                step.get("continue-on-error").is_none(),
+                "miri step must not ignore errors"
+            );
+            step.get("run").and_then(Value::as_str)
+        })
+        .filter(|run| run.contains("cargo +nightly miri test"))
+        .collect();
+    assert!(
+        miri_runs.len() >= 4,
+        "miri.yml must run core, post-0.2.3 integration, ayaml-edit, and memcount Miri steps"
+    );
+    for run in &miri_runs {
+        assert!(
+            run.contains("ulimit -v 8388608") && run.contains("timeout -k 5"),
+            "every Miri step must enforce ulimit -v 8388608 and timeout: {run}"
+        );
+    }
     for needle in [
-        "ulimit -v 8388608",
         "--test frontmatter",
         "--test merge_keys",
         "--test document_deserializer",
@@ -1184,22 +1221,47 @@ fn miri_and_kani_workflows_cover_post_023_apis_and_ayaml_edit() {
         "cargo +nightly miri test -p ayaml-edit --all-features --locked",
     ] {
         assert!(
-            miri_wf.contains(needle),
-            ".github/workflows/miri.yml must include {needle:?}"
+            miri_runs.iter().any(|run| run.contains(needle)),
+            ".github/workflows/miri.yml must execute {needle:?} inside a bounded Miri step"
         );
     }
 
     let kani_wf = read(&root, ".github/workflows/kani.yml");
-    for needle in [
-        "python3 tools/run_kani.py",
-        "--package ayaml",
-        "--package ayaml-edit",
-        "--harness-vmem-mib 3072",
-        "--max-rss-mib 2048",
-    ] {
+    let kani_doc = parse_value(&kani_wf).expect(".github/workflows/kani.yml parses");
+    let kani_steps = kani_doc["jobs"]["kani"]["steps"]
+        .as_sequence()
+        .expect("kani steps sequence");
+    let kani_runs: Vec<&str> = kani_steps
+        .iter()
+        .filter_map(|step| {
+            assert!(
+                step.get("if").is_none(),
+                "kani step must not be conditional"
+            );
+            assert!(
+                step.get("continue-on-error").is_none(),
+                "kani step must not ignore errors"
+            );
+            step.get("run").and_then(Value::as_str)
+        })
+        .filter(|run| run.contains("tools/run_kani.py"))
+        .collect();
+    assert!(
+        kani_runs.len() >= 2,
+        "kani.yml must run tools/run_kani.py for both ayaml and ayaml-edit"
+    );
+    for run in &kani_runs {
         assert!(
-            kani_wf.contains(needle),
-            ".github/workflows/kani.yml must include {needle:?}"
+            run.contains("--harness-vmem-mib 3072")
+                && run.contains("--max-rss-mib 2048")
+                && run.contains("timeout -k 10"),
+            "every Kani step must enforce vmem, rss, and timeout bounds: {run}"
+        );
+    }
+    for pkg in ["--package ayaml ", "--package ayaml-edit "] {
+        assert!(
+            kani_runs.iter().any(|run| run.contains(pkg)),
+            ".github/workflows/kani.yml must verify {pkg:?} under tools/run_kani.py"
         );
     }
 }

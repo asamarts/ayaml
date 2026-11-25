@@ -121,6 +121,37 @@ dist_asset_names() {
   printf '%s\n' "${names[@]}" | LC_ALL=C sort
 }
 
+# Verify that DIST/SHA256SUMS is non-empty, has no blank lines, lists exactly the `*-<version>.crate`
+# files in DIST, and matches every file's SHA-256 checksum.
+verify_dist_checksums() {
+  local version="$1" dist="$2"
+  local expected_crates=() listed_crates=() path base line hash file
+  shopt -s nullglob
+  for path in "$dist"/*-"$version".crate; do
+    base="$(basename "$path")"
+    expected_crates+=("$base")
+  done
+  shopt -u nullglob
+  [ "${#expected_crates[@]}" -gt 0 ] || fail "no *-$version.crate files found in $dist"
+  [ -f "$dist/SHA256SUMS" ] || fail "SHA256SUMS missing from $dist"
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || fail "SHA256SUMS in $dist contains a blank line"
+    [[ "$line" == *"  "* ]] || fail "malformed SHA256SUMS line in $dist: $line"
+    hash="${line%%  *}"
+    file="${line#*  }"
+    [ -n "$hash" ] && [ -n "$file" ] || fail "malformed SHA256SUMS line in $dist: $line"
+    listed_crates+=("$file")
+  done < "$dist/SHA256SUMS"
+  [ "${#listed_crates[@]}" -gt 0 ] || fail "SHA256SUMS in $dist is empty"
+  local expected_sorted listed_sorted
+  expected_sorted="$(printf '%s\n' "${expected_crates[@]}" | LC_ALL=C sort)"
+  listed_sorted="$(printf '%s\n' "${listed_crates[@]}" | LC_ALL=C sort)"
+  [ "$listed_sorted" = "$expected_sorted" ] ||
+    fail "SHA256SUMS in $dist does not cover exactly the *-$version.crate files"
+  (cd "$dist" && sha256sum --check --status SHA256SUMS) ||
+    fail "SHA256SUMS verification failed in $dist"
+}
+
 # NAME holds exactly the crate(s) and SHA256SUMS of DIST, with these bytes.
 check_assets() {
   local name="$1" version="$2" dist="$3" assets existing expected_list expected_raw
@@ -140,8 +171,7 @@ check_assets() {
   for asset in "${expected[@]}"; do
     cmp "$existing/$asset" "$dist/$asset"
   done
-  (cd "$existing" && sha256sum --check --status SHA256SUMS) ||
-    fail "SHA256SUMS verification failed for release $name"
+  verify_dist_checksums "$version" "$existing"
   rm -r "$existing"
 }
 
@@ -162,7 +192,10 @@ dist_upload_paths() {
 release_summary() {
   local dist="$1"
   local lines=() line hash file items=()
-  mapfile -t lines < "$dist/SHA256SUMS"
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    lines+=("$line")
+  done < "$dist/SHA256SUMS"
   [ "${#lines[@]}" -gt 0 ] || fail "SHA256SUMS in $dist is empty"
   if [ "${#lines[@]}" -eq 1 ]; then
     hash="${lines[0]%% *}"
@@ -171,7 +204,6 @@ release_summary() {
     return
   fi
   for line in "${lines[@]}"; do
-    [ -n "$line" ] || continue
     hash="${line%% *}"
     file="${line##* }"
     items+=("$file ($hash)")
@@ -184,6 +216,7 @@ release_summary() {
 release() {
   local tag="$1" version="$2" dist="$3" notes="$4"
   local summary upload_raw upload_paths=()
+  verify_dist_checksums "$version" "$dist"
   upload_raw="$(dist_upload_paths "$version" "$dist")"
   mapfile -t upload_paths <<< "$upload_raw"
   summary="$(release_summary "$dist")"
@@ -242,6 +275,7 @@ rehearse() {
   local name="$1" target="$2" version="$3" dist="$4" notes="$5"
   local body upload_raw upload_paths=() summary
   [[ "$name" =~ $rehearsal_name ]] || fail "$name isn't a rehearsal's name, rehearsal-RUN-ATTEMPT"
+  verify_dist_checksums "$version" "$dist"
   upload_raw="$(dist_upload_paths "$version" "$dist")"
   mapfile -t upload_paths <<< "$upload_raw"
   summary="$(release_summary "$dist")"

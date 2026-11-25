@@ -458,6 +458,53 @@ shutil.copy(src, out)
             self.assertNotEqual(empty_rel.returncode, 0)
             self.assertIn("no *-0.2.1.crate files found", empty_rel.stderr)
 
+            # Corrupt, incomplete, or blank-line SHA256SUMS must fail BEFORE gh release create.
+            for case_name, bad_sums, expected_err in (
+                (
+                    "corrupt-hash",
+                    f"{'0' * 64}  ayaml-0.2.0.crate\n{d2}  ayaml-edit-0.2.0.crate\n",
+                    "SHA256SUMS verification failed",
+                ),
+                (
+                    "missing-crate-entry",
+                    f"{d1}  ayaml-0.2.0.crate\n",
+                    "does not cover exactly the *-0.2.0.crate files",
+                ),
+                (
+                    "blank-line",
+                    f"{d1}  ayaml-0.2.0.crate\n\n{d2}  ayaml-edit-0.2.0.crate\n",
+                    "contains a blank line",
+                ),
+            ):
+                with self.subTest(case=case_name):
+                    bad_dist = root / f"bad_{case_name}"
+                    bad_dist.mkdir()
+                    shutil.copy(ayaml_src, bad_dist / "ayaml-0.2.0.crate")
+                    shutil.copy(edit_src, bad_dist / "ayaml-edit-0.2.0.crate")
+                    (bad_dist / "SHA256SUMS").write_text(bad_sums, encoding="utf-8")
+                    bad_tag = f"v0.2.9-{case_name}"
+                    res = subprocess.run(
+                        [
+                            "bash",
+                            str(root / "tools/github_release.sh"),
+                            "release",
+                            bad_tag,
+                            "0.2.0",
+                            str(bad_dist),
+                            str(notes),
+                        ],
+                        cwd=root,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertNotEqual(res.returncode, 0)
+                    self.assertIn(expected_err, res.stderr)
+                    self.assertFalse(
+                        (state / "releases" / bad_tag).exists(),
+                        f"gh release create must not run when SHA256SUMS fails ({case_name})",
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

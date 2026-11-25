@@ -232,8 +232,9 @@ used again:
 
 1. **Ensure the matching `ayaml X.Y.Z` version is live on crates.io.** When cutting the first
    release tag that includes `ayaml-edit`, the workflow's `publish` job publishes `ayaml X.Y.Z`
-   via Trusted Publishing, verifies it on the sparse index, and then stops on `Mint a crates.io
-   token for ayaml-edit` because `ayaml-edit` does not exist on crates.io yet.
+   via Trusted Publishing, verifies it on the sparse index, mints an OIDC token covering only
+   crates that already trust `release.yml` (`ayaml`), and then stops on `Publish ayaml-edit`
+   because `ayaml-edit` does not exist on crates.io yet.
 2. **One-time initial publish from a clean tag checkout.** Create a temporary crates.io API token
    with the narrowest scope (`publish-new` only) and shortest expiry, check out the exact tagged
    commit with `RELEASE_TOOLCHAIN`, verify the packaged bytes match the workflow's `edit_digest`,
