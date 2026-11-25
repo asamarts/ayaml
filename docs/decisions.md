@@ -1133,3 +1133,27 @@ signature regressions across the `1.x` lifetime.
 **Consequences.** Any unintended removal of a public item, `Send`/`Sync`/`Unpin` bound, standard
 derive, or `ErrorCode` variant fails CI immediately; the `1.0.0` release PR only needs to drop the
 explicitly deprecated `0.x` shims and bump workspace crate versions after `AY-150` completes.
+
+## D105 — 1.0 Public comparative benchmark and migration-guide naming policy
+
+**Date:** 2026-11-24
+**Status:** Accepted
+
+**Decision.** Permit factual, reproducible references to other public YAML libraries in `ayaml`'s
+public documentation — specifically comparative 1.0 benchmark reports and ecosystem migration
+guides — while keeping all infrastructure guards (hostnames, runner names, local filesystem paths,
+personal identifiers, private repository names, and internal planning notes) strictly enforced by
+the leak gate.
+
+**Alternatives.** Keep comparison names blocked in public docs: prevents publishing honest 1.0
+competitive benchmarks and concrete side-by-side migration guides from existing Rust YAML crates.
+Drop the leak gate entirely: weakens protection against accidentally publishing infrastructure or
+private-planning details.
+
+**Why.** Production adopters evaluating `ayaml 1.0` need transparent, reproducible benchmark data
+and concrete migration guides from existing Rust YAML libraries. Scoping the leak-gate relaxation
+exclusively to public library names preserves every operational and privacy guarantee.
+
+**Consequences.** `AY-159`, `AY-160`, `AY-161`, and `AY-162` can publish reproducible comparative
+benchmark results and end-to-end tested migration guides on the refreshed documentation site, while
+all non-comparison leak-gate classes remain enforced on every push and pull request.
