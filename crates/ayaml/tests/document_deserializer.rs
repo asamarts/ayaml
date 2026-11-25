@@ -553,6 +553,7 @@ server:
 }
 
 #[test]
+#[allow(deprecated, reason = "tests deprecated 0.x *_with_limits shims")]
 fn document_deserializer_enforces_limits_and_compat_options() {
     // Invalid limits fail fast before parsing.
     for bad in [

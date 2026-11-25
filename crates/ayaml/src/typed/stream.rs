@@ -44,6 +44,7 @@ pub(super) fn read<'de, T: DeserializeSeed<'de>>(
     options: NodeOptions,
     seed: T,
 ) -> Result<T::Value, Error> {
+    limits.validate()?;
     let located = |error: Error| error.with_input_location(input, options.compat_flow);
     // An input over the limit is refused here as `parse_document` refuses it, before any work.
     limits.check_input(input.len()).map_err(|error| {

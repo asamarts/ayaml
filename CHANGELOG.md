@@ -4,6 +4,69 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Companion crate `ayaml-edit` providing verified, source-preserving YAML edits (`replace_scalar`,
+  `replace_scalar_with`, `remove_entry`, `remove_entry_with`, `apply_batch`, `apply_batch_with`,
+  `apply_edits`, `TextEdit`, `VerifiedEdit`, `EditOp`, `EditOptions`, `EditError`,
+  `EditErrorKind`), backed by value-tree and event-stream verification and checked against the
+  shared `tests/vectors/edit-order.json` contract vectors.
+- Opt-in YAML 1.1 merge-key expansion (`ParseOptions::merge_keys`,
+  `ParseOptions::with_merge_keys`) at the spanned event layer, preserving source spans, borrowed
+  slices, literal quoted `"<<"` / `!!str <<` keys, lexical anchor scoping, and pre-allocation
+  resource limits across `parse_events_with`, `parse_value_with`, `parse_documents_with`,
+  `from_str_with`, `from_str_seed_with`, `from_slice_with`, `from_reader_with`, `Deserializer`,
+  `DocumentDeserializer`, `SpannedTree`, and `parse_frontmatter*`.
+- Bounded I/O reader entry points (`from_reader`, `from_reader_with`, and deprecated
+  `from_reader_with_limits`) that validate limits first and read at most `max_input_bytes + 1`
+  bytes before rejecting oversized or infinite streams.
+- Frontmatter splitting and parsing helpers (`Frontmatter`, `FrontmatterDelimiter`,
+  `ParsedFrontmatter`, `split_frontmatter`, `split_frontmatter_with`, `parse_frontmatter`,
+  `parse_frontmatter_with`, `parse_frontmatter_value`, `parse_frontmatter_value_with`) preserving
+  exact byte offsets aligned with `LineIndex` and `SpannedTree`.
+- `DocumentDeserializer` (implementing `serde::Deserializer` by value and `&mut`) so Serde
+  middleware wrappers can wrap `ayaml`'s borrowed, span-preserving source deserializer directly.
+- `Spanned<T>` typed deserialization wrapper capturing exact YAML byte spans on both the
+  small-tree and event-stream paths while rejecting non-source and buffered deserializers.
+- `Value::apply_merge_keys_with_limits` enforcing `max_depth` and `max_collection_entries` on
+  post-parse merge-key expansion.
+- Documentation guides for YAML 1.1 migration (`docs/migration.md`), recipes (`docs/cookbook.md`),
+  and resource-limit sizing (`docs/limits-sizing.md`).
+- Pre-1.0 additive trait and `const fn` polish: `DerefMut` on `Spanned<T>`, `Hash` on `Chomping`,
+  `Frontmatter`, `ParsedFrontmatter`, `ayaml_edit::TextEdit`, and `ayaml_edit::EditErrorKind`,
+  and `PartialEq`/`Eq` + `const fn` constructors on `ayaml_edit::EditOptions`.
+
+### Changed
+
+- `SpannedTree::lookup` now returns `Some(alias_node)` (with `SpannedNode::is_alias() == true`
+  and `entry_span() == None`) for alias values instead of `None`, and `SpannedTree` now provides
+  exact `entry_span` values for compact mapping first keys on `- ` lines (when no intervening
+  comment would be deleted) and entries following safe block scalars.
+- `SpannedTree::parse_with` with `ParseOptions::with_merge_keys(true)` conservatively suppresses
+  `entry_span` across the tree so deleting a merged entry cannot mutate an anchored source
+  mapping.
+- `Deserializer::next` and `Deserializer::next_seed` now decode directly from spanned events
+  without composing an intermediate owned `Value`.
+
+### Deprecated
+
+- Newly added `*_with_limits` shims (`from_str_with_limits`, `from_slice_with_limits`,
+  `from_slice_borrowed_with_limits`, `from_reader_with_limits`,
+  `DocumentDeserializer::from_str_with_limits`, and
+  `DocumentDeserializer::from_str_compat_with_limits`) are deprecated alongside the existing
+  `*_with_limits` shims in favor of `*_with` taking `&ParseOptions` / `&compat::ParseOptions`
+  and are scheduled for removal in `1.0`. (`Value::apply_merge_keys_with_limits` takes no
+  `ParseOptions` and remains stable in `1.0`.)
+
+### Performance
+
+- Faster implicit mapping parsing, line-indent calculation, `EventCursor` line chunking, scanner
+  ASCII byte dispatch, plain scalar resolution, emitter scalar lookup tables, lookahead
+  collection size hints, token-arena release before large whole-built target reads, non-cloning
+  collection key comparisons, and linear-time complex-key resolution in `SpannedTree`.
+
 ## [0.2.3] — 2026-11-21
 
 ### Added

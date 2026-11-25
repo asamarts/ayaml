@@ -24,7 +24,7 @@ use std::sync::Once;
 use ayaml::{EmitOptions, Limits, LineIndex, SpannedTree, Value};
 use ayaml_bench::{
     BOUNDARY_IDS, BoundaryBorrowed, BoundaryOwned, DOMAIN_IDS, ERROR_IDS, FrontmatterBorrowed,
-    FrontmatterOwned, SCALING_IDS, STRUCTURAL_IDS, must_fixture, probe_line_index,
+    FrontmatterOwned, SCALING_IDS, STRUCTURAL_IDS, must_fixture, probe_line_index_queries,
     stream_cluster_borrowed, stream_cluster_owned, validate_all_scenarios,
 };
 use ayaml_fixtures::bulk_automation_files;
@@ -260,7 +260,8 @@ fn bench_spans(c: &mut Criterion) {
             BenchmarkId::new("line_index_queries", id),
             &fixture.content,
             |b, text| {
-                b.iter(|| black_box(probe_line_index(black_box(text))));
+                let index = LineIndex::new(text);
+                b.iter(|| black_box(probe_line_index_queries(black_box(text), black_box(&index))));
             },
         );
     }

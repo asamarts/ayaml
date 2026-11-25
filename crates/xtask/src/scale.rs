@@ -144,19 +144,13 @@ pub(crate) fn evaluate_scaling_step(
         large_median_ns: round3(large.median_ns),
         normalized_time_ratio: norm_time,
         small_peak_bytes: small.peak_bytes,
-        large_peak_bytes: large.large_peak_bytes_checked(),
+        large_peak_bytes: large.peak_bytes,
         normalized_peak_ratio: norm_peak,
         small_allocations: small.allocations,
         large_allocations: large.allocations,
         normalized_allocs_ratio: norm_allocs,
         passed,
     })
-}
-
-impl ScalePoint {
-    const fn large_peak_bytes_checked(&self) -> u64 {
-        self.peak_bytes
-    }
 }
 
 /// Measure median `ayaml::parse_value` time in nanoseconds over `samples` rounds (excluding 2 warmups).

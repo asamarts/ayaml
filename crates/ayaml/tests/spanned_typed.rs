@@ -167,6 +167,29 @@ labels:
 #[test]
 fn spanned_handles_aliases_tags_options_and_rejects_non_source_deserializers() {
     #[derive(Debug, Deserialize)]
+    struct OptionalAliasDoc {
+        base: Option<Spanned<u32>>,
+        copy: Option<Spanned<u32>>,
+    }
+    #[derive(Debug, Deserialize)]
+    struct FlattenedInner {
+        #[allow(dead_code, reason = "tests flatten forgery rejection")]
+        val: Spanned<u32>,
+    }
+    #[derive(Debug, Deserialize)]
+    struct FlattenedOuter {
+        #[serde(flatten)]
+        #[allow(dead_code, reason = "tests flatten forgery rejection")]
+        inner: FlattenedInner,
+    }
+    #[derive(Debug, Deserialize)]
+    #[serde(untagged)]
+    enum UntaggedSpoof {
+        #[allow(dead_code, reason = "tests untagged forgery rejection")]
+        Spanned(Spanned<u32>),
+    }
+
+    #[derive(Debug, Deserialize)]
     struct Item {
         x: Spanned<u32>,
     }
@@ -255,6 +278,25 @@ explicit_null: null
         value_err.to_string().contains("Spanned") || value_err.to_string().contains("spanned"),
         "{value_err}"
     );
+
+    // Option<Spanned<T>> preserves the alias use-site span (`*b`), matching Spanned<T>.
+    let opt_input = "base: &b 42\ncopy: *b\n";
+    let opt_doc: OptionalAliasDoc = ayaml::from_str(opt_input).expect("opt alias");
+    assert_eq!(opt_doc.base.unwrap().span().slice(opt_input), Some("42"));
+    assert_eq!(opt_doc.copy.unwrap().span().slice(opt_input), Some("*b"));
+
+    // Spoofed sentinel maps cannot forge arbitrary out-of-bounds Spans through from_value,
+    // serde_json, #[serde(flatten)], or #[serde(untagged)].
+    let spoof_yaml = "$__ayaml_private_start: 1000000\n$__ayaml_private_end: 2000000\n$__ayaml_private_value: 42\n";
+    let spoof_val = ayaml::parse_value(spoof_yaml).expect("parse spoof");
+    assert!(ayaml::from_value::<Spanned<u32>>(spoof_val).is_err());
+
+    let spoof_json = r#"{"$__ayaml_private_start": 1000000, "$__ayaml_private_end": 2000000, "$__ayaml_private_value": 42}"#;
+    assert!(serde_json::from_str::<Spanned<u32>>(spoof_json).is_err());
+
+    let flatten_spoof = "val:\n  $__ayaml_private_start: 1000000\n  $__ayaml_private_end: 2000000\n  $__ayaml_private_value: 42\n";
+    assert!(ayaml::from_str::<FlattenedOuter>(flatten_spoof).is_err());
+    assert!(ayaml::from_str::<UntaggedSpoof>(spoof_yaml).is_err());
 }
 
 proptest! {

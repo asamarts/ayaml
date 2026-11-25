@@ -71,13 +71,17 @@ impl<'a> SpannedTree<'a> {
     /// Parse one default-profile stream into a spanned tree with explicit
     /// parse options.
     ///
+    /// When `options.merge_keys` is enabled, merged entries keep the source [`Span`] of the
+    /// originating entry in the merged operand and [`SpannedNode::entry_span`] returns `None`
+    /// conservatively so deleting a merged entry can never mutate its anchored source mapping.
+    ///
     /// # Errors
     ///
     /// Returns an error for the same syntax and limit failures as
     /// [`crate::parse_events_with`].
     pub fn parse_with(input: &'a str, options: &ParseOptions) -> Result<Self, Error> {
         let events = crate::parse_events_with(input, options)?;
-        build(input, events)
+        build(input, events, options.merge_keys)
     }
 
     /// Parse one default-profile stream with explicit limits.
@@ -121,7 +125,7 @@ impl<'a> SpannedTree<'a> {
         options: &crate::compat::ParseOptions,
     ) -> Result<Self, Error> {
         let events = crate::compat::parse_events_with(input, options)?;
-        build(input, events)
+        build(input, events, false)
     }
 
     /// Parse one compatibility-profile stream with explicit limits.
@@ -244,6 +248,8 @@ impl SpannedNode<'_> {
     /// - every entry of an input that holds a byte-order mark past the marks that open it, be
     ///   it in a quoted scalar: what a mark that begins a line means depends on the lines
     ///   before it;
+    /// - every entry of a tree parsed with `ParseOptions::with_merge_keys(true)`, where expanded
+    ///   entries can originate from anchored source mappings outside the target mapping;
     /// - an entry after a block scalar when a following blank or comment line could be absorbed
     ///   by the scalar (for example, an empty or explicitly indented scalar, a keep-chomping
     ///   scalar followed by a blank line, a blank line with spaces, a tab-indented blank or
@@ -423,6 +429,7 @@ fn split_first_line(text: &str) -> (&str, &str) {
 fn build<'a>(
     input: &'a str,
     events: impl Iterator<Item = Result<Event<'a>, Error>>,
+    suppress_entry_spans: bool,
 ) -> Result<SpannedTree<'a>, Error> {
     let mut builder = Builder {
         input,
@@ -432,6 +439,7 @@ fn build<'a>(
         after_block_scalar: AfterBlockScalar::NONE,
         // A run of marks opens the input as one mark does.
         marked: input.trim_start_matches('\u{feff}').contains('\u{feff}'),
+        suppress_entry_spans,
     };
     for event in events {
         builder.event(event?)?;
@@ -455,6 +463,9 @@ struct Builder<'a> {
     /// a mark means depends on the lines before it, and no entry's removal is known to be
     /// exact.
     marked: bool,
+    /// Suppress all `entry_span`s conservatively (for example, when merge-key expansion replays
+    /// entries whose source spans point into anchored source mappings).
+    suppress_entry_spans: bool,
 }
 
 struct Frame<'a> {
@@ -703,9 +714,11 @@ impl<'a> Builder<'a> {
             }
         } else if !flow
             && !self.marked
+            && !self.suppress_entry_spans
             && !frame.anchored
             && !self.stack.iter().any(|outer| outer.anchored)
             && entries.len() >= 2
+            && !entries[0].ambiguous
             && entries[0].value.entry_span.is_none()
             && !entries[0].key.anchored
             && !entries[0].value.anchored
@@ -761,7 +774,8 @@ impl<'a> Builder<'a> {
         // An alias to a collection reads the entries inside it, so removing one of them changes
         // what the alias stands for.
         let marked = self.marked;
-        let aliased = marked || self.stack.iter().any(|frame| frame.anchored);
+        let aliased =
+            marked || self.suppress_entry_spans || self.stack.iter().any(|frame| frame.anchored);
         let Some(frame) = self.stack.last_mut() else {
             self.root = Some(node);
             return;
@@ -1038,8 +1052,19 @@ fn compact_first_entry_span(
     if next_colon <= next_key_end || input.get(next_first..next_colon)?.contains(['\n', '\r']) {
         return None;
     }
-    if end < next_line && value_indicator_follows(input, end) {
-        return None;
+    if end < next_line {
+        let between = input.get(end..next_line)?;
+        // Refuse if any comment or non-whitespace line stands between the first entry and the
+        // next key; deleting up to `next_first` would silently delete that intervening comment.
+        if !between
+            .bytes()
+            .all(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+        {
+            return None;
+        }
+        if value_indicator_follows(input, end) {
+            return None;
+        }
     }
     (next_first > first).then(|| Span::new(first, next_first))
 }

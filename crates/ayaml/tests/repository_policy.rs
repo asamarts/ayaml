@@ -429,6 +429,12 @@ fn every_place_that_repeats_the_version_agrees_with_the_workspace() {
         [version],
         "docs/compatibility.md's install line"
     );
+    let migration = read(&root, "docs/migration.md");
+    assert_eq!(
+        dependency_versions(&migration),
+        [version],
+        "docs/migration.md's install line"
+    );
     assert!(
         guide.contains(&format!(
             "ayaml = {{ version = \"{version}\", features = [\"libyaml-compat\"] }}"
@@ -447,6 +453,8 @@ fn every_place_that_repeats_the_version_agrees_with_the_workspace() {
         "crates/ayaml-bench/Cargo.toml",
         "crates/ayaml-conformance/Cargo.toml",
         "crates/ayaml-edit/Cargo.toml",
+        "crates/ayaml-fixtures/Cargo.toml",
+        "crates/xtask/Cargo.toml",
         "fuzz/Cargo.toml",
     ] {
         let text = read(&root, name);
@@ -458,6 +466,20 @@ fn every_place_that_repeats_the_version_agrees_with_the_workspace() {
         assert!(
             pins[0].contains(&format!("version = \"={version}\"")),
             "{name}: {}",
+            pins[0]
+        );
+    }
+    for (name, dep) in [
+        ("crates/ayaml-bench/Cargo.toml", "ayaml-fixtures = {"),
+        ("crates/xtask/Cargo.toml", "ayaml-fixtures = {"),
+        ("fuzz/Cargo.toml", "ayaml-edit = {"),
+    ] {
+        let text = read(&root, name);
+        let pins: Vec<&str> = text.lines().filter(|line| line.starts_with(dep)).collect();
+        assert_eq!(pins.len(), 1, "{name} ({dep}): {pins:?}");
+        assert!(
+            pins[0].contains(&format!("version = \"={version}\"")),
+            "{name} ({dep}): {}",
             pins[0]
         );
     }
@@ -956,6 +978,20 @@ fn fuzz_targets_and_harness_unit_tests_are_wired_in_ci() {
         matrix_targets, expected,
         ".github/workflows/fuzz.yml matrix must cover every fuzz target"
     );
+
+    let ci_local = read(&root, "tools/ci-local.sh");
+    let fuzz_readme = read(&root, "fuzz/README.md");
+    for target in &expected {
+        assert!(
+            ci_local.contains(&format!(" {target}")) || ci_local.contains(&format!(" {target};")),
+            "tools/ci-local.sh job_fuzz-smoke missing {target}"
+        );
+        assert!(
+            fuzz_readme.contains(&format!("fuzz run {target} "))
+                && fuzz_readme.contains(&format!("- `{target}`")),
+            "fuzz/README.md missing documentation for {target}"
+        );
+    }
 
     let ci_wf = read(&root, ".github/workflows/ci.yml");
     let harness_test_steps = steps_that_run(&ci_wf, &|step| {

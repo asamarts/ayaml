@@ -7,8 +7,11 @@ is ignored by Git and can hold notes specific to one machine.
 ## Layout
 
 - `crates/ayaml`: the library, including the optional `ayaml::compat` module.
-- `crates/ayaml-conformance`: the YAML Test Suite runner.
+- `crates/ayaml-edit`: verified, source-preserving YAML editing crate built on `ayaml`.
+- `crates/ayaml-conformance`: the YAML Test Suite runner and `book_doctests`.
+- `crates/ayaml-fixtures`: deterministic SHA-256-verified fixture catalog.
 - `crates/ayaml-bench`: timing benchmarks.
+- `crates/xtask`: workspace CLI for performance workflows (`bench`, `mem`, `det`, `scale`, `compare`, `gate`, `report`).
 - `tests/`: fixtures, the pinned suite, and real-world files.
 - `fuzz/`: `cargo-fuzz` targets and seeds.
 - `tools/`: local CI, allocation and instruction checks, the dependency and unsafe-code

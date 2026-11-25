@@ -225,6 +225,7 @@ fn readers() -> Vec<Reader> {
     readers
 }
 
+#[allow(deprecated, reason = "tests deprecated 0.x *_with_limits shims")]
 fn extra_typed_readers() -> [Reader; 7] {
     [
         Reader {
@@ -1013,4 +1014,58 @@ fn compat_typed_readers_honor_every_single_document_limit() {
             }
         }
     }
+}
+
+#[test]
+fn invalid_limits_take_precedence_over_input_size_and_root_size_hint_is_clamped() {
+    #[derive(Debug)]
+    struct HintProbe;
+    impl<'de> serde::Deserialize<'de> for HintProbe {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct V;
+            impl<'de> serde::de::Visitor<'de> for V {
+                type Value = HintProbe;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("seq")
+                }
+                fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                    self,
+                    mut seq: A,
+                ) -> Result<Self::Value, A::Error> {
+                    if let Some(hint) = seq.size_hint() {
+                        assert!(
+                            hint <= 4,
+                            "root flow size_hint must be clamped to max_collection_entries (got {hint})"
+                        );
+                    }
+                    while seq.next_element::<IgnoredAny>()?.is_some() {}
+                    Ok(HintProbe)
+                }
+            }
+            deserializer.deserialize_seq(V)
+        }
+    }
+
+    let bad = Limits::new()
+        .with_max_depth(ayaml::MAX_DEPTH_CAP + 1)
+        .with_max_input_bytes(1);
+    let opts = ParseOptions::new().with_limits(bad);
+    let over = "a: 1\nb: 2\n";
+    for err in [
+        ayaml::parse_value_with(over, &opts).unwrap_err(),
+        ayaml::from_str_with::<Value>(over, &opts).unwrap_err(),
+        ayaml::from_slice_with::<Value>(over.as_bytes(), &opts).unwrap_err(),
+        ayaml::from_reader_with::<_, Value>(over.as_bytes(), &opts).unwrap_err(),
+        ayaml::DocumentDeserializer::from_str_with(over, &opts).unwrap_err(),
+    ] {
+        assert_eq!(err.code(), ayaml::ErrorCode::InvalidLimits);
+    }
+
+    // Streaming typed path (> 4 KiB) clamps root flow collection size_hint() to
+    // `max_collection_entries` so a custom Deserialize visitor never pre-allocates past the limit.
+    let wide_flow = format!("[{}1]", "1,".repeat(3_000));
+    assert!(wide_flow.len() > 4096);
+    let tight = ParseOptions::new().with_limits(Limits::new().with_max_collection_entries(4));
+    let err = ayaml::from_str_with::<HintProbe>(&wide_flow, &tight).expect_err("over entries");
+    assert_eq!(err.code(), ayaml::ErrorCode::CollectionEntriesLimit);
 }

@@ -539,10 +539,15 @@ impl<'de> Deserializer<'de> for ValueDeserializer {
     /// A struct reads only a mapping. A sequence does not fill its fields by position.
     fn deserialize_struct<V: Visitor<'de>>(
         self,
-        _name: &'static str,
-        _fields: &'static [&'static str],
+        name: &'static str,
+        fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
+        if name == crate::span::SPANNED_TOKEN && fields == crate::span::SPANNED_FIELDS {
+            return Err(serde::de::Error::custom(
+                "Spanned<T> requires an ayaml source-backed deserializer; `from_value` does not carry source spans",
+            ));
+        }
         match untagged(self.value) {
             Value::Mapping(value) => ValueDeserializer {
                 value: Value::Mapping(value),

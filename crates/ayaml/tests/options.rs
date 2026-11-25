@@ -1,3 +1,8 @@
+#![allow(
+    deprecated,
+    reason = "options contract suite explicitly verifies deprecated 0.x *_with_limits/_with_options/_with_styles shims"
+)]
+
 //! Contracts for the unified options API (`ParseOptions`, `compat::ParseOptions`,
 //! `EmitOptions`), every `*_with` entry point, and compatibility of every deprecated
 //! combination function through `0.x`.

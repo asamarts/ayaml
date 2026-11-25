@@ -200,6 +200,12 @@ final:
         .span_at(&[PathSegment::key("final"), PathSegment::key("k5")])
         .expect("k5 span");
     assert_eq!(k5_span.slice(input), Some("from_c"));
+    // Merged trees suppress entry_span conservatively so deleting a merged entry cannot mutate
+    // its anchored source mapping.
+    assert_eq!(
+        tree.entry_span_at(&[PathSegment::key("final"), PathSegment::key("k5")]),
+        None
+    );
 
     // Typed Serde error on a merged value points back to the original source span!
     let err = ayaml::from_str_with::<ExpectInt>(input, &MERGE).expect_err("type error");
@@ -288,25 +294,154 @@ ref_kept: *kept
         ErrorCode::TrailingDocuments
     );
 
-    // Multi-document `parse_documents_with` shares the alias dereference budget between merge
-    // expansion and regular alias composition.
-    let tight_aliases = ParseOptions::new()
+    // Multi-document `parse_documents_with` and `Deserializer::from_str_with` share one alias
+    // dereference budget between merge expansion and regular alias composition without
+    // double-charging merged entries.
+    let two_aliases = ParseOptions::new()
         .with_limits(Limits::new().with_max_alias_dereferences(2))
         .with_merge_keys(true);
-    let over_budget_multi = "\
+    let one_alias = ParseOptions::new()
+        .with_limits(Limits::new().with_max_alias_dereferences(1))
+        .with_merge_keys(true);
+    let two_alias_doc = "\
 a: &a
   x: 1
+  y: 2
+  z: 3
 b:
   <<: *a
 c: *a
 ";
-    let err = ayaml::parse_documents_with(over_budget_multi, &tight_aliases)
-        .expect_err("shared alias budget");
+    // Exactly two alias dereferences (`<<: *a` and `c: *a`) fit within limit 2 regardless of
+    // how many keys `&a` holds.
+    assert!(ayaml::parse_documents_with(two_alias_doc, &two_aliases).is_ok());
+    let mut cursor_ok = Deserializer::from_str_with(two_alias_doc, &two_aliases).expect("cursor");
+    assert!(cursor_ok.next_borrowed::<Value>().expect("doc").is_some());
+
+    // Limit 1 rejects the second alias dereference on both `parse_documents_with` and
+    // `Deserializer::from_str_with`.
+    let err =
+        ayaml::parse_documents_with(two_alias_doc, &one_alias).expect_err("shared alias budget");
     assert_eq!(err.kind(), ErrorKind::Limit);
     assert_eq!(
         err.limit().map(ayaml::LimitExceeded::kind),
         Some(LimitKind::AliasDereferences)
     );
+    let mut cursor_tight = Deserializer::from_str_with(two_alias_doc, &one_alias).expect("cursor");
+    let cursor_err = cursor_tight
+        .next_borrowed::<Value>()
+        .expect_err("cursor shares alias budget with merge expansion");
+    assert_eq!(cursor_err.kind(), ErrorKind::Limit);
+    assert_eq!(
+        cursor_err.limit().map(ayaml::LimitExceeded::kind),
+        Some(LimitKind::AliasDereferences)
+    );
+
+    // Alias-free inline merges charge zero alias dereferences.
+    let zero_aliases = ParseOptions::new()
+        .with_limits(Limits::new().with_max_alias_dereferences(0))
+        .with_merge_keys(true);
+    let inline_only = "out:\n  <<:\n    k1: 1\n    k2: 2\n";
+    let inline_val = ayaml::parse_value_with(inline_only, &zero_aliases).expect("inline merge");
+    assert_eq!(inline_val["out"]["k1"].as_u64(), Some(1));
+    assert_eq!(inline_val["out"]["k2"].as_u64(), Some(2));
+}
+
+#[test]
+fn merge_keys_preserves_lexical_scoping_tags_inline_validation_and_stream_parity() {
+    // 1. Anchor redefinition between source mapping and merge site keeps lexical value.
+    let redef = "v1: &v 1\nbase: &base\n  a: *v\nv2: &v 2\nmerged:\n  <<: *base\n";
+    let val = ayaml::parse_value_with(redef, &MERGE).expect("lexical redef");
+    assert_eq!(val["merged"]["a"].as_u64(), Some(1));
+
+    // 2. Redefining an outer anchor on the merge target does not create a spurious cycle.
+    let non_cyclic = "first: &x 1\nbase: &base\n  val: *x\nsecond: &x\n  <<: *base\n";
+    let val = ayaml::parse_value_with(non_cyclic, &MERGE).expect("non-cyclic anchor reuse");
+    assert_eq!(val["second"]["val"].as_u64(), Some(1));
+
+    // 3. Own key referencing an anchor defined inside a preceding inline merge operand works.
+    let inline_before = "merged:\n  <<:\n    a: &inner 1\n  b: *inner\n";
+    let val = ayaml::parse_value_with(inline_before, &MERGE).expect("inline anchor before own");
+    assert_eq!(val["merged"]["a"].as_u64(), Some(1));
+    assert_eq!(val["merged"]["b"].as_u64(), Some(1));
+
+    // 4. Overridden inline merge entry defining an anchor used by a sibling keeps lexical value.
+    let overridden_anchor = "merged:\n  <<:\n    a: &inner 1\n    b: *inner\n  a: 2\n";
+    let val = ayaml::parse_value_with(overridden_anchor, &MERGE).expect("overridden inline anchor");
+    assert_eq!(val["merged"]["a"].as_u64(), Some(2));
+    assert_eq!(val["merged"]["b"].as_u64(), Some(1));
+
+    // 5. Anchor on the inline merge operand itself stays usable by later aliases.
+    let anchored_operand = "a:\n  <<: &m\n    x: 1\nb: *m\n";
+    let val = ayaml::parse_value_with(anchored_operand, &MERGE).expect("anchored inline operand");
+    assert_eq!(val["a"]["x"].as_u64(), Some(1));
+    assert_eq!(val["b"]["x"].as_u64(), Some(1));
+
+    // 6. Tagged complex keys stay distinct during merge deduplication.
+    let tagged_keys =
+        "base: &b\n  ? !tagA [1]\n  : from_base\nout:\n  <<: *b\n  ? !tagB [1]\n  : from_out\n";
+    let val = ayaml::parse_value_with(tagged_keys, &MERGE).expect("tagged complex keys");
+    assert_eq!(val["out"].as_mapping().expect("map").len(), 2);
+
+    // 7. Duplicate keys and invalid overridden scalars/aliases inside inline operands fail cleanly.
+    assert_eq!(
+        ayaml::parse_value_with("out:\n  <<:\n    x: 1\n    x: 2\n", &MERGE)
+            .expect_err("dup in inline operand")
+            .code(),
+        ErrorCode::DuplicateKey
+    );
+    assert_eq!(
+        ayaml::parse_value_with("out:\n  x: 1\n  <<:\n    x: !!int bad\n", &MERGE)
+            .expect_err("invalid int in overridden inline operand")
+            .code(),
+        ErrorCode::InvalidIntScalar
+    );
+    assert_eq!(
+        ayaml::parse_value_with("out:\n  x: 1\n  <<:\n    x: *missing\n", &MERGE)
+            .expect_err("dangling alias in overridden inline operand")
+            .code(),
+        ErrorCode::UnknownAnchor
+    );
+
+    // 8. Custom-tagged merge operands are rejected with InvalidMergeOperand.
+    for bad in [
+        "out:\n  <<: !custom { x: 1 }\n",
+        "out:\n  <<: !custom [{ x: 1 }]\n",
+    ] {
+        assert_eq!(
+            ayaml::parse_value_with(bad, &MERGE).expect_err(bad).code(),
+            ErrorCode::InvalidMergeOperand
+        );
+    }
+
+    // 9. MergedEventStream is fused after returning an error and preserves BOM StreamStart span.
+    let mut stream = ayaml::parse_events_with("a:\n  <<: 1\n---\nb: 2\n", &MERGE).expect("stream");
+    assert!(matches!(stream.next(), Some(Ok(Event::StreamStart { .. }))));
+    assert!(matches!(stream.next(), Some(Err(_))));
+    assert!(stream.next().is_none(), "stream must fuse after error");
+
+    let mut bom_stream = ayaml::parse_events_with("\u{feff}a: 1\n", &MERGE).expect("bom stream");
+    assert!(matches!(
+        bom_stream.next(),
+        Some(Ok(Event::StreamStart { span })) if span == ayaml::Span::empty(3)
+    ));
+
+    // 10. Single-document merge readers reject trailing documents before expanding doc 2.
+    let trailing_bad = "a: 1\n---\nb:\n  <<: 123\n";
+    assert_eq!(
+        ayaml::parse_value_with(trailing_bad, &MERGE)
+            .expect_err("trailing before doc2 merge")
+            .code(),
+        ErrorCode::TrailingDocuments
+    );
+
+    // 11. Alias-key depth does not falsely trigger DuplicateKey at tight max_depth.
+    let alias_key_depth = "s: &s x\nk: &k [*s]\n? *k\n: from_out\n<<:\n  ? *k\n  : from_base\n";
+    let depth2 = ParseOptions::new()
+        .with_limits(Limits::new().with_max_depth(2))
+        .with_merge_keys(true);
+    let val = ayaml::parse_value_with(alias_key_depth, &depth2).expect("alias key at depth 2");
+    assert_eq!(val.as_mapping().expect("map").len(), 3);
 }
 
 proptest! {

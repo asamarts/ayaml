@@ -24,6 +24,8 @@ jobs:
         run: |
           set -euo pipefail
           ( ulimit -v 8388608; timeout -k 5 900 nice -n 10 env PROPTEST_CASES=16384 cargo test -p ayaml --locked --release --all-features --test properties -- --nocapture )
+          ( ulimit -v 8388608; timeout -k 5 600 nice -n 10 env PROPTEST_CASES=2048 cargo test -p ayaml --locked --release --all-features --test frontmatter --test spanned_typed --test merge_keys )
+          ( ulimit -v 8388608; timeout -k 5 600 nice -n 10 env PROPTEST_CASES=2048 cargo test -p ayaml-edit --locked --release --test edits )
       - name: Run deep property tests (typed reads from events at every size)
         run: |
           set -euo pipefail

@@ -98,7 +98,7 @@ The production library has a stricter panic profile. It denies `unwrap_used`, `e
 `panic`, so fallible parsing and writing return errors and a panic is only allowed for a required
 trait contract with a narrow reason. Tests and development targets are not part of that profile.
 
-The separate `fuzz` workspace declares Rust 1.88 and mirrors the applicable policy. Its three
+The separate `fuzz` workspace declares Rust 1.88 and mirrors the applicable policy. Its ten
 fuzz targets forbid unsafe code; `memcount` is the one documented exception because a counting
 global allocator needs `unsafe`. Run the fuzz workspace's format and Clippy checks in both
 toolchain jobs.
@@ -141,19 +141,22 @@ today's `crates/`, `fuzz/`, and `tools/` directories.
 
 ## Scheduled checks
 
-Fuzzing and an advisory scan of the dependencies run every day. A fuzz run prints no input, and
-what it finds uploads encrypted (D74). `tools/check_scheduled_runs.py`
-runs later each day, and it opens an issue if either workflow failed, didn't run, or passed and left
-a sealed file. Close that issue by hand after reading what the run sealed, since a later green run
-doesn't read it, and closing it doesn't file the same problem again. GitHub turns off every schedule in a repository after 60 days with no activity, the check's own included,
-so run `tools/ci-local.sh scheduled` before a release.
+Fuzzing, dependency advisories, deep property testing, Miri, and Kani run daily, and bounded
+mutation testing runs weekly. A fuzz run prints no input, and what it finds uploads encrypted
+(D74). `tools/check_scheduled_runs.py` runs each day across all six scheduled workflows, and it
+opens an issue if any workflow failed, missed its freshness window, or passed and left a sealed
+file. Close that issue by hand after reading what the run sealed, since a later green run doesn't
+read it, and closing it doesn't file the same problem again. GitHub turns off every schedule in a
+repository after 60 days with no activity, the check's own included, so run
+`tools/ci-local.sh scheduled` before a release.
 
 ### Mutation testing triage
 
-`.github/workflows/mutants.yml` runs `cargo-mutants` weekly across eight shards on hosted runners
-under an 8 GiB virtual-memory ceiling (`ulimit -v 8388608`) and per-mutant timeout. Never run
-limit-disabling mutants on a shared host: `.cargo/mutants.toml` excludes `limits.rs` and
-resource-limit guards so no mutant can turn adversarial tests into memory exhaustion.
+`.github/workflows/mutants.yml` runs `cargo-mutants` weekly across sixteen shards on hosted runners
+under a 6 GiB per-process virtual-memory ceiling (`ulimit -v 6291456`, `--jobs 1`) and a 30-second
+per-mutant timeout. Never run limit-disabling mutants on a shared host: `.cargo/mutants.toml`
+excludes `limits.rs` and resource-limit guards so no mutant can turn adversarial tests into memory
+exhaustion.
 
 Each shard writes caught, missed, timeout, and unviable counts plus a kill-rate summary to the
 workflow step summary and uploads `mutants.out/` (including `summary.json` and `missed.txt`) for
@@ -191,9 +194,9 @@ recovery from a failed run, and how to verify a release.
 - **Unsafe code:** this workspace forbids it. The fuzz workspace's counting allocator
   is the one exception.
 - **Compatibility:** the default mode follows YAML 1.2.2. Behavior that imitates
-  libyaml belongs only in `ayaml::compat`, and libyaml is the one other parser the
-  documentation names. Describe behavior on its own terms, with literal expected
-  values in tests.
+  libyaml belongs only in `ayaml::compat`. Describe core behavior on its own terms with literal
+  expected values in tests; public comparative benchmarks and migration guides may name other
+  public YAML libraries with factual, reproducible data (see D105 in `docs/decisions.md`).
 - **Limits:** a new way to spend CPU or memory needs a limit, with tests just below,
   at, and above it.
 - **Plan:** tasks live under `aplan/tasks/`; `aplan check` validates their structure and

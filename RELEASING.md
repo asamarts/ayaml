@@ -77,10 +77,13 @@ These are done in the web interfaces by an owner. Each is recorded here once don
 
 1. In a pull request, set the workspace version in `Cargo.toml` and in each place that repeats
    it: the current release and the two install lines in `README.md`, the install lines in
-   `docs/index.md`, `docs/getting-started.md`, and `docs/compatibility.md`, and the exact `ayaml`
-   requirement in `crates/ayaml-bench/Cargo.toml`, `crates/ayaml-conformance/Cargo.toml`, and
-   `fuzz/Cargo.toml`. A policy test fails while one of them disagrees. Rename the
-   `CHANGELOG.md` and in its copy under `crates/ayaml`, and refresh `Cargo.lock` and
+   `docs/index.md`, `docs/getting-started.md`, `docs/compatibility.md`, and `docs/migration.md`,
+   and the exact `ayaml` / `ayaml-edit` / `ayaml-fixtures` requirements in
+   `crates/ayaml-bench/Cargo.toml`, `crates/ayaml-conformance/Cargo.toml`,
+   `crates/ayaml-edit/Cargo.toml`, `crates/ayaml-fixtures/Cargo.toml`,
+   `crates/xtask/Cargo.toml`, and `fuzz/Cargo.toml`. A policy test fails while one of them
+   disagrees. Rename `## [Unreleased]` to `## [VERSION] — YYYY-MM-DD` in `CHANGELOG.md` and in
+   its copy under `crates/ayaml/CHANGELOG.md`, and refresh `Cargo.lock` and
    `fuzz/Cargo.lock`. Make sure any breaking or signature change since the last release tag is
    named in that release's `### Changed` section so the public API gate passes both on the release
    pull request and on the tag. For a minor release, say in `SECURITY.md` which versions get fixes.

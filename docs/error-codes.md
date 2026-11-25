@@ -79,7 +79,7 @@ failed.
 
 | Variant | Code | Usual `ErrorKind` | Meaning |
 | --- | --- | --- | --- |
-| `InvalidUtf8` | `yaml.invalid-utf8` | `InvalidEncoding` | Input bytes passed to `from_slice` or `from_slice_with` are not valid UTF-8. |
+| `InvalidUtf8` | `yaml.invalid-utf8` | `InvalidEncoding` | Input bytes passed to `from_slice*` or `from_reader*` are not valid UTF-8. |
 
 ## Scanner
 
@@ -114,8 +114,8 @@ failed.
 | `TrailingContent` | `yaml.trailing-content` | `Parser` | Unexpected tokens appear after the document root without a new document start marker. |
 | `InvalidBlockIndentation` | `yaml.invalid-block-indentation` | `Parser` | A block sequence or mapping entry is indented inconsistently with its enclosing block structure. |
 | `MissingMappingColon` | `yaml.missing-mapping-colon` | `Parser` | A line inside a block mapping has no `:` value indicator. |
-| `TrailingDocuments` | `yaml.trailing-documents` | `Parser` | A single-document reader (`parse_value`, `from_str`, `from_slice`, `from_str_seed`, or their `_with` and `compat` forms) encountered a second document in the stream. |
-| `UnexpectedToken` | `yaml.unexpected-token` | `Parser`, `Scanner` | An unexpected token appeared in node, mapping key, or post-node position. Also the default code for `ErrorKind::Parser` and `ErrorKind::Scanner`. |
+| `TrailingDocuments` | `yaml.trailing-documents` | `Parser` | A single-document reader (`parse_value`, `from_str`, `from_slice`, `from_reader`, `from_str_seed`, `DocumentDeserializer`, `parse_frontmatter*`, or their `_with` and `compat` forms) encountered a second document in the stream. |
+| `UnexpectedToken` | `yaml.unexpected-token` | `Parser`, `Scanner` | An unexpected token appeared in node, mapping key, or post-node position (or frontmatter was missing a closing `---`/`...` delimiter). Also the default code for `ErrorKind::Parser` and `ErrorKind::Scanner`. |
 | `UnexpectedMappingValue` | `yaml.unexpected-mapping-value` | `Parser` | An unexpected token or nested mapping value (`:`) appeared where a single mapping value was expected. |
 | `UnterminatedFlowCollection` | `yaml.unterminated-flow-collection` | `Parser` | A flow sequence (`[...]`) or flow mapping (`{...}`) reached end of input without its closing bracket. |
 | `InvalidFlowCollection` | `yaml.invalid-flow-collection` | `Parser` | A flow collection is missing a `,` or closing bracket, has an empty entry, or has a mismatched bracket. |
@@ -131,7 +131,7 @@ failed.
 | `UnknownAnchor` | `yaml.unknown-anchor` | `Composition`, `Alias` | An alias refers to an anchor name that was not defined earlier in the same document. Also the default code for `ErrorKind::Alias`. |
 | `CyclicAlias` | `yaml.cyclic-alias` | `Composition`, `Alias` | An alias refers to an enclosing collection whose anchor has not yet closed. |
 | `DuplicateKey` | `yaml.duplicate-key` | `DuplicateKey`, `Serde` | A mapping contains two semantically equal keys during YAML composition or Serde serialization. |
-| `InvalidMergeOperand` | `yaml.invalid-merge-operand` | `Composition` | A merge key (`<<`) evaluated by `Value::apply_merge_keys` has a value that is neither a mapping nor a sequence of mappings. |
+| `InvalidMergeOperand` | `yaml.invalid-merge-operand` | `Composition` | A merge key (`<<`) evaluated by `Value::apply_merge_keys*` or `ParseOptions::with_merge_keys(true)` has a value that is neither a mapping nor a sequence of mappings. |
 | `MalformedEventStream` | `yaml.malformed-event-stream` | `Composition` | An event stream handed to composition is structurally unbalanced or incomplete. Also the default code for `ErrorKind::Composition`. |
 
 ## Scalar resolution
@@ -188,4 +188,4 @@ All limit-exceeded errors also attach a structured `LimitExceeded` value accessi
 | `InvalidEmitterOptions` | `yaml.invalid-emitter-options` | `Emitter` | Emitter options failed validation (for example, `indent` outside `2..=9`). |
 | `UnsupportedTag` | `yaml.unsupported-tag` | `Emitter` | A tag cannot be written as valid YAML, wraps an already-tagged payload, or conflicts with the scalar value's YAML 1.2 Core Schema rule. |
 | `InvalidEmitEvent` | `yaml.invalid-emit-event` | `Emitter` | An event stream handed to `to_string_events*`, `to_writer_events*`, or `to_writer_event_stream*` is malformed, has an unwritable anchor/alias/directive, or references an undefined alias. Also the default code for `ErrorKind::Emitter`. |
-| `Io` | `yaml.io` | `Io` | Writing YAML output to a `std::io::Write` sink returned an I/O error. |
+| `Io` | `yaml.io` | `Io` | Reading YAML input from a `std::io::Read` source (`from_reader*`) or writing YAML output to a `std::io::Write` sink returned an I/O error. |

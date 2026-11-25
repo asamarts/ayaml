@@ -35,6 +35,7 @@ impl Read for FailingReader {
 /// Bounded reader entry points reject infinite and oversized streams after reading at most
 /// `max_input_bytes + 1` bytes, and propagate I/O errors cleanly.
 #[test]
+#[allow(deprecated, reason = "tests deprecated 0.x *_with_limits shims")]
 fn from_reader_rejects_infinite_and_oversized_streams_boundedly() {
     in_child!(|| {
         // Default limits bound an infinite stream to max_input_bytes + 1 bytes.

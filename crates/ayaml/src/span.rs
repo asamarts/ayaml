@@ -5,6 +5,7 @@
 //! bytes, Unicode scalar values, or UTF-16 code units. A [`Position`] counts
 //! from zero, for a machine; a [`Location`] counts from one, for a person.
 
+use std::cell::Cell;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Deref, Range};
@@ -18,6 +19,34 @@ pub(crate) const SPANNED_END_FIELD: &str = "$__ayaml_private_end";
 pub(crate) const SPANNED_VALUE_FIELD: &str = "$__ayaml_private_value";
 pub(crate) const SPANNED_FIELDS: &[&str] =
     &[SPANNED_START_FIELD, SPANNED_END_FIELD, SPANNED_VALUE_FIELD];
+
+thread_local! {
+    static TRUSTED_SPANNED_SPAN: Cell<Option<Span>> = const { Cell::new(None) };
+}
+
+/// Scoped RAII token proving that [`Spanned::deserialize`] is being driven directly by
+/// `ayaml`'s source-backed deserializer rather than a buffered or foreign map deserializer
+/// (such as `from_value`, `serde_json`, `#[serde(flatten)]`, or `#[serde(untagged)]`).
+pub(crate) struct TrustedSpanGuard {
+    previous: Option<Span>,
+}
+
+impl TrustedSpanGuard {
+    pub(crate) fn enter(span: Span) -> Self {
+        let previous = TRUSTED_SPANNED_SPAN.with(|cell| cell.replace(Some(span)));
+        Self { previous }
+    }
+}
+
+impl Drop for TrustedSpanGuard {
+    fn drop(&mut self) {
+        TRUSTED_SPANNED_SPAN.with(|cell| cell.set(self.previous));
+    }
+}
+
+fn take_trusted_span() -> Option<Span> {
+    TRUSTED_SPANNED_SPAN.with(Cell::take)
+}
 
 /// A byte offset with one-based line and column values.
 ///
@@ -241,9 +270,11 @@ impl From<Range<usize>> for Span {
 ///   opening token through closing token, matching [`SpannedTree::span_at`](crate::SpannedTree::span_at).
 /// - **Borrowed strings:** `Spanned<&'a str>` borrows directly from the YAML source when the
 ///   underlying scalar is borrowable.
-/// - **Non-`ayaml` deserializers and [`from_value`](crate::from_value):** Deserializers that do
-///   not carry YAML source spans (such as `serde_json` or [`from_value`](crate::from_value))
-///   return a Serde error rather than fabricating a placeholder span.
+/// - **Non-`ayaml` deserializers, [`from_value`](crate::from_value), and buffered Serde
+///   attributes:** Deserializers that do not carry YAML source spans (such as `serde_json`,
+///   [`from_value`](crate::from_value), or Serde's internal buffering used by
+///   `#[serde(flatten)]`, `#[serde(untagged)]`, and `#[serde(tag = "...")]`) return a Serde
+///   error rather than fabricating or accepting spoofed spans.
 /// - **Serialization:** [`Serialize`] writes the inner value transparently so structs containing
 ///   `Spanned<T>` fields round-trip cleanly through [`to_string`](crate::to_string).
 ///
@@ -394,6 +425,12 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Spanned<T> {
                     }
                 }
 
+                let Some(trusted_span) = take_trusted_span() else {
+                    return Err(de::Error::custom(
+                        "Spanned<T> requires an ayaml source-backed deserializer",
+                    ));
+                };
+
                 let mut start: Option<usize> = None;
                 let mut end: Option<usize> = None;
                 let mut value: Option<T> = None;
@@ -401,19 +438,25 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Spanned<T> {
                     match key {
                         Field::Start => {
                             if start.is_some() {
-                                return Err(de::Error::duplicate_field(SPANNED_START_FIELD));
+                                return Err(de::Error::custom(
+                                    "Spanned<T> requires an ayaml source-backed deserializer",
+                                ));
                             }
                             start = Some(map.next_value()?);
                         }
                         Field::End => {
                             if end.is_some() {
-                                return Err(de::Error::duplicate_field(SPANNED_END_FIELD));
+                                return Err(de::Error::custom(
+                                    "Spanned<T> requires an ayaml source-backed deserializer",
+                                ));
                             }
                             end = Some(map.next_value()?);
                         }
                         Field::Value => {
                             if value.is_some() {
-                                return Err(de::Error::duplicate_field(SPANNED_VALUE_FIELD));
+                                return Err(de::Error::custom(
+                                    "Spanned<T> requires an ayaml source-backed deserializer",
+                                ));
                             }
                             value = Some(map.next_value()?);
                         }
@@ -424,8 +467,13 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Spanned<T> {
                         "Spanned<T> requires an ayaml source-backed deserializer",
                     ));
                 };
+                if start != trusted_span.start() || end != trusted_span.end() {
+                    return Err(de::Error::custom(
+                        "Spanned<T> requires an ayaml source-backed deserializer",
+                    ));
+                }
                 Ok(Spanned {
-                    span: Span::new(start, end),
+                    span: trusted_span,
                     value,
                 })
             }

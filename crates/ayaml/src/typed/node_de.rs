@@ -234,7 +234,7 @@ impl<'src, 'de, M: StrMode<'src, 'de>> Deserializer<'de> for NodeDeserializer<'s
             visitor.visit_none()
         } else {
             visitor
-                .visit_some(NodeDeserializer::<M>::with_mode(node))
+                .visit_some(self)
                 .map_err(|error| with_span(error, span))
         }
     }
@@ -326,6 +326,7 @@ impl<'src, 'de, M: StrMode<'src, 'de>> Deserializer<'de> for NodeDeserializer<'s
             // Preserve the outer node's full span (e.g. alias use-site span or full collection
             // span) before resolving aliases.
             let span = self.node.full_span();
+            let _guard = crate::span::TrustedSpanGuard::enter(span);
             return visitor
                 .visit_map(SpannedMapAccess::<M> {
                     node: self.node,

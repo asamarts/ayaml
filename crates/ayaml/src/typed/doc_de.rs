@@ -67,7 +67,7 @@ impl<'de> DocumentDeserializer<'de> {
         reason = "DocumentDeserializer borrows from input with lifetime 'de, which std::str::FromStr cannot express"
     )]
     pub fn from_str(input: &'de str) -> Result<Self, Error> {
-        Self::from_str_with_limits(input, &Limits::default_profile())
+        Self::from_str_with(input, &ParseOptions::new())
     }
 
     /// Parse one YAML document with explicit parse options and return a [`serde::Deserializer`]
@@ -99,7 +99,7 @@ impl<'de> DocumentDeserializer<'de> {
                 compat_errors: false,
             });
         }
-        Self::from_str_with_limits(input, &options.limits)
+        Self::parse_default(input, &options.limits)
     }
 
     /// Parse one YAML document with explicit limits and return a [`serde::Deserializer`] backed
@@ -110,7 +110,15 @@ impl<'de> DocumentDeserializer<'de> {
     /// Returns an error when `limits` is invalid, when `input` is invalid YAML or contains
     /// trailing documents, or when a configured resource limit is exceeded.
     #[inline]
+    #[deprecated(
+        note = "use `DocumentDeserializer::from_str_with` with `ParseOptions`; deprecated through 0.x and will be removed in 1.0"
+    )]
     pub fn from_str_with_limits(input: &'de str, limits: &Limits) -> Result<Self, Error> {
+        Self::parse_default(input, limits)
+    }
+
+    #[inline]
+    fn parse_default(input: &'de str, limits: &Limits) -> Result<Self, Error> {
         limits.validate()?;
         let options = NodeOptions::default();
         let node = parse_document(input, limits, options)
@@ -176,6 +184,9 @@ impl<'de> DocumentDeserializer<'de> {
     #[cfg(feature = "libyaml-compat")]
     #[cfg_attr(docsrs, doc(cfg(feature = "libyaml-compat")))]
     #[inline]
+    #[deprecated(
+        note = "use `DocumentDeserializer::from_str_compat_with` with `compat::ParseOptions`; deprecated through 0.x and will be removed in 1.0"
+    )]
     pub fn from_str_compat_with_limits(input: &'de str, limits: &Limits) -> Result<Self, Error> {
         let options = crate::compat::ParseOptions::new().with_limits(limits.clone());
         Self::from_str_compat_with(input, &options)

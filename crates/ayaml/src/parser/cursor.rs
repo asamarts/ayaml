@@ -74,6 +74,31 @@ impl<'a> EventCursor<'a> {
         })
     }
 
+    /// Consume the scanner's `StreamStart` token (preserving any leading BOM offset) once.
+    pub(crate) fn take_stream_start_span(&mut self) -> Result<Span, Error> {
+        if self.stream_started {
+            return Ok(Span::empty(0));
+        }
+        self.stream_started = true;
+        let result = (|| {
+            let span = match self.scanner.next_token()? {
+                Some(token) if matches!(token.kind, TokenKind::StreamStart) => token.span,
+                _ => Span::empty(0),
+            };
+            self.events += 1;
+            self.limits
+                .check_events(self.events)
+                .map_err(|error| self.limit_at(span, error))?;
+            Ok(span)
+        })()
+        .map_err(|error: Error| error.with_location_from(&self.positions, self.input));
+        if result.is_err() {
+            self.stream_ended = true;
+            self.queue.clear();
+        }
+        result
+    }
+
     /// Take the next document's events without copying through `self.queue` when possible.
     pub(crate) fn next_document(&mut self) -> Result<Option<Vec<Event<'a>>>, Error> {
         let result = self

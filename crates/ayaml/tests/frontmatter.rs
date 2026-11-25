@@ -218,6 +218,30 @@ fn rejects_missing_closing_delimiter_and_enforces_limits() {
         Some(LimitKind::InputBytes)
     );
 
+    // Oversized comment on the closing delimiter line also fails boundedly with InputBytes.
+    let long_close_comment = format!("---\na: 1\n--- #{}\nbody\n", "c".repeat(4096));
+    let error = ayaml::split_frontmatter_with(&long_close_comment, &small_opts)
+        .expect_err("long closing comment");
+    assert_eq!(error.kind(), ErrorKind::Limit);
+    assert_eq!(
+        error.limit().map(ayaml::LimitExceeded::kind),
+        Some(LimitKind::InputBytes)
+    );
+
+    // Bare CR (`\r`) line breaks work consistently with YAML 1.2.2 and LineIndex.
+    for (doc, expected_body) in [
+        ("---\ra: 1\r---\rbody", "body"),
+        ("---\na: 1\r---\nbody\n", "body\n"),
+        ("---\na: 1\n---\rbody", "body"),
+    ] {
+        let parsed = ayaml::parse_frontmatter_value(doc)
+            .expect("cr frontmatter")
+            .expect("some");
+        assert_eq!(parsed.frontmatter["a"].as_u64(), Some(1));
+        assert_eq!(parsed.body, expected_body);
+        assert_eq!(&doc[parsed.body_offset..], parsed.body);
+    }
+
     // Depth and other parser limits are enforced when parsing frontmatter.
     let depth_opts = ParseOptions::new().with_limits(Limits::new().with_max_depth(1));
     let error = ayaml::parse_frontmatter_value_with("---\na: [1, 2]\n---\nbody\n", &depth_opts)
