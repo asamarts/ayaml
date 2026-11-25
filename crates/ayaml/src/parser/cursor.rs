@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 
-use super::{Line, Lines, drop_truncated_block_line, parse_lines};
+use super::{Line, Lines, parse_lines};
 use crate::error::Error;
 use crate::event::{Event, ScalarStyle};
 use crate::limits::Limits;
@@ -41,6 +41,8 @@ pub(crate) struct EventCursor<'a> {
     /// Scanner errors hold only owned metadata (no dynamic `source`), so wrapping in
     /// `AssertUnwindSafe` preserves `EventStream` and `Deserializer`'s `UnwindSafe` auto-trait.
     scanner_error: Option<AssertUnwindSafe<Error>>,
+    /// Whether the final line scanned before `scanner_error` was truncated mid-line.
+    truncated_last_line: bool,
 }
 
 impl<'a> EventCursor<'a> {
@@ -87,6 +89,7 @@ impl<'a> EventCursor<'a> {
             compat,
             single_document: false,
             scanner_error: None,
+            truncated_last_line: false,
         })
     }
 
@@ -308,6 +311,13 @@ impl<'a> EventCursor<'a> {
                 }
             })
             .unwrap_or(self.input.len());
+        let (scanner_error, truncated_last_line) = if self.pending_line.is_none() {
+            let truncated = self.truncated_last_line;
+            self.truncated_last_line = false;
+            (self.scanner_error.take().map(|error| error.0), truncated)
+        } else {
+            (None, false)
+        };
         let (events, counted, documents) = parse_lines(
             Lines {
                 lines,
@@ -315,11 +325,8 @@ impl<'a> EventCursor<'a> {
                 stream_start: None,
                 stream_end: None,
                 positions: self.positions.clone(),
-                scanner_error: if self.pending_line.is_none() {
-                    self.scanner_error.take().map(|error| error.0)
-                } else {
-                    None
-                },
+                scanner_error,
+                truncated_last_line,
                 #[cfg(test)]
                 growths: 0,
             },
@@ -373,11 +380,9 @@ impl<'a> EventCursor<'a> {
                     if !self.scanner.saw_flow_start() {
                         return Err(error);
                     }
-                    if self.scanner.flow_level() == 0 {
-                        drop_truncated_block_line(out, start);
-                    }
                     self.eof = true;
                     self.scanner_error = Some(AssertUnwindSafe(error));
+                    self.truncated_last_line = out.len() > start;
                     return Ok(out.len() > start);
                 }
             }

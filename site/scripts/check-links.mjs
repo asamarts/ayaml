@@ -4,7 +4,8 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { advanceRustLexer, stripMarkdownCode } from './markdown-utils.mjs';
 
 const SITE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const REPO_ROOT = resolve(SITE_ROOT, '..');
@@ -75,6 +76,70 @@ function idsOf(htmlPath) {
 function addError(map, key, source) {
   if (!map.has(key)) map.set(key, new Set());
   map.get(key).add(source);
+}
+
+const UNSTRIPPED_RUSTDOC_LINE_RE =
+  /^\s*#(?:\s+(?:fn\s|use\s|Ok(?:\(|::)|let\s|extern\s|struct\s|enum\s|const\s|static\s|type\s|trait\s|impl\s|mod\s|pub\s|\})|\s*$)/;
+
+/**
+ * Inspect `llms-full.txt` text for unstripped rustdoc hidden lines outside
+ * multiline Rust strings/comments and any unrewritten relative `.md` links
+ * (inline with optional titles, reference definitions, or HTML `href`).
+ */
+export function checkLlmsFullContent(text) {
+  const errors = [];
+  let inFence = false;
+  let fenceChar = '';
+  let fenceLen = 0;
+  let inRust = false;
+  let rustState = { blockCommentDepth: 0, stringMode: null, rawHashes: 0 };
+  for (const line of text.split('\n')) {
+    const trimmed = line.trimStart();
+    if (!inFence) {
+      const m = /^(`{3,}|~{3,})(.*)$/.exec(trimmed);
+      if (m) {
+        inFence = true;
+        fenceChar = m[1][0];
+        fenceLen = m[1].length;
+        inRust = m[2]
+          .trim()
+          .split(/[\s,]+/)
+          .some((tok) => tok.toLowerCase() === 'rust');
+        rustState = { blockCommentDepth: 0, stringMode: null, rawHashes: 0 };
+      }
+    } else {
+      const closeRe = new RegExp(`^${fenceChar}{${fenceLen},}\\s*$`);
+      if (closeRe.test(trimmed)) {
+        inFence = false;
+        inRust = false;
+        rustState = { blockCommentDepth: 0, stringMode: null, rawHashes: 0 };
+      } else if (inRust) {
+        if (
+          rustState.stringMode === null &&
+          rustState.blockCommentDepth === 0 &&
+          UNSTRIPPED_RUSTDOC_LINE_RE.test(line)
+        ) {
+          errors.push(`dist/llms-full.txt contains unstripped rustdoc hidden line: ${line.trim()}`);
+          break;
+        }
+        advanceRustLexer(line, rustState);
+      }
+    }
+  }
+
+  const proseOnly = stripMarkdownCode(text);
+  const relPatterns = [
+    /\]\((?!https?:\/\/|#|\/)[^)#\s]+\.md(?:#[^)\s]*)?(?:\s+[^)]*)?\)/,
+    /^\s*\[[^\]]+\]:\s*(?!https?:\/\/|#|\/)\S+\.md(?:#\S*)?(?:\s+.*)?$/m,
+    /\bhref=["'](?!https?:\/\/|mailto:|#|\/)[^"'#]+\.md(?:#[^"']*)?["']/i,
+  ];
+  for (const pattern of relPatterns) {
+    const match = proseOnly.match(pattern);
+    if (match) {
+      errors.push(`dist/llms-full.txt contains unrewritten relative .md link: ${match[0].trim()}`);
+    }
+  }
+  return errors;
 }
 
 function main() {
@@ -193,31 +258,6 @@ function main() {
     extraErrors.push('missing Pagefind index under dist/pagefind/');
   }
 
-  // Strip fenced code blocks and inline code spans from Markdown text before prose scans.
-  const stripCode = (markdown) => {
-    const out = [];
-    let inFence = false;
-    let fenceChar = '';
-    let fenceLen = 0;
-    for (const line of markdown.split('\n')) {
-      const trimmed = line.trimStart();
-      if (!inFence) {
-        const m = /^(`{3,}|~{3,})/.exec(trimmed);
-        if (m) {
-          inFence = true;
-          fenceChar = m[1][0];
-          fenceLen = m[1].length;
-          continue;
-        }
-        out.push(line.replace(/`+[^`]*`+/g, ''));
-      } else {
-        const closeRe = new RegExp(`^${fenceChar}{${fenceLen},}\\s*$`);
-        if (closeRe.test(trimmed)) inFence = false;
-      }
-    }
-    return out.join('\n');
-  };
-
   // Verify llms.txt & llms-full.txt links (base path, trailing slash, fragments) and ensure rustdoc boilerplate was stripped.
   for (const bundle of ['llms.txt', 'llms-full.txt']) {
     const p = join(DIST, bundle);
@@ -252,39 +292,7 @@ function main() {
       }
     }
     if (bundle === 'llms-full.txt') {
-      let inFence = false;
-      let fenceChar = '';
-      let fenceLen = 0;
-      let inRust = false;
-      for (const line of text.split('\n')) {
-        const trimmed = line.trimStart();
-        if (!inFence) {
-          const m = /^(`{3,}|~{3,})(.*)$/.exec(trimmed);
-          if (m) {
-            inFence = true;
-            fenceChar = m[1][0];
-            fenceLen = m[1].length;
-            inRust = m[2]
-              .trim()
-              .split(/[\s,]+/)
-              .some((tok) => tok.toLowerCase() === 'rust');
-          }
-        } else {
-          const closeRe = new RegExp(`^${fenceChar}{${fenceLen},}\\s*$`);
-          if (closeRe.test(trimmed)) {
-            inFence = false;
-            inRust = false;
-          } else if (inRust && /^\s*#\s+(?:fn\s|use\s|Ok\(|let\s|extern\s)/.test(line)) {
-            extraErrors.push(`dist/llms-full.txt contains unstripped rustdoc hidden line: ${line.trim()}`);
-            break;
-          }
-        }
-      }
-      const proseOnly = stripCode(text);
-      const relMd = proseOnly.match(/\]\((?!https?:\/\/|#|\/)[^)#]+\.md(?:#[^)]*)?\)/);
-      if (relMd) {
-        extraErrors.push(`dist/llms-full.txt contains unrewritten relative .md link: ${relMd[0]}`);
-      }
+      extraErrors.push(...checkLlmsFullContent(text));
     }
   }
 
@@ -314,4 +322,6 @@ function main() {
   );
 }
 
-main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}

@@ -70,8 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           # Exercise frontmatter, merge_keys, DocumentDeserializer, Spanned<T>, and from_reader*
-          # under Miri with bounded proptest cases, skipping only the multi-megabyte streaming
-          # rejection test while keeping the bounded from_reader* variants active.
+          # under Miri with bounded proptest cases.
           (
             ulimit -v 8388608
             timeout -k 5 600 nice -n 10 cargo +nightly miri test -p ayaml \
@@ -80,8 +79,7 @@ jobs:
               --test document_deserializer \
               --test spanned_typed \
               --test options \
-              --all-features --locked -- \
-              --skip limits_from_reader_rejects_oversized_stream_without_buffering_whole_input
+              --all-features --locked
           )
       - name: Run Miri on ayaml-edit tests
         env:

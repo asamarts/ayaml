@@ -299,8 +299,20 @@ explicit_null: null
     assert!(ayaml::from_str::<UntaggedSpoof>(spoof_yaml).is_err());
 }
 
+fn proptest_config() -> ProptestConfig {
+    let default_cases = if cfg!(miri) { 2 } else { 128 };
+    let cases = std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default_cases);
+    ProptestConfig {
+        cases,
+        ..ProptestConfig::default()
+    }
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(128))]
+    #![proptest_config(proptest_config())]
 
     #[test]
     fn spanned_spans_are_valid_utf8_and_match_spanned_tree(

@@ -58,6 +58,7 @@ impl<'a> DocumentEvents<'a> {
             stream_end,
             positions,
             scanner_error,
+            truncated_last_line,
             ..
         } = read_lines(&mut scanner)?;
         let flow_ends = flow_ends(&tokens);
@@ -81,6 +82,7 @@ impl<'a> DocumentEvents<'a> {
                 stop_at_second: true,
                 end,
                 scanner_error,
+                truncated_last_line,
             },
             state: State::Start,
             step: None,

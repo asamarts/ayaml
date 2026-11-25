@@ -25,6 +25,8 @@ pub(crate) use pull::DocumentEvents;
 mod cursor;
 mod flow;
 mod grammar;
+#[cfg(kani)]
+mod kani_proofs;
 mod pull;
 #[cfg(test)]
 mod tests;
@@ -161,39 +163,11 @@ struct Lines<'a> {
     /// A scanner failure deferred until the parser checks earlier tokens, so raising
     /// `max_depth` cannot swap an earlier error for a later scanner error.
     scanner_error: Option<Error>,
+    /// Whether the final line in `lines` was truncated mid-line by `scanner_error`.
+    truncated_last_line: bool,
     /// How many times the token arena was reallocated, which the tests bound.
     #[cfg(test)]
     growths: usize,
-}
-
-/// Whether `kind` opens a flow collection (`[` or `{`).
-///
-/// The scanner stops early without returning an error immediately when `flow_level > max_depth`
-/// (`stop_error`), so deferring any subsequent scanner error once a flow opener has been
-/// scanned keeps error reporting monotonic across all `max_depth` ceilings while preserving
-/// immediate scanner errors when no flow opener precedes them.
-const fn is_flow_start(kind: &TokenKind<'_>) -> bool {
-    matches!(
-        kind,
-        TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart
-    )
-}
-
-/// Drop any half-scanned block line from `tokens[line_start..]` when a deferred scanner error
-/// halted scanning outside a flow collection. Preserves a leading `---` or `...` document marker
-/// so `max_documents` and `TrailingDocuments` still fire on the second document boundary.
-pub(super) fn drop_truncated_block_line(tokens: &mut Vec<Token<'_>>, line_start: usize) {
-    if tokens.len() <= line_start {
-        return;
-    }
-    if matches!(
-        tokens[line_start].kind,
-        TokenKind::DocumentStart { .. } | TokenKind::DocumentEnd
-    ) {
-        tokens.truncate(line_start + 1);
-    } else {
-        tokens.truncate(line_start);
-    }
 }
 
 /// The token arena capacity to reserve before scanning a mid-sized document, or `None` to grow
@@ -312,6 +286,7 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
     let mut stream_start = None;
     let mut stream_end = None;
     let mut scanner_error = None;
+    let mut truncated_last_line = false;
     #[cfg(test)]
     let mut growths = 0;
     loop {
@@ -322,9 +297,7 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
                 if !scanner.saw_flow_start() {
                     return Err(error);
                 }
-                if scanner.flow_level() == 0 {
-                    drop_truncated_block_line(&mut tokens, line_start);
-                }
+                truncated_last_line = tokens.len() > line_start;
                 scanner_error = Some(error);
                 break;
             }
@@ -424,6 +397,7 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
         stream_end,
         positions: scanner.line_index().clone(),
         scanner_error,
+        truncated_last_line,
         #[cfg(test)]
         growths,
     })
@@ -508,6 +482,10 @@ impl<'a> EventSink<'a> {
     }
 }
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "the flags describe independent parser modes and truncation state, not an enum"
+)]
 struct Parser<'a> {
     lines: Vec<Line>,
     token_arena: Vec<Token<'a>>,
@@ -533,8 +511,10 @@ struct Parser<'a> {
     /// Where the lines end: the stream end, or for one document of a lazy read, the next
     /// document's first token. An empty node after the last line is placed here.
     end: usize,
-    /// Deferred non-limit scanner failure recorded after earlier tokens were scanned.
+    /// Deferred scanner failure recorded after earlier tokens were scanned.
     scanner_error: Option<Error>,
+    /// Whether the last line in `lines` was truncated mid-line by `scanner_error`.
+    truncated_last_line: bool,
 }
 
 /// Pair every flow collection's opening token with its closing token.
@@ -615,6 +595,7 @@ fn parse_lines<'a>(
         stop_at_second: false,
         end,
         scanner_error: lines.scanner_error,
+        truncated_last_line: lines.truncated_last_line,
     };
     parser.parse_stream()?;
     match parser.sink {
@@ -690,6 +671,7 @@ pub(crate) fn parse_document_typed<'a>(
         stream_end,
         positions,
         scanner_error,
+        truncated_last_line,
         ..
     } = read_lines(&mut scanner)?;
     let flow_ends = flow_ends(&tokens);
@@ -709,6 +691,7 @@ pub(crate) fn parse_document_typed<'a>(
         stop_at_second: true,
         end,
         scanner_error,
+        truncated_last_line,
     };
     parser.emit(Event::StreamStart {
         span: stream_start.unwrap_or_else(|| Span::empty(0)),
@@ -738,6 +721,7 @@ pub(crate) fn parse_document_with_consumer<'a>(
         stream_end,
         positions,
         scanner_error,
+        truncated_last_line,
         ..
     } = read_lines(&mut scanner)?;
     let flow_ends = flow_ends(&tokens);
@@ -757,6 +741,7 @@ pub(crate) fn parse_document_with_consumer<'a>(
         stop_at_second: true,
         end,
         scanner_error,
+        truncated_last_line,
     };
     parser.emit(Event::StreamStart {
         span: stream_start.unwrap_or_else(|| Span::empty(0)),
@@ -786,6 +771,7 @@ fn parse_events_with_compat<'a>(
         stream_end,
         positions,
         scanner_error,
+        truncated_last_line,
         ..
     } = read_lines(&mut scanner)?;
 
@@ -807,6 +793,7 @@ fn parse_events_with_compat<'a>(
         stop_at_second,
         end,
         scanner_error,
+        truncated_last_line,
     };
     parser.emit(Event::StreamStart {
         span: stream_start.unwrap_or_else(|| Span::empty(0)),
@@ -849,6 +836,7 @@ pub(crate) fn parse_documents(
         stop_at_second: false,
         end: lines.stream_end.map_or(input.len(), Span::start),
         scanner_error: lines.scanner_error,
+        truncated_last_line: lines.truncated_last_line,
     };
     // The composer ignores the stream events, but they count as an event parse counts them.
     parser.emit(Event::StreamStart {
@@ -932,18 +920,42 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Surface a deferred scanner error at block-mapping exit: either at truncated EOF or when
-    /// the last line at `indent` is an unclosed flow key truncated before its `:`.
+    /// Surface a deferred scanner error once parsing reaches the end of a truncated final line,
+    /// before synthesizing a null scalar or reporting a missing `:` on a truncated prefix.
     #[inline]
-    pub(super) fn check_mapping_exit_scanner_error(
-        &mut self,
-        current_index: usize,
-        indent: usize,
-    ) -> Result<(), Error> {
-        if self.scanner_error.is_some() {
-            return self.check_mapping_exit_scanner_error_cold(current_index, indent);
+    pub(super) fn check_truncated_run_end(&mut self, run: Run, index: usize) -> Result<(), Error> {
+        if self.truncated_last_line
+            && self.scanner_error.is_some()
+            && index >= run.len()
+            && run.line + 1 == self.lines.len()
+            && run.end == self.lines[run.line].len()
+        {
+            return self.take_deferred_scanner_error();
         }
         Ok(())
+    }
+
+    /// Whether `current_index` is the final line at `indent`, truncated mid-line before its `:`,
+    /// and could still begin an implicit mapping key (so earlier syntax errors on that line are
+    /// checked in order before surfacing the deferred scanner error).
+    #[inline]
+    pub(super) fn is_truncated_mapping_key_line(
+        &self,
+        current_index: usize,
+        indent: usize,
+    ) -> bool {
+        self.truncated_last_line
+            && self.scanner_error.is_some()
+            && current_index + 1 == self.lines.len()
+            && self.lines[current_index].indent == indent
+            && !self.line_starts_with(current_index, |kind| {
+                matches!(
+                    kind,
+                    TokenKind::DocumentStart { .. }
+                        | TokenKind::DocumentEnd
+                        | TokenKind::BlockEntry
+                )
+            })
     }
 
     #[cold]
@@ -951,29 +963,6 @@ impl<'a> Parser<'a> {
     fn take_deferred_scanner_error(&mut self) -> Result<(), Error> {
         if let Some(error) = self.scanner_error.take() {
             return Err(error);
-        }
-        Ok(())
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn check_mapping_exit_scanner_error_cold(
-        &mut self,
-        current_index: usize,
-        indent: usize,
-    ) -> Result<(), Error> {
-        if current_index >= self.lines.len() {
-            return self.take_deferred_scanner_error();
-        }
-        let truncated_flow_key = current_index + 1 == self.lines.len()
-            && self.lines[current_index].indent == indent
-            && {
-                let line_tokens = self.line_tokens(current_index);
-                !is_mapping_line(line_tokens)
-                    && line_tokens.iter().any(|token| is_flow_start(&token.kind))
-            };
-        if truncated_flow_key {
-            return self.take_deferred_scanner_error();
         }
         Ok(())
     }
@@ -1906,78 +1895,5 @@ fn is_mapping_line(tokens: &[Token<'_>]) -> bool {
         // A document marker ends the collection, whatever follows it on its line.
         Some(TokenKind::DocumentStart { .. } | TokenKind::DocumentEnd) | None => false,
         Some(_) => has_value_indicator(tokens),
-    }
-}
-
-#[cfg(kani)]
-mod kani_proofs {
-    use super::{
-        TOKEN_ARENA_AHEAD, arena_growth, estimated_growth, mid_input_token_capacity,
-        prefix_token_capacity,
-    };
-
-    #[kani::proof]
-    fn verify_prefix_token_capacity_bounds() {
-        let tokens: usize = kani::any();
-        let consumed: usize = kani::any();
-        let last_tokens: usize = kani::any();
-        let last_consumed: usize = kani::any();
-        let input_len: usize = kani::any();
-        let most: usize = kani::any();
-
-        // Bound bit-width for the 128-bit division so CBMC verifies exhaustively within seconds
-        // while covering below-threshold, threshold, overflow-safe saturation, and cap regimes.
-        kani::assume(tokens <= 1_000_000);
-        kani::assume(consumed <= 16_000_000);
-        kani::assume(last_tokens <= tokens);
-        kani::assume(last_consumed <= consumed);
-        kani::assume(input_len <= 16_000_000);
-        kani::assume(most <= 16_000_000);
-
-        let result = prefix_token_capacity(
-            tokens,
-            consumed,
-            last_tokens,
-            last_consumed,
-            input_len,
-            most,
-        );
-        if tokens < 1_024 || consumed == 0 {
-            assert_eq!(result, None);
-        } else {
-            let cap = input_len
-                .min(most)
-                .min(tokens.saturating_mul(TOKEN_ARENA_AHEAD));
-            let Some(capacity) = result else {
-                unreachable!("tokens >= 1024 and consumed > 0 must yield Some");
-            };
-            assert!(capacity >= tokens);
-            assert!(capacity <= cap.max(tokens));
-        }
-    }
-
-    #[kani::proof]
-    fn verify_token_arena_growth_helpers_never_overflow() {
-        let len: usize = kani::any();
-        let estimate: usize = kani::any();
-        let chunk: usize = kani::any();
-        let most: usize = kani::any();
-        let input_len: usize = kani::any();
-        let line_count: usize = kani::any();
-
-        let g = arena_growth(len, chunk);
-        assert!(g == chunk || g == len);
-
-        let eg = estimated_growth(len, estimate, chunk, most);
-        let room = most.saturating_sub(len);
-        assert!(eg <= if room == 0 { 1 } else { room });
-
-        let mid = mid_input_token_capacity(input_len, line_count, most);
-        if let Some(cap) = mid {
-            assert!((4097..=32768).contains(&input_len));
-            assert!(line_count > 0);
-            assert!(cap <= most);
-            assert!(cap <= input_len / 10);
-        }
     }
 }

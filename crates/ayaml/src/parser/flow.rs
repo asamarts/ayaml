@@ -130,6 +130,7 @@ impl<'a> Parser<'a> {
         let key_end = self.find_flow_value(tokens, key_start);
         let key = tokens.slice(key_start, key_end);
         if key.is_empty() {
+            self.check_truncated_run_end(tokens, key_end)?;
             self.emit(self.null_scalar(Span::empty(start_span.end())))?;
             return self.flow_explicit_value(tokens, start_span, key_end, depth, stack);
         }
@@ -161,6 +162,7 @@ impl<'a> Parser<'a> {
             index += 1;
             let value_end = self.find_flow_item_end(tokens, index);
             if index == value_end {
+                self.check_truncated_run_end(tokens, value_end)?;
                 let span = Span::empty(self.token(tokens, index - 1).span.end());
                 self.emit(self.null_scalar(span))?;
                 return self.flow_mapping_end(tokens, start_span, value_end);
@@ -179,6 +181,7 @@ impl<'a> Parser<'a> {
                 anchor: None,
             }));
         }
+        self.check_truncated_run_end(tokens, index)?;
         let span = self.empty_before(tokens, index, start_span);
         self.emit(self.null_scalar(span))?;
         self.flow_mapping_end(tokens, start_span, index)
@@ -253,6 +256,7 @@ impl<'a> Parser<'a> {
         let value_start = colon + 1;
         let value_end = self.find_flow_item_end(tokens, value_start);
         if value_start >= tokens.len() || value_start == value_end {
+            self.check_truncated_run_end(tokens, value_end)?;
             let span = Span::empty(self.token(tokens, colon).span.end());
             self.emit(self.null_scalar(span))?;
             return self.flow_mapping_end(tokens, start_span, value_end);
@@ -360,6 +364,7 @@ impl<'a> Parser<'a> {
                     ),
                 ));
             }
+            self.check_truncated_run_end(tokens, key_end)?;
             let span = Span::empty(self.token(tokens, index.saturating_sub(1)).span.end());
             self.emit(self.null_scalar(span))?;
             return self.flow_mapping_after_key(state, stack);
@@ -406,6 +411,7 @@ impl<'a> Parser<'a> {
                 TokenKind::FlowEntry | TokenKind::FlowMappingEnd
             )
         {
+            self.check_truncated_run_end(tokens, index)?;
             if matches!(
                 self.token(tokens, index.saturating_sub(1)).kind,
                 TokenKind::Value

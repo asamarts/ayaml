@@ -336,9 +336,10 @@ def check_summary_and_doctests(root: Path, docs_dir: Path) -> list[str]:
     }
 
     expected_included = set(pages)
-    readme = (root / "README.md").resolve()
-    if readme.is_file():
-        expected_included.add(readme)
+    for extra_readme in ("README.md", "crates/ayaml-edit/README.md"):
+        readme_path = (root / extra_readme).resolve()
+        if readme_path.is_file():
+            expected_included.add(readme_path)
 
     for page in sorted(expected_included - included):
         errors.append(

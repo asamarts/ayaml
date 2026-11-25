@@ -195,20 +195,13 @@ pub(crate) fn expand_single_document<'a>(
         ),
         None => None,
     };
-    if let Some(second_raw) = stream.cursor.next_document()? {
-        let span = second_raw
-            .iter()
-            .find_map(|event| match event {
-                Event::DocumentStart { span, .. } => Some(*span),
-                _ => None,
-            })
-            .unwrap_or_else(|| Span::empty(input.len()));
+    if stream.cursor.next_document()?.is_some() {
         return Err(Error::coded(
             ErrorKind::Parser,
             ErrorCode::TrailingDocuments,
             "expected a single YAML document, but found trailing documents",
         )
-        .with_span(span)
+        .with_span(Span::empty(input.len()))
         .with_input_location(input, false));
     }
     let _end = stream.end_stream()?;
