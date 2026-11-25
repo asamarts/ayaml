@@ -1,6 +1,7 @@
 //! Document-bounded pull cursor over parser events.
 
 use std::collections::VecDeque;
+use std::panic::AssertUnwindSafe;
 
 use super::{Line, Lines, has_flow_start, is_limit_error, parse_lines};
 use crate::error::Error;
@@ -34,7 +35,10 @@ pub(crate) struct EventCursor<'a> {
     /// Use the compatibility scanner and parser rules.
     compat: bool,
     /// Deferred non-limit scanner failure encountered after scanning earlier tokens.
-    scanner_error: Option<Error>,
+    ///
+    /// Scanner errors hold only owned metadata (no dynamic `source`), so wrapping in
+    /// `AssertUnwindSafe` preserves `EventStream` and `Deserializer`'s `UnwindSafe` auto-trait.
+    scanner_error: Option<AssertUnwindSafe<Error>>,
 }
 
 impl<'a> EventCursor<'a> {
@@ -273,7 +277,7 @@ impl<'a> EventCursor<'a> {
         }
         if lines.is_empty() {
             if let Some(error) = self.scanner_error.take() {
-                return Err(error);
+                return Err(error.0);
             }
             return Ok(None);
         }
@@ -296,7 +300,7 @@ impl<'a> EventCursor<'a> {
                 stream_end: None,
                 positions: self.positions.clone(),
                 scanner_error: if self.pending_line.is_none() {
-                    self.scanner_error.take()
+                    self.scanner_error.take().map(|error| error.0)
                 } else {
                     None
                 },
@@ -366,7 +370,7 @@ impl<'a> EventCursor<'a> {
                         return Err(error);
                     }
                     self.eof = true;
-                    self.scanner_error = Some(error);
+                    self.scanner_error = Some(AssertUnwindSafe(error));
                     return Ok(out.len() > start);
                 }
             }
