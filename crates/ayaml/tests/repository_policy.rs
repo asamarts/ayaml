@@ -1166,3 +1166,40 @@ fn ayaml_edit_ci_and_release_automation_is_wired() {
         );
     }
 }
+
+/// Bounded Miri and Kani verification workflows cover post-0.2.3 APIs and `ayaml-edit` (AY-164).
+#[test]
+fn miri_and_kani_workflows_cover_post_023_apis_and_ayaml_edit() {
+    let Some(root) = repository_root() else {
+        return;
+    };
+    let miri_wf = read(&root, ".github/workflows/miri.yml");
+    for needle in [
+        "ulimit -v 8388608",
+        "--test frontmatter",
+        "--test merge_keys",
+        "--test document_deserializer",
+        "--test spanned_typed",
+        "--test options",
+        "cargo +nightly miri test -p ayaml-edit --all-features --locked",
+    ] {
+        assert!(
+            miri_wf.contains(needle),
+            ".github/workflows/miri.yml must include {needle:?}"
+        );
+    }
+
+    let kani_wf = read(&root, ".github/workflows/kani.yml");
+    for needle in [
+        "python3 tools/run_kani.py",
+        "--package ayaml",
+        "--package ayaml-edit",
+        "--harness-vmem-mib 3072",
+        "--max-rss-mib 2048",
+    ] {
+        assert!(
+            kani_wf.contains(needle),
+            ".github/workflows/kani.yml must include {needle:?}"
+        );
+    }
+}

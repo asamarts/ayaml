@@ -1,7 +1,8 @@
 name: miri
 
-# Daily bounded Miri check over core `ayaml` unit tests and the counting allocator in
-# `fuzz/src/bin/memcount.rs` (AY-134).
+# Daily bounded Miri check over core `ayaml` unit tests, post-0.2.3 API integration tests
+# (`frontmatter`, `merge/events`, `DocumentDeserializer`, `Spanned<T>`, `from_reader*`),
+# `ayaml-edit`, and the counting allocator in `fuzz/src/bin/memcount.rs` (AY-134, AY-164).
 on:
   schedule:
     - cron: "37 5 * * *"
@@ -61,6 +62,36 @@ jobs:
               --skip a_root_that_is_built_whole_is_read_after_the_tokens_are_freed \
               --skip block_scalars_built_as_read_match_the_list_of_lines \
               --skip the_plain_scalar_fast_path_agrees_with_the_full_path
+          )
+      - name: Run Miri on post-0.2.3 ayaml API integration tests
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+          PROPTEST_CASES: "2"
+        run: |
+          set -euo pipefail
+          # Exercise frontmatter, merge_keys, DocumentDeserializer, Spanned<T>, and from_reader*
+          # under Miri with bounded proptest cases, skipping only the multi-megabyte streaming
+          # rejection test while keeping the bounded from_reader* variants active.
+          (
+            ulimit -v 8388608
+            timeout -k 5 600 nice -n 10 cargo +nightly miri test -p ayaml \
+              --test frontmatter \
+              --test merge_keys \
+              --test document_deserializer \
+              --test spanned_typed \
+              --test options \
+              --all-features --locked -- \
+              --skip limits_from_reader_rejects_oversized_stream_without_buffering_whole_input
+          )
+      - name: Run Miri on ayaml-edit tests
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+          PROPTEST_CASES: "2"
+        run: |
+          set -euo pipefail
+          (
+            ulimit -v 8388608
+            timeout -k 5 600 nice -n 10 cargo +nightly miri test -p ayaml-edit --all-features --locked
           )
       - name: Run Miri on memcount counting global allocator tests
         run: |

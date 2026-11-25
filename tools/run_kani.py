@@ -180,9 +180,20 @@ def discover_harnesses(
             list_path.unlink(missing_ok=True)
 
 
-def render_markdown_summary(results: list[dict], *, max_rss_mib: float, vmem_mib: int) -> str:
+def render_markdown_summary(
+    results: list[dict],
+    *,
+    max_rss_mib: float,
+    vmem_mib: int,
+    package: str | None = None,
+) -> str:
+    heading = (
+        f"### Kani Bounded Model Checking Summary (`{package}`)"
+        if package
+        else "### Kani Bounded Model Checking Summary"
+    )
     lines = [
-        "### Kani Bounded Model Checking Summary",
+        heading,
         "",
         f"- Virtual-memory cap per harness (`RLIMIT_AS`): **{vmem_mib} MiB**",
         f"- Peak RSS budget per harness: **{max_rss_mib:.0f} MiB**",
@@ -421,6 +432,7 @@ def main(argv: list[str] | None = None) -> int:
                 results,
                 max_rss_mib=args.max_rss_mib,
                 vmem_mib=args.harness_vmem_mib,
+                package=args.package,
             )
             with open(summary_path, "a", encoding="utf-8") as handle:
                 handle.write(md)

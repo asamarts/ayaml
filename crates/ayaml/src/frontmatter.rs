@@ -367,3 +367,113 @@ fn missing_closing_delimiter(input: &str, open_span: Span) -> Error {
     .with_span(open_span)
     .with_location_from(&index, prefix)
 }
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::{FrontmatterDelimiter, match_delimiter_line, next_line_len_bounded};
+
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn verify_next_line_len_bounded_invariants() {
+        let mut buf = [0_u8; 6];
+        for slot in &mut buf {
+            *slot = match kani::any::<u8>() & 3 {
+                0 => b'a',
+                1 => b'\n',
+                2 => b'\r',
+                _ => b'-',
+            };
+        }
+        let len: usize = kani::any();
+        kani::assume(len <= buf.len());
+        let max_len: usize = kani::any();
+        let Ok(s) = std::str::from_utf8(&buf[..len]) else {
+            return;
+        };
+
+        match next_line_len_bounded(s, max_len) {
+            Some(step) => {
+                assert!(step <= len);
+                assert!(step <= max_len);
+                assert!(s.is_char_boundary(step));
+                if len > 0 {
+                    assert!(step > 0);
+                }
+                // Never split a `\r\n` line ending.
+                if step > 0 && step < len {
+                    assert!(!(buf[step - 1] == b'\r' && buf[step] == b'\n'));
+                }
+            }
+            None => {
+                assert!(len > max_len);
+                // No complete line ending can finish within `max_len` bytes.
+                let mut i = 0;
+                while i < max_len && i < len {
+                    assert!(buf[i] != b'\n');
+                    if buf[i] == b'\r' {
+                        assert!(i + 1 < len && buf[i + 1] == b'\n' && i + 2 > max_len);
+                    }
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn verify_match_delimiter_line_bounds() {
+        let mut buf = [0_u8; 7];
+        for slot in &mut buf {
+            *slot = match kani::any::<u8>() & 7 {
+                0 => b'-',
+                1 => b'.',
+                2 => b' ',
+                3 => b'\t',
+                4 => b'#',
+                5 => b'\r',
+                6 => b'\n',
+                _ => b'x',
+            };
+        }
+        let len: usize = kani::any();
+        kani::assume(len <= buf.len());
+        let opening_only: bool = kani::any();
+        let max_len: Option<usize> = if kani::any() {
+            let max: usize = kani::any();
+            kani::assume(max <= buf.len() + 2 || max == usize::MAX);
+            Some(max)
+        } else {
+            None
+        };
+        let Ok(s) = std::str::from_utf8(&buf[..len]) else {
+            return;
+        };
+
+        if let Some(matched) = match_delimiter_line(s, opening_only, max_len) {
+            if opening_only {
+                assert_eq!(matched.kind, FrontmatterDelimiter::DocumentStart);
+            }
+            assert!(matched.next_offset <= len);
+            assert!(s.is_char_boundary(matched.next_offset));
+            if !matched.exceeded_limit {
+                assert!(matched.next_offset >= 3);
+                if let Some(max) = max_len {
+                    assert!(matched.next_offset <= max);
+                }
+                if matched.has_newline {
+                    assert!(matched.next_offset >= 4);
+                    if matched.next_offset < len {
+                        assert!(
+                            !(buf[matched.next_offset - 1] == b'\r'
+                                && buf[matched.next_offset] == b'\n')
+                        );
+                    }
+                } else {
+                    assert_eq!(matched.next_offset, len);
+                }
+            } else {
+                assert!(max_len.is_some());
+            }
+        }
+    }
+}
