@@ -3,10 +3,10 @@
 A safe, pure-Rust YAML 1.2.2 parser, event stream, value model, Serde
 implementation, and emitter.
 
-ayaml is built for applications that need a complete YAML pipeline without
-unsafe Rust or a native YAML dependency. One scanner and grammar back the
-spanned event stream, the generic value model, typed Serde decoding, and the
-emitter, so every surface observes the same syntax and resolution rules.
+ayaml provides a complete YAML pipeline without unsafe Rust or a native YAML
+dependency. One scanner and grammar back the spanned event stream, the generic
+value model, typed Serde decoding, and the emitter, so every surface observes
+the same syntax and resolution rules.
 
 The current release is `0.2.3`. The crate is UTF-8 only, has an MSRV of
 Rust 1.88, and is dual-licensed under MIT or Apache-2.0.
@@ -130,7 +130,7 @@ fn main() -> Result<(), ayaml::Error> {
 | Markdown frontmatter | `split_frontmatter`, `split_frontmatter_with`, `parse_frontmatter`, `parse_frontmatter_with`, `parse_frontmatter_value`, `parse_frontmatter_value_with` |
 | Value/Serde conversion | `from_value`, `from_value_seed`, `to_value` |
 | Emission | `to_string`, `to_string_with`, `to_writer`, `to_writer_with`, `to_string_value_with`, `to_string_documents_with`, `to_string_events_with`, `Emitter` |
-| Surgical editing | Companion crate `ayaml-edit`: `replace_scalar`, `remove_entry`, `apply_batch`, `apply_edits` |
+| Source-preserving editing | Companion crate `ayaml-edit`: `replace_scalar`, `remove_entry`, `apply_batch`, `apply_edits` |
 | Compatibility | `ayaml::compat` with `compat::ParseOptions` and the `libyaml-compat` feature |
 
 `ParseOptions`, `compat::ParseOptions`, `EmitOptions`, and `Limits` are
@@ -190,10 +190,10 @@ budget formula.
 ## Documentation
 
 - [Documentation site](https://asamarts.github.io/ayaml/)
-- [Interactive benchmarks & performance showcase](https://asamarts.github.io/ayaml/benchmarks/)
+- [Benchmarks and performance data](https://asamarts.github.io/ayaml/benchmarks/)
 - [Getting started](https://asamarts.github.io/ayaml/docs/getting-started/)
 - [Cookbook](https://asamarts.github.io/ayaml/docs/cookbook/)
-- [Surgical editing with `ayaml-edit`](https://asamarts.github.io/ayaml/docs/editing/)
+- [Source-preserving editing with `ayaml-edit`](https://asamarts.github.io/ayaml/docs/editing/)
 - Migration guides:
   - [Migrating from `serde_yaml`](https://asamarts.github.io/ayaml/docs/migrating-from/serde-yaml/)
   - [Migrating from `serde_yml`, `serde_yaml_ng`, and `yaml-serde`](https://asamarts.github.io/ayaml/docs/migrating-from/serde-yml-and-forks/)

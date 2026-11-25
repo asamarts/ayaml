@@ -8,7 +8,7 @@ const columns: Array<{ title: string; links: Array<[string, string, boolean?]> }
       ['Introduction', `${BASE}/docs/`],
       ['Getting started', `${BASE}/docs/getting-started/`],
       ['Cookbook', `${BASE}/docs/cookbook/`],
-      ['Surgical editing (ayaml-edit)', `${BASE}/docs/editing/`],
+      ['Source-preserving editing (ayaml-edit)', `${BASE}/docs/editing/`],
       ['API reference', `${BASE}/docs/api-reference/`],
       ['Error codes', `${BASE}/docs/error-codes/`],
     ],
@@ -26,7 +26,7 @@ const columns: Array<{ title: string; links: Array<[string, string, boolean?]> }
   {
     title: 'Engineering',
     links: [
-      ['Benchmarks showcase', `${BASE}/benchmarks/`],
+      ['Benchmarks', `${BASE}/benchmarks/`],
       ['Benchmark methodology', `${BASE}/docs/benchmarks/`],
       ['Security & limits', `${BASE}/docs/security/`],
       ['Developer tools', `${BASE}/docs/tools/`],
@@ -54,8 +54,8 @@ const columns: Array<{ title: string; links: Array<[string, string, boolean?]> }
           <span class="bar" aria-hidden="true"></span>ayaml
         </a>
         <p class="blurb">
-          Safe, fast, pure-Rust YAML 1.2.2 parser, spanned event stream, generic value model,
-          Serde codec, deterministic emitter, and format-preserving editor.
+          Pure-Rust YAML 1.2.2 parser, Serde codec, spanned event stream, deterministic emitter,
+          and source-preserving editor with <code>#![forbid(unsafe_code)]</code>.
         </p>
         <p class="meta">
           Current crate: <code>v{WORKSPACE_VERSION}</code> &middot; MSRV Rust 1.88 &middot; MIT OR Apache-2.0.

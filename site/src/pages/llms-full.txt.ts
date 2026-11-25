@@ -10,10 +10,10 @@ export const GET = async () => {
   const summary = readFileSync(join(REPO_ROOT, 'docs', 'SUMMARY.md'), 'utf8');
   const sections: string[] = [
     [
-      `# ayaml ${WORKSPACE_VERSION} — Complete Documentation`,
+      `# ayaml ${WORKSPACE_VERSION}: Complete Documentation`,
       '',
       `Canonical URL: ${SITE_URL}/`,
-      `Benchmarks showcase (${fingerprint.captured_date}): ${SITE_URL}/benchmarks/`,
+      `Benchmarks (${fingerprint.captured_date}): ${SITE_URL}/benchmarks/`,
       `- Geometric mean across shared fixtures: \`ayaml value\` is ${HEADLINE.vsYamlRust2.toFixed(2)}x faster than \`yaml-rust2\`, ${HEADLINE.vsSaphyr.toFixed(2)}x faster than \`saphyr\`, ${HEADLINE.vsYamlSerde.toFixed(2)}x faster than \`yaml-serde\` (${HEADLINE.vsYamlSerdeAllocs.toFixed(1)}x fewer allocations, ${HEADLINE.vsYamlSerdePeak.toFixed(2)}x lower peak heap), and ${HEADLINE.vsSerdeSaphyr.toFixed(2)}x faster than \`serde-saphyr\`; \`ayaml events\` is ${HEADLINE.vsLibyamlEvents.toFixed(2)}x faster than C \`libyaml\` and ${HEADLINE.vsLibfyamlEvents.toFixed(2)}x faster than C \`libfyaml\`.`,
       '',
     ].join('\n'),

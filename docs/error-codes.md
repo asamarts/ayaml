@@ -1,12 +1,11 @@
 # Error codes
 
 Every [`Error`](https://docs.rs/ayaml/latest/ayaml/struct.Error.html) returned by `ayaml` carries
-both:
+an `ErrorKind` (pipeline stage) and a stable `ErrorCode` (`yaml.<kebab-name>`).
 
-- a coarse category via `Error::kind()` (`ErrorKind`), grouping failures by pipeline stage, and
-- a stable machine-readable code via `Error::code()` (`ErrorCode`), whose `as_str()` method returns
-  a `yaml.<kebab-name>` identifier (and whose `Display` and `AsRef<str>` implementations return the
-  same string).
+Call `Error::kind()` for the coarse category and `Error::code()` for the machine-readable variant,
+whose `as_str()` method and `Display` / `AsRef<str>` implementations return the same
+`yaml.<kebab-name>` string.
 
 Match on `Error::code()` or `Error::kind()` rather than `Error::message()` text. Message wording
 may be clarified across releases; `ErrorCode` variants and their `yaml.<kebab-name>` strings are
@@ -17,9 +16,9 @@ unmasked errors may contain and guidance on untrusted input, see
 ## Masked error output
 
 Normal `Display`, `Debug`, `Error::message()`, and `std::error::Error::source()` output on `Error`
-may include text from the YAML document — for example, scalar values, mapping keys and typed error
+may include text from the YAML document (for example, scalar values, mapping keys, typed error
 paths, `%TAG` handles or prefixes, anchor and alias names, unexpected characters, or underlying
-I/O error text.
+I/O error text).
 
 When logging, recording telemetry, or surfacing errors from untrusted or sensitive YAML files
 (such as configuration files containing credentials, tokens, or personal data), format

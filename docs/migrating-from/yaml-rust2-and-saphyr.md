@@ -1,14 +1,13 @@
 # Migrating from `yaml-rust2`, `saphyr`, and `serde-saphyr`
 
 `yaml-rust2`, `saphyr`, and `serde-saphyr` are pure-Rust YAML 1.2 libraries.
-Moving to `ayaml` consolidates event scanning, generic `Value` DOM, spanned
-trees, owned/borrowed Serde decoding, deterministic emission, and
-format-preserving edits into one unified engine — running 1.40x–1.54x faster
-than `yaml-rust2`/`saphyr` on geometric mean across 23 shared fixtures (with
-~3x fewer allocations than `yaml-rust2`) and 3.2x faster than `serde-saphyr`
-across 22 shared fixtures (see the
-[Benchmarks showcase](https://asamarts.github.io/ayaml/benchmarks/) and
-[Benchmark methodology](../benchmarks.md)).
+`ayaml` brings event scanning, generic `Value` DOM, spanned trees, owned and
+borrowed Serde decoding, deterministic emission, and source-preserving edits
+under one parser. On geometric mean across 23 shared fixtures, `ayaml` runs
+1.40x to 1.54x faster than `yaml-rust2` and `saphyr` (with roughly 3x fewer
+allocations than `yaml-rust2`), and 3.2x faster than `serde-saphyr` across 22
+shared fixtures (see [Benchmarks](https://asamarts.github.io/ayaml/benchmarks/)
+and [Benchmark methodology](../benchmarks.md)).
 
 ## Updating `Cargo.toml`
 
@@ -16,7 +15,7 @@ across 22 shared fixtures (see the
 [dependencies]
 ayaml = "0.2.3"
 
-# Optional: verified format-preserving edits
+# Optional: verified source-preserving edits
 ayaml-edit = "0.2.3"
 ```
 
@@ -26,18 +25,18 @@ ayaml-edit = "0.2.3"
 | --- | --- | --- |
 | `YamlLoader::load_from_str(s)` | `ayaml::parse_documents(s)` or `ayaml::parse_value(s)` | `parse_value` enforces single-document input (`TrailingDocuments` on extra docs). |
 | `Yaml::Hash` / `Array` (`yaml-rust2`) or `Yaml::Mapping` / `Sequence` / `Value(Scalar)` (`saphyr`) | `Value::Mapping` / `Value::Sequence` / `Value::String` / `Value::Number` | `Number` stores exact `i64`/`u64`/`i128`/`u128` integers and IEEE-754 `f64` floats (unlike `yaml-rust2`'s `i64`-only `Integer` and string `Real`); also `Value::Tagged`, `Value::Bool`, `Value::Null`. |
-| `doc["missing"].is_badvalue()` (`Yaml::BadValue`) | `doc.get("missing")` (`Option<&Value>`) | `ayaml`'s `doc["missing"]` returns `&Value::Null`, NOT a distinct `BadValue` variant — always use `.get(...)` to distinguish missing keys from explicit `null`. |
+| `doc["missing"].is_badvalue()` (`Yaml::BadValue`) | `doc.get("missing")` (`Option<&Value>`) | `ayaml`'s `doc["missing"]` returns `&Value::Null`, not a distinct `BadValue` variant. Use `.get(...)` to distinguish missing keys from explicit `null`. |
 | `yaml_rust2::Parser` + `EventReceiver` (or `saphyr_parser::Parser` `Iterator`) | `ayaml::parse_events(s)` pull `Iterator` | Pull iterator yielding `Result<Event<'a>, Error>` with exact byte `Span`s. |
 | `MarkedYaml` / `saphyr::LoadableYamlNode` | `ayaml::SpannedTree` + `SpannedNode` or `Spanned<T>` | Query single-document spans by `PathSegment` (`span_at`, `lookup`, `entry_span_at`) or per-document via `tree.documents()` / `tree.document(i)`, or decode typed `Spanned<T>` fields. |
 | `YamlEmitter::new(&mut out).dump(&doc)` | `ayaml::to_string_value(&doc)` / `to_string_value_with(&doc, &EmitOptions)` | `YamlEmitter` writes a leading `---` by default; pass `EmitOptions::new().with_explicit_start(true)` in `ayaml` when you want `---`. |
 | `serde_saphyr::from_str::<T>(s)` / `serde_saphyr::Spanned<T>` | `ayaml::from_str::<T>(s)` / `from_str_borrowed::<T>(s)` / `ayaml::Spanned<T>` | Direct event streaming above 4 KiB; `ayaml::Spanned<T>` implements `Deref`/`DerefMut` and exposes byte `Span` (convert with `LineIndex`). `serde-saphyr` expands `<<:` merges by default; pass `ParseOptions::new().with_merge_keys(true)` in `ayaml`. |
-| Manual string slicing for config updates | `ayaml_edit::replace_scalar`, `remove_entry`, `apply_batch` | Preserves comments, blank lines, and indentation; verifies canonical event diff (see [Surgical editing](../editing.md)). |
+| Manual string slicing for config updates | `ayaml_edit::replace_scalar`, `remove_entry`, `apply_batch` | Preserves comments, blank lines, and indentation; verifies canonical event diff (see [Source-preserving editing](../editing.md)). |
 
 ## 1. Replacing `YamlLoader` and `Yaml` indexing
 
 `ayaml::parse_value` and `ayaml::parse_documents` return insertion-ordered
-`Value` trees with ergonomic indexing and typed accessors. Use `.get(...)`
-whenever you previously checked `.is_badvalue()`:
+`Value` trees with indexing and typed accessors. Use `.get(...)` whenever you
+previously checked `.is_badvalue()`:
 
 ```rust
 use ayaml::{parse_documents, parse_value};
@@ -87,7 +86,7 @@ assert_eq!(scalars[1].1.slice(input), Some("ayaml"));
 
 ## 3. Replacing `MarkedYaml` with `SpannedTree` and `Spanned<T>`
 
-`ayaml` provides two complementary span APIs:
+`ayaml` provides two span APIs:
 
 - Use `SpannedTree::parse` for untyped path lookups (`span_at`, `lookup`,
   `entry_span_at`, plus `SpannedNode::entry_span`), and `LineIndex` to map byte
@@ -122,11 +121,11 @@ assert_eq!((loc.line(), loc.column()), (3, 14));
 # }
 ```
 
-## 4. Replacing `YamlEmitter` and format-preserving edits
+## 4. Replacing `YamlEmitter` and source-preserving edits
 
 Use `ayaml::to_string_value_with` with `EmitOptions` for canonical re-emission
 (add `.with_explicit_start(true)` to match `YamlEmitter`'s leading `---`), or
-use the companion `ayaml-edit` crate (see [Surgical editing](../editing.md))
+use the companion `ayaml-edit` crate (see [Source-preserving editing](../editing.md))
 when updating existing configuration files while preserving comments and
 formatting:
 
@@ -146,7 +145,7 @@ assert_eq!(edited.output(), "# Production replicas\nenv: prod\nreplicas: 4\n");
 # }
 ```
 
-## 5. Key behavioral differences to keep in mind
+## 5. Behavioral differences
 
 - **Missing-key indexing:** `doc["missing"]` returns `&Value::Null` (not
   `Yaml::BadValue`). Check `doc.get("missing")` wherever presence matters.
@@ -154,7 +153,7 @@ assert_eq!(edited.output(), "# Production replicas\nenv: prod\nreplicas: 4\n");
   composition and typed Serde decoding (`ErrorCode::DuplicateKey`), while
   `parse_events` exposes every raw pair for linters.
 - **Native limits:** All entry points enforce default ceilings (`Limits`). For
-  dense documents within the 32 MiB default input limit (> 1M events or > 200k
+  dense documents within the 32 MiB default input limit (> 1M events or > 1M
   entries), use `ParseOptions::for_max_input()`. For trusted documents **larger
   than 32 MiB**, also raise `max_input_bytes` explicitly via
   `ParseOptions::new().with_limits(Limits::for_max_input().with_max_input_bytes(...))`

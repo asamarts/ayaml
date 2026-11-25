@@ -15,7 +15,7 @@ deprecated, and which sit outside SemVer.
 - **1.0 stability promise.** Once `1.0.0` is tagged, all `1.x` releases are strictly additive and
   backwards-compatible for every surface marked **Stable** or **Stable (additive)** below.
   Deprecated `0.x` shims (`*_with_limits`, `*_with_options`, `*_with_styles`, and `Marker`) are
-  scheduled for removal in `1.0.0` (see D104 in [Design decisions](decisions.md#d104--10-public-api-trait-error-code-and-semver-freeze-audit)).
+  scheduled for removal in `1.0.0` (see D104 in [Design decisions](decisions.md#d104-10-public-api-trait-error-code-and-semver-freeze-audit)).
 - **Previous line (`0.1.x`).** The `0.1.x` line ended with `0.1.3` and does not receive
   backports.
 - **Minimum supported Rust version (MSRV).** Rust 1.88, verified in CI against the locked

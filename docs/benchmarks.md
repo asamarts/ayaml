@@ -1,7 +1,7 @@
 # Benchmark methodology
 
 ayaml includes deterministic fixtures, timing benchmarks, counting-allocator
-probes, steady-state Callgrind checks, and a unified `cargo xtask` CLI so that
+probes, steady-state Callgrind checks, and a `cargo xtask` CLI so that
 performance and memory behavior can be verified separately from correctness.
 Benchmark results are environment-specific and are not a compatibility
 guarantee.
@@ -58,7 +58,7 @@ produce misleading timings.
 ## Running measurements locally with `cargo xtask`
 
 The workspace provides a `cargo xtask` CLI (`.cargo/config.toml` alias for
-`crates/xtask`) that orchestrates every measurement and writes schema-versioned
+`crates/xtask`) that runs every measurement and writes schema-versioned
 JSONL records alongside a sibling hardware/toolchain fingerprint JSON file
 (`*.fingerprint.json`):
 
@@ -126,7 +126,7 @@ Timing uses repeated samples and reports medians rather than a single run.
 Allocation probes report peak live bytes, retained live bytes, allocation
 count, cumulative allocated bytes, and peak-to-input byte ratio.
 
-CI enforces two complementary allocation gates, both measured by the same
+CI enforces two allocation gates, both measured by the same
 counting allocator in `fuzz/src/bin/memcount.rs`:
 
 1. **Structured JSONL baseline (`tools/check_alloc_baseline.py` against

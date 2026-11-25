@@ -1,12 +1,9 @@
 # Migrating from YAML 1.1
 
 `ayaml` follows YAML 1.2.2 by default. Teams moving from YAML 1.1 stacks or
-libyaml-based pipelines usually encounter five concrete differences: scalar
-typing, duplicate mapping keys, `<<:` merge keys, non-core global tags, and
-stricter indentation or alias syntax.
-
-This guide shows each difference, how `ayaml` behaves by default, and how to
-migrate cleanly without weakening validation.
+libyaml-based pipelines usually run into five differences: scalar typing,
+duplicate mapping keys, `<<:` merge keys, non-core global tags, and stricter
+indentation or alias syntax.
 
 ## 1. Scalar resolution (YAML 1.2.2 Core Schema)
 
@@ -49,7 +46,7 @@ assert_eq!(doc["date"].as_str(), Some("2026-05-01"));
 When emitting YAML that older YAML 1.1 consumers may read, `ayaml`'s writers
 automatically quote leading-zero decimal strings such as `"0644"` so they are
 not misread as octal. See
-[Compatibility profile — YAML 1.1 readers](compatibility.md#yaml-11-readers)
+[Compatibility profile: YAML 1.1 readers](compatibility.md#yaml-11-readers)
 for the full list of scalars to quote when interoperating with YAML 1.1 tools.
 
 ## 2. Duplicate mapping keys
@@ -81,7 +78,7 @@ pipelines, and legacy configs frequently combine anchors with `<<:` merges.
 
 `ayaml` keeps `<<` literal by default and offers two explicit opt-in paths:
 
-1. **Event and typed merge expansion (`ParseOptions::with_merge_keys(true)`)** —
+1. **Event and typed merge expansion (`ParseOptions::with_merge_keys(true)`):**
    recommended for new code. Expands plain `<<` and `!!merge <<` across
    `from_str_with`, `from_slice_with`, `from_reader_with`, `parse_value_with`,
    `parse_documents_with`, `parse_events_with`, `SpannedTree::parse_with`,
@@ -90,7 +87,7 @@ pipelines, and legacy configs frequently combine anchors with `<<:` merges.
    literal, original source spans and borrowed `&str` slices are preserved, and
    all depth, entry, event, and alias budgets are enforced.
 2. **Post-composition value merge (`Value::apply_merge_keys` /
-   `Value::apply_merge_keys_with_limits`)** — useful when you already hold a
+   `Value::apply_merge_keys_with_limits`):** useful when you already hold a
    `Value`. Because `Value` does not retain scalar quoting, `"<<"` and `<<` are
    treated identically there.
 

@@ -16,7 +16,7 @@ tools/ci-local.sh harness        # conformance fixtures, JSONL baseline + legacy
 tools/ci-local.sh docs-lint      # markdownlint, link/coverage checks, site build, documentation doctests
 ```
 
-## Unified benchmark & measurement CLI (`cargo xtask`)
+## Benchmark and measurement CLI (`cargo xtask`)
 
 The workspace defines a `cargo xtask` alias (`crates/xtask`) that drives all
 deterministic fixtures, Criterion timings, counting-allocator memory probes,

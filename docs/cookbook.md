@@ -1,8 +1,7 @@
 # Cookbook
 
-Self-contained recipes for common production patterns in `ayaml`. Every Rust
-example on this page is compiled and executed as part of the workspace test
-suite.
+Self-contained recipes for common tasks in `ayaml`. Every Rust example on this
+page is compiled and executed as part of the workspace test suite.
 
 ## Multi-document streaming
 

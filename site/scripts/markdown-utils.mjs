@@ -96,7 +96,7 @@ export function extractDescription(body, title) {
     para.push(trimmed);
   }
   if (para.length === 0) {
-    return `${title} — ayaml documentation.`;
+    return `${title} documentation for ayaml.`;
   }
   let desc = para
     .join(' ')
@@ -110,7 +110,11 @@ export function extractDescription(body, title) {
     desc = `${desc.slice(0, -1).trim()}.`;
   }
   if (desc.length > 160) {
-    desc = `${desc.slice(0, 157).replace(/\s+\S*$/, '')}...`;
+    const trimmed = desc
+      .slice(0, 157)
+      .replace(/\s+\S*$/, '')
+      .replace(/[,;:\s]+$/, '');
+    desc = `${trimmed}...`;
   }
   return desc;
 }
@@ -271,65 +275,118 @@ function rewriteProseLine(line, relDir, urlPrefix) {
   return out;
 }
 
+function parseOpeningFence(line) {
+  let indent = 0;
+  while (indent < line.length && line[indent] === ' ') indent++;
+  if (indent > 3) return null;
+  const rest = line.slice(indent);
+  const m = /^(`{3,}|~{3,})(.*)$/.exec(rest);
+  if (!m) return null;
+  const char = m[1][0];
+  const len = m[1].length;
+  const info = m[2].trim();
+  if (char === '`' && info.includes('`')) return null;
+  return { char, len, info };
+}
+
+function isClosingFence(line, fenceChar, fenceLen) {
+  let indent = 0;
+  while (indent < line.length && line[indent] === ' ') indent++;
+  if (indent > 3) return false;
+  const trimmed = line.slice(indent).replace(/[ \t\r\n]+$/, '');
+  return trimmed.length >= fenceLen && trimmed === fenceChar.repeat(trimmed.length);
+}
+
+function stripInlineCodeParagraph(paragraph) {
+  let stripped = '';
+  let i = 0;
+  const n = paragraph.length;
+  while (i < n) {
+    if (paragraph[i] === '`') {
+      let bs = 0;
+      while (i - 1 - bs >= 0 && paragraph[i - 1 - bs] === '\\') bs++;
+      if (bs % 2 === 1) {
+        stripped += '`';
+        i++;
+        continue;
+      }
+      let ticks = 0;
+      while (i + ticks < n && paragraph[i + ticks] === '`') ticks++;
+      let j = i + ticks;
+      let closed = -1;
+      while (j < n) {
+        if (paragraph[j] === '`') {
+          let run = 0;
+          while (j + run < n && paragraph[j + run] === '`') run++;
+          if (run === ticks) {
+            closed = j + run;
+            break;
+          }
+          j += run;
+        } else {
+          j++;
+        }
+      }
+      if (closed !== -1) {
+        const span = paragraph.slice(i, closed);
+        const newlines = span.split('\n').length - 1;
+        stripped += '\n'.repeat(newlines);
+        i = closed;
+        continue;
+      }
+      stripped += paragraph.slice(i, i + ticks);
+      i += ticks;
+      continue;
+    }
+    stripped += paragraph[i];
+    i++;
+  }
+  return stripped;
+}
+
 /**
- * Strip fenced code blocks and equal-length backtick inline code spans from
- * Markdown text so prose checks ignore code examples without losing prose
- * between multi-backtick spans.
+ * Strip fenced code blocks (CommonMark §4.5) and equal-length backtick inline
+ * code spans (including multiline spans within a paragraph, respecting
+ * backslash-escaped backticks) while preserving exact line count.
  */
 export function stripMarkdownCode(markdown) {
   const out = [];
   let inFence = false;
   let fenceChar = '';
   let fenceLen = 0;
+  let para = [];
+
+  const flushPara = () => {
+    if (para.length === 0) return;
+    out.push(stripInlineCodeParagraph(para.join('\n')));
+    para = [];
+  };
+
   for (const line of markdown.split('\n')) {
-    const trimmed = line.trimStart();
     if (!inFence) {
-      const m = /^(`{3,}|~{3,})/.exec(trimmed);
-      if (m) {
+      const opened = parseOpeningFence(line);
+      if (opened) {
+        flushPara();
         inFence = true;
-        fenceChar = m[1][0];
-        fenceLen = m[1].length;
+        fenceChar = opened.char;
+        fenceLen = opened.len;
+        out.push('');
         continue;
       }
-      let stripped = '';
-      let i = 0;
-      const n = line.length;
-      while (i < n) {
-        if (line[i] === '`') {
-          let ticks = 0;
-          while (i + ticks < n && line[i + ticks] === '`') ticks++;
-          let j = i + ticks;
-          let closed = -1;
-          while (j < n) {
-            if (line[j] === '`') {
-              let run = 0;
-              while (j + run < n && line[j + run] === '`') run++;
-              if (run === ticks) {
-                closed = j + run;
-                break;
-              }
-              j += run;
-            } else {
-              j++;
-            }
-          }
-          if (closed !== -1) {
-            i = closed;
-            continue;
-          }
-          stripped += line.slice(i, i + ticks);
-          i += ticks;
-          continue;
-        }
-        stripped += line[i];
-        i++;
+      if (line.trim() === '') {
+        flushPara();
+        out.push('');
+        continue;
       }
-      out.push(stripped);
+      para.push(line);
     } else {
-      const closeRe = new RegExp(`^${fenceChar}{${fenceLen},}\\s*$`);
-      if (closeRe.test(trimmed)) inFence = false;
+      out.push('');
+      if (isClosingFence(line, fenceChar, fenceLen)) {
+        inFence = false;
+      }
     }
   }
+  flushPara();
   return out.join('\n');
 }
 

@@ -3,7 +3,7 @@
   "type": "module",
   "private": true,
   "version": "1.0.0",
-  "description": "Documentation site and benchmark showcase for ayaml",
+  "description": "Documentation site and benchmarks for ayaml",
   "scripts": {
     "sync": "node scripts/sync-docs.mjs",
     "dev": "node scripts/sync-docs.mjs && astro dev",

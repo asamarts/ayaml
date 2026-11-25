@@ -227,6 +227,48 @@ class DocsCheck(unittest.TestCase):
         found2 = check_docs.problems(root2)
         self.assertTrue(any("missing benchmark data directory" in msg for msg in found2), found2)
 
+    def test_em_dash_prose_fails_while_code_blocks_and_inline_code_pass(self) -> None:
+        for bad in (
+            "Avoid em dashes \u2014 use normal punctuation.\n",
+            "Entity &mdash; rejected too.\n",
+            "Numeric &#8212; rejected too.\n",
+            "Leading-zero decimal &#08212; rejected too.\n",
+            "Hex &#x2014; rejected too.\n",
+            "Leading-zero hex &#X002014; rejected too.\n",
+            "## Heading \u2014 rejected\n",
+            "| Col |\n| --- |\n| Table \u2014 cell |\n",
+            "```code``` \u2014 inline triple backtick at start of line\n",
+            "\\`escaped backtick \u2014 is prose`\n",
+            "    ```text\nNot a fence \u2014 still prose\n",
+        ):
+            with self.subTest(bad=bad):
+                root = self.make_tree()
+                (root / "docs/index.md").write_text(f"# Intro\n\n{bad}", encoding="utf-8")
+                found = check_docs.problems(root)
+                self.assertTrue(any("em dash" in msg and "docs/index.md:" in msg for msg in found), found)
+
+        # README.md and crates/ayaml-edit/README.md are also checked.
+        root = self.make_tree()
+        (root / "README.md").write_text("# ayaml\n\nFast \u2014 safe.\n", encoding="utf-8")
+        edit_dir = root / "crates/ayaml-edit"
+        edit_dir.mkdir(parents=True)
+        (edit_dir / "README.md").write_text("# ayaml-edit\n\nSafe \u2014 edits.\n", encoding="utf-8")
+        found = check_docs.problems(root)
+        self.assertTrue(any("README.md:3: em dash" in msg for msg in found), found)
+        self.assertTrue(any("crates/ayaml-edit/README.md:3: em dash" in msg for msg in found), found)
+
+        # Code fences (up to 3 spaces indent, trailing spaces on close, backticks/tildes),
+        # even-backslash inline code spans, and multiline inline code spans are ignored.
+        root_ok = self.make_tree()
+        (root_ok / "docs/security.md").write_text(
+            "# Security\n\nInline `\u2014`, `&mdash;`, and \\\\`\u2014` are fine.\n\n"
+            "Multiline `code\n\u2014 still code` is fine too.\n\n"
+            "   ```text\nraw \u2014 inside 3-space indented fence\n   ```   \n\n"
+            "~~~text\nraw &mdash; inside tilde fence\n~~~  \n",
+            encoding="utf-8",
+        )
+        self.assertEqual(check_docs.problems(root_ok), [])
+
     def test_repository_tree_passes(self) -> None:
         repo = Path(__file__).resolve().parent.parent
         self.assertEqual(check_docs.problems(repo), [])

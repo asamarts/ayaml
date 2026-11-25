@@ -5,7 +5,7 @@ record states what was decided and why, so a later reader can tell whether the
 reason still holds. Numbering continues from earlier records that aren't published,
 which is why it starts at D65 and skips numbers.
 
-## D65 — Development happens here, through pull requests
+## D65: Development happens here, through pull requests
 
 **Date:** 2026-11-05
 **Status:** Accepted
@@ -23,7 +23,7 @@ leak gate in `tools/leak-scan/` runs before a commit is pushed and on the pull r
 can't read a squash commit's message until that message is public, so write it from text
 that has already passed the gate, and check the run on `main` after merging.
 
-## D66 — The leak gate judges a change from the base commit
+## D66: The leak gate judges a change from the base commit
 
 **Date:** 2026-11-05
 **Status:** Accepted
@@ -46,7 +46,7 @@ pull requests from forks, so the job fails on them by design, and a maintainer w
 the change brings it onto a branch here. Dependabot's pull requests read only Dependabot's
 secrets, and since 2026-11-07 the pattern list is one of those too, so the gate runs on them.
 
-## D67 — Dependencies are checked against an allowlist
+## D67: Dependencies are checked against an allowlist
 
 **Date:** 2026-11-05
 **Status:** Accepted
@@ -62,7 +62,7 @@ ayaml uses.
 
 **Consequences.** Adding a dependency, even a transitive one, takes a line here.
 
-## D68 — CI checks allocations and instruction counts, not timing
+## D68: CI checks allocations and instruction counts, not timing
 
 **Date:** 2026-11-05
 **Status:** Accepted
@@ -82,7 +82,7 @@ compare ayaml only with itself, so nothing private is involved.
 **Consequences.** One more required job. Counts miss cache and branch effects, so a
 slowdown of that kind still waits for the release check.
 
-## D69 — The fuzz workspace may hold a counting allocator's `unsafe`
+## D69: The fuzz workspace may hold a counting allocator's `unsafe`
 
 **Date:** 2026-11-05
 **Status:** Accepted
@@ -99,7 +99,7 @@ still has `unsafe`.
 **Consequences.** Claims about `unsafe` name the published crates or this workspace, not
 everything in the repository.
 
-## D70 — A fuzz target's skip for a known bug is temporary and exact
+## D70: A fuzz target's skip for a known bug is temporary and exact
 
 **Date:** 2026-11-05
 **Status:** Accepted
@@ -116,7 +116,7 @@ nightly run. Both have happened.
 
 **Consequences.** A known-bug skip in `borrowed` stays until AY-025 closes.
 
-## D71 — No `cargo-vet` until the dependency graph changes hands or grows
+## D71: No `cargo-vet` until the dependency graph changes hands or grows
 
 **Date:** 2026-11-05
 **Status:** Accepted
@@ -131,7 +131,7 @@ runtime dependency, or if the runtime graph grows.
 
 **Consequences.** Nobody attests to dependency code in the meantime.
 
-## D72 — The name `parse` is reserved for a recovering parser
+## D72: The name `parse` is reserved for a recovering parser
 
 **Date:** 2026-11-05
 **Status:** Accepted
@@ -147,7 +147,7 @@ what follows, and nothing needs it yet.
 
 **Consequences.** Broken YAML still stops at the first error.
 
-## D73 — Tag expansion has its own limit
+## D73: Tag expansion has its own limit
 
 **Date:** 2026-11-06
 **Status:** Accepted
@@ -173,7 +173,7 @@ each of those.
 **Consequences.** `Limits` and `LimitKind` each gain a member. Both are `#[non_exhaustive]`, so this
 isn't a breaking change. A document with more expansions than this needs a higher limit.
 
-## D74 — A hosted fuzz run publishes no input
+## D74: A hosted fuzz run publishes no input
 
 **Date:** 2026-11-06
 **Status:** Accepted
@@ -207,7 +207,7 @@ same corpus by running the same fuzzer, so encrypting it would add a secret and 
 gain. One run from before this decision printed an
 input, and its log and artifact were deleted on 2026-11-06.
 
-## D77 — A rehearsal creates and deletes a draft release, and attests nothing
+## D77: A rehearsal creates and deletes a draft release, and attests nothing
 
 **Date:** 2026-11-07
 **Status:** Accepted
@@ -242,7 +242,7 @@ target, so GitHub checks the default branch's own head. The attestation and its 
 create that publishes a release, still run for the first time in the first release through the
 workflow.
 
-## D78 — `max_events` bounds events and kept tokens, and counts no line break
+## D78: `max_events` bounds events and kept tokens, and counts no line break
 
 **Date:** 2026-11-08
 **Status:** Accepted
@@ -273,7 +273,7 @@ alike, so at the same limits they agree on whether an input keeps within it, and
 differ when it breaks the limit in more than one place: `parse_events` and the `Deserializer` read
 a stream a document at a time, and can stop in an earlier document. `docs/limits.md` says when.
 
-## D79 — `max_anchors` counts the anchors of the whole stream
+## D79: `max_anchors` counts the anchors of the whole stream
 
 **Date:** 2026-11-08
 **Status:** Accepted
@@ -292,7 +292,7 @@ documents shares between them.
 **Consequences.** A long stream of documents that each hold many anchors may need a higher
 `max_anchors`.
 
-## D80 — An enum reads from one mapping form: a single entry whose key is a string
+## D80: An enum reads from one mapping form: a single entry whose key is a string
 
 **Date:** 2026-11-08
 **Status:** Accepted
@@ -323,7 +323,7 @@ and the key can follow that rule then.
 refuses an untagged mapping. `! B: 5` now names `B`, where it was an error. `docs/compatibility.md`
 says which forms read.
 
-## D82 — A writer gives a tag that no verbatim tag can hold a `%TAG` directive of its own
+## D82: A writer gives a tag that no verbatim tag can hold a `%TAG` directive of its own
 
 **Date:** 2026-11-09
 **Status:** Accepted
@@ -368,7 +368,7 @@ value for tags that need a directive before they write its first line. That look
 writer would, at the depth limit, and costs about 60 instructions a collection and 75 a document,
 which `tools/instruction-rises.tsv` accepts for the smallest and the deepest inputs that CI counts.
 
-## D83 — Documentation lint and plan verification are required gates
+## D83: Documentation lint and plan verification are required gates
 
 **Date:** 2026-11-10
 **Status:** Accepted
@@ -385,7 +385,7 @@ commit can rot while the hosted plan job stays green.
 the whole history because a shallow clone cannot resolve commit evidence. A new single-line
 `run:` command in a workflow still needs its local counterpart, which the `sync` job checks.
 
-## D84 — Repository shape is gated by alint 0.22.0
+## D84: Repository shape is gated by alint 0.22.0
 
 **Date:** 2026-11-11
 **Status:** Accepted
@@ -417,7 +417,7 @@ conformance. A version update moves `.alint.yml`'s `requires`, the action pin, a
 binary together, and repeats the 2,000/2,001-line boundary probes for every covered extension,
 `tools/hooks/*`, and a Rust source outside today's `crates/`, `fuzz/`, and `tools/` layouts.
 
-## D85 — A core tag on a node of another kind is dropped
+## D85: A core tag on a node of another kind is dropped
 
 **Date:** 2026-11-11
 **Status:** Accepted
@@ -443,7 +443,7 @@ from libyaml without saying so. One rule makes every reader agree.
 and `!!seq a` reads `a`. A custom tag on a collection still wraps it. The event streams no longer
 carry the dropped tag, so the composed value and the events agree.
 
-## D86 — Rust linting is strict on the MSRV and stable, with a separate panic profile
+## D86: Rust linting is strict on the MSRV and stable, with a separate panic profile
 
 **Date:** 2026-11-12
 **Status:** Accepted
@@ -480,7 +480,7 @@ pull request with this record updated. The production panic profile is checked i
 jobs, and any new `unwrap`, `expect`, or `panic` in the library must be a checked invariant or a
 required panicking trait behavior.
 
-## D87 — Typed decoding checks the node shape, scalar kind, and exact variant names
+## D87: Typed decoding checks the node shape, scalar kind, and exact variant names
 
 **Date:** 2026-11-12
 **Status:** Accepted
@@ -518,7 +518,7 @@ treat it as an explicit null and reject it for those targets. That difference is
 `docs/compatibility.md` and the `from_value` API docs. A tag built by hand keeps the explicit
 split its constructor was given; tags read from a source use the canonical split.
 
-## D88 — Default count limits stay memory-bounded; `Limits::for_max_input` lifts them
+## D88: Default count limits stay memory-bounded; `Limits::for_max_input` lifts them
 
 **Date:** 2026-11-16
 **Status:** Accepted
@@ -545,7 +545,7 @@ that lower any of the four counts keep their stricter behavior. The other budget
 depth and alias expansion, still apply even with `for_max_input()`, so a syntactically valid
 document can still be refused for those reasons.
 
-## D89 — Spans are byte ranges, and line columns come from a public index
+## D89: Spans are byte ranges, and line columns come from a public index
 
 **Date:** 2026-11-16
 **Status:** Accepted
@@ -577,7 +577,7 @@ a location. On a 64-bit release build the event size falls from 176 to 144 bytes
 to 16, and `Error` from 112 to 104. The hosted performance gates decide whether the scanner and
 parser remain within their instruction and allocation budgets.
 
-## D90 — 0.2.0 carries every known break, and the additive interface work follows it
+## D90: 0.2.0 carries every known break, and the additive interface work follows it
 
 **Date:** 2026-11-18
 **Status:** Accepted
@@ -605,7 +605,7 @@ task: the iterator newtypes become a task of their own that blocks 0.2.0, and th
 move to a later milestone. `SECURITY.md` names the versions that get fixes when 0.2.0 ships. The
 release is qualified as 0.1.2 and 0.1.3 were, with the timing comparison D68 asks for.
 
-## D91 — A typed reader of one document reports its first problem at every input size
+## D91: A typed reader of one document reports its first problem at every input size
 
 **Date:** 2026-11-18
 **Status:** Accepted
@@ -635,7 +635,7 @@ The `Deserializer` is unchanged: it reads a document's events before it builds f
 every size, so within a document it reports a syntax error first. D95 later changed what an
 input of more than 4 KiB costs: it is read from its events, and read twice when it is refused.
 
-## D92 — An entry span is given only where its removal is exact
+## D92: An entry span is given only where its removal is exact
 
 **Date:** 2026-11-18
 **Status:** Accepted
@@ -704,7 +704,7 @@ of entry next to every other, each span a tree gives is deleted and the rest rea
 Flow entries, only entries, and entries that share a line wait for the edit crate's verified
 edits (AY-050).
 
-## D93 — The allocation gate budgets an issue's shapes by the issue's own measure
+## D93: The allocation gate budgets an issue's shapes by the issue's own measure
 
 **Date:** 2026-11-18
 **Status:** Accepted
@@ -734,7 +734,7 @@ is published depends on them. The ten percent of room keeps a shape that is with
 issue's reference there, since none is over 1.06 times today; a row is lowered in the change that
 lowers its measurement. The gate script no longer passes over a budget file that is missing.
 
-## D94 — The last shape of #178 is closed by composing without the intermediate tree
+## D94: The last shape of #178 is closed by composing without the intermediate tree
 
 **Date:** 2026-11-18
 **Status:** Accepted
@@ -758,7 +758,7 @@ narrower change trims one shape and leaves little room under the target.
 The narrower change is not planned. The budgets in `tools/json-alloc-corpus.tsv` are lowered in
 the change that closes AY-104.
 
-## D95 — A typed read builds its value from events, and reports what a tree of the document reports
+## D95: A typed read builds its value from events, and reports what a tree of the document reports
 
 **Date:** 2026-11-18
 **Status:** Accepted
@@ -814,7 +814,7 @@ reads small inputs and anchored nodes, and it words every error. The tests read 
 ways and compare, the `borrowed` fuzz target does the same, and a build with
 `--cfg ayaml_typed_from_events` runs the whole suite on events at every size.
 
-## D96 — The positions layer is the format contract's, by its names, its rules, and its vectors
+## D96: The positions layer is the format contract's, by its names, its rules, and its vectors
 
 **Date:** 2026-11-19
 **Status:** Accepted
@@ -871,7 +871,7 @@ marker follows, as libyaml does. A test holds every reader to that rule on every
 `Location::from` adds one to a line and a column and stops at the largest number, where a count
 can't go. `docs/interface.md` says what ayaml offers at each layer of the contract.
 
-## D97 — A writer refuses what no reader of the crate loads, from 0.2.0 on
+## D97: A writer refuses what no reader of the crate loads, from 0.2.0 on
 
 **Date:** 2026-11-19
 **Status:** Accepted
@@ -915,7 +915,7 @@ given. A tag is refused before the first line of its document, by the scan that 
 need a directive, so a writer that is handed the output has none of that document. A tag that is written on a scalar that fits it still reads back as what the tag makes of the text:
 `!!int` on the string `1` reads back as the number, as it did.
 
-## D98 — Options values are `non_exhaustive` structs with `const` builders and `*_with` entry points
+## D98: Options values are `non_exhaustive` structs with `const` builders and `*_with` entry points
 
 **Date:** 2026-11-20
 **Status:** Accepted
@@ -955,7 +955,7 @@ operation (including `from_str_with` and `from_slice_with`, both accepting owned
 `SpannedTree::parse_compat_with`), and deprecates all 32 older `*_with_limits`, `*_with_options`,
 and `*_with_styles` combination functions through `0.x` for removal in `1.0`.
 
-## D99 — CI compares public API listings per feature set against the last release tag
+## D99: CI compares public API listings per feature set against the last release tag
 
 **Date:** 2026-11-20
 **Status:** Accepted
@@ -998,7 +998,7 @@ breaks unless named in `### Changed`. Compiler-internal unstable marker traits (
 `Unpin`, `UnwindSafe`, `RefUnwindSafe`) stay enforced. The `public-api` crate version/checksum and
 its paired nightly toolchain must move together by hand.
 
-## D100 — Stable `ErrorCode` (`yaml.<kebab-name>`) alongside `ErrorKind`, plus `Clone` and `PartialEq` on `Error`
+## D100: Stable `ErrorCode` (`yaml.<kebab-name>`) alongside `ErrorKind`, plus `Clone` and `PartialEq` on `Error`
 
 **Date:** 2026-11-20
 **Status:** Accepted
@@ -1038,7 +1038,7 @@ resource-limit, Serde, emitter, and I/O failure carries a pinned `ErrorCode`, an
 variant requires updating `docs/error-codes.md` and `crates/ayaml/tests/error_codes.rs`, enforced
 by tests.
 
-## D101 — Masked error wrapper (`Error::masked()` / `MaskedError`)
+## D101: Masked error wrapper (`Error::masked()` / `MaskedError`)
 
 **Date:** 2026-11-21
 **Status:** Accepted
@@ -1067,7 +1067,7 @@ preserving `ErrorKind`, `ErrorCode`, and `Location` for triage.
 format `error.masked()` without leaking document contents, and `crates/ayaml/tests/masked_errors.rs`
 pins every error path in the crate that can interpolate document text against regressions.
 
-## D102 — Documentation book, reference pages, and workspace book doctests
+## D102: Documentation book, reference pages, and workspace book doctests
 
 **Date:** 2026-11-21
 **Status:** Accepted (mdBook tooling superseded by D106; `docs/SUMMARY.md` and `book_doctests` retained)
@@ -1093,7 +1093,7 @@ published crate tarball or `ayaml`'s public API.
 **Consequences.** Every book page is covered by `docs/SUMMARY.md`, `book_doctests`, link checks,
 and `markdownlint`, and any broken or skipped example fails CI immediately.
 
-## D104 — 1.0 Public API, trait, error-code, and SemVer freeze audit
+## D104: 1.0 Public API, trait, error-code, and SemVer freeze audit
 
 **Date:** 2026-11-24
 **Status:** Accepted
@@ -1135,50 +1135,50 @@ signature regressions across the `1.x` lifetime.
 derive, or `ErrorCode` variant fails CI immediately; the `1.0.0` release PR only needs to drop the
 explicitly deprecated `0.x` shims and bump workspace crate versions after `AY-150` completes.
 
-## D105 — 1.0 Public comparative benchmark and migration-guide naming policy
+## D105: 1.0 Public comparative benchmark and migration-guide naming policy
 
 **Date:** 2026-11-24
 **Status:** Accepted
 
 **Decision.** Permit factual, reproducible references to other public YAML libraries in `ayaml`'s
-public documentation — specifically comparative 1.0 benchmark reports and ecosystem migration
-guides — while keeping all infrastructure guards (hostnames, runner names, local filesystem paths,
-personal identifiers, private repository names, and internal planning notes) strictly enforced by
-the leak gate.
+public documentation (specifically comparative 1.0 benchmark reports and ecosystem migration
+guides), while keeping all infrastructure guards (hostnames, runner names, local filesystem paths,
+personal identifiers, private repository names, and internal planning notes) enforced by the leak
+gate.
 
-**Alternatives.** Keep comparison names blocked in public docs: prevents publishing honest 1.0
-competitive benchmarks and concrete side-by-side migration guides from existing Rust YAML crates.
-Drop the leak gate entirely: weakens protection against accidentally publishing infrastructure or
-private-planning details.
+**Alternatives.** Keep comparison names blocked in public docs: prevents publishing comparative 1.0
+benchmarks and side-by-side migration guides from existing Rust YAML crates. Drop the leak gate
+entirely: weakens protection against accidentally publishing infrastructure or private-planning
+details.
 
-**Why.** Production adopters evaluating `ayaml 1.0` need transparent, reproducible benchmark data
-and concrete migration guides from existing Rust YAML libraries. Scoping the leak-gate relaxation
-exclusively to public library names preserves every operational and privacy guarantee.
+**Why.** Teams evaluating `ayaml 1.0` need reproducible benchmark data and side-by-side migration
+guides from existing Rust YAML libraries. Scoping the leak-gate relaxation to public library names
+keeps the operational and privacy guards intact.
 
 **Consequences.** `AY-159`, `AY-160`, `AY-161`, and `AY-162` can publish reproducible comparative
-benchmark results and end-to-end tested migration guides on the refreshed documentation site, while
-all non-comparison leak-gate classes remain enforced on every push and pull request.
+benchmark results and tested migration guides on the documentation site, while all non-comparison
+leak-gate classes remain enforced on every push and pull request.
 
-## D106 — Astro + Starlight documentation site backed by `docs/` single source of truth
+## D106: Astro + Starlight documentation site backed by `docs/` single source of truth
 
 **Date:** 2026-11-25
 **Status:** Accepted (supersedes mdBook tooling in D102 while retaining `docs/SUMMARY.md` and `book_doctests`)
 
 **Decision.** Build and deploy `https://asamarts.github.io/ayaml/` from `site/` using Astro +
-Starlight (`base: '/ayaml'`) with a bespoke landing page (`/`), an interactive pinned-JSONL
-benchmarks showcase (`/benchmarks/`), Pagefind search, `llms.txt` / `llms-full.txt`, and
-Starlight documentation pages synced directly from `docs/**/*.md` via `site/scripts/sync-docs.mjs`
-and ordered by `docs/SUMMARY.md`. Remove `book.toml`.
+Starlight (`base: '/ayaml'`) with a custom landing page (`/`), a pinned-JSONL benchmarks page
+(`/benchmarks/`), Pagefind search, `llms.txt` / `llms-full.txt`, and Starlight documentation pages
+synced directly from `docs/**/*.md` via `site/scripts/sync-docs.mjs` and ordered by
+`docs/SUMMARY.md`. Remove `book.toml`.
 
-**Alternatives.** Stay on mdBook: limited layout flexibility for an interactive benchmark showcase,
-modern landing page, and `llms.txt` generation. Duplicate Markdown files inside `site/src/content/`:
+**Alternatives.** Stay on mdBook: limited layout control for the data-driven benchmark page,
+landing page, and `llms.txt` generation. Duplicate Markdown files inside `site/src/content/`:
 creates drift between GitHub Markdown, `crates/ayaml-conformance` `book_doctests`, and the deployed
 site.
 
 **Why.** Keeping `docs/**/*.md` as plain GitHub-Flavored Markdown (without Starlight frontmatter)
-preserves clean GitHub browsing, `markdownlint-cli2`, `tools/check_docs.py`, and workspace
-`book_doctests` across every Rust example, while Astro + Starlight delivers a fast, accessible
-modern site and data-driven benchmark visualizations with zero duplicated prose.
+preserves GitHub browsing, `markdownlint-cli2`, `tools/check_docs.py`, and workspace
+`book_doctests` across every Rust example, while Astro + Starlight builds the static site and
+data-driven benchmark views without duplicating prose.
 
 **Consequences.** `.github/workflows/docs.yml` runs `tools/check_docs.py`, builds `site/` with
 `npm --prefix site install --no-audit --no-fund && npm --prefix site run build`, validates every internal link and fragment

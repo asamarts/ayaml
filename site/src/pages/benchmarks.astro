@@ -21,7 +21,7 @@ import {
 } from '../lib/bench';
 
 const TITLE = 'Benchmarks & Performance | ayaml';
-const DESCRIPTION = `Transparent, pinned-JSONL throughput, latency, peak heap, allocation count, and 10x linear scaling benchmarks across ${HEADLINE.scenarioCount} timed and ${HEADLINE.memoryScenarioCount} memory YAML workloads.`;
+const DESCRIPTION = `Pinned-JSONL throughput, latency, peak heap, allocation count, and 10x linear scaling benchmarks across ${HEADLINE.scenarioCount} timed and ${HEADLINE.memoryScenarioCount} memory YAML workloads.`;
 
 const maxTier2Ratio = Math.max(...TIER2_PEERS.map((r) => r.speedRatio));
 const maxTier1Ratio = Math.max(...TIER1_PEERS.map((r) => r.speedRatio));
@@ -91,12 +91,11 @@ tools/check_alloc_corpus.sh`;
     <span class="sec-kicker">Pinned benchmark artifacts &middot; {fingerprint.captured_date}</span>
     <h1>Benchmarks &amp; Performance</h1>
     <p class="sec-lede">
-      Every chart, ratio, and table on this page is computed at build time directly from pinned,
-      SHA-256-verified JSONL artifacts (<code>{fingerprint.speed_rows}</code> speed rows across
-      <code>{HEADLINE.scenarioCount}</code> timed fixtures and
+      Every chart, ratio, and table on this page is computed at build time from pinned,
+      SHA-256-verified JSONL artifacts rather than hand-entered numbers (<code>{fingerprint.speed_rows}</code>
+      speed rows across <code>{HEADLINE.scenarioCount}</code> timed fixtures and
       <code>{fingerprint.memory_rows}</code> memory rows across
       <code>{HEADLINE.memoryScenarioCount}</code> fixtures, including 1 MiB scaling points).
-      Nothing is hand-typed.
     </p>
     <nav class="jump-nav" aria-label="On this page">
       <a href="#tier2">Tier 2 DOM</a>
@@ -115,9 +114,9 @@ tools/check_alloc_corpus.sh`;
     <div class="kpi-grid">
       <div class="kpi-card">
         <div class="kpi-val accent">
-          {HEADLINE.vsYamlRust2.toFixed(2)}x–{HEADLINE.vsSerdeSaphyr.toFixed(2)}x
+          {HEADLINE.vsYamlRust2.toFixed(2)}x-{HEADLINE.vsSerdeSaphyr.toFixed(2)}x
         </div>
-        <div class="kpi-label">Fastest Rust YAML DOM</div>
+        <div class="kpi-label">Ahead of Rust YAML DOMs</div>
         <div class="kpi-sub">
           <code>ayaml value</code> leads <code>yaml-rust2</code> ({HEADLINE.vsYamlRust2.toFixed(2)}x),
           <code>saphyr</code> ({HEADLINE.vsSaphyr.toFixed(2)}x), <code>yaml-serde</code> ({HEADLINE.vsYamlSerde.toFixed(2)}x),
@@ -140,7 +139,7 @@ tools/check_alloc_corpus.sh`;
         <div class="kpi-label">Deterministic YAML emission</div>
         <div class="kpi-sub">
           <code>{HEADLINE.ciEmitVsYamlSerde.toFixed(1)}x</code> faster than <code>yaml-serde</code>
-          on CI workflows and <code>{HEADLINE.emitVsFkyamlMin.toFixed(1)}x–{HEADLINE.emitVsFkyamlMax.toFixed(1)}x</code>
+          on CI workflows and <code>{HEADLINE.emitVsFkyamlMin.toFixed(1)}x to {HEADLINE.emitVsFkyamlMax.toFixed(1)}x</code>
           faster than C++ <code>fkYAML</code>.
         </div>
       </div>
@@ -388,12 +387,12 @@ tools/check_alloc_corpus.sh`;
         <p class="sec-lede">
           Higher is faster (MiB/s). <code>ayaml</code> emits canonical output with YAML 1.1-safe
           leading-zero numeral quoting at
-          <code>{HEADLINE.emitMinMib.toFixed(0)}–{HEADLINE.emitMaxMib.toFixed(0)} MiB/s</code> —
-          <code>{HEADLINE.emitVsFkyamlMin.toFixed(1)}x–{HEADLINE.emitVsFkyamlMax.toFixed(1)}x</code>
+          <code>{HEADLINE.emitMinMib.toFixed(0)} to {HEADLINE.emitMaxMib.toFixed(0)} MiB/s</code>:
+          <code>{HEADLINE.emitVsFkyamlMin.toFixed(1)}x to {HEADLINE.emitVsFkyamlMax.toFixed(1)}x</code>
           faster than C++ <code>fkYAML</code>,
-          <code>{HEADLINE.emitVsNoyalibMin.toFixed(1)}x–{HEADLINE.emitVsNoyalibMax.toFixed(1)}x</code>
+          <code>{HEADLINE.emitVsNoyalibMin.toFixed(1)}x to {HEADLINE.emitVsNoyalibMax.toFixed(1)}x</code>
           faster than <code>noyalib</code>, and
-          <code>{HEADLINE.emitVsYamlSerdeMin.toFixed(1)}x–{HEADLINE.emitVsYamlSerdeMax.toFixed(1)}x</code>
+          <code>{HEADLINE.emitVsYamlSerdeMin.toFixed(1)}x to {HEADLINE.emitVsYamlSerdeMax.toFixed(1)}x</code>
           faster than <code>yaml-serde</code>.
         </p>
       </div>
@@ -431,15 +430,15 @@ tools/check_alloc_corpus.sh`;
   <section id="progress" class="sec">
     <div class="wrap">
       <div class="sec-head">
-        <span class="sec-kicker">Optimization trajectory &middot; Longer bar = larger speedup</span>
+        <span class="sec-kicker">Progress since v0.2.3 &middot; Longer bar = larger speedup</span>
         <h2>Speedups &amp; memory reductions since <code>v0.2.3</code></h2>
         <p class="sec-lede">
           Same hardware, same compiler (<code>{fingerprint.rustc}</code>), same SHA-256 verified
           fixtures comparing <code>v0.2.3</code> (<code>{fingerprint.baseline_v023_git_sha.slice(0, 8)}</code>)
-          against the pre-1.0 fast-path engine (<code>{fingerprint.public_git_sha.slice(0, 8)}</code>).
+          against the current engine (<code>{fingerprint.public_git_sha.slice(0, 8)}</code>).
           Across all <code>{HEADLINE.v023SpeedRowCount}</code> shared speed rows, geometric-mean
           speedup is <strong>{HEADLINE.v023OverallSpeedup.toFixed(2)}x</strong> (range
-          <code>{HEADLINE.v023MinSpeedup.toFixed(2)}x–{HEADLINE.v023MaxSpeedup.toFixed(2)}x</code>,
+          <code>{HEADLINE.v023MinSpeedup.toFixed(2)}x to {HEADLINE.v023MaxSpeedup.toFixed(2)}x</code>,
           zero regressions), with <strong>{HEADLINE.v023PeakImprovement.toFixed(2)}x</strong>
           geometric-mean peak-heap improvement across <code>{HEADLINE.v023MemoryRowCount}</code>
           memory rows. Top highlights sorted by speedup:
@@ -499,10 +498,10 @@ tools/check_alloc_corpus.sh`;
 
         {
           [
-            { id: 'mib', title: 'Throughput (MiB/s)', fmt: (c: typeof scenarioMatrix[0]['cells'][0]) => (c.mib !== null ? c.mib.toFixed(1) : '—') },
-            { id: 'us', title: 'Median latency (µs / ms)', fmt: (c: typeof scenarioMatrix[0]['cells'][0]) => (c.us !== null ? fmtTimeUs(c.us) : '—') },
-            { id: 'peak', title: 'Peak heap (KiB / MiB)', fmt: (c: typeof scenarioMatrix[0]['cells'][0]) => (c.peakBytes !== null ? fmtBytes(c.peakBytes) : '—') },
-            { id: 'allocs', title: 'Heap allocations (count)', fmt: (c: typeof scenarioMatrix[0]['cells'][0]) => (c.allocs !== null ? c.allocs.toLocaleString('en-US') : '—') },
+            { id: 'mib', title: 'Throughput (MiB/s)', fmt: (c: typeof scenarioMatrix[0]['cells'][0]) => (c.mib !== null ? c.mib.toFixed(1) : 'n/a') },
+            { id: 'us', title: 'Median latency (µs / ms)', fmt: (c: typeof scenarioMatrix[0]['cells'][0]) => (c.us !== null ? fmtTimeUs(c.us) : 'n/a') },
+            { id: 'peak', title: 'Peak heap (KiB / MiB)', fmt: (c: typeof scenarioMatrix[0]['cells'][0]) => (c.peakBytes !== null ? fmtBytes(c.peakBytes) : 'n/a') },
+            { id: 'allocs', title: 'Heap allocations (count)', fmt: (c: typeof scenarioMatrix[0]['cells'][0]) => (c.allocs !== null ? c.allocs.toLocaleString('en-US') : 'n/a') },
           ].map((metric, idx) => (
             <div
               id={`mat-panel-${metric.id}`}
@@ -559,7 +558,7 @@ tools/check_alloc_corpus.sh`;
         <h2>10x linear scaling ladder (10 KiB &rarr; 100 KiB &rarr; 1 MiB)</h2>
         <p class="sec-lede">
           Normalized growth when input size increases by 10x (<code>1.00x</code> = ideal O(n) scaling).
-          Notice that amortized arena/table capacity jumps between 10 KiB and 100 KiB settle below
+          Amortized arena and table capacity jumps between 10 KiB and 100 KiB settle below
           <code>1.00x</code> from 100 KiB to 1 MiB. Verified automatically by
           <code>cargo xtask scale</code>.
         </p>
@@ -605,7 +604,7 @@ tools/check_alloc_corpus.sh`;
   <section id="tradeoffs" class="sec">
     <div class="wrap">
       <div class="sec-head">
-        <span class="sec-kicker">Architectural transparency</span>
+        <span class="sec-kicker">Architecture trade-offs</span>
         <h2>Why C++ arena parsers (<code>rapidyaml</code>) differ on structured workloads</h2>
       </div>
 
@@ -615,20 +614,20 @@ tools/check_alloc_corpus.sh`;
           On geometric mean across the {HEADLINE.scenarioCount}-fixture suite, <code>ayaml</code> is
           faster than every measured Rust YAML library, C <code>libyaml</code>, C
           <code>libfyaml</code>, and C++ <code>fkYAML</code>. On dense multi-node documents, C++
-          <code>rapidyaml</code> remains roughly
-          <code>{HEADLINE.rymlAheadOfEvents.toFixed(2)}x–{HEADLINE.rymlAheadOfValue.toFixed(2)}x</code>
-          faster on geometric mean because it solves a fundamentally different problem: it parses raw
-          bytes into a flat, unsafe C++ index arena (optionally mutating the input buffer in place)
-          with 2–3 arena allocations, no Rust UTF-8 ownership barriers, no duplicate-key
-          hashing/rejection, no YAML 1.2.2 Core schema resolution on the arena path, and no per-node
-          owned Rust <code>Value</code> / <code>Mapping</code> DOM.
+          <code>rapidyaml</code> stays about
+          <code>{HEADLINE.rymlAheadOfEvents.toFixed(2)}x to {HEADLINE.rymlAheadOfValue.toFixed(2)}x</code>
+          faster on geometric mean because its output model does much less per-node work. It parses
+          raw bytes into a flat, unsafe C++ index arena (optionally mutating the input buffer in
+          place) with 2 to 3 allocations, skipping Rust UTF-8 ownership checks, duplicate-key
+          hashing, YAML 1.2.2 Core schema resolution on the arena path, and owned per-node
+          <code>Value</code> / <code>Mapping</code> structures.
         </p>
         <p>
-          <code>ayaml</code> enforces <code>#![forbid(unsafe_code)]</code>, strict YAML 1.2.2 Core
-          schema semantics, duplicate mapping-key rejection, byte-accurate spans, bounded
-          alias-expansion budgets, and full Serde integration. Where input is dominated by bulk text
-          rather than tiny node overhead (such as <code>large-scalar-1mb</code>), <code>ayaml</code>
-          runs at <strong>{HEADLINE.largeScalarMib.toFixed(1)} MiB/s</strong> — more than
+          <code>ayaml</code> enforces <code>#![forbid(unsafe_code)]</code>, YAML 1.2.2 Core schema
+          semantics, duplicate mapping-key rejection, byte-accurate spans, bounded alias-expansion
+          budgets, and full Serde integration. When input is dominated by bulk text rather than
+          small nodes (such as <code>large-scalar-1mb</code>), <code>ayaml</code> runs at
+          <strong>{HEADLINE.largeScalarMib.toFixed(1)} MiB/s</strong>, more than
           <strong>{HEADLINE.largeScalarVsRyml.toFixed(1)}x faster than rapidyaml</strong>.
         </p>
       </div>

@@ -80,6 +80,81 @@ function addError(map, key, source) {
 
 const UNSTRIPPED_RUSTDOC_LINE_RE =
   /^\s*#(?:\s+(?:fn\s|use\s|Ok(?:\(|::)|let\s|extern\s|struct\s|enum\s|const\s|static\s|type\s|trait\s|impl\s|mod\s|pub\s|\})|\s*$)/;
+const EM_DASH_GLOBAL_RE = /\u2014|&mdash;|&#0*8212;|&#x0*2014;/gi;
+
+function stripBalancedHtmlElement(html, tagName) {
+  const tokenRe = new RegExp(`<(\\/)?${tagName}(?=[\\s>/])[^>]*>`, 'gi');
+  let out = '';
+  let last = 0;
+  let depth = 0;
+  for (const m of html.matchAll(tokenRe)) {
+    const isClose = Boolean(m[1]);
+    const isSelfClose = !isClose && m[0].endsWith('/>');
+    if (!isClose) {
+      if (depth === 0) {
+        out += html.slice(last, m.index);
+      }
+      if (!isSelfClose) depth++;
+      if (isSelfClose && depth === 0) {
+        last = m.index + m[0].length;
+      }
+    } else if (depth > 0) {
+      depth--;
+      if (depth === 0) {
+        last = m.index + m[0].length;
+      }
+    }
+  }
+  if (depth === 0) {
+    out += html.slice(last);
+  }
+  return out;
+}
+
+/**
+ * Strip non-prose HTML elements (scripts, styles, comments, code blocks, and
+ * copy-button source payloads) and verify no rendered text or metadata
+ * contains em dashes.
+ */
+export function checkHtmlNoEmDashes(html, sourceUrl) {
+  // Strip <script> and <style> before HTML comments so `"<!--"` inside JS/CSS
+  // strings cannot mask prose that follows the script tag.
+  let prose = html
+    .replace(/<script(?=[\s>/])[^>]*>[\s\S]*?<\/script\s*>/gi, '')
+    .replace(/<style(?=[\s>/])[^>]*>[\s\S]*?<\/style\s*>/gi, '')
+    .replace(/<!--[\s\S]*?-->/g, '');
+  prose = stripBalancedHtmlElement(prose, 'pre');
+  prose = stripBalancedHtmlElement(prose, 'code');
+  // Strip Starlight Expressive Code (`data-code`) and custom (`data-copy`)
+  // clipboard payloads mirroring fenced code blocks.
+  prose = prose.replace(/\sdata-(?:code|copy)=(?:"[^"]*"|'[^']*')/gi, '');
+
+  const errors = [];
+  for (const match of prose.matchAll(EM_DASH_GLOBAL_RE)) {
+    const start = Math.max(0, match.index - 30);
+    const end = Math.min(prose.length, match.index + match[0].length + 30);
+    const snippet = prose.slice(start, end).replace(/\s+/g, ' ').trim();
+    errors.push(`${sourceUrl} contains disallowed em dash (${match[0]}): ${snippet}`);
+  }
+  return errors;
+}
+
+/**
+ * Verify Markdown/plain text output outside code blocks and inline code spans
+ * contains no em dashes or HTML em-dash entities.
+ */
+export function checkTextNoEmDashes(text, label) {
+  const prose = stripMarkdownCode(text);
+  const errors = [];
+  for (const [idx, line] of prose.split('\n').entries()) {
+    for (const match of line.matchAll(EM_DASH_GLOBAL_RE)) {
+      errors.push(
+        `${label}:${idx + 1} contains disallowed em dash (${match[0]}): ${line.trim()}`,
+      );
+    }
+  }
+  return errors;
+}
 
 /**
  * Inspect `llms-full.txt` text for unstripped rustdoc hidden lines outside
@@ -139,6 +214,7 @@ export function checkLlmsFullContent(text) {
       errors.push(`dist/llms-full.txt contains unrewritten relative .md link: ${match[0].trim()}`);
     }
   }
+  errors.push(...checkTextNoEmDashes(text, 'dist/llms-full.txt'));
   return errors;
 }
 
@@ -164,6 +240,7 @@ function main() {
     const html = readFileSync(htmlPath, 'utf8');
     const sourceUrl = htmlPathToUrl(htmlPath);
     const is404 = htmlPath === join(DIST, '404.html');
+    extraErrors.push(...checkHtmlNoEmDashes(html, sourceUrl));
 
     for (const match of html.matchAll(/\s(href|src)=["']([^"']+)["']/gi)) {
       const attr = match[1].toLowerCase();
@@ -293,6 +370,8 @@ function main() {
     }
     if (bundle === 'llms-full.txt') {
       extraErrors.push(...checkLlmsFullContent(text));
+    } else {
+      extraErrors.push(...checkTextNoEmDashes(text, `dist/${bundle}`));
     }
   }
 

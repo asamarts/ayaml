@@ -19,7 +19,7 @@ export default defineConfig({
     starlight({
       title: 'ayaml',
       description:
-        'Safe, fast, pure-Rust YAML 1.2.2 parser, spanned event stream, generic value model, Serde codec, and deterministic emitter.',
+        'Pure-Rust YAML 1.2.2 parser, Serde codec, spanned event stream, deterministic emitter, and source-preserving editor.',
       favicon: '/favicon.svg',
       disable404Route: true,
       social: [

@@ -60,7 +60,7 @@ assert_eq!(hook.event, "deploy.succeeded");
 The default count limits (`max_events = 1_000_000`,
 `max_collection_entries = 1_000_000`, `max_anchors = 100_000`,
 `max_alias_dereferences = 100_000`) intentionally cap peak token memory for
-untrusted input. A dense, trusted 10-32 MiB document (for example a large
+untrusted input. A dense, trusted 10 to 32 MiB document (for example a large
 OpenAPI specification or generated catalog) can exceed `max_events` even when
 it is well under `max_input_bytes`.
 
@@ -83,14 +83,14 @@ assert_eq!(value["openapi"].as_str(), Some("3.1.0"));
 ```
 
 If you prefer a finite ceiling instead of `usize::MAX`, estimate
-`max_events` at roughly `1` token per 3-5 bytes of dense YAML (each token is
+`max_events` at roughly `1` token per 3 to 5 bytes of dense YAML (each token is
 32 bytes on 64-bit targets, so 2,000,000 tokens is roughly 64 MiB of token
 arena memory).
 
 ## 3. Alias expansion and opt-in merge keys
 
-Every alias dereference — including `<<: *anchor` merge-key expansion when
-`ParseOptions::with_merge_keys(true)` is enabled — charges the shared alias
+Every alias dereference (including `<<: *anchor` merge-key expansion when
+`ParseOptions::with_merge_keys(true)` is enabled) charges the shared alias
 budget:
 
 ```text
@@ -110,7 +110,7 @@ and non-core tag bytes. Guidelines:
 - Keep `max_depth` at or below `MAX_DEPTH_CAP` (`128`); higher values are
   rejected during limit validation before parsing begins.
 
-## 4. Reporting actionable limit diagnostics
+## 4. Reporting limit diagnostics
 
 When a limit fires, inspect `Error::limit()` to tell operators which ceiling
 was hit and by how much without exposing document contents:

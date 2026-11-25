@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Check the Astro + Starlight site configuration, pinned benchmark JSONL artifacts,
-page coverage, doctest coverage, code fences, and relative links."""
+page coverage, doctest coverage, code fences, em-dash prose hygiene, and relative links."""
 
 from __future__ import annotations
 
@@ -14,6 +14,37 @@ HTML_HREF_PATTERN = re.compile(r'href="([^"]+)"')
 INCLUDE_DOC_PATTERN = re.compile(r'include_str!\("\.\./\.\./\.\./([^"]+)"\)')
 HEADING_PATTERN = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+EM_DASH_PATTERN = re.compile(r"\u2014|&mdash;|&#0*8212;|&#x0*2014;", re.IGNORECASE)
+
+
+def _leading_spaces(line: str) -> int:
+    """Count leading ASCII spaces before the first non-space character."""
+    return len(line) - len(line.lstrip(" "))
+
+
+def _parse_opening_fence(line: str) -> tuple[str, int, str] | None:
+    """Parse a CommonMark §4.5 opening code fence (0-3 spaces indent; backtick info has no backticks)."""
+    if _leading_spaces(line) > 3:
+        return None
+    stripped = line.lstrip(" ")
+    if not stripped.startswith(("```", "~~~")):
+        return None
+    ch = stripped[0]
+    count = len(stripped) - len(stripped.lstrip(ch))
+    if count < 3:
+        return None
+    info = stripped[count:].strip()
+    if ch == "`" and "`" in info:
+        return None
+    return ch, count, info
+
+
+def _is_closing_fence(line: str, fence_char: str, fence_len: int) -> bool:
+    """Match a CommonMark §4.5 closing code fence (0-3 spaces indent, >= opening length, spaces only after)."""
+    if _leading_spaces(line) > 3:
+        return False
+    stripped = line.lstrip(" ").rstrip(" \t\r\n")
+    return len(stripped) >= fence_len and stripped == fence_char * len(stripped)
 
 
 def strip_fenced_code_blocks(text: str) -> str:
@@ -24,21 +55,15 @@ def strip_fenced_code_blocks(text: str) -> str:
     fence_char = ""
     fence_len = 0
     for line in lines:
-        stripped = line.lstrip()
         if not in_fence:
-            if stripped.startswith(("```", "~~~")):
-                ch = stripped[0]
-                count = len(stripped) - len(stripped.lstrip(ch))
-                if count >= 3:
-                    in_fence = True
-                    fence_char = ch
-                    fence_len = count
-                    continue
+            opened = _parse_opening_fence(line)
+            if opened is not None:
+                fence_char, fence_len, _ = opened
+                in_fence = True
+                continue
             out.append(line)
         else:
-            if stripped.startswith(fence_char * fence_len) and stripped.strip() == fence_char * len(
-                stripped.strip()
-            ):
+            if _is_closing_fence(line, fence_char, fence_len):
                 in_fence = False
     return "".join(out)
 
@@ -200,35 +225,117 @@ def check_rust_fences(root: Path, path: Path, text: str) -> list[str]:
     fence_char = ""
     fence_len = 0
     for line_no, line in enumerate(text.splitlines(), 1):
-        stripped = line.lstrip()
         if not in_fence:
-            if stripped.startswith(("```", "~~~")):
-                ch = stripped[0]
-                count = len(stripped) - len(stripped.lstrip(ch))
-                if count >= 3:
-                    info = stripped[count:].strip()
-                    in_fence = True
-                    fence_char = ch
-                    fence_len = count
-                    if not info:
-                        errors.append(
-                            f"{rel}:{line_no}: fenced code block has no language tag "
-                            "(rustdoc treats untagged fences as Rust)"
-                        )
-                        continue
-                    tokens = [tok.strip().lower() for tok in re.split(r"[,\s]+", info) if tok.strip()]
-                    if "rust" in tokens:
-                        for forbidden in ("ignore", "no_run"):
-                            if forbidden in tokens:
-                                errors.append(
-                                    f"{rel}:{line_no}: Rust example uses '{forbidden}' ({info!r}); "
-                                    "documentation examples must compile and run as doctests"
-                                )
+            opened = _parse_opening_fence(line)
+            if opened is not None:
+                fence_char, fence_len, info = opened
+                in_fence = True
+                if not info:
+                    errors.append(
+                        f"{rel}:{line_no}: fenced code block has no language tag "
+                        "(rustdoc treats untagged fences as Rust)"
+                    )
+                    continue
+                tokens = [tok.strip().lower() for tok in re.split(r"[,\s]+", info) if tok.strip()]
+                if "rust" in tokens:
+                    for forbidden in ("ignore", "no_run"):
+                        if forbidden in tokens:
+                            errors.append(
+                                f"{rel}:{line_no}: Rust example uses '{forbidden}' ({info!r}); "
+                                "documentation examples must compile and run as doctests"
+                            )
         else:
-            if stripped.startswith(fence_char * fence_len) and stripped.strip() == fence_char * len(
-                stripped.strip()
-            ):
+            if _is_closing_fence(line, fence_char, fence_len):
                 in_fence = False
+    return errors
+
+
+def strip_inline_code_spans(text: str) -> str:
+    """Remove equal-length backtick inline code spans across a paragraph while preserving newlines."""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == "`":
+            # Backslash-escaped backtick (odd number of preceding backslashes) is literal prose.
+            bs = 0
+            while i - 1 - bs >= 0 and text[i - 1 - bs] == "\\":
+                bs += 1
+            if bs % 2 == 1:
+                out.append("`")
+                i += 1
+                continue
+            ticks = 0
+            while i + ticks < n and text[i + ticks] == "`":
+                ticks += 1
+            j = i + ticks
+            closed = -1
+            while j < n:
+                if text[j] == "`":
+                    run = 0
+                    while j + run < n and text[j + run] == "`":
+                        run += 1
+                    if run == ticks:
+                        closed = j + run
+                        break
+                    j += run
+                else:
+                    j += 1
+            if closed != -1:
+                # Keep newline count exact so callers keep accurate 1-based line numbers.
+                out.append("\n" * text[i:closed].count("\n"))
+                i = closed
+                continue
+            out.append(text[i : i + ticks])
+            i += ticks
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def check_no_em_dashes(root: Path, path: Path, text: str) -> list[str]:
+    """Reject em dashes and HTML em-dash entities in Markdown prose outside code blocks/spans."""
+    errors: list[str] = []
+    rel = path.relative_to(root)
+    in_fence = False
+    fence_char = ""
+    fence_len = 0
+    # Collect prose paragraphs separated by blank lines or code fences so multiline inline code
+    # spans stay balanced without leaking across paragraph boundaries, while keeping exact line numbers.
+    para_lines: list[tuple[int, str]] = []
+
+    def flush_paragraph() -> None:
+        if not para_lines:
+            return
+        start_line = para_lines[0][0]
+        joined = "\n".join(line for _, line in para_lines)
+        stripped_para = strip_inline_code_spans(joined)
+        for offset, prose_line in enumerate(stripped_para.split("\n")):
+            match = EM_DASH_PATTERN.search(prose_line)
+            if match:
+                errors.append(
+                    f"{rel}:{start_line + offset}: em dash ({match.group(0)!r}) is disallowed in docs prose; "
+                    "use commas, colons, parentheses, or separate sentences"
+                )
+        para_lines.clear()
+
+    for line_no, line in enumerate(text.splitlines(), 1):
+        if not in_fence:
+            opened = _parse_opening_fence(line)
+            if opened is not None:
+                flush_paragraph()
+                fence_char, fence_len, _ = opened
+                in_fence = True
+                continue
+            if not line.strip():
+                flush_paragraph()
+                continue
+            para_lines.append((line_no, line))
+        else:
+            if _is_closing_fence(line, fence_char, fence_len):
+                in_fence = False
+    flush_paragraph()
     return errors
 
 
@@ -254,6 +361,7 @@ def check_links(root: Path, docs_dir: Path, files: list[Path]) -> list[str]:
         in_docs = docs_resolved in resolved_path.parents
         if in_docs or resolved_path in check_fences_in:
             errors.extend(check_rust_fences(root, path, text))
+            errors.extend(check_no_em_dashes(root, path, text))
         prose = strip_fenced_code_blocks(text)
         targets = [match.group(1) for match in LINK_PATTERN.finditer(prose)]
         if in_docs:

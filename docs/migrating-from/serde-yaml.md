@@ -3,7 +3,7 @@
 `serde_yaml` (archived upstream) wrapped C-transpiled `unsafe-libyaml` with YAML
 1.1 heuristics and unbounded alias expansion by default (while enforcing a
 128-level recursion cap). `ayaml` provides a safe, pure-Rust
-(`#![forbid(unsafe_code)]`) YAML 1.2.2 replacement with familiar Serde entry
+(`#![forbid(unsafe_code)]`) YAML 1.2.2 replacement with Serde entry
 points, native DoS `Limits` (including byte-weighted alias expansion budgets),
 byte-accurate spans, and an optional `libyaml-compat` boundary for legacy
 documents.
@@ -69,7 +69,7 @@ assert_eq!(services[1].name, "worker");
 
 ## 3. Behavioral differences to check
 
-Moving from `serde_yaml` to strict YAML 1.2.2 surfaces several intentional
+Moving from `serde_yaml` to YAML 1.2.2 introduces several intentional
 differences:
 
 1. **Duplicate mapping keys are rejected by default.** `serde_yaml` silently
@@ -155,11 +155,11 @@ assert_eq!(
     }
 );
 
-// Single-entry mapping enum syntax (`Env: API_TOKEN`) also deserializes cleanly.
+// Single-entry mapping enum syntax (`Env: API_TOKEN`) also deserializes.
 let mapped_enum: SecretRef = from_str("Env: API_TOKEN\n")?;
 assert_eq!(mapped_enum, SecretRef::Env("API_TOKEN".into()));
 
-// Single-doc readers reject trailing documents cleanly.
+// Single-doc readers reject trailing documents.
 let trailing = from_str::<u32>("1\n---\n2\n").unwrap_err();
 assert_eq!(trailing.code(), ErrorCode::TrailingDocuments);
 # Ok(())
