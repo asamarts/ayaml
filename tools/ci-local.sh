@@ -259,6 +259,7 @@ quality() {
   test_step "fuzz workspace harness tests ($tc)" cargo "+$tc" test --manifest-path fuzz/Cargo.toml --lib --locked
   test_step "counting allocator tests ($tc)" cargo "+$tc" test --manifest-path fuzz/Cargo.toml --bin memcount --locked
   step "production library panic profile ($tc)" cargo "+$tc" clippy -p ayaml --lib --locked --all-features -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
+  step "production ayaml-edit library panic profile ($tc)" cargo "+$tc" clippy -p ayaml-edit --lib --locked --all-features -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
   test_step "test ($tc)" cargo "+$tc" test --workspace --locked --all-features
   test_step "test default features ($tc)" cargo "+$tc" test -p ayaml --locked
   # A typed read builds a tree of a small input; this build reads every input from its events.
@@ -273,6 +274,7 @@ quality() {
   # Mirrors: cargo test --manifest-path fuzz/Cargo.toml --lib --locked
   # Mirrors: cargo test --manifest-path fuzz/Cargo.toml --bin memcount --locked
   # Mirrors: cargo clippy -p ayaml --lib --locked --all-features -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
+  # Mirrors: cargo clippy -p ayaml-edit --lib --locked --all-features -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
   # Mirrors: cargo test --workspace --locked --all-features
   # Mirrors: cargo test -p ayaml --locked
   # Mirrors: cargo test -p ayaml --locked --all-features
@@ -317,6 +319,10 @@ job_policy() {
     # Mirrors: cargo geiger --manifest-path "$PWD/crates/ayaml/Cargo.toml" --all-features --output-format Json > "$TMPDIR/geiger.json"
     step "evaluate the census" python3 tools/check_unsafe_census.py "$TMPDIR/geiger.json"
     # Mirrors: python3 tools/check_unsafe_census.py "$TMPDIR/geiger.json"
+    shstep "unsafe census (ayaml-edit)" "CARGO_TARGET_DIR=\"\$PWD/target/geiger\" cargo geiger --manifest-path \"\$PWD/crates/ayaml-edit/Cargo.toml\" --all-features --output-format Json > \"$TMPDIR/geiger-edit.json\""
+    # Mirrors: cargo geiger --manifest-path "$PWD/crates/ayaml-edit/Cargo.toml" --all-features --output-format Json > "$TMPDIR/geiger-edit.json"
+    step "evaluate the ayaml-edit census" python3 tools/check_unsafe_census.py --crate ayaml-edit "$TMPDIR/geiger-edit.json"
+    # Mirrors: python3 tools/check_unsafe_census.py --crate ayaml-edit "$TMPDIR/geiger-edit.json"
   else
     skip "cargo-geiger not installed: unsafe census"
   fi
@@ -329,6 +335,8 @@ job_public-api() {
   if api_dir="$(tools/install-public-api.sh "$PWD/target/ci-tools/public-api")"; then
     step "public API diff against last release" env PATH="$api_dir:$PATH" python3 tools/check_public_api.py
     # Mirrors: python3 tools/check_public_api.py
+    step "ayaml-edit public API diff against last release" env PATH="$api_dir:$PATH" python3 tools/check_public_api.py --package ayaml-edit
+    # Mirrors: python3 tools/check_public_api.py --package ayaml-edit
     step "verify 0.1.3 to 0.2.0 break detection" env PATH="$api_dir:$PATH" AYAML_TEST_PUBLIC_API_LIVE=1 python3 tools/test_public_api.py
     # Mirrors: AYAML_TEST_PUBLIC_API_LIVE=1 python3 tools/test_public_api.py
   else
@@ -412,14 +420,16 @@ job_docs-lint() {
   # Mirrors: cargo test --doc -p ayaml-conformance --all-features --locked
 }
 
-# cargo package plus a fresh downstream consumer built from the .crate.
+# cargo package plus a fresh downstream consumer built from the .crate files.
 job_package() {
   local allow=()
   [ "$dirty" -eq 1 ] && allow=(--allow-dirty)
-  step "cargo package" cargo package -p ayaml --locked "${allow[@]}"
+  step "cargo package (ayaml)" cargo package -p ayaml --locked "${allow[@]}"
   # Mirrors: cargo package -p ayaml --locked
+  step "cargo package (ayaml-edit)" cargo package -p ayaml-edit --locked --no-verify "${allow[@]}"
+  # Mirrors: cargo package -p ayaml-edit --locked --no-verify
   if [ "$job_failed" -ne 0 ]; then return; fi
-  local version crate
+  local version crate edit_crate
   version="$(python3 - <<'PY'
 import tomllib
 from pathlib import Path
@@ -428,23 +438,28 @@ with Path("Cargo.toml").open("rb") as manifest:
 PY
 )"
   crate="target/package/ayaml-$version.crate"
-  if [ ! -f "$crate" ]; then
-    echo "  cargo package did not write $crate"
+  edit_crate="target/package/ayaml-edit-$version.crate"
+  if [ ! -f "$crate" ] || [ ! -f "$edit_crate" ]; then
+    echo "  cargo package did not write $crate and $edit_crate"
     job_failed=1
     return
   fi
   if [ "$dirty" -eq 0 ]; then
     step "the package holds the commit's files" python3 tools/check_release.py package "$crate" "$sha"
     # Mirrors: python3 tools/check_release.py package target/package/ayaml-*.crate "$(git rev-parse HEAD)"
+    step "the ayaml-edit package holds the commit's files" python3 tools/check_release.py package --package ayaml-edit "$edit_crate" "$sha"
+    # Mirrors: python3 tools/check_release.py package --package ayaml-edit target/package/ayaml-edit-*.crate "$(git rev-parse HEAD)"
   else
-    skip "the checkout is dirty: the package against the commit"
+    skip "the checkout is dirty: the packages against the commit"
   fi
   shstep "packaged crate contents" "tar -tzf '$crate' | sed 's|^[^/]*/||' | sort > '$logdir/package-files.txt'; cat '$logdir/package-files.txt'"
   local work
   work="$(mktemp -d "$ROOT/target/ayaml-smoke.XXXXXX")"
   tar -xzf "$crate" -C "$work"
-  local src
-  src="$(find "$work" -maxdepth 1 -mindepth 1 -type d -name 'ayaml-*' | head -1)"
+  tar -xzf "$edit_crate" -C "$work"
+  local src edit_src
+  src="$(find "$work" -maxdepth 1 -mindepth 1 -type d -name 'ayaml-*' ! -name 'ayaml-edit-*' | head -1)"
+  edit_src="$(find "$work" -maxdepth 1 -mindepth 1 -type d -name 'ayaml-edit-*' | head -1)"
   mkdir -p "$work/consumer/src"
   cat >"$work/consumer/Cargo.toml" <<EOF
 [package]
@@ -454,6 +469,10 @@ edition = "2024"
 publish = false
 
 [dependencies]
+ayaml = { path = "$src" }
+ayaml-edit = { path = "$edit_src" }
+
+[patch.crates-io]
 ayaml = { path = "$src" }
 
 [workspace]
@@ -470,6 +489,13 @@ fn main() {
     assert_eq!(typed.len(), 3);
     let events = ayaml::parse_events(input).expect("parse_events").count();
     assert!(events > 0);
+    let edited = ayaml_edit::replace_scalar(
+        "name: smoke\nport: 8080\n",
+        &[ayaml::PathSegment::key("port")],
+        &ayaml::Value::from(9090_u64),
+    )
+    .expect("replace_scalar");
+    assert_eq!(edited.output(), "name: smoke\nport: 9090\n");
     println!("downstream smoke ok: {} events, ayaml {}", events, ayaml::VERSION);
 }
 EOF

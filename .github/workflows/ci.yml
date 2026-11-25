@@ -42,6 +42,8 @@ jobs:
         run: cargo test --manifest-path fuzz/Cargo.toml --bin memcount --locked
       - name: Production library panic profile
         run: cargo clippy -p ayaml --lib --locked --all-features -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
+      - name: Production ayaml-edit library panic profile
+        run: cargo clippy -p ayaml-edit --lib --locked --all-features -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
       - name: Test
         run: cargo test --workspace --locked --all-features
       - name: Test with default features
@@ -188,6 +190,10 @@ jobs:
         run: cargo package -p ayaml --locked
       - name: The package holds the commit's files
         run: python3 tools/check_release.py package target/package/ayaml-*.crate "$(git rev-parse HEAD)"
+      - name: Package ayaml-edit
+        run: cargo package -p ayaml-edit --locked --no-verify
+      - name: The ayaml-edit package holds the commit's files
+        run: python3 tools/check_release.py package --package ayaml-edit target/package/ayaml-edit-*.crate "$(git rev-parse HEAD)"
       - name: Test the unpacked package
         run: |
           set -e
@@ -195,19 +201,58 @@ jobs:
           rm -rf "$tmp"
           mkdir -p "$tmp"
           tar -xzf target/package/ayaml-*.crate -C "$tmp"
-          crate="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d -name 'ayaml-*' | head -n1)"
+          crate="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d -name 'ayaml-*' ! -name 'ayaml-edit-*' | head -n1)"
           test -n "$crate"
           cargo test --manifest-path "$crate/Cargo.toml" --all-features --locked
+      - name: Test the unpacked ayaml-edit package
+        run: |
+          set -e
+          tmp="${RUNNER_TEMP}/ayaml-edit-package-test"
+          rm -rf "$tmp"
+          mkdir -p "$tmp"
+          tar -xzf target/package/ayaml-*.crate -C "$tmp"
+          tar -xzf target/package/ayaml-edit-*.crate -C "$tmp"
+          ayaml_crate="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d -name 'ayaml-*' ! -name 'ayaml-edit-*' | head -n1)"
+          edit_crate="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d -name 'ayaml-edit-*' | head -n1)"
+          test -n "$ayaml_crate"
+          test -n "$edit_crate"
+          cargo test --manifest-path "$edit_crate/Cargo.toml" \
+            --config "patch.crates-io.ayaml.path=\"$ayaml_crate\"" --all-features
       - name: Downstream smoke
         run: |
           set -e
           tmp="${RUNNER_TEMP}/ayaml-downstream"
           rm -rf "$tmp"
-          cargo new --quiet "$tmp"
-          package="$(find "$GITHUB_WORKSPACE/target/package" -maxdepth 1 -type d -name 'ayaml-*' | head -n1)"
-          test -n "$package"
-          printf '\nayaml = { path = "%s" }\n' "$package" >> "$tmp/Cargo.toml"
-          cargo check --quiet --manifest-path "$tmp/Cargo.toml"
+          mkdir -p "$tmp/unpacked"
+          tar -xzf target/package/ayaml-*.crate -C "$tmp/unpacked"
+          tar -xzf target/package/ayaml-edit-*.crate -C "$tmp/unpacked"
+          ayaml_pkg="$(find "$tmp/unpacked" -mindepth 1 -maxdepth 1 -type d -name 'ayaml-*' ! -name 'ayaml-edit-*' | head -n1)"
+          edit_pkg="$(find "$tmp/unpacked" -mindepth 1 -maxdepth 1 -type d -name 'ayaml-edit-*' | head -n1)"
+          test -n "$ayaml_pkg"
+          test -n "$edit_pkg"
+          cargo new --quiet "$tmp/app"
+          cat >> "$tmp/app/Cargo.toml" <<EOF
+
+          ayaml = { path = "$ayaml_pkg" }
+          ayaml-edit = { path = "$edit_pkg" }
+
+          [patch.crates-io]
+          ayaml = { path = "$ayaml_pkg" }
+          EOF
+          cat > "$tmp/app/src/main.rs" <<'EOF'
+          fn main() {
+              let v = ayaml::parse_value("port: 8080\n").expect("parse");
+              assert_eq!(v["port"].as_u64(), Some(8080));
+              let edited = ayaml_edit::replace_scalar(
+                  "port: 8080\n",
+                  &[ayaml::PathSegment::key("port")],
+                  &ayaml::Value::from(9090_u64),
+              )
+              .expect("edit");
+              assert_eq!(edited.output(), "port: 9090\n");
+          }
+          EOF
+          cargo run --quiet --manifest-path "$tmp/app/Cargo.toml"
 
   cross:
     name: cross (${{ matrix.target }})
@@ -279,6 +324,10 @@ jobs:
         run: cargo geiger --manifest-path "$GITHUB_WORKSPACE/crates/ayaml/Cargo.toml" --all-features --output-format Json > "${RUNNER_TEMP}/geiger.json"
       - name: Evaluate the census
         run: python3 tools/check_unsafe_census.py "${RUNNER_TEMP}/geiger.json"
+      - name: Unsafe census (ayaml-edit)
+        run: cargo geiger --manifest-path "$GITHUB_WORKSPACE/crates/ayaml-edit/Cargo.toml" --all-features --output-format Json > "${RUNNER_TEMP}/geiger-edit.json"
+      - name: Evaluate the ayaml-edit census
+        run: python3 tools/check_unsafe_census.py --crate ayaml-edit "${RUNNER_TEMP}/geiger-edit.json"
 
   semver:
     name: semver checks
@@ -297,6 +346,18 @@ jobs:
         run: tools/install-semver-checks.sh "${RUNNER_TEMP}/semver-checks" >> "$GITHUB_PATH"
       - name: cargo-semver-checks
         run: cargo semver-checks --package ayaml
+      - name: cargo-semver-checks (ayaml-edit)
+        run: |
+          set -euo pipefail
+          set +e
+          python3 tools/check_release.py published --package ayaml-edit
+          answer=$?
+          set -e
+          case "$answer" in
+            0) cargo semver-checks --package ayaml-edit ;;
+            1) echo "ayaml-edit is not yet published on crates.io; skipping semver baseline diff until first publish" ;;
+            *) exit 1 ;;
+          esac
 
   public-api:
     name: public API diff
@@ -316,6 +377,8 @@ jobs:
         run: tools/install-public-api.sh "${RUNNER_TEMP}/public-api" >> "$GITHUB_PATH"
       - name: Compare public API with the last release
         run: python3 tools/check_public_api.py
+      - name: Compare ayaml-edit public API with the last release
+        run: python3 tools/check_public_api.py --package ayaml-edit
       - name: Verify 0.1.3 to 0.2.0 break detection
         run: AYAML_TEST_PUBLIC_API_LIVE=1 python3 tools/test_public_api.py
 

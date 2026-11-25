@@ -16,10 +16,14 @@ import re
 import subprocess
 import tomllib
 
-# Direct dependencies of the public crate.
+# Direct dependencies of the public crates.
 ALLOWED_DIRECT = {
     "indexmap": "ordered value-layer Mapping",
     "serde": "required Serde contract",
+}
+
+ALLOWED_EDIT_DIRECT = {
+    "ayaml": "core parser, spans, and emitter",
 }
 
 # Everything else that users of the crate compile.
@@ -81,13 +85,13 @@ def manifest_direct_dependencies(manifest_path: Path) -> set[str]:
     return names
 
 
-def package_names(*extra: str) -> set[str]:
+def package_names(*extra: str, package: str = "ayaml") -> set[str]:
     output = subprocess.check_output(
         [
             "cargo",
             "tree",
             "-p",
-            "ayaml",
+            package,
             "-e",
             "normal,build",
             "--all-features",
@@ -101,7 +105,7 @@ def package_names(*extra: str) -> set[str]:
         text=True,
     )
     names = {line.split()[0] for line in output.splitlines() if line.strip()}
-    names.discard("ayaml")
+    names.discard(package)
     return names
 
 
@@ -292,6 +296,30 @@ def main() -> int:
         print(f"FAIL: unclassified package in ayaml's dependency graph: {unclassified}")
         return 1
 
+    edit_manifest = repo / "crates/ayaml-edit/Cargo.toml"
+    if edit_manifest.is_file():
+        edit_manifest_direct = manifest_direct_dependencies(edit_manifest)
+        unexpected_edit_manifest = sorted(edit_manifest_direct - ALLOWED_EDIT_DIRECT.keys())
+        if unexpected_edit_manifest:
+            print(
+                f"FAIL: unapproved direct dependency in crates/ayaml-edit/Cargo.toml: "
+                f"{unexpected_edit_manifest}"
+            )
+            return 1
+        edit_direct = package_names("--depth", "1", package="ayaml-edit")
+        unexpected_edit_direct = sorted(edit_direct - ALLOWED_EDIT_DIRECT.keys())
+        if unexpected_edit_direct:
+            print(f"FAIL: unapproved direct dependency of ayaml-edit: {unexpected_edit_direct}")
+            return 1
+        edit_graph = package_names(package="ayaml-edit")
+        for target in CROSS_TARGETS:
+            edit_graph |= package_names("--target", target, package="ayaml-edit")
+        edit_allowed = ALLOWED_EDIT_DIRECT.keys() | ALLOWED_DIRECT.keys() | ALLOWED_TRANSITIVE.keys()
+        unclassified_edit = sorted(edit_graph - edit_allowed)
+        if unclassified_edit:
+            print(f"FAIL: unclassified package in ayaml-edit's dependency graph: {unclassified_edit}")
+            return 1
+
     scanner = scanner_problem(repo / "crates/ayaml/src")
     if scanner:
         print(f"FAIL: {scanner}")
@@ -301,6 +329,11 @@ def main() -> int:
         f"OK: ayaml's direct dependencies are {sorted(direct | manifest_direct)}; "
         f"{len(graph)} packages in all, each classified"
     )
+    if edit_manifest.is_file():
+        print(
+            f"OK: ayaml-edit's direct dependencies are {sorted(edit_direct | edit_manifest_direct)}; "
+            f"{len(edit_graph)} packages in all, each classified"
+        )
     print("OK: scanner imports are core, alloc, std, or approved crate-local modules")
     return 0
 

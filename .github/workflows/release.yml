@@ -1,14 +1,15 @@
 name: release
 
-# Publishes ayaml when a vMAJOR.MINOR.PATCH tag is pushed: the CI gate runs on the tag's commit,
-# the tag and the package are checked against that commit, crates.io Trusted Publishing mints a
-# short-lived token, and the bytes crates.io then serves are attested and attached to a GitHub
-# release with their checksums. RELEASING.md says how to cut a release and how to recover from a
-# failed run.
+# Publishes ayaml (and ayaml-edit when present on the tag) when a vMAJOR.MINOR.PATCH tag is
+# pushed: the CI gate runs on the tag's commit, the tag and packages are checked against that
+# commit, crates.io Trusted Publishing mints short-lived tokens, ayaml is published and waited for
+# on the sparse index before ayaml-edit publishes, and the bytes crates.io serves are attested and
+# attached to a GitHub release with their checksums. RELEASING.md says how to cut a release and how
+# to recover from a failed run.
 #
 # Started by hand, it rehearses everything but the publish and the attestation against a tag that
 # is already published: the gate runs on the branch it was started from, the tag is checked and
-# packaged, the package is compared with the bytes crates.io serves, and those bytes go into a
+# packaged, the package(s) are compared with the bytes crates.io serves, and those bytes go into a
 # draft release that is checked as a rerun checks a release, and deleted (D77).
 on:
   push:
@@ -52,6 +53,9 @@ jobs:
       version: ${{ steps.tag.outputs.version }}
       commit: ${{ steps.tag.outputs.commit }}
       digest: ${{ steps.package.outputs.digest }}
+      has_edit: ${{ steps.package.outputs.has_edit }}
+      edit_digest: ${{ steps.package.outputs.edit_digest }}
+      edit_rehearse: ${{ steps.rehearse_check.outputs.edit_rehearse }}
     steps:
       # The checks come from the commit this run's workflow file comes from, and judge the tag.
       # On a tag push they are the same commit.
@@ -112,12 +116,57 @@ jobs:
           crate="target/package/ayaml-$VERSION.crate"
           python3 ../trusted/tools/check_release.py package "$crate" "$COMMIT"
           echo "digest=$(sha256sum "$crate" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          if [ -f crates/ayaml-edit/Cargo.toml ]; then
+            cargo +"$RELEASE_TOOLCHAIN" package -p ayaml-edit --locked --no-verify
+            edit_crate="target/package/ayaml-edit-$VERSION.crate"
+            python3 ../trusted/tools/check_release.py package --package ayaml-edit "$edit_crate" "$COMMIT"
+            # Verify the unpacked ayaml-edit package compiles and passes tests against the
+            # freshly packaged ayaml crate without crates.io credentials.
+            verify_dir="${RUNNER_TEMP}/verify-ayaml-edit"
+            rm -rf "$verify_dir"
+            mkdir -p "$verify_dir"
+            tar -xzf "$crate" -C "$verify_dir"
+            tar -xzf "$edit_crate" -C "$verify_dir"
+            cargo +"$RELEASE_TOOLCHAIN" test \
+              --manifest-path "$verify_dir/ayaml-edit-$VERSION/Cargo.toml" \
+              --config "patch.crates-io.ayaml.path=\"$verify_dir/ayaml-$VERSION\"" \
+              --all-features
+            echo "has_edit=true" >> "$GITHUB_OUTPUT"
+            echo "edit_digest=$(sha256sum "$edit_crate" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_edit=false" >> "$GITHUB_OUTPUT"
+            echo "edit_digest=" >> "$GITHUB_OUTPUT"
+          fi
       - name: Compare with the published bytes
+        id: rehearse_check
         if: github.event_name == 'workflow_dispatch'
         working-directory: source
         env:
           VERSION: ${{ steps.tag.outputs.version }}
-        run: python3 ../trusted/tools/check_release.py registry "target/package/ayaml-$VERSION.crate" "$VERSION" 0
+          HAS_EDIT: ${{ steps.package.outputs.has_edit }}
+        run: |
+          set -euo pipefail
+          python3 ../trusted/tools/check_release.py registry "target/package/ayaml-$VERSION.crate" "$VERSION" 0
+          edit_rehearse=false
+          if [ "$HAS_EDIT" = "true" ]; then
+            set +e
+            python3 ../trusted/tools/check_release.py published --package ayaml-edit "$VERSION"
+            answer=$?
+            set -e
+            case "$answer" in
+              0)
+                python3 ../trusted/tools/check_release.py registry --package ayaml-edit "target/package/ayaml-edit-$VERSION.crate" "$VERSION" 0
+                edit_rehearse=true
+                ;;
+              1)
+                echo "ayaml-edit $VERSION is not published on crates.io; rehearsing ayaml alone for this tag"
+                ;;
+              *)
+                exit 1
+                ;;
+            esac
+          fi
+          echo "edit_rehearse=$edit_rehearse" >> "$GITHUB_OUTPUT"
 
   publish:
     name: publish to crates.io
@@ -134,6 +183,8 @@ jobs:
       VERSION: ${{ needs.package.outputs.version }}
       COMMIT: ${{ needs.package.outputs.commit }}
       DIGEST: ${{ needs.package.outputs.digest }}
+      HAS_EDIT: ${{ needs.package.outputs.has_edit }}
+      EDIT_DIGEST: ${{ needs.package.outputs.edit_digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -142,7 +193,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ env.RELEASE_TOOLCHAIN }}
-      - name: Check the tag and the package again
+      - name: Check the tag and the package(s) again
         id: check
         run: |
           set -euo pipefail
@@ -152,7 +203,7 @@ jobs:
           # cargo publish packages again, so this checkout must give the package job's bytes. In
           # this job, neither command builds the package to verify it: that would run dependencies'
           # build scripts beside the credentials that mint a crates.io token. The package job built
-          # these bytes without them.
+          # and tested these bytes without them.
           cargo +"$RELEASE_TOOLCHAIN" package -p ayaml --locked --no-verify
           test "$(sha256sum "target/package/ayaml-$VERSION.crate" | cut -d' ' -f1)" = "$DIGEST"
           set +e
@@ -164,17 +215,44 @@ jobs:
             1) echo "published=false" >> "$GITHUB_OUTPUT" ;;
             *) exit 1 ;;
           esac
-      - name: Mint a crates.io token
+          if [ "$HAS_EDIT" = "true" ]; then
+            cargo +"$RELEASE_TOOLCHAIN" package -p ayaml-edit --locked --no-verify
+            test "$(sha256sum "target/package/ayaml-edit-$VERSION.crate" | cut -d' ' -f1)" = "$EDIT_DIGEST"
+            set +e
+            python3 tools/check_release.py published --package ayaml-edit "$VERSION"
+            edit_answer=$?
+            set -e
+            case "$edit_answer" in
+              0) echo "edit_published=true" >> "$GITHUB_OUTPUT" ;;
+              1) echo "edit_published=false" >> "$GITHUB_OUTPUT" ;;
+              *) exit 1 ;;
+            esac
+          else
+            echo "edit_published=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Mint a crates.io token for ayaml
         if: steps.check.outputs.published == 'false'
         id: auth
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
-      - name: Publish
+      - name: Publish ayaml
         if: steps.check.outputs.published == 'false'
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo +"$RELEASE_TOOLCHAIN" publish -p ayaml --locked --no-verify
-      - name: crates.io serves the package
+      - name: crates.io serves ayaml
         run: python3 tools/check_release.py registry "target/package/ayaml-$VERSION.crate" "$VERSION" 600
+      - name: Mint a crates.io token for ayaml-edit
+        if: needs.package.outputs.has_edit == 'true' && steps.check.outputs.edit_published == 'false'
+        id: auth_edit
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+      - name: Publish ayaml-edit
+        if: needs.package.outputs.has_edit == 'true' && steps.check.outputs.edit_published == 'false'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth_edit.outputs.token }}
+        run: cargo +"$RELEASE_TOOLCHAIN" publish -p ayaml-edit --locked --no-verify
+      - name: crates.io serves ayaml-edit
+        if: needs.package.outputs.has_edit == 'true'
+        run: python3 tools/check_release.py registry --package ayaml-edit "target/package/ayaml-edit-$VERSION.crate" "$VERSION" 600
 
   release:
     name: GitHub release
@@ -190,6 +268,8 @@ jobs:
       VERSION: ${{ needs.package.outputs.version }}
       COMMIT: ${{ needs.package.outputs.commit }}
       DIGEST: ${{ needs.package.outputs.digest }}
+      HAS_EDIT: ${{ needs.package.outputs.has_edit }}
+      EDIT_DIGEST: ${{ needs.package.outputs.edit_digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -198,31 +278,54 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$COMMIT"
-          tools/github_release.sh fetch "$VERSION" "$DIGEST" "$RUNNER_TEMP/dist"
-      - name: Attest the crate's provenance
+          if [ "$HAS_EDIT" = "true" ]; then
+            tools/github_release.sh fetch "$VERSION" "$DIGEST" "$RUNNER_TEMP/dist" "ayaml-edit=$EDIT_DIGEST"
+          else
+            tools/github_release.sh fetch "$VERSION" "$DIGEST" "$RUNNER_TEMP/dist"
+          fi
+      - name: Attest ayaml provenance
         id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ runner.temp }}/dist/ayaml-${{ needs.package.outputs.version }}.crate
-      - name: The attestation verifies as the release notes say
+      - name: Attest ayaml-edit provenance
+        if: needs.package.outputs.has_edit == 'true'
+        id: attest_edit
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/dist/ayaml-edit-${{ needs.package.outputs.version }}.crate
+      - name: The attestation(s) verify as the release notes say
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           gh attestation verify "$RUNNER_TEMP/dist/ayaml-$VERSION.crate" --repo "$GITHUB_REPOSITORY" \
             --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/tags/$TAG" \
             --cert-oidc-issuer https://token.actions.githubusercontent.com \
             --source-ref "refs/tags/$TAG" --source-digest "$COMMIT" --deny-self-hosted-runners
+          if [ "$HAS_EDIT" = "true" ]; then
+            gh attestation verify "$RUNNER_TEMP/dist/ayaml-edit-$VERSION.crate" --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/tags/$TAG" \
+              --cert-oidc-issuer https://token.actions.githubusercontent.com \
+              --source-ref "refs/tags/$TAG" --source-digest "$COMMIT" --deny-self-hosted-runners
+          fi
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
+          EDIT_ATTESTATION_URL: ${{ steps.attest_edit.outputs.attestation-url }}
         run: |
           set -euo pipefail
           {
             python3 tools/check_release.py notes "$VERSION"
             echo
-            python3 tools/check_release.py record "$TAG" "$COMMIT" "$DIGEST" "$ATTESTATION_URL"
+            if [ "$HAS_EDIT" = "true" ]; then
+              python3 tools/check_release.py record "$TAG" "$COMMIT" "$DIGEST" "$ATTESTATION_URL" \
+                --extra ayaml-edit "$EDIT_DIGEST" "$EDIT_ATTESTATION_URL"
+            else
+              python3 tools/check_release.py record "$TAG" "$COMMIT" "$DIGEST" "$ATTESTATION_URL"
+            fi
           } > "$RUNNER_TEMP/notes.md"
           # The release names no target commit, so GitHub compares the default branch's head, not
           # the tag's commit, with the default branch, and this job's token may create it. The
@@ -243,6 +346,8 @@ jobs:
       VERSION: ${{ needs.package.outputs.version }}
       COMMIT: ${{ needs.package.outputs.commit }}
       DIGEST: ${{ needs.package.outputs.digest }}
+      EDIT_REHEARSE: ${{ needs.package.outputs.edit_rehearse }}
+      EDIT_DIGEST: ${{ needs.package.outputs.edit_digest }}
       DRAFT: rehearsal-${{ github.run_id }}-${{ github.run_attempt }}
       # A draft's tag would be made here. A job's token can't create a release whose target commit
       # adds or changes workflow files relative to the default branch, as GitHub's REST reference
@@ -253,7 +358,13 @@ jobs:
         with:
           persist-credentials: false
       - name: Download what crates.io serves
-        run: tools/github_release.sh fetch "$VERSION" "$DIGEST" "$RUNNER_TEMP/dist"
+        run: |
+          set -euo pipefail
+          if [ "$EDIT_REHEARSE" = "true" ]; then
+            tools/github_release.sh fetch "$VERSION" "$DIGEST" "$RUNNER_TEMP/dist" "ayaml-edit=$EDIT_DIGEST"
+          else
+            tools/github_release.sh fetch "$VERSION" "$DIGEST" "$RUNNER_TEMP/dist"
+          fi
       - name: Create, check, and delete a draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -264,7 +375,12 @@ jobs:
           {
             python3 tools/check_release.py notes "$VERSION"
             echo
-            python3 tools/check_release.py record "$TAG" "$COMMIT" "$DIGEST"
+            if [ "$EDIT_REHEARSE" = "true" ]; then
+              python3 tools/check_release.py record "$TAG" "$COMMIT" "$DIGEST" \
+                --extra ayaml-edit "$EDIT_DIGEST"
+            else
+              python3 tools/check_release.py record "$TAG" "$COMMIT" "$DIGEST"
+            fi
           } > "$RUNNER_TEMP/notes.md"
           tools/github_release.sh rehearse "$DRAFT" "$DRAFT_TARGET" "$VERSION" "$RUNNER_TEMP/dist" "$RUNNER_TEMP/notes.md"
       - name: Delete the draft if a step stopped before it could

@@ -554,6 +554,58 @@ class PinConsistencyAndInstaller(unittest.TestCase):
             self.assertFalse((bad_dir / "ayaml-public-api").exists())
 
 
+class AyamlEditPublicApiTests(unittest.TestCase):
+    """tools/check_public_api.py supports --package ayaml-edit alongside ayaml (AY-163)."""
+
+    def test_ayaml_edit_diff_and_changelog_matching(self) -> None:
+        base = {
+            "pub struct ayaml_edit::TextEdit",
+            "pub fn ayaml_edit::replace_scalar(&str, &[ayaml::PathSegment], &ayaml::Value) -> core::result::Result<ayaml_edit::VerifiedEdit, ayaml_edit::EditError>",
+        }
+        head = {
+            "pub struct ayaml_edit::TextEdit",
+            "pub fn ayaml_edit::replace_scalar(&str, &[ayaml::PathSegment], &ayaml::Value, bool) -> core::result::Result<ayaml_edit::VerifiedEdit, ayaml_edit::EditError>",
+        }
+        changelog = "# Changelog\n\n## [Unreleased]\n\n### Changed\n\n- `ayaml_edit::replace_scalar` now takes an extra flag.\n"
+        undoc, doc, _ = cpa.check_comparison(
+            {"default": base},
+            {"default": head},
+            changelog,
+            "1.0.0",
+            "0.2.3",
+            crate_ident="ayaml_edit",
+        )
+        self.assertEqual(undoc, [])
+        self.assertEqual(len(doc), 1)
+
+        undoc_empty, _, _ = cpa.check_comparison(
+            {"default": base},
+            {"default": head},
+            "",
+            "1.0.0",
+            "0.2.3",
+            crate_ident="ayaml_edit",
+        )
+        self.assertEqual(len(undoc_empty), 1)
+
+    def test_ayaml_edit_manifest_features_are_validated(self) -> None:
+        cfg = cpa.PACKAGE_CONFIGS["ayaml-edit"]
+        manifest = (REPO_ROOT / cfg.package_dir / "Cargo.toml").read_text(encoding="utf-8")
+        cpa.validate_manifest_features(
+            manifest,
+            package_dir=cfg.package_dir,
+            feature_sets=cfg.feature_sets,
+            non_api_features=cfg.non_api_features,
+        )
+        with self.assertRaises(RuntimeError):
+            cpa.validate_manifest_features(
+                '[package]\nname = "ayaml-edit"\n[features]\nexperimental = []\n',
+                package_dir=cfg.package_dir,
+                feature_sets=cfg.feature_sets,
+                non_api_features=cfg.non_api_features,
+            )
+
+
 @unittest.skipUnless(
     os.environ.get("AYAML_TEST_PUBLIC_API_LIVE") == "1",
     "set AYAML_TEST_PUBLIC_API_LIVE=1 to run live rustdoc comparison against v0.1.3 and v0.2.0",
