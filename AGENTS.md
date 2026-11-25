@@ -32,9 +32,10 @@ or stop and say what's blocking you.
 Every push is public at once and can't be fully recalled. That covers commit
 messages, branch names, pull request titles and bodies, and code. Keep out machine
 names, runner names, local paths, private repository names, and anything from a
-private planning document. Name no parser other than libyaml, and only for what
-`ayaml::compat` imitates. If the leak gate rejects a commit, rewrite that commit,
-because removing the text in a later commit doesn't clear it.
+private planning document. Public documentation (comparative benchmarks and
+migration guides) may name other YAML libraries with factual, reproducible data
+(see D105 in `docs/decisions.md`). If the leak gate rejects a commit, rewrite that
+commit, because removing the text in a later commit doesn't clear it.
 
 Task text says what to build. Reproduction inputs for an unfixed resource or
 correctness problem wait until the fix ships.
