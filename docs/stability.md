@@ -7,22 +7,28 @@ deprecated, and which sit outside SemVer.
 
 ## Release line and compatibility checks
 
-- **Current line (`0.2.x`).** Every pull request and release tag runs both
+- **Current line (`0.2.x` -> `1.0.0` freeze).** Every pull request and release tag runs both
   `cargo-semver-checks` and a `public-api` diff against the previous released `vMAJOR.MINOR.PATCH`
   tag across default features and `libyaml-compat`. Any removed item or signature/trait break
   fails CI unless explicitly recorded as a breaking change for a minor (`0.x`) or major (`1.0`)
   release in `CHANGELOG.md`.
+- **1.0 stability promise.** Once `1.0.0` is tagged, all `1.x` releases are strictly additive and
+  backwards-compatible for every surface marked **Stable** or **Stable (additive)** below.
+  Deprecated `0.x` shims (`*_with_limits`, `*_with_options`, `*_with_styles`, and `Marker`) are
+  scheduled for removal in `1.0.0` (see D104 in [Design decisions](decisions.md#d104-10-public-api-trait-error-code-and-semver-freeze-audit)).
 - **Previous line (`0.1.x`).** The `0.1.x` line ended with `0.1.3` and does not receive
   backports.
 - **Minimum supported Rust version (MSRV).** Rust 1.88, verified in CI against the locked
-  dependency graph (`Cargo.lock`). Raising the MSRV requires an explicit release note.
+  dependency graph (`Cargo.lock`). In `1.x`, raising the MSRV requires a minor version bump and an
+  explicit release note.
 
 ## Surface stability matrix
 
 | Surface | Status | Contract |
 | --- | --- | --- |
-| Crate-root functions, submodules, constants, and core data types (`error`, `event`, `limits`, `mapping`, `number`, `span`, `tag`, `value`; `parse_value*`, `parse_documents*`, `parse_events*`, `from_str*`, `from_slice*`, `from_value*`, `to_value`, `to_string*`, `to_writer*`, `Value`, `Mapping`, `Entry`, `Number`, `Tag`, `TaggedValue`, `Event`, `EventStream`, `Anchor`, `ScalarStyle`, `CollectionStyle`, `Deserializer`, `Span`, `Position`, `Location`, `LineIndex`, `ColumnEncoding`, `PositionError`, `SpannedTree`, `SpannedNode`, `PathSegment`, `Chomping`, `NodeStyle`, `Emitter`, `EmitterOptions`, `EmitterStyles`, `Error`, `MaskedError`, `LimitExceeded`, default limit constants, `VERSION`) | **Stable** | Covered by SemVer and automated public API diff checks. |
-| `#[non_exhaustive]` enums and option/style structs (`ErrorKind`, `ErrorCode`, `LimitKind`, `Event`, `ScalarStyle`, `CollectionStyle`, `ColumnEncoding`, `PositionError`, `PathSegment`, `Chomping`, `compat::GlobalTags`, `Limits`, `ParseOptions`, `compat::ParseOptions`, `EmitOptions`, `EmitterOptions`, `NodeStyle`) | **Stable (additive)** | Existing variants, `ErrorCode::as_str()` (`yaml.<kebab-name>`) strings, and builder methods are not renamed or removed within a major line. New variants or fields may be added in any `0.2.x` or `1.x` release. |
+| Crate-root functions, submodules, constants, and core data types (`error`, `event`, `limits`, `mapping`, `number`, `span`, `tag`, `value`; `parse_value*`, `parse_documents*`, `parse_events*`, `from_str*`, `from_slice*`, `from_reader*`, `from_value*`, `to_value`, `to_string*`, `to_writer*`, `split_frontmatter*`, `parse_frontmatter*`, `Value`, `Mapping`, `Entry`, `Number`, `Tag`, `TaggedValue`, `Event`, `EventStream`, `Anchor`, `ScalarStyle`, `CollectionStyle`, `Deserializer`, `DocumentDeserializer`, `Span`, `Spanned`, `Position`, `Location`, `LineIndex`, `ColumnEncoding`, `PositionError`, `Frontmatter`, `FrontmatterDelimiter`, `ParsedFrontmatter`, `SpannedTree`, `SpannedNode`, `PathSegment`, `Chomping`, `NodeStyle`, `Emitter`, `EmitterOptions`, `EmitterStyles`, `Error`, `MaskedError`, `LimitExceeded`, default limit constants, `VERSION`) | **Stable** | Covered by SemVer, compile-time trait freeze tests (`api_freeze`), and automated public API diff checks. |
+| Companion editing crate `ayaml-edit` (`TextEdit`, `VerifiedEdit`, `EditError`, `EditErrorKind`, `EditOptions`, `EditOp`, `apply_edits`, `replace_scalar*`, `remove_entry*`, `apply_batch*`) | **Stable (additive)** | Covered by SemVer and compile-time trait freeze tests; `EditErrorKind`, `EditOptions`, and `EditOp` are `#[non_exhaustive]`. |
+| `#[non_exhaustive]` enums and option/style structs (`ErrorKind`, `ErrorCode`, `LimitKind`, `Event`, `ScalarStyle`, `CollectionStyle`, `ColumnEncoding`, `PositionError`, `PathSegment`, `Chomping`, `compat::GlobalTags`, `Limits`, `ParseOptions`, `compat::ParseOptions`, `EmitOptions`, `EmitterOptions`, `NodeStyle`, `ayaml_edit::EditErrorKind`, `ayaml_edit::EditOptions`, `ayaml_edit::EditOp`) | **Stable (additive)** | Existing variants, `ErrorCode::as_str()` (`yaml.<kebab-name>`) strings, and builder methods are not renamed or removed within a major line. New variants or fields may be added in any `0.2.x` or `1.x` release. |
 | `libyaml-compat` feature (`ayaml::compat::*`, `SpannedTree::parse_compat*`) | **Stable (opt-in feature)** | Additive feature that does not change default-profile functions. Covered by the public API diff check. Deliberate deviations from YAML 1.2.2 are documented in [Compatibility profile](compatibility.md). |
 | Legacy `*_with_limits`, `*_with_options`, `*_with_styles` functions and `Marker` | **Deprecated** | Kept working through `0.x` so existing callers do not break; scheduled for removal in `1.0`. Prefer the `*_with` functions taking `&ParseOptions`, `&compat::ParseOptions`, or `&EmitOptions`, and use `Location` / `Position` instead of `Marker`. |
 | `bench-internals` feature and `ayaml::internals` module | **Unstable** | Outside SemVer. Exists only for `ayaml`'s own benchmark and conformance harnesses; items may change or be removed in any release. |

@@ -1092,3 +1092,44 @@ published crate tarball or `ayaml`'s public API.
 
 **Consequences.** Every book page is covered by `docs/SUMMARY.md`, `book_doctests`, link checks,
 and `markdownlint`, and any broken or skipped example fails CI immediately.
+
+## D104 — 1.0 Public API, trait, error-code, and SemVer freeze audit
+
+**Date:** 2026-11-24
+**Status:** Accepted
+
+**Decision.** Freeze the public API of `ayaml` and `ayaml-edit` for the `1.0.0` release line after
+auditing every public type, method signature, trait implementation, `#[non_exhaustive]` attribute,
+feature flag, error code, and deprecation across both crates:
+
+- Pin compile-time auto-trait (`Send`, `Sync`, `Unpin`) and standard derive (`Clone`, `Debug`,
+  `PartialEq`, `Eq`, `Hash`, `std::error::Error`) contracts in
+  `crates/ayaml/tests/api_freeze.rs` and `crates/ayaml-edit/tests/api_freeze.rs`.
+- Complete final additive trait polish before freeze: add `DerefMut` to `Spanned<T>`, `Hash` to
+  `Chomping`, `Frontmatter<'a>`, `ParsedFrontmatter<'a, T>`, `ayaml_edit::TextEdit`, and
+  `ayaml_edit::EditErrorKind`, and `PartialEq`/`Eq` + `const fn` constructors (`new`,
+  `with_parse_options`) to `ayaml_edit::EditOptions`.
+- Keep `ErrorCode` (`yaml.<kebab-name>`), `ErrorKind`, `LimitKind`, `ParseOptions`,
+  `compat::ParseOptions`, `EmitOptions`, `Limits`, `Event`, `ScalarStyle`, `CollectionStyle`,
+  `ColumnEncoding`, `PositionError`, `PathSegment`, `Chomping`, `NodeStyle`, `compat::GlobalTags`,
+  `ayaml_edit::EditErrorKind`, `ayaml_edit::EditOptions`, and `ayaml_edit::EditOp` marked
+  `#[non_exhaustive]` so `1.x` remains strictly additive.
+- Keep `libyaml-compat` as an additive opt-in feature and `bench-internals` / `ayaml::internals`
+  explicitly outside SemVer.
+- Keep legacy `*_with_limits`, `*_with_options`, `*_with_styles` shims and `Marker` deprecated
+  through `0.2.x` and scheduled for removal in `1.0.0`.
+- Document the `1.0` support, MSRV (Rust 1.88, minor bump required to raise in `1.x`), and
+  error-code stability guarantees in `docs/stability.md`.
+
+**Alternatives.** Delay trait and `const fn` polish until `1.x`: harmless for additive traits, but
+auditing everything before `1.0` ensures no missing `#[non_exhaustive]` or incompatible signature
+gets locked into `1.x`. Remove deprecated `0.x` shims before `1.0`: breaks `0.2.x` SemVer
+compatibility and fails `cargo-semver-checks` / `public-api` diff against `v0.2.3`.
+
+**Why.** Locking the `1.0` contract with compile-time trait tests alongside `cargo-semver-checks`,
+`public-api` diffing, and `docs/error-codes.md` bidirectional checks prevents accidental trait or
+signature regressions across the `1.x` lifetime.
+
+**Consequences.** Any unintended removal of a public item, `Send`/`Sync`/`Unpin` bound, standard
+derive, or `ErrorCode` variant fails CI immediately; the `1.0.0` release PR only needs to drop the
+explicitly deprecated `0.x` shims and bump workspace crate versions after `AY-150` completes.

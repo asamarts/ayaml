@@ -318,6 +318,12 @@ impl<T> Deref for Spanned<T> {
     }
 }
 
+impl<T> std::ops::DerefMut for Spanned<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.value
+    }
+}
+
 impl<T> AsRef<T> for Spanned<T> {
     fn as_ref(&self) -> &T {
         &self.value

@@ -15,7 +15,7 @@ use ayaml::{
 };
 
 /// A single byte-range replacement against a source string.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TextEdit {
     span: Span,
     replacement: String,
@@ -89,7 +89,7 @@ impl VerifiedEdit {
 }
 
 /// Coarse category of an [`EditError`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum EditErrorKind {
     /// The input YAML document could not be parsed.
@@ -162,7 +162,7 @@ impl std::error::Error for EditError {
 }
 
 /// Options controlling how documents are parsed and verified during editing.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct EditOptions {
     parse: ParseOptions,
@@ -171,13 +171,15 @@ pub struct EditOptions {
 impl EditOptions {
     /// Default edit options using [`ParseOptions::new`].
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub const fn new() -> Self {
+        Self {
+            parse: ParseOptions::new(),
+        }
     }
 
     /// Set the [`ParseOptions`] used to parse and re-verify documents.
     #[must_use]
-    pub fn with_parse_options(mut self, options: ParseOptions) -> Self {
+    pub const fn with_parse_options(mut self, options: ParseOptions) -> Self {
         self.parse = options;
         self
     }

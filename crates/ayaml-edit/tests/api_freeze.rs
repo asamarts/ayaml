@@ -1,0 +1,33 @@
+//! Compile-time trait and auto-trait freeze assertions for `ayaml-edit` 1.0 (AY-149).
+
+use std::error::Error as StdError;
+use std::fmt::{Debug, Display};
+use std::hash::Hash;
+
+use ayaml_edit::{EditError, EditErrorKind, EditOp, EditOptions, TextEdit, VerifiedEdit};
+
+fn assert_send_sync_unpin<T: Send + Sync + Unpin>() {}
+fn assert_value_traits<T: Clone + Debug + PartialEq + Eq>() {}
+fn assert_hash_traits<T: Clone + Debug + PartialEq + Eq + Hash>() {}
+fn assert_error_traits<T: StdError + Send + Sync + Clone + Debug + Display + PartialEq + Eq>() {}
+
+const DEFAULT_EDIT_OPTIONS: EditOptions = EditOptions::new();
+
+#[test]
+fn ayaml_edit_public_api_traits_are_frozen_for_v1() {
+    assert_send_sync_unpin::<TextEdit>();
+    assert_send_sync_unpin::<VerifiedEdit>();
+    assert_send_sync_unpin::<EditErrorKind>();
+    assert_send_sync_unpin::<EditError>();
+    assert_send_sync_unpin::<EditOptions>();
+    assert_send_sync_unpin::<EditOp>();
+
+    assert_hash_traits::<TextEdit>();
+    assert_value_traits::<VerifiedEdit>();
+    assert_hash_traits::<EditErrorKind>();
+    assert_error_traits::<EditError>();
+    assert_value_traits::<EditOptions>();
+    assert_value_traits::<EditOp>();
+
+    assert_eq!(DEFAULT_EDIT_OPTIONS, EditOptions::default());
+}

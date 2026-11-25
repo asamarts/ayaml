@@ -30,7 +30,7 @@ pub enum FrontmatterDelimiter {
 /// leading UTF-8 BOM and opening `---` line), so every [`Span`] produced when parsing it with
 /// [`parse_events`](crate::parse_events), [`SpannedTree::parse`](crate::SpannedTree::parse), or
 /// any error aligns directly with [`LineIndex::new(input)`](crate::LineIndex::new).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Frontmatter<'a> {
     yaml: &'a str,
     yaml_span: Span,
@@ -82,7 +82,7 @@ impl<'a> Frontmatter<'a> {
 }
 
 /// A decoded leading YAML frontmatter value paired with the remaining non-YAML body slice.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ParsedFrontmatter<'a, T> {
     /// The decoded frontmatter value.
     pub frontmatter: T,
