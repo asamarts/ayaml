@@ -548,6 +548,82 @@ mod tests {
         assert_eq!(Span::new(3, 5).slice(text), None);
         assert_eq!(Span::new(0, 8).slice(text), None);
     }
+
+    #[test]
+    fn trusted_span_guard_restores_previous_span_on_drop() {
+        use super::{TrustedSpanGuard, take_trusted_span};
+
+        assert_eq!(take_trusted_span(), None);
+        {
+            let _outer = TrustedSpanGuard::enter(Span::new(1, 5));
+            {
+                let _inner = TrustedSpanGuard::enter(Span::new(2, 4));
+            }
+            // Dropping `_inner` without taking must restore `_outer`'s span rather than leaving
+            // `_inner`'s span behind.
+            assert_eq!(take_trusted_span(), Some(Span::new(1, 5)));
+        }
+        assert_eq!(take_trusted_span(), None);
+
+        {
+            let _unused = TrustedSpanGuard::enter(Span::new(3, 7));
+        }
+        // Dropping an unconsumed guard must clear the thread-local token so foreign deserializers
+        // cannot forge a span afterwards.
+        assert_eq!(take_trusted_span(), None);
+    }
+
+    #[test]
+    fn spanned_visitor_rejects_partial_span_mismatches() {
+        use super::{
+            SPANNED_END_FIELD, SPANNED_START_FIELD, SPANNED_VALUE_FIELD, Spanned, TrustedSpanGuard,
+        };
+        use serde::de::value::{Error as DeError, MapDeserializer};
+        use serde::de::{Deserialize, IntoDeserializer};
+
+        #[derive(Clone, Copy)]
+        enum FieldVal {
+            Usize(usize),
+            Val(u32),
+        }
+
+        impl IntoDeserializer<'_, DeError> for FieldVal {
+            type Deserializer = Self;
+            fn into_deserializer(self) -> Self::Deserializer {
+                self
+            }
+        }
+
+        impl<'de> serde::de::Deserializer<'de> for FieldVal {
+            type Error = DeError;
+            fn deserialize_any<V: serde::de::Visitor<'de>>(
+                self,
+                visitor: V,
+            ) -> Result<V::Value, Self::Error> {
+                match self {
+                    Self::Usize(n) => visitor.visit_u64(u64::try_from(n).unwrap_or(u64::MAX)),
+                    Self::Val(n) => visitor.visit_u32(n),
+                }
+            }
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+                bytes byte_buf option unit unit_struct newtype_struct seq tuple
+                tuple_struct map struct enum identifier ignored_any
+            }
+        }
+
+        // Exact match succeeds; matching only start or only end must fail.
+        for (start, end, expect_ok) in [(2, 5, true), (2, 6, false), (1, 5, false)] {
+            let _guard = TrustedSpanGuard::enter(Span::new(2, 5));
+            let entries = [
+                (SPANNED_START_FIELD, FieldVal::Usize(start)),
+                (SPANNED_END_FIELD, FieldVal::Usize(end)),
+                (SPANNED_VALUE_FIELD, FieldVal::Val(42)),
+            ];
+            let result = Spanned::<u32>::deserialize(MapDeserializer::new(entries.into_iter()));
+            assert_eq!(result.is_ok(), expect_ok, "start={start} end={end}");
+        }
+    }
 }
 
 #[cfg(kani)]

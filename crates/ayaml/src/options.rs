@@ -325,6 +325,9 @@ mod tests {
     fn emit_options_conversions_and_styles() {
         let emitter_opts = EmitterOptions::new()
             .with_flow(true)
+            .with_explicit_start(true)
+            .with_explicit_end(true)
+            .with_scalar_style(Some(ScalarStyle::SingleQuoted))
             .with_indent(3)
             .with_indent_sequences(true);
         let from_emitter = EmitOptions::from(emitter_opts);

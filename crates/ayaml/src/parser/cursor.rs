@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use super::{Line, Lines, parse_lines};
+use super::{Line, Lines, has_flow_start, is_limit_error, parse_lines};
 use crate::error::Error;
 use crate::event::{Event, ScalarStyle};
 use crate::limits::Limits;
@@ -33,6 +33,8 @@ pub(crate) struct EventCursor<'a> {
     events: usize,
     /// Use the compatibility scanner and parser rules.
     compat: bool,
+    /// Deferred non-limit scanner failure encountered after scanning earlier tokens.
+    scanner_error: Option<Error>,
 }
 
 impl<'a> EventCursor<'a> {
@@ -71,6 +73,7 @@ impl<'a> EventCursor<'a> {
             documents: 0,
             events: 0,
             compat,
+            scanner_error: None,
         })
     }
 
@@ -269,6 +272,9 @@ impl<'a> EventCursor<'a> {
             }
         }
         if lines.is_empty() {
+            if let Some(error) = self.scanner_error.take() {
+                return Err(error);
+            }
             return Ok(None);
         }
         // The document ends where an eager parse would go on: at the next document's first
@@ -289,6 +295,11 @@ impl<'a> EventCursor<'a> {
                 stream_start: None,
                 stream_end: None,
                 positions: self.positions.clone(),
+                scanner_error: if self.pending_line.is_none() {
+                    self.scanner_error.take()
+                } else {
+                    None
+                },
                 #[cfg(test)]
                 growths: 0,
             },
@@ -325,23 +336,23 @@ impl<'a> EventCursor<'a> {
         }
         let start = out.len();
         loop {
-            match self.scanner.next_token()? {
-                None => {
+            match self.scanner.next_token() {
+                Ok(None) => {
                     self.eof = true;
                     return Ok(out.len() > start);
                 }
-                Some(token) if matches!(token.kind, TokenKind::StreamStart) => {}
-                Some(token) if matches!(token.kind, TokenKind::StreamEnd) => {
+                Ok(Some(token)) if matches!(token.kind, TokenKind::StreamStart) => {}
+                Ok(Some(token)) if matches!(token.kind, TokenKind::StreamEnd) => {
                     self.eof = true;
                     self.stream_end = Some(token.span);
                     return Ok(out.len() > start);
                 }
-                Some(token) if matches!(token.kind, TokenKind::LineBreak) => {
+                Ok(Some(token)) if matches!(token.kind, TokenKind::LineBreak) => {
                     if out.len() > start {
                         return Ok(true);
                     }
                 }
-                Some(token) => {
+                Ok(Some(token)) => {
                     let block_scalar = token.kind.scalar_style().is_some_and(|style| {
                         matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
                     });
@@ -349,6 +360,14 @@ impl<'a> EventCursor<'a> {
                     if block_scalar {
                         return Ok(true);
                     }
+                }
+                Err(error) => {
+                    if is_limit_error(&error) || !has_flow_start(out) {
+                        return Err(error);
+                    }
+                    self.eof = true;
+                    self.scanner_error = Some(error);
+                    return Ok(out.len() > start);
                 }
             }
         }
