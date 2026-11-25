@@ -1,8 +1,7 @@
 # Getting started
 
-This guide walks through the main entry points in `ayaml`: generic `Value` parsing,
-typed Serde decoding, multi-document streams, spanned events and tree lookups, emitting,
-resource limits, and safe error handling.
+Parse YAML into `Value` trees or typed Serde structs, stream multiple documents,
+inspect spans, emit YAML, and enforce resource limits with masked errors.
 
 ## Adding `ayaml`
 
@@ -64,7 +63,7 @@ assert_eq!(stream.next::<u32>()?, None);
 
 ## Spanned events, positions, and `SpannedTree`
 
-When source locations matter — for policy checks, diagnostics, or locating keys and values —
+When source locations matter (for policy checks, diagnostics, or locating keys and values),
 use `parse_events`, `LineIndex`, and `SpannedTree`:
 
 ```rust

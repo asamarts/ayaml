@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { checkLlmsFullContent } from './check-links.mjs';
+import {
+  checkHtmlNoEmDashes,
+  checkLlmsFullContent,
+  checkTextNoEmDashes,
+} from './check-links.mjs';
 import {
   extractDescription,
   stripMarkdownCode,
@@ -114,4 +118,57 @@ test('checkLlmsFullContent catches titled/reference/HTML relative links and turb
     '',
   ].join('\n');
   assert.deepEqual(checkLlmsFullContent(validMultiline), []);
+});
+
+test('extractDescription fallback avoids em dashes and trims trailing punctuation on truncation', () => {
+  assert.equal(extractDescription('', 'Reference'), 'Reference documentation for ayaml.');
+  const longWithComma =
+    'A long opening paragraph with several items: alpha, beta, gamma, delta, epsilon, ' +
+    'zeta, eta, theta, iota, kappa, lambda, mu, nu, xi, omicron, pi, rho, sigma, tau, upsilon.';
+  const truncated = extractDescription(longWithComma, 'Long');
+  assert.ok(truncated.endsWith('...'));
+  assert.ok(!/[,;:]\.\.\.$/.test(truncated), `unexpected trailing punctuation: ${truncated}`);
+});
+
+test('checkHtmlNoEmDashes flags rendered text, entities, and bypasses while ignoring code and copy payloads', () => {
+  assert.equal(checkHtmlNoEmDashes('<p>One \u2014 and two &mdash;.</p>', '/ayaml/').length, 2);
+  assert.equal(checkHtmlNoEmDashes('<title>ayaml &mdash; YAML</title>', '/ayaml/').length, 1);
+  assert.equal(checkHtmlNoEmDashes('<meta content="a &#08212; b">', '/ayaml/').length, 1);
+  assert.equal(checkHtmlNoEmDashes('<p>Hex &#X002014; entity</p>', '/ayaml/').length, 1);
+  // Script string containing "<!--" must not mask prose before a later HTML comment.
+  assert.equal(
+    checkHtmlNoEmDashes('<script>const x = "<!--";</script><p>Bad \u2014 prose</p><!-- end -->', '/ayaml/').length,
+    1,
+  );
+  // Hyphenated custom element <code-block> must not be treated as <code>.
+  assert.equal(
+    checkHtmlNoEmDashes('<code-block>Bad \u2014 prose</code-block><code>ok</code>', '/ayaml/').length,
+    1,
+  );
+  // Comments, scripts, styles, pre/nested code, and copy-button payloads are ignored.
+  assert.deepEqual(
+    checkHtmlNoEmDashes(
+      '<!-- comment \u2014 --><script>const s = "\u2014";</script><style>/* \u2014 */</style>' +
+        '<button data-code="let s = &quot;\u2014&quot;;" data-copy="\u2014">Copy</button>' +
+        '<pre><code>let s = "\u2014";</code></pre>' +
+        '<code>outer <code>inner</code> still \u2014 code</code><p>Clean prose.</p>',
+      '/ayaml/',
+    ),
+    [],
+  );
+});
+
+test('checkTextNoEmDashes and checkLlmsFullContent catch edge cases and report all occurrences', () => {
+  assert.equal(checkTextNoEmDashes('Line one \u2014\nLine two &#08212; and &#x02014;\n', 'llms.txt').length, 3);
+  assert.equal(checkTextNoEmDashes('```code``` \u2014 after inline triple ticks\n', 'llms.txt').length, 1);
+  assert.equal(checkTextNoEmDashes('\\`escaped \u2014 prose`\n', 'llms.txt').length, 1);
+  assert.equal(checkTextNoEmDashes('    ```text\nStill \u2014 prose\n', 'llms.txt').length, 1);
+  assert.equal(checkLlmsFullContent('# Heading \u2014 Bad\n').length, 1);
+  assert.deepEqual(
+    checkTextNoEmDashes(
+      'Inline `\u2014` and \\\\`\u2014` ok\n\nMultiline `code\n\u2014 span` ok\n\n   ```text\n\u2014 in fence\n   ```  \n',
+      'llms.txt',
+    ),
+    [],
+  );
 });

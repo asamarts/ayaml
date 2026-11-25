@@ -1,4 +1,4 @@
-# Surgical editing with `ayaml-edit`
+# Source-preserving editing with `ayaml-edit`
 
 When updating an existing YAML configuration file (such as a CI workflow,
 manifest, or lockfile), deserializing and re-emitting the entire document strips

@@ -47,7 +47,7 @@ function groupedSummaryMarkdown(): string {
 export const GET = async () => {
   const body = `# ayaml
 
-> Safe, fast, pure-Rust YAML 1.2.2 parser, spanned event stream, generic value model, Serde codec, deterministic emitter, and format-preserving editor.
+> Pure-Rust YAML 1.2.2 parser, Serde codec, spanned event stream, deterministic emitter, and source-preserving editor.
 
 - Crate version: \`ayaml ${WORKSPACE_VERSION}\` (companion crate: \`ayaml-edit ${WORKSPACE_VERSION}\`)
 - MSRV: Rust 1.88
@@ -62,7 +62,7 @@ export const GET = async () => {
   - \`ayaml value\` is ${HEADLINE.vsYamlRust2.toFixed(2)}x faster than \`yaml-rust2\`, ${HEADLINE.vsSaphyr.toFixed(2)}x faster than \`saphyr\`, ${HEADLINE.vsYamlSerde.toFixed(2)}x faster than \`yaml-serde\` (${HEADLINE.vsYamlSerdeAllocs.toFixed(1)}x fewer allocations, ${HEADLINE.vsYamlSerdePeak.toFixed(2)}x lower peak heap), ${HEADLINE.vsSerdeSaphyr.toFixed(2)}x faster than \`serde-saphyr\`, and ${HEADLINE.vsFkyaml.toFixed(2)}x faster than C++ \`fkYAML\`.
   - \`ayaml events\` is ${HEADLINE.vsLibyamlEvents.toFixed(2)}x faster than C \`libyaml\` events and ${HEADLINE.vsLibfyamlEvents.toFixed(2)}x faster than C \`libfyaml\` events.
   - Large-scalar streaming reaches ${HEADLINE.largeScalarMib.toFixed(1)} MiB/s (${HEADLINE.largeScalarVsRyml.toFixed(2)}x faster than \`rapidyaml\`); deterministic emission reaches ${HEADLINE.ciEmitMib.toFixed(1)} MiB/s.
-- Interactive showcase: ${SITE_URL}/benchmarks/
+- Benchmarks: ${SITE_URL}/benchmarks/
 
 ## Documentation pages
 

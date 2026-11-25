@@ -6,7 +6,7 @@
 
 - [Getting started](getting-started.md)
 - [Cookbook](cookbook.md)
-- [Surgical editing (ayaml-edit)](editing.md)
+- [Source-preserving editing (ayaml-edit)](editing.md)
 - [Sizing resource limits](limits-sizing.md)
 - [Format contract and interface](interface.md)
 - [Compatibility profile](compatibility.md)

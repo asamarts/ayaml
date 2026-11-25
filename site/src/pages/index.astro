@@ -4,9 +4,9 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 import { BASE, DOCS_RS_AYAML, DOCS_RS_EDIT, SITE_URL, WORKSPACE_VERSION } from '../lib/site';
 import { HEADLINE, TIER2_PEERS, fingerprint } from '../lib/bench';
 
-const TITLE = 'ayaml — Safe, fast, pure-Rust YAML 1.2.2';
+const TITLE = 'ayaml | Safe, pure-Rust YAML 1.2.2';
 const DESCRIPTION =
-  'A safe, pure-Rust YAML 1.2.2 parser, spanned event stream, generic value model, Serde codec, deterministic emitter, and format-preserving editor.';
+  'Safe, pure-Rust YAML 1.2.2 parser, Serde codec, spanned event stream, deterministic emitter, and source-preserving editor.';
 
 const tier2Rust = TIER2_PEERS.filter(
   (r) => !r.isUnsafeArena && (r.lang === 'Rust' || r.impl === 'fkyaml'),
@@ -17,7 +17,7 @@ const INSTALL_SNIPPET = `[dependencies]
 ayaml = "${WORKSPACE_VERSION}"
 serde = { version = "1", features = ["derive"] }
 
-# Optional format-preserving edits:
+# Optional source-preserving edits:
 # ayaml-edit = "${WORKSPACE_VERSION}"`;
 
 const EXAMPLES = [
@@ -99,7 +99,7 @@ assert_eq!(doc["build"]["image"].as_str(), Some("rust:1.88"));`,
   },
   {
     id: 'edit',
-    label: 'Surgical edits',
+    label: 'Source-preserving edits',
     filename: 'src/edit.rs',
     code: `use ayaml::{PathSegment, Value};
 use ayaml_edit::replace_scalar;
@@ -140,42 +140,42 @@ const GUARANTEES = [
   {
     badge: 'YAML 1.2.2',
     title: 'One scanner and grammar across every API',
-    body: 'Events, Value DOM, typed owned/borrowed Serde, SpannedTree, DocumentDeserializer, and frontmatter share one strict YAML 1.2.2 core — 100% passing on the pinned YAML Test Suite.',
+    body: 'EventStream, Value, owned and borrowed Serde decoding, SpannedTree, and frontmatter share one YAML 1.2.2 core passing every case in the pinned YAML Test Suite.',
     href: `${BASE}/docs/interface/`,
     linkText: 'Format contract',
   },
   {
     badge: '#![forbid(unsafe_code)]',
     title: 'Pure safe Rust with 2 runtime dependencies',
-    body: 'Published workspace crates forbid unsafe code and avoid C/libyaml FFI completely. Direct runtime dependencies are limited strictly to serde and indexmap.',
+    body: 'Published workspace crates forbid unsafe code and avoid C/libyaml FFI. Direct runtime dependencies are serde and indexmap.',
     href: `${BASE}/docs/dependencies/`,
     linkText: 'Dependency policy',
   },
   {
     badge: 'Hardened defaults',
-    title: 'Native DoS limits & leak-proof masked errors',
+    title: 'Native DoS limits & redacted errors',
     body: 'Every parse, decode, merge expansion, reader, and emit call enforces explicit ceilings for input bytes, depth, collections, events, and byte-weighted alias expansion. Error::masked() strips document text.',
     href: `${BASE}/docs/security/`,
     linkText: 'Security model',
   },
   {
     badge: 'Byte-accurate spans',
-    title: 'Spanned<T>, SpannedTree & surgical edits',
-    body: 'Attach exact byte spans to typed Serde fields, convert offsets to UTF-8/scalar/UTF-16 positions via LineIndex, or apply comment-preserving edits verified with ayaml-edit.',
+    title: 'Spanned<T>, SpannedTree & source-preserving edits',
+    body: 'Attach byte spans to typed Serde fields, convert offsets to UTF-8, scalar, or UTF-16 positions via LineIndex, or apply comment-preserving edits verified with ayaml-edit.',
     href: `${BASE}/docs/editing/`,
     linkText: 'Spans & editing',
   },
   {
     badge: 'Zero-copy & streaming',
-    title: 'Fastest pure-Rust YAML stack',
-    body: `Leads every measured Rust YAML library by ${HEADLINE.vsYamlRust2.toFixed(2)}x–${HEADLINE.vsSerdeSaphyr.toFixed(2)}x on geometric mean across shared fixtures (up to ${HEADLINE.scenarioCount}), with ${HEADLINE.vsYamlSerdeAllocs.toFixed(1)}x fewer allocations than yaml-serde.`,
+    title: 'Measured against Rust and C/C++ peers',
+    body: 'Streams typed reads directly from events above 4 KiB and borrows unescaped scalars in place, avoiding intermediate DOM allocations on large inputs.',
     href: `${BASE}/benchmarks/`,
-    linkText: 'Explore benchmarks',
+    linkText: 'Read benchmarks',
   },
   {
     badge: 'Incremental migration',
     title: 'Opt-in merge keys & libyaml-compat boundary',
-    body: 'Adopt strict YAML 1.2.2 immediately while opting into <<: merge keys per call or enabling the additive libyaml-compat feature for legacy inputs.',
+    body: 'Adopt YAML 1.2.2 immediately while opting into <<: merge keys per call or enabling the additive libyaml-compat feature for legacy inputs.',
     href: `${BASE}/docs/compatibility/`,
     linkText: 'Compatibility profile',
   },
@@ -186,7 +186,7 @@ const MIGRATIONS = [
     from: 'serde_yaml',
     tag: 'Archived unsafe-libyaml crate',
     summary:
-      'Drop-in API table, YAML 1.1 scalar changes, duplicate keys, merge keys, and Error::masked() upgrades.',
+      'API mapping table, YAML 1.1 scalar changes, duplicate keys, merge keys, and Error::masked() usage.',
     href: `${BASE}/docs/migrating-from/serde-yaml/`,
   },
   {
@@ -210,12 +210,11 @@ const MIGRATIONS = [
     <div class="hero-grid">
       <div class="hero-copy">
         <span class="hero-pill">Pure safe Rust &middot; YAML 1.2.2 &middot; MSRV 1.88</span>
-        <h1>Fast, safe YAML 1.2.2 for production Rust</h1>
+        <h1>Safe, fast YAML 1.2.2 in pure Rust</h1>
         <p class="hero-lede">
-          <code>ayaml</code> gives you one unified scanner and grammar backing typed Serde decoding,
-          zero-copy borrowed reads, spanned event streams, a generic <code>Value</code> DOM,
-          deterministic emission, and verified format-preserving edits — with
-          <code>#![forbid(unsafe_code)]</code> and native DoS protection on every call.
+          <code>ayaml</code> parses, decodes, emits, and edits YAML 1.2.2 in pure safe Rust
+          (<code>#![forbid(unsafe_code)]</code>), with default DoS limits and byte-accurate spans
+          across every API.
         </p>
         <div class="hero-actions">
           <a class="btn" href={`${BASE}/docs/getting-started/`}>Get started</a>
@@ -254,7 +253,7 @@ const MIGRATIONS = [
     <div class="kpi-grid hero-kpis">
       <div class="kpi-card">
         <div class="kpi-val accent">
-          {HEADLINE.vsYamlRust2.toFixed(2)}x–{HEADLINE.vsSerdeSaphyr.toFixed(2)}x
+          {HEADLINE.vsYamlRust2.toFixed(2)}x-{HEADLINE.vsSerdeSaphyr.toFixed(2)}x
         </div>
         <div class="kpi-label">Faster than pure-Rust peers</div>
         <div class="kpi-sub">
@@ -295,12 +294,10 @@ const MIGRATIONS = [
   <section class="sec">
     <div class="wrap">
       <div class="sec-head">
-        <span class="sec-kicker">One cohesive API</span>
-        <h2>Every YAML workflow, backed by one parser</h2>
+        <span class="sec-kicker">API tour</span>
+        <h2>One parser across every workflow</h2>
         <p class="sec-lede">
-          Switch seamlessly between zero-copy Serde structs, generic values, spanned diagnostics,
-          untrusted readers, opt-in merge keys, frontmatter, and comment-preserving edits without
-          changing syntax rules or resource limits.
+          All six surfaces below run on the same scanner, schema resolver, and resource limits.
         </p>
       </div>
 
@@ -356,7 +353,7 @@ const MIGRATIONS = [
     <div class="wrap">
       <div class="sec-head">
         <span class="sec-kicker">Performance snapshot &middot; Shorter bar = faster</span>
-        <h2>Fastest safe Rust YAML parser — verified by pinned data</h2>
+        <h2>Comparative parse speed on pinned fixtures</h2>
         <p class="sec-lede">
           Relative geometric-mean parse time across shared fixtures (up to {HEADLINE.scenarioCount})
           in the <code>ayaml-fixtures</code> catalog (shorter bar = faster; <code>1.00x</code> =
@@ -388,7 +385,7 @@ const MIGRATIONS = [
       </div>
 
       <div class="bench-cta">
-        <a class="btn" href={`${BASE}/benchmarks/`}>Explore full interactive benchmarks</a>
+        <a class="btn" href={`${BASE}/benchmarks/`}>View full benchmarks</a>
         <span class="bench-note">
           Includes Tier 1 C/C++ comparisons (including <code>rapidyaml</code> architectural
           trade-offs), typed Serde decode, emission, peak heap, 10x linear scaling, and
@@ -402,7 +399,7 @@ const MIGRATIONS = [
     <div class="wrap">
       <div class="sec-head">
         <span class="sec-kicker">Design guarantees</span>
-        <h2>Built for correctness, security, and long-term maintenance</h2>
+        <h2>What the crate enforces</h2>
       </div>
       <div class="feature-grid">
         {
@@ -422,11 +419,11 @@ const MIGRATIONS = [
   <section class="sec">
     <div class="wrap">
       <div class="sec-head">
-        <span class="sec-kicker">End-to-end tested guides</span>
+        <span class="sec-kicker">Tested migration guides</span>
         <h2>Migrating from another Rust YAML crate</h2>
         <p class="sec-lede">
-          Every Rust snippet in our migration guides compiles and executes in CI via
-          <code>book_doctests</code>, backed by an end-to-end integration suite verifying edge cases.
+          Every Rust snippet in the migration guides compiles and runs in CI via
+          <code>book_doctests</code>, backed by integration tests covering behavioral differences.
         </p>
       </div>
 
@@ -445,8 +442,8 @@ const MIGRATIONS = [
 
       <div class="ref-strip">
         <div>
-          <strong>Looking for generated Rustdoc API documentation?</strong>
-          <span>Browse complete trait signatures, builder methods, and examples on docs.rs.</span>
+          <strong>Rustdoc API reference</strong>
+          <span>Full trait signatures, option builders, and module docs on docs.rs.</span>
         </div>
         <div class="ref-links">
           <a class="btn btn-ghost" href={DOCS_RS_AYAML} target="_blank" rel="noopener noreferrer">

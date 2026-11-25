@@ -7,11 +7,11 @@ cause so one change is tested once, rather than fixing symptoms separately.
 
 No open correctness issues.
 
-Completed: AY-086 — #132, #146, #147 in `608a0b4` (#152);
-AY-087 — #133, #137, #140; AY-088 — #138; AY-089 — #139; AY-090 — #141;
-AY-083 — #124; AY-082 — #123; AY-045; AY-091 — #165; AY-092 — #160, #161, #162;
-AY-093 — #164; AY-070; AY-057; AY-084 — #125; AY-049 — #128; AY-096 — #163;
-AY-098, AY-100, AY-101, AY-102, and AY-103 (part of #127 and #178); AY-085 — #126;
+Completed: AY-086: #132, #146, #147 in `608a0b4` (#152);
+AY-087: #133, #137, #140; AY-088: #138; AY-089: #139; AY-090: #141;
+AY-083: #124; AY-082: #123; AY-045; AY-091: #165; AY-092: #160, #161, #162;
+AY-093: #164; AY-070; AY-057; AY-084: #125; AY-049: #128; AY-096: #163;
+AY-098, AY-100, AY-101, AY-102, and AY-103 (part of #127 and #178); AY-085: #126;
 Issue #127 closed by the streaming and compact-token work. AY-105 through AY-113 fixed what
 audits found after it.
 
@@ -21,7 +21,7 @@ The diagnostics queue is empty.
 
 ## API and performance
 
-No open API issues. Completed: AY-122 — #191 (compatibility `ParseOptions` with
+No open API issues. Completed: AY-122: #191 (compatibility `ParseOptions` with
 `GlobalTags::Drop`, default `from_str_seed` and `from_str_seed_with_limits`, and tag-naming
 refusals).
 

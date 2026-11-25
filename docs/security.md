@@ -1,8 +1,9 @@
 # Security and untrusted input
 
-`ayaml` is built to parse untrusted YAML input safely, with explicit resource limits and
-masked error formatting for secret-bearing documents. This page documents what `ayaml` does
-and does not do, how its limits protect callers, and what text error values may contain.
+`ayaml` parses untrusted YAML input with explicit resource limits and masked
+error formatting for secret-bearing documents. This page documents what `ayaml`
+does and does not do, how its limits protect callers, and what text error values
+may contain.
 
 ## What `ayaml` never does
 
@@ -99,8 +100,8 @@ per-reader accounting rules.
 
 ## What errors may contain
 
-Normal formatting on `ayaml::Error` — `Display`, `Debug`, `Error::message()`, and
-`std::error::Error::source()` — is written for developer diagnostics and **may include text
+Normal formatting on `ayaml::Error` (`Display`, `Debug`, `Error::message()`, and
+`std::error::Error::source()`) is written for developer diagnostics and **may include text
 copied from the YAML document or from an underlying sink**:
 
 - **Scalar values:** Serde type and value errors (such as `invalid type: string "..."`),
@@ -119,8 +120,8 @@ copied from the YAML document or from an underlying sink**:
 
 ### Use `Error::masked()` for logs, telemetry, and external responses
 
-Whenever YAML input may contain credentials, tokens, private keys, or personal data — or is
-supplied by an untrusted party — format `error.masked()` (`MaskedError`) instead of `error`:
+Whenever YAML input is supplied by an untrusted party or may contain credentials, tokens,
+private keys, or personal data, format `error.masked()` (`MaskedError`) instead of `error`:
 
 ```rust
 use std::collections::HashMap;
@@ -151,7 +152,7 @@ assert!(masked.source().is_none());
 ### Other types that contain document text
 
 `Debug` and `Display` output on `Value`, `Mapping`, `Entry`, `TaggedValue`, `Event`,
-`SpannedTree`, and `SpannedNode` naturally contains document keys, values, tags, anchors,
+`SpannedTree`, and `SpannedNode` contains document keys, values, tags, anchors,
 and raw source slices. Do not log their formatted representations when documents contain
 secrets.
 

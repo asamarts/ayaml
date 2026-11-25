@@ -3,10 +3,10 @@
 Complete Rustdoc signatures and trait implementations are published on docs.rs:
 
 - Core crate: [docs.rs/ayaml](https://docs.rs/ayaml)
-- Surgical editor crate: [docs.rs/ayaml-edit](https://docs.rs/ayaml-edit)
+- Source-preserving editor crate: [docs.rs/ayaml-edit](https://docs.rs/ayaml-edit)
 
-This page maps every public surface, feature flag, and important caveat in one
-place so you can pick the right API quickly.
+Use the tables below to choose an entry point, check feature flags, and review
+key caveats across `ayaml` and `ayaml-edit`.
 
 ## Choosing the right entry point
 

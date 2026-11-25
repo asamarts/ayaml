@@ -540,7 +540,7 @@ export function fmtTimeUs(us: number): string {
   return `${(us / 1000).toFixed(2)} ms`;
 }
 
-// Headline stats used across homepage, benchmarks page, and llms*.txt — 100% computed from JSONL.
+// Headline stats used across homepage, benchmarks page, and llms*.txt (computed from JSONL).
 export const HEADLINE = (() => {
   const largeScalar = mustSpeed('ayaml', 'events', 'large-scalar-1mb');
   const largeScalarRyml = mustSpeed('rapidyaml', 'parse-arena', 'large-scalar-1mb');
