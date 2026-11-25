@@ -158,31 +158,42 @@ struct Lines<'a> {
     stream_start: Option<Span>,
     stream_end: Option<Span>,
     positions: LineStarts,
-    /// A non-limit scanner failure deferred until the parser checks earlier tokens, so raising
-    /// `max_depth` cannot swap an earlier parser error for a later scanner error.
+    /// A scanner failure deferred until the parser checks earlier tokens, so raising
+    /// `max_depth` cannot swap an earlier error for a later scanner error.
     scanner_error: Option<Error>,
     /// How many times the token arena was reallocated, which the tests bound.
     #[cfg(test)]
     growths: usize,
 }
 
-fn is_limit_error(error: &Error) -> bool {
-    error.kind() == ErrorKind::Limit || error.limit().is_some()
+/// Whether `kind` opens a flow collection (`[` or `{`).
+///
+/// The scanner stops early without returning an error immediately when `flow_level > max_depth`
+/// (`stop_error`), so deferring any subsequent scanner error once a flow opener has been
+/// scanned keeps error reporting monotonic across all `max_depth` ceilings while preserving
+/// immediate scanner errors when no flow opener precedes them.
+const fn is_flow_start(kind: &TokenKind<'_>) -> bool {
+    matches!(
+        kind,
+        TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart
+    )
 }
 
-/// Whether `tokens` contains a flow collection opener (`[` or `{`).
-///
-/// The scanner only stops early at `max_depth` on a flow opener (`stop_after`), so deferring a
-/// later non-limit scanner error precisely when a flow opener was already scanned keeps error
-/// reporting monotonic across all `max_depth` ceilings while preserving eager scanner errors when
-/// no flow opener precedes them.
-fn has_flow_start(tokens: &[Token<'_>]) -> bool {
-    tokens.iter().any(|token| {
-        matches!(
-            token.kind,
-            TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart
-        )
-    })
+/// Drop any half-scanned block line from `tokens[line_start..]` when a deferred scanner error
+/// halted scanning outside a flow collection. Preserves a leading `---` or `...` document marker
+/// so `max_documents` and `TrailingDocuments` still fire on the second document boundary.
+pub(super) fn drop_truncated_block_line(tokens: &mut Vec<Token<'_>>, line_start: usize) {
+    if tokens.len() <= line_start {
+        return;
+    }
+    if matches!(
+        tokens[line_start].kind,
+        TokenKind::DocumentStart { .. } | TokenKind::DocumentEnd
+    ) {
+        tokens.truncate(line_start + 1);
+    } else {
+        tokens.truncate(line_start);
+    }
 }
 
 /// The token arena capacity to reserve before scanning a mid-sized document, or `None` to grow
@@ -308,8 +319,11 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
             Ok(Some(token)) => token,
             Ok(None) => break,
             Err(error) => {
-                if is_limit_error(&error) || !has_flow_start(&tokens) {
+                if !scanner.saw_flow_start() {
                     return Err(error);
+                }
+                if scanner.flow_level() == 0 {
+                    drop_truncated_block_line(&mut tokens, line_start);
                 }
                 scanner_error = Some(error);
                 break;
@@ -567,16 +581,23 @@ fn flow_entry_count(tokens: &[Token<'_>], open: usize, close: usize) -> usize {
     entries + usize::from(content)
 }
 
-/// Parse one document's lines for the pull cursor. Its events count on from the `counted` events
-/// before them, and the count after them comes back with them. `end` is where the lines stop.
+/// Parse one document's lines for the pull cursor. Its events and document count continue from
+/// the `counted` events and `documents` already seen before them, and the updated counts come
+/// back with them. `end` is where the lines stop.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "internal pull-cursor handoff mirrors Parser's initial state directly"
+)]
 fn parse_lines<'a>(
     lines: Lines<'a>,
     limits: &Limits,
     input: &'a str,
     counted: usize,
+    documents: usize,
+    single_document: bool,
     end: usize,
     compat: bool,
-) -> Result<(Vec<Event<'a>>, usize), Error> {
+) -> Result<(Vec<Event<'a>>, usize, usize), Error> {
     let event_capacity = event_capacity(&lines.lines, &lines.tokens);
     let flow_ends = flow_ends(&lines.tokens);
     let mut parser = Parser {
@@ -588,16 +609,16 @@ fn parse_lines<'a>(
         input,
         positions: lines.positions,
         compat,
-        documents: 0,
+        documents,
         emitted: counted,
-        single_document: false,
+        single_document,
         stop_at_second: false,
         end,
         scanner_error: lines.scanner_error,
     };
     parser.parse_stream()?;
     match parser.sink {
-        EventSink::Events(events) => Ok((events, parser.emitted)),
+        EventSink::Events(events) => Ok((events, parser.emitted, parser.documents)),
         _ => unreachable!("event sink kind changed during parsing"),
     }
 }
@@ -901,6 +922,62 @@ impl<'a> Parser<'a> {
         Some(flow_entry_count(&self.token_arena, open, close))
     }
 
+    /// Surface a deferred scanner error once parsing reaches the truncated EOF boundary, before
+    /// synthesizing an empty node or closing a block collection at EOF.
+    #[inline]
+    pub(super) fn check_truncated_eof(&mut self, index: usize) -> Result<(), Error> {
+        if self.scanner_error.is_some() && index >= self.lines.len() {
+            return self.take_deferred_scanner_error();
+        }
+        Ok(())
+    }
+
+    /// Surface a deferred scanner error at block-mapping exit: either at truncated EOF or when
+    /// the last line at `indent` is an unclosed flow key truncated before its `:`.
+    #[inline]
+    pub(super) fn check_mapping_exit_scanner_error(
+        &mut self,
+        current_index: usize,
+        indent: usize,
+    ) -> Result<(), Error> {
+        if self.scanner_error.is_some() {
+            return self.check_mapping_exit_scanner_error_cold(current_index, indent);
+        }
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn take_deferred_scanner_error(&mut self) -> Result<(), Error> {
+        if let Some(error) = self.scanner_error.take() {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn check_mapping_exit_scanner_error_cold(
+        &mut self,
+        current_index: usize,
+        indent: usize,
+    ) -> Result<(), Error> {
+        if current_index >= self.lines.len() {
+            return self.take_deferred_scanner_error();
+        }
+        let truncated_flow_key = current_index + 1 == self.lines.len()
+            && self.lines[current_index].indent == indent
+            && {
+                let line_tokens = self.line_tokens(current_index);
+                !is_mapping_line(line_tokens)
+                    && line_tokens.iter().any(|token| is_flow_start(&token.kind))
+            };
+        if truncated_flow_key {
+            return self.take_deferred_scanner_error();
+        }
+        Ok(())
+    }
+
     /// Read every document of the stream.
     fn parse_stream(&mut self) -> Result<(), Error> {
         let mut index = 0;
@@ -1086,6 +1163,7 @@ impl<'a> Parser<'a> {
                 block,
             })
         } else {
+            self.check_truncated_eof(index)?;
             let span = self.empty_span(index);
             self.emit(self.null_scalar(span))?;
             Ok(Opening::Root {

@@ -161,9 +161,13 @@ pub(crate) struct Scanner<'a> {
     pending_tag_handles: HashMap<String, String>,
     started: bool,
     finished: bool,
-    /// The next call returns end of stream: a flow start went over the depth limit, and the
-    /// parser reports that limit from the token it just received (AY-027).
+    /// The next call returns a depth-limit error: a flow start went over the depth limit, so the
+    /// parser reports earlier errors first and never misreads a truncated flow-key line (AY-027).
     stop_after: bool,
+    /// Whether any flow collection opener (`[` or `{`) has been emitted in this stream.
+    saw_flow_start: bool,
+    /// Byte offset of the flow opener that triggered `stop_after`.
+    stop_depth_start: usize,
     initial_bom: bool,
     /// The byte after the stream-start run of byte order marks.
     initial_bom_end: usize,
@@ -274,6 +278,8 @@ impl<'a> Scanner<'a> {
             started: false,
             finished: false,
             stop_after: false,
+            saw_flow_start: false,
+            stop_depth_start: 0,
             initial_bom,
             initial_bom_end,
             after_line_bom: if initial_bom && !compat_flow { pos } else { 0 },
@@ -320,6 +326,27 @@ impl<'a> Scanner<'a> {
         self.limits.max_events
     }
 
+    /// Current nesting depth of open flow collections (`[` and `{`).
+    pub(crate) const fn flow_level(&self) -> usize {
+        self.flow_level
+    }
+
+    /// Whether any flow collection opener (`[` or `{`) has been emitted so far.
+    pub(crate) const fn saw_flow_start(&self) -> bool {
+        self.saw_flow_start
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn finish_depth_stop(&mut self) -> Result<Option<Token<'a>>, Error> {
+        self.stop_after = false;
+        self.finished = true;
+        match self.limits.check_depth(self.flow_level) {
+            Err(limit) => Err(self.limit_at(self.stop_depth_start, limit)),
+            Ok(()) => Ok(None),
+        }
+    }
+
     /// Return the next token, or `None` after the stream end has been emitted.
     #[allow(
         clippy::too_many_lines,
@@ -330,8 +357,11 @@ impl<'a> Scanner<'a> {
             self.started = true;
             return self.make(TokenKind::StreamStart, self.pos, self.pos);
         }
-        if self.finished || self.stop_after {
+        if self.finished {
             return Ok(None);
+        }
+        if self.stop_after {
+            return self.finish_depth_stop();
         }
 
         let bytes = self.input.as_bytes();
@@ -449,18 +479,24 @@ impl<'a> Scanner<'a> {
         };
         match byte {
             b'[' => {
+                let allow_zero = self.may_continue_at_column_zero();
+                let token = self.make(TokenKind::FlowSequenceStart, start, start + 1)?;
                 if self.flow_level == 0 {
                     self.flow_start = start;
                 }
                 self.flow_level += 1;
                 self.flow_stack.push(('[', start, false));
-                self.flow_allow_zero_indent
-                    .push(self.may_continue_at_column_zero());
-                // The parser checks depth from this token. Stop reading ahead here, so a limit
-                // hit cannot hide an earlier token error (AY-027).
-                self.stop_after = self.limits.check_depth(self.flow_level).is_err();
+                self.flow_allow_zero_indent.push(allow_zero);
+                self.saw_flow_start = true;
+                // The parser checks depth from this token. Stop reading ahead here and yield the
+                // depth limit on the next call, so earlier errors still win while a truncated
+                // flow-key line cannot masquerade as trailing content (AY-027).
+                if self.limits.check_depth(self.flow_level).is_err() {
+                    self.stop_after = true;
+                    self.stop_depth_start = start;
+                }
                 self.pos += 1;
-                self.make(TokenKind::FlowSequenceStart, start, self.pos)
+                Ok(token)
             }
             b']' => {
                 self.pos += 1;
@@ -470,16 +506,21 @@ impl<'a> Scanner<'a> {
                 self.make(TokenKind::FlowSequenceEnd, start, self.pos)
             }
             b'{' => {
+                let allow_zero = self.may_continue_at_column_zero();
+                let token = self.make(TokenKind::FlowMappingStart, start, start + 1)?;
                 if self.flow_level == 0 {
                     self.flow_start = start;
                 }
                 self.flow_level += 1;
                 self.flow_stack.push(('{', start, false));
-                self.flow_allow_zero_indent
-                    .push(self.may_continue_at_column_zero());
-                self.stop_after = self.limits.check_depth(self.flow_level).is_err();
+                self.flow_allow_zero_indent.push(allow_zero);
+                self.saw_flow_start = true;
+                if self.limits.check_depth(self.flow_level).is_err() {
+                    self.stop_after = true;
+                    self.stop_depth_start = start;
+                }
                 self.pos += 1;
-                self.make(TokenKind::FlowMappingStart, start, self.pos)
+                Ok(token)
             }
             b'}' => {
                 self.pos += 1;
@@ -1212,7 +1253,7 @@ impl<'a> Scanner<'a> {
             // this scanner wouldn't, so stopping would match neither reading.
             if self.compat_flow && ch == '?' {
                 let after = self.input[self.pos + 1..].chars().next();
-                if compat_question_stops_name(after) {
+                if compat_question_stops_name(after, self.flow_level > 0) {
                     break;
                 }
             }

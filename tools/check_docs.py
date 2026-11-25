@@ -95,6 +95,8 @@ def check_benchmark_data(root: Path) -> list[str]:
     """Validate pinned benchmark JSONL artifacts and fingerprint metadata under site/src/data/benchmarks/."""
     bench_dir = root / "site/src/data/benchmarks"
     if not bench_dir.is_dir():
+        if (root / "site/src/lib/bench.ts").is_file():
+            return ["site/src/data/benchmarks/: missing benchmark data directory"]
         return []
     errors: list[str] = []
     fp_path = bench_dir / "fingerprint.json"
@@ -104,6 +106,8 @@ def check_benchmark_data(root: Path) -> list[str]:
         fp = json.loads(fp_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
         return [f"site/src/data/benchmarks/fingerprint.json: invalid JSON: {error}"]
+    if not isinstance(fp, dict):
+        return ["site/src/data/benchmarks/fingerprint.json: expected JSON object"]
 
     if fp.get("schema_version") != 1:
         errors.append("site/src/data/benchmarks/fingerprint.json: expected schema_version == 1")
@@ -111,11 +115,11 @@ def check_benchmark_data(root: Path) -> list[str]:
     if not isinstance(manifest_sha, str) or not SHA256_RE.match(manifest_sha):
         errors.append("site/src/data/benchmarks/fingerprint.json: invalid fixture_manifest_sha256")
 
-    def load_jsonl(name: str, required_keys: tuple[str, ...]) -> list[dict]:
+    def load_jsonl(name: str, required_keys: tuple[str, ...]) -> tuple[bool, list[dict]]:
         path = bench_dir / name
         if not path.is_file():
             errors.append(f"site/src/data/benchmarks/{name}: missing benchmark file")
-            return []
+            return False, []
         rows: list[dict] = []
         for idx, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             line = raw.strip()
@@ -126,6 +130,9 @@ def check_benchmark_data(root: Path) -> list[str]:
             except json.JSONDecodeError as error:
                 errors.append(f"site/src/data/benchmarks/{name}:{idx}: invalid JSON: {error}")
                 continue
+            if not isinstance(row, dict):
+                errors.append(f"site/src/data/benchmarks/{name}:{idx}: expected JSON object")
+                continue
             if row.get("schema_version") != 1:
                 errors.append(f"site/src/data/benchmarks/{name}:{idx}: expected schema_version == 1")
             for key in required_keys:
@@ -135,28 +142,43 @@ def check_benchmark_data(root: Path) -> list[str]:
             if not isinstance(sha, str) or not SHA256_RE.match(sha):
                 errors.append(f"site/src/data/benchmarks/{name}:{idx}: invalid fixture_sha256")
             rows.append(row)
-        return rows
+        if not rows:
+            errors.append(f"site/src/data/benchmarks/{name}: benchmark file contains no rows")
+        return True, rows
 
     speed_keys = ("scenario", "operation", "implementation", "bytes", "median_ns", "throughput_mib_s")
-    mem_keys = ("scenario", "operation", "implementation", "bytes", "peak_bytes", "allocations")
-    speed_rows = load_jsonl("speed.jsonl", speed_keys)
-    mem_rows = load_jsonl("memory.jsonl", mem_keys)
-    load_jsonl("v023-speed.jsonl", speed_keys)
-    load_jsonl("v023-memory.jsonl", mem_keys)
+    mem_keys = (
+        "scenario",
+        "operation",
+        "implementation",
+        "bytes",
+        "peak_bytes",
+        "live_bytes",
+        "allocations",
+    )
+    has_speed, speed_rows = load_jsonl("speed.jsonl", speed_keys)
+    has_mem, mem_rows = load_jsonl("memory.jsonl", mem_keys)
+    _, v023_speed_rows = load_jsonl("v023-speed.jsonl", speed_keys)
+    _, v023_mem_rows = load_jsonl("v023-memory.jsonl", mem_keys)
 
-    if speed_rows and fp.get("speed_rows") != len(speed_rows):
+    if has_speed and fp.get("speed_rows") != len(speed_rows):
         errors.append(
             f"site/src/data/benchmarks/fingerprint.json: speed_rows={fp.get('speed_rows')} "
             f"!= speed.jsonl count {len(speed_rows)}"
         )
-    if mem_rows and fp.get("memory_rows") != len(mem_rows):
+    if has_mem and fp.get("memory_rows") != len(mem_rows):
         errors.append(
             f"site/src/data/benchmarks/fingerprint.json: memory_rows={fp.get('memory_rows')} "
             f"!= memory.jsonl count {len(mem_rows)}"
         )
 
     scenario_hashes: dict[str, str] = {}
-    for label, rows in (("speed.jsonl", speed_rows), ("memory.jsonl", mem_rows)):
+    for label, rows in (
+        ("speed.jsonl", speed_rows),
+        ("memory.jsonl", mem_rows),
+        ("v023-speed.jsonl", v023_speed_rows),
+        ("v023-memory.jsonl", v023_mem_rows),
+    ):
         for row in rows:
             sc = row.get("scenario")
             sha = row.get("fixture_sha256")
@@ -214,7 +236,11 @@ def check_links(root: Path, docs_dir: Path, files: list[Path]) -> list[str]:
     errors: list[str] = []
     docs_resolved = docs_dir.resolve()
     slug_cache: dict[Path, set[str]] = {}
-    check_fences_in = {docs_resolved, (root / "README.md").resolve()}
+    check_fences_in = {
+        docs_resolved,
+        (root / "README.md").resolve(),
+        (root / "crates/ayaml-edit/README.md").resolve(),
+    }
 
     def slugs_for(target_path: Path) -> set[str]:
         resolved = target_path.resolve()

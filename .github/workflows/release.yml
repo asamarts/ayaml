@@ -147,26 +147,12 @@ jobs:
         run: |
           set -euo pipefail
           python3 ../trusted/tools/check_release.py registry "target/package/ayaml-$VERSION.crate" "$VERSION" 0
-          edit_rehearse=false
           if [ "$HAS_EDIT" = "true" ]; then
-            set +e
-            python3 ../trusted/tools/check_release.py published --package ayaml-edit "$VERSION"
-            answer=$?
-            set -e
-            case "$answer" in
-              0)
-                python3 ../trusted/tools/check_release.py registry --package ayaml-edit "target/package/ayaml-edit-$VERSION.crate" "$VERSION" 0
-                edit_rehearse=true
-                ;;
-              1)
-                echo "ayaml-edit $VERSION is not published on crates.io; rehearsing ayaml alone for this tag"
-                ;;
-              *)
-                exit 1
-                ;;
-            esac
+            python3 ../trusted/tools/check_release.py registry --package ayaml-edit "target/package/ayaml-edit-$VERSION.crate" "$VERSION" 0
+            echo "edit_rehearse=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "edit_rehearse=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "edit_rehearse=$edit_rehearse" >> "$GITHUB_OUTPUT"
 
   publish:
     name: publish to crates.io

@@ -151,8 +151,16 @@ pub(super) fn only_properties(text: &str, compat: bool) -> bool {
 }
 
 /// Whether compat ends an anchor or alias name at a `?` before `after`.
-pub(super) fn compat_question_stops_name(after: Option<char>) -> bool {
-    after.is_some_and(|next| !is_blank(next) && !matches!(next, '[' | ']' | '{' | '}' | ','))
+///
+/// Outside a flow collection, NEL/LS/PS are content in compat (just as for `:`), so a `?`
+/// immediately before one stays in the name instead of producing a third reading that matches
+/// neither default mode nor libyaml.
+pub(super) fn compat_question_stops_name(after: Option<char>, in_flow: bool) -> bool {
+    after.is_some_and(|next| {
+        !is_blank(next)
+            && !matches!(next, '[' | ']' | '{' | '}' | ',')
+            && (in_flow || !matches!(next, '\u{85}' | '\u{2028}' | '\u{2029}'))
+    })
 }
 
 /// Whether compat ends an anchor or alias name at a `:` before `after`.
@@ -170,7 +178,7 @@ fn compat_name_stop(bytes: &[u8], index: usize, name_start: usize) -> bool {
             .and_then(|rest| rest.chars().next())
     };
     match bytes[index] {
-        b'?' => compat_question_stops_name(after()),
+        b'?' => compat_question_stops_name(after(), false),
         b':' => index > name_start && compat_colon_stops_name(after()),
         _ => false,
     }

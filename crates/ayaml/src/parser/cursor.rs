@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 
-use super::{Line, Lines, has_flow_start, is_limit_error, parse_lines};
+use super::{Line, Lines, drop_truncated_block_line, parse_lines};
 use crate::error::Error;
 use crate::event::{Event, ScalarStyle};
 use crate::limits::Limits;
@@ -34,7 +34,9 @@ pub(crate) struct EventCursor<'a> {
     events: usize,
     /// Use the compatibility scanner and parser rules.
     compat: bool,
-    /// Deferred non-limit scanner failure encountered after scanning earlier tokens.
+    /// Reject a second document at its start (mirrors single-document eager readers).
+    single_document: bool,
+    /// Deferred scanner failure encountered after scanning a flow opener.
     ///
     /// Scanner errors hold only owned metadata (no dynamic `source`), so wrapping in
     /// `AssertUnwindSafe` preserves `EventStream` and `Deserializer`'s `UnwindSafe` auto-trait.
@@ -54,6 +56,12 @@ impl<'a> EventCursor<'a> {
 
     pub(crate) fn new(input: &'a str, limits: &Limits) -> Result<Self, Error> {
         Self::with_compat(input, limits, false)
+    }
+
+    pub(crate) fn new_single_document(input: &'a str, limits: &Limits) -> Result<Self, Error> {
+        let mut cursor = Self::with_compat(input, limits, false)?;
+        cursor.single_document = true;
+        Ok(cursor)
     }
 
     pub(crate) fn with_compat(
@@ -77,6 +85,7 @@ impl<'a> EventCursor<'a> {
             documents: 0,
             events: 0,
             compat,
+            single_document: false,
             scanner_error: None,
         })
     }
@@ -282,17 +291,24 @@ impl<'a> EventCursor<'a> {
             return Ok(None);
         }
         // The document ends where an eager parse would go on: at the next document's first
-        // token, or at the stream end. After a `...` line neither is read yet, and nothing
-        // past that line is placed.
+        // token, or at the stream end. When a deferred scanner error halted scanning before
+        // `StreamEnd`, use `input.len()` to match eager `read_lines`. After a `...` line neither
+        // is read yet, and nothing past that line is placed.
         let end = self
             .pending_line
             .as_ref()
             .and_then(|line| line.first())
             .map(|token| token.span.start())
             .or_else(|| self.stream_end.map(Span::start))
-            .or_else(|| tokens.last().map(|token| token.span.end()))
+            .or_else(|| {
+                if self.scanner_error.is_some() {
+                    Some(self.input.len())
+                } else {
+                    tokens.last().map(|token| token.span.end())
+                }
+            })
             .unwrap_or(self.input.len());
-        let (events, counted) = parse_lines(
+        let (events, counted, documents) = parse_lines(
             Lines {
                 lines,
                 tokens,
@@ -310,25 +326,13 @@ impl<'a> EventCursor<'a> {
             &self.limits,
             self.input,
             self.events,
+            self.documents,
+            self.single_document,
             end,
             self.compat,
         )?;
         self.events = counted;
-        let documents = events
-            .iter()
-            .filter(|event| matches!(event, Event::DocumentStart { .. }))
-            .count();
-        self.documents = self.documents.saturating_add(documents);
-        let span = events
-            .iter()
-            .find_map(|event| match event {
-                Event::DocumentStart { span, .. } => Some(*span),
-                _ => None,
-            })
-            .unwrap_or_else(|| Span::empty(self.input.len()));
-        self.limits
-            .check_documents(self.documents)
-            .map_err(|error| self.limit_at(span, error))?;
+        self.documents = documents;
         Ok(Some(events))
     }
 
@@ -366,8 +370,11 @@ impl<'a> EventCursor<'a> {
                     }
                 }
                 Err(error) => {
-                    if is_limit_error(&error) || !has_flow_start(out) {
+                    if !self.scanner.saw_flow_start() {
                         return Err(error);
+                    }
+                    if self.scanner.flow_level() == 0 {
+                        drop_truncated_block_line(out, start);
                     }
                     self.eof = true;
                     self.scanner_error = Some(AssertUnwindSafe(error));

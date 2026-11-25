@@ -50,19 +50,35 @@ fetch() {
   local version="$1" digest="$2" dist="$3"
   shift 3
   mkdir -p "$dist"
+  local seen_pkgs=("ayaml")
   local crates=("ayaml-$version.crate")
   fetch_one "ayaml" "$version" "$digest" "$dist"
-  local spec pkg extra_digest
+  local spec pkg extra_digest seen
   for spec in "$@"; do
     [[ "$spec" == *=* ]] || fail "invalid extra package spec '$spec'; expected PKG=DIGEST"
     pkg="${spec%%=*}"
     extra_digest="${spec#*=}"
     [ -n "$pkg" ] && [ -n "$extra_digest" ] || fail "invalid extra package spec '$spec'"
+    for seen in "${seen_pkgs[@]}"; do
+      [ "$seen" != "$pkg" ] || fail "duplicate package '$pkg' in fetch arguments"
+    done
+    seen_pkgs+=("$pkg")
     fetch_one "$pkg" "$version" "$extra_digest" "$dist"
     crates+=("$pkg-$version.crate")
   done
-  local sorted_crates=()
-  mapfile -t sorted_crates < <(printf '%s\n' "${crates[@]}" | LC_ALL=C sort)
+  local sorted_raw sorted_crates=() existing_crates=() path base
+  sorted_raw="$(printf '%s\n' "${crates[@]}" | LC_ALL=C sort)"
+  mapfile -t sorted_crates <<< "$sorted_raw"
+  shopt -s nullglob
+  for path in "$dist"/*.crate; do
+    base="$(basename "$path")"
+    existing_crates+=("$base")
+  done
+  shopt -u nullglob
+  local existing_raw
+  existing_raw="$(printf '%s\n' "${existing_crates[@]}" | LC_ALL=C sort)"
+  [ "$existing_raw" = "$sorted_raw" ] ||
+    fail "unexpected .crate files in $dist; expected only: ${sorted_crates[*]}"
   (cd "$dist" && sha256sum "${sorted_crates[@]}" > SHA256SUMS)
 }
 
@@ -107,9 +123,10 @@ dist_asset_names() {
 
 # NAME holds exactly the crate(s) and SHA256SUMS of DIST, with these bytes.
 check_assets() {
-  local name="$1" version="$2" dist="$3" assets existing expected_list
+  local name="$1" version="$2" dist="$3" assets existing expected_list expected_raw
   local expected=() download_args=() asset
-  mapfile -t expected < <(dist_asset_names "$version" "$dist")
+  expected_raw="$(dist_asset_names "$version" "$dist")"
+  mapfile -t expected <<< "$expected_raw"
   expected_list="$(printf '%s ' "${expected[@]}")"
   expected_list="${expected_list% }"
   assets="$(gh release view "$name" --json assets --jq '[.assets[].name] | sort | join(" ")')"
@@ -123,25 +140,53 @@ check_assets() {
   for asset in "${expected[@]}"; do
     cmp "$existing/$asset" "$dist/$asset"
   done
+  (cd "$existing" && sha256sum --check --status SHA256SUMS) ||
+    fail "SHA256SUMS verification failed for release $name"
   rm -r "$existing"
 }
 
 dist_upload_paths() {
   local version="$1" dist="$2"
-  local path
+  local paths=() path
   shopt -s nullglob
   for path in "$dist"/*-"$version".crate; do
-    printf '%s\n' "$path"
-  done | LC_ALL=C sort
+    paths+=("$path")
+  done
   shopt -u nullglob
+  [ "${#paths[@]}" -gt 0 ] || fail "no *-$version.crate files found in $dist"
+  [ -f "$dist/SHA256SUMS" ] || fail "SHA256SUMS missing from $dist"
+  printf '%s\n' "${paths[@]}" | LC_ALL=C sort
   printf '%s\n' "$dist/SHA256SUMS"
+}
+
+release_summary() {
+  local dist="$1"
+  local lines=() line hash file items=()
+  mapfile -t lines < "$dist/SHA256SUMS"
+  [ "${#lines[@]}" -gt 0 ] || fail "SHA256SUMS in $dist is empty"
+  if [ "${#lines[@]}" -eq 1 ]; then
+    hash="${lines[0]%% *}"
+    file="${lines[0]##* }"
+    printf '%s with sha256 %s' "$file" "$hash"
+    return
+  fi
+  for line in "${lines[@]}"; do
+    [ -n "$line" ] || continue
+    hash="${line%% *}"
+    file="${line##* }"
+    items+=("$file ($hash)")
+  done
+  local joined
+  joined="$(printf '%s, ' "${items[@]}")"
+  printf '%s' "${joined%, }"
 }
 
 release() {
   local tag="$1" version="$2" dist="$3" notes="$4"
-  local digest upload_paths=()
-  digest="$(head -n1 "$dist/SHA256SUMS" | cut -d' ' -f1)"
-  mapfile -t upload_paths < <(dist_upload_paths "$version" "$dist")
+  local summary upload_raw upload_paths=()
+  upload_raw="$(dist_upload_paths "$version" "$dist")"
+  mapfile -t upload_paths <<< "$upload_raw"
+  summary="$(release_summary "$dist")"
   look_up "$tag"
   case "$found" in
     absent)
@@ -150,7 +195,7 @@ release() {
       look_up "$tag"
       [ "$found" = published ] || fail "gh created the release $tag, but it is $found"
       check_assets "$tag" "$version" "$dist"
-      echo "::notice::created the release $tag, which holds ayaml-$version.crate with sha256 $digest"
+      echo "::notice::created the release $tag, which holds $summary"
       ;;
     draft)
       # gh creates a release as a draft, uploads its assets, and then publishes it, so a run
@@ -159,11 +204,11 @@ release() {
       gh release edit "$tag" --draft=false
       look_up "$tag"
       [ "$found" = published ] || fail "the draft release $tag is still $found after it was published"
-      echo "::notice::published the draft release $tag, which holds ayaml-$version.crate with sha256 $digest"
+      echo "::notice::published the draft release $tag, which holds $summary"
       ;;
     published)
       check_assets "$tag" "$version" "$dist"
-      echo "::notice::release $tag already holds ayaml-$version.crate with sha256 $digest"
+      echo "::notice::release $tag already holds $summary"
       ;;
   esac
 }
@@ -195,9 +240,11 @@ discard_draft() {
 
 rehearse() {
   local name="$1" target="$2" version="$3" dist="$4" notes="$5"
-  local body upload_paths=()
+  local body upload_raw upload_paths=() summary
   [[ "$name" =~ $rehearsal_name ]] || fail "$name isn't a rehearsal's name, rehearsal-RUN-ATTEMPT"
-  mapfile -t upload_paths < <(dist_upload_paths "$version" "$dist")
+  upload_raw="$(dist_upload_paths "$version" "$dist")"
+  mapfile -t upload_paths <<< "$upload_raw"
+  summary="$(release_summary "$dist")"
   look_up "$name"
   [ "$found" = absent ] || fail "a release named $name exists already"
   draft="$name"
@@ -211,7 +258,7 @@ rehearse() {
   # Both sides without their trailing line breaks, which GitHub may not keep.
   [ "$body" = "$(cat "$notes")" ] || fail "the draft's notes aren't the notes it was given"
   discard_draft
-  echo "::notice::a draft release of ayaml $version held the crate and SHA256SUMS that crates.io serves, and is deleted"
+  echo "::notice::a draft release of ayaml $version held $summary and SHA256SUMS, and is deleted"
 }
 
 discard() {

@@ -62,6 +62,7 @@ FROM_WORKSPACE = {"README.md": "README.md"}
 # What cargo writes rather than copies. The manifest it copies is packaged as Cargo.toml.orig.
 GENERATED = {".cargo_vcs_info.json", "Cargo.toml", "Cargo.lock"}
 TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+SEMVER = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 USER_AGENT = "ayaml-release-check (https://github.com/asamarts/ayaml)"
 DOWNLOAD = "https://static.crates.io/crates/{name}/{name}-{version}.crate"
 VERSION_API = "https://crates.io/api/v1/crates/{name}/{version}"
@@ -357,8 +358,12 @@ def record(
     if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         raise Refused(f"{commit!r} isn't a full commit id")
     artifacts: list[tuple[str, str, str | None]] = [(PACKAGE, digest, attestation_url)]
+    seen_packages = {PACKAGE}
     for extra_pkg, extra_digest, extra_url in extra_artifacts:
         package_spec(extra_pkg)
+        if extra_pkg in seen_packages:
+            raise Refused(f"duplicate package {extra_pkg!r} in record")
+        seen_packages.add(extra_pkg)
         artifacts.append((extra_pkg, extra_digest, extra_url))
     for _, art_digest, _ in artifacts:
         if re.fullmatch(r"[0-9a-f]{64}", art_digest) is None:
@@ -439,9 +444,20 @@ def record(
 
 
 def _pop_package_flag(args: list[str]) -> tuple[str, list[str]]:
-    if len(args) >= 2 and args[0] == "--package":
-        return args[1], args[2:]
-    return PACKAGE, args
+    pkg = PACKAGE
+    rest = args
+    if rest and rest[0] == "--package":
+        if len(rest) < 2 or not rest[1] or rest[1].startswith("-"):
+            raise ValueError("--package requires a package name")
+        pkg, rest = rest[1], rest[2:]
+    elif rest and rest[0].startswith("--package="):
+        pkg = rest[0].split("=", 1)[1]
+        if not pkg:
+            raise ValueError("--package= requires a package name")
+        rest = rest[1:]
+    if any(arg.startswith("-") for arg in rest):
+        raise ValueError(f"unexpected flag in arguments: {rest!r}")
+    return pkg, rest
 
 
 def _parse_record_args(rest: list[str]) -> tuple[str | None, list[tuple[str, str, str | None]]]:
@@ -475,17 +491,31 @@ def main(argv: list[str]) -> int:
             case ["tag", tag]:
                 check_tag(root, tag)
             case ["package", *rest]:
-                pkg, pos = _pop_package_flag(rest)
+                try:
+                    pkg, pos = _pop_package_flag(rest)
+                except ValueError:
+                    print(__doc__, file=sys.stderr)
+                    return 2
                 if len(pos) != 2:
                     print(__doc__, file=sys.stderr)
                     return 2
                 check_package(root, Path(pos[0]), pos[1], package=pkg)
             case ["published", *rest]:
-                pkg, pos = _pop_package_flag(rest)
+                try:
+                    pkg, pos = _pop_package_flag(rest)
+                except ValueError:
+                    print(__doc__, file=sys.stderr)
+                    return 2
                 if len(pos) > 1:
                     print(__doc__, file=sys.stderr)
                     return 2
                 version = pos[0] if pos else None
+                if version is not None and SEMVER.fullmatch(version) is None:
+                    print(
+                        f"error: {version!r} isn't a release version (MAJOR.MINOR.PATCH)",
+                        file=sys.stderr,
+                    )
+                    return 2
                 label = f"{pkg} {version}" if version is not None else pkg
                 # 1 sends the workflow on to publish, so nothing but a clear "no" may give it.
                 try:
@@ -496,7 +526,11 @@ def main(argv: list[str]) -> int:
                 print(f"{label} on crates.io: {'unknown' if answer is None else answer}")
                 return 2 if answer is None else 0 if answer else 1
             case ["registry", *rest]:
-                pkg, pos = _pop_package_flag(rest)
+                try:
+                    pkg, pos = _pop_package_flag(rest)
+                except ValueError:
+                    print(__doc__, file=sys.stderr)
+                    return 2
                 if len(pos) not in (2, 3):
                     print(__doc__, file=sys.stderr)
                     return 2

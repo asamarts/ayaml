@@ -76,6 +76,7 @@ impl<'a> Parser<'a> {
                     indent = self.lines[index].indent;
                     continue;
                 }
+                self.check_truncated_eof(next_index)?;
                 let span = self.empty_span(index);
                 let scalar = self.null_scalar_with(span, tag, anchor);
                 self.emit(scalar)?;
@@ -189,6 +190,7 @@ impl<'a> Parser<'a> {
                         matches!(kind, TokenKind::BlockEntry)
                     })
                 {
+                    self.check_truncated_eof(current_index)?;
                     self.emit(Event::SequenceEnd {
                         span: self.last_span(current_index),
                     })?;
@@ -271,6 +273,7 @@ impl<'a> Parser<'a> {
                     bounds: NodeBounds::block_in(indent),
                 }));
             }
+            self.check_truncated_eof(next_index)?;
             let span = self.empty_span(next_index);
             self.emit(self.null_scalar(span))?;
             return Ok(Step::Return(next_index));
@@ -289,6 +292,7 @@ impl<'a> Parser<'a> {
                         bounds: NodeBounds::block_in(indent),
                     }));
                 }
+                self.check_truncated_eof(next_index)?;
                 let span = self.empty_span(next_index);
                 self.emit(self.null_scalar_with(span, tag, anchor))?;
                 return Ok(Step::Return(next_index));
@@ -390,6 +394,10 @@ impl<'a> Parser<'a> {
         self.mapping_loop(state, stack)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the block mapping loop keeps its inline fast paths contiguous"
+    )]
     pub(super) fn mapping_loop(
         &mut self,
         mut state: BlockState,
@@ -404,6 +412,7 @@ impl<'a> Parser<'a> {
                     || self.lines[current_index].indent != state.indent
                     || !is_mapping_line(self.line_tokens(current_index))
                 {
+                    self.check_mapping_exit_scanner_error(current_index, state.indent)?;
                     self.emit(Event::MappingEnd {
                         span: self.last_span(current_index),
                     })?;
@@ -484,6 +493,7 @@ impl<'a> Parser<'a> {
                             }));
                         }
                     }
+                    self.check_truncated_eof(current_index)?;
                     let span = Span::empty(self.token(tokens, 0).span.end());
                     self.emit(self.null_scalar(span))?;
                     return self.mapping_after_explicit_key(state, stack);
@@ -640,6 +650,7 @@ impl<'a> Parser<'a> {
                 allow_compact: true,
             }));
         }
+        self.check_truncated_eof(current_index)?;
         let span = self.empty_span(current_index);
         self.emit(self.null_scalar(span))?;
         // Continue through the driver rather than calling `mapping_loop`:
@@ -726,6 +737,7 @@ impl<'a> Parser<'a> {
                     bounds: NodeBounds::block_out(indent),
                 }));
             }
+            self.check_truncated_eof(current_index)?;
             let span = self.empty_span(current_index);
             self.emit(self.null_scalar_with(span, tag, anchor))?;
             return Ok(Step::Return(current_index));

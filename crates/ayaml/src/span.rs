@@ -622,6 +622,12 @@ mod tests {
             ];
             let result = Spanned::<u32>::deserialize(MapDeserializer::new(entries.into_iter()));
             assert_eq!(result.is_ok(), expect_ok, "start={start} end={end}");
+            if expect_ok {
+                assert_eq!(
+                    result.expect("matching span succeeds"),
+                    Spanned::new(Span::new(2, 5), 42)
+                );
+            }
         }
     }
 }

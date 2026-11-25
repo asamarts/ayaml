@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Compare ayaml's public API against the last released tag for every public feature set.
+"""Compare a published workspace crate's public API against the last released tag.
 
 usage:
-  tools/check_public_api.py [--base REV] [--head REV] [--changelog PATH | --no-changelog] [--json]
+  tools/check_public_api.py [--package PKG] [--base REV] [--head REV]
+                            [--changelog PATH | --no-changelog] [--json]
 
 Builds rustdoc JSON with the pinned nightly toolchain and lists the public API with the pinned
 `ayaml-public-api` binary (installed by `tools/install-public-api.sh`) for each feature set that
-changes the public API: the default crate and `libyaml-compat`. Also verifies that every feature
-in `crates/ayaml/Cargo.toml` is accounted for and that `bench-internals` adds no public items.
+changes the public API: the default `ayaml` crate and `libyaml-compat`, or `--package ayaml-edit`.
+Also verifies that every feature in the crate's `Cargo.toml` is accounted for and that hidden
+features such as `bench-internals` add no public items.
 
 Any removed item or changed signature, trait implementation, or associated type fails unless the
 active `### Changed` section of `CHANGELOG.md` names it. Purely additive changes pass without a
@@ -103,7 +105,8 @@ FN_RE = re.compile(rf"^pub\s+(?:const\s+)?(?:unsafe\s+)?fn\s+(?P<path>{_REF_PATH
 TYPE_RE = re.compile(rf"^pub\s+type\s+(?P<path>{_REF_PATH})")
 CONST_STATIC_RE = re.compile(rf"^pub\s+(?P<kind>const|static)\s+(?:mut\s+)?(?P<path>{_PATH})")
 DECL_RE = re.compile(rf"^pub\s+(?P<kind>struct|enum|trait|union|mod)\s+(?P<path>{_PATH})")
-MEMBER_RE = re.compile(rf"^pub\s+(?P<path>(?:ayaml|ayaml_edit)::{_PATH})")
+_CRATE_IDENTS = "|".join(re.escape(cfg.crate_ident) for cfg in PACKAGE_CONFIGS.values())
+MEMBER_RE = re.compile(rf"^pub\s+(?P<path>(?:{_CRATE_IDENTS})::{_PATH})")
 
 
 def parse_impl_header(line: str) -> tuple[str | None, str] | None:
@@ -519,23 +522,28 @@ def path_aliases(
     """Return acceptable ways to name `<crate>::...` in `CHANGELOG.md`.
 
     Submodule items under `compat::` always keep `compat::`. Other submodule items may omit the
-    defining module only when the item is re-exported at the crate root.
+    defining module only when the item is re-exported at the crate root. For hyphenated crate
+    names (such as `ayaml-edit` whose Rust identifier is `ayaml_edit`), both forms are accepted.
     """
     clean = strip_generic_args(full_path)
     parts = clean.split("::")
     if not parts or parts[0] != crate_ident:
         return [clean]
+    pkg_name = crate_ident.replace("_", "-")
+    prefixes = [crate_ident] if pkg_name == crate_ident else [crate_ident, pkg_name]
     if len(parts) == 1:
-        return [crate_ident]
-    aliases = [clean, "::".join(parts[1:])]
+        return prefixes
+    tail = "::".join(parts[1:])
+    aliases = [f"{prefix}::{tail}" for prefix in prefixes] + [tail]
     if len(parts) == 2:
-        return aliases
+        return list(dict.fromkeys(aliases))
     # `<crate>::<mod>::<Type>[::<member>...]`
     module, head_name, *rest = parts[1:]
     if module != "compat" and head_name in root_reexports:
         short = "::".join([head_name, *rest])
         aliases.append(short)
-        aliases.append(f"{crate_ident}::{short}")
+        for prefix in prefixes:
+            aliases.append(f"{prefix}::{short}")
     return list(dict.fromkeys(aliases))
 
 
@@ -593,7 +601,7 @@ def item_owner_type(line: str) -> str | None:
     if (parsed := parse_impl_header(body)) is not None:
         _, inner = split_ref_prefix(strip_generic_args(parsed[1]))
         return inner
-    for regex in (FN_RE, TYPE_RE, MEMBER_RE):
+    for regex in (FN_RE, TYPE_RE, CONST_STATIC_RE, DECL_RE, MEMBER_RE):
         if match := regex.match(body):
             _, inner = split_ref_prefix(strip_generic_args(match.group("path")))
             parts = inner.split("::")
@@ -848,8 +856,13 @@ def main(argv: list[str] | None = None) -> int:
             head_tree = ROOT
             head_key = "working-tree"
 
+        head_manifest = head_tree / cfg.package_dir / "Cargo.toml"
+        if not head_manifest.is_file():
+            raise RuntimeError(
+                f"{cfg.package_dir}/Cargo.toml does not exist in {args.head or 'working tree'}"
+            )
         validate_manifest_features(
-            (head_tree / cfg.package_dir / "Cargo.toml").read_text(encoding="utf-8"),
+            head_manifest.read_text(encoding="utf-8"),
             package_dir=cfg.package_dir,
             feature_sets=cfg.feature_sets,
             non_api_features=cfg.non_api_features,
