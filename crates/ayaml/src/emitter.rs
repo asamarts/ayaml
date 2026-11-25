@@ -138,7 +138,7 @@ impl PathSegment {
 }
 
 /// Explicit block-scalar chomping preference.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Chomping {
     /// Strip all trailing line breaks.
