@@ -135,11 +135,64 @@ pub(crate) fn parse_int(text: &str) -> Option<Number> {
 }
 
 fn parse_int_with(text: &str, allow_leading_zero: bool) -> Option<Number> {
-    let (negative, digits) = match text.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    let bytes = text.as_bytes();
+    let (negative, rest) = match bytes.first() {
+        Some(b'-') => (true, &bytes[1..]),
+        Some(b'+') => (false, &bytes[1..]),
+        _ => (false, bytes),
     };
-    if digits.is_empty() || digits.starts_with(['+', '-']) {
+    if rest.is_empty() {
+        return None;
+    }
+    // Fast path: 1..=18 decimal ASCII digits fit in both `u64` and `i64` without overflow,
+    // avoiding 128-bit division/multiplication and `from_str_radix` overhead.
+    if rest.len() <= 18 {
+        let first = rest[0];
+        if first.is_ascii_digit() {
+            if rest.len() == 1 {
+                let digit = u64::from(first - b'0');
+                return Some(if negative {
+                    Number::from_i64(-i64::from(first - b'0'))
+                } else {
+                    Number::from_u64(digit)
+                });
+            }
+            if first != b'0' || (allow_leading_zero && !matches!(rest[1], b'b' | b'o' | b'x')) {
+                let mut acc = u64::from(first - b'0');
+                let mut all_digits = true;
+                for &byte in &rest[1..] {
+                    let digit = byte.wrapping_sub(b'0');
+                    if digit > 9 {
+                        all_digits = false;
+                        break;
+                    }
+                    acc = acc * 10 + u64::from(digit);
+                }
+                if all_digits {
+                    return Some(if negative {
+                        // `acc <= 999_999_999_999_999_999 < i64::MAX`, so negation cannot overflow.
+                        #[allow(
+                            clippy::cast_possible_wrap,
+                            reason = "18 decimal digits are strictly below i64::MAX"
+                        )]
+                        let signed = -(acc as i64);
+                        Number::from_i64(signed)
+                    } else {
+                        Number::from_u64(acc)
+                    });
+                }
+                if first != b'0' {
+                    return None;
+                }
+            }
+        }
+    }
+    let digits = if negative || bytes[0] == b'+' {
+        &text[1..]
+    } else {
+        text
+    };
+    if digits.starts_with(['+', '-']) {
         return None;
     }
     let (radix, digits) = if let Some(rest) = digits.strip_prefix("0b") {
@@ -356,5 +409,60 @@ mod tests {
         assert_eq!(plain("café"), Value::from("café"));
         assert_eq!(plain("-.INF").as_f64(), Some(f64::NEG_INFINITY));
         assert_eq!(plain("+.Inf").as_f64(), Some(f64::INFINITY));
+    }
+
+    #[test]
+    fn decimal_int_fast_path_matches_boundaries_and_fallbacks() {
+        let int_tag = Tag::core("int");
+        let resolve_int =
+            |s: &str| resolve_scalar(s, ScalarStyle::Plain, Some(&int_tag)).expect("explicit int");
+
+        // 0, -0, +0, single digits, and 18-digit fast-path max/min.
+        assert_eq!(plain("0"), Value::from(0_i64));
+        assert_eq!(plain("-0"), Value::from(0_i64));
+        assert_eq!(plain("+0"), Value::from(0_i64));
+        assert_eq!(
+            plain("999999999999999999"),
+            Value::from(999_999_999_999_999_999_i64)
+        );
+        assert_eq!(
+            plain("-999999999999999999"),
+            Value::from(-999_999_999_999_999_999_i64)
+        );
+        assert_eq!(
+            plain("+999999999999999999"),
+            Value::from(999_999_999_999_999_999_i64)
+        );
+
+        // 19-digit fallback to i64::MAX / i64::MIN / u64::MAX / u128 / > u128::MAX.
+        assert_eq!(plain("9223372036854775807"), Value::from(i64::MAX));
+        assert_eq!(plain("-9223372036854775808"), Value::from(i64::MIN));
+        assert_eq!(plain("18446744073709551615"), Value::from(u64::MAX));
+        assert_eq!(
+            plain("18446744073709551616"),
+            Value::Number(crate::Number::from_u128(18_446_744_073_709_551_616))
+        );
+        assert_eq!(
+            plain("-170141183460469231731687303715884105728"),
+            Value::Number(crate::Number::from_i128(i128::MIN))
+        );
+        assert_eq!(
+            plain("340282366920938463463374607431768211456").as_f64(),
+            Some(340_282_366_920_938_463_463_374_607_431_768_211_456.0)
+        );
+
+        // Leading zeros: rejected for plain Core Schema, allowed for explicit !!int.
+        assert_eq!(plain("0123"), Value::from("0123"));
+        assert_eq!(plain("-0123"), Value::from("-0123"));
+        assert_eq!(resolve_int("0123"), Value::from(123_i64));
+        assert_eq!(resolve_int("-0123"), Value::from(-123_i64));
+        assert_eq!(resolve_int("0000000000000000012"), Value::from(12_i64));
+
+        // Non-decimal radices and non-digit rejections.
+        assert_eq!(plain("0x1f"), Value::from(0x1f_i64));
+        assert_eq!(plain("0o17"), Value::from(0o17_i64));
+        assert_eq!(plain("123a"), Value::from("123a"));
+        assert_eq!(plain("-"), Value::from("-"));
+        assert_eq!(plain("+"), Value::from("+"));
     }
 }

@@ -14,17 +14,19 @@ use crate::tag::Tag;
 use proptest::prelude::*;
 
 fn tokens(input: &str) -> Vec<TokenKind<'_>> {
-    let mut scanner = Scanner::new(input, Limits::default()).expect("scanner");
+    let limits = Limits::default();
+    let mut scanner = Scanner::new(input, &limits).expect("scanner");
     let mut tokens = Vec::new();
-    while let Some(token) = scanner.next_token().expect("token") {
+    while let Some(token) = scanner.next_token(&limits).expect("token") {
         tokens.push(token.kind);
     }
     tokens
 }
 
 fn scalar(input: &str) -> (String, ScalarStyle, String) {
-    let mut scanner = Scanner::new(input, Limits::default()).expect("scanner");
-    while let Some(token) = scanner.next_token().expect("token") {
+    let limits = Limits::default();
+    let mut scanner = Scanner::new(input, &limits).expect("scanner");
+    while let Some(token) = scanner.next_token(&limits).expect("token") {
         let raw = input[token.span.start()..token.span.end()].to_owned();
         match token.kind {
             TokenKind::PlainScalar => return (raw.clone(), ScalarStyle::Plain, raw),
@@ -51,8 +53,9 @@ fn scalar(input: &str) -> (String, ScalarStyle, String) {
 
 /// The anchor names `input` leaves for its aliases to match, sorted.
 fn colon_anchors(input: &str, compat: bool) -> Option<Vec<String>> {
-    let mut scanner = Scanner::with_compat(input, Limits::default(), compat).expect("scanner");
-    while scanner.next_token().expect("token").is_some() {}
+    let limits = Limits::default();
+    let mut scanner = Scanner::with_compat(input, &limits, compat).expect("scanner");
+    while scanner.next_token(&limits).expect("token").is_some() {}
     let mut names: Vec<String> = scanner
         .colon_anchors?
         .into_keys()
@@ -304,7 +307,7 @@ fn block_tokens_and_indicators() {
 #[test]
 fn flow_tokens_are_nested_and_comma_separated() {
     let kinds = tokens("[1, {a: 2}]");
-    assert!(matches!(kinds[1], TokenKind::FlowSequenceStart));
+    assert!(matches!(kinds[1], TokenKind::FlowSequenceStart { .. }));
     assert!(
         kinds
             .iter()
@@ -313,7 +316,7 @@ fn flow_tokens_are_nested_and_comma_separated() {
     assert!(
         kinds
             .iter()
-            .any(|kind| matches!(kind, TokenKind::FlowMappingStart))
+            .any(|kind| matches!(kind, TokenKind::FlowMappingStart { .. }))
     );
     assert!(
         kinds
@@ -527,18 +530,19 @@ fn anchors_aliases_tags_and_directives() {
     assert!(kinds.iter().any(|kind| matches!(kind, TokenKind::Anchor)));
     assert!(kinds.iter().any(|kind| matches!(kind, TokenKind::Alias)));
     assert!(
-        kinds.iter().any(
-            |kind| matches!(kind, TokenKind::Tag(tag) if tag.as_ref() == &Tag::local("Custom"))
-        )
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, TokenKind::Tag(tag) if *tag == Tag::local("Custom")))
     );
 }
 
 #[test]
 fn comments_are_skipped_and_line_breaks_are_tokens() {
     let input = "a: 1 # comment\nb: 2\n";
-    let mut scanner = Scanner::new(input, Limits::default()).expect("scanner");
+    let limits = Limits::default();
+    let mut scanner = Scanner::new(input, &limits).expect("scanner");
     let mut values = Vec::new();
-    while let Some(token) = scanner.next_token().expect("token") {
+    while let Some(token) = scanner.next_token(&limits).expect("token") {
         match token.kind {
             TokenKind::PlainScalar => {
                 values.push(input[token.span.start()..token.span.end()].to_owned());
@@ -564,9 +568,10 @@ fn crlf_and_bom_are_handled() {
 
 #[test]
 fn unicode_span_is_byte_based() {
-    let mut scanner = Scanner::new("é: 1", Limits::default()).expect("scanner");
+    let limits = Limits::default();
+    let mut scanner = Scanner::new("é: 1", &limits).expect("scanner");
     let mut spans = Vec::new();
-    while let Some(token) = scanner.next_token().expect("token") {
+    while let Some(token) = scanner.next_token(&limits).expect("token") {
         let value = match &token.kind {
             TokenKind::PlainScalar => Some(&"é: 1"[token.span.start()..token.span.end()]),
             TokenKind::Scalar(scalar) => Some(scalar.value.as_ref()),
@@ -582,9 +587,10 @@ fn unicode_span_is_byte_based() {
 
 #[test]
 fn unterminated_quotes_and_unknown_escapes_error() {
-    let mut scanner = Scanner::new("\"unterminated", Limits::default()).expect("scanner");
+    let limits = Limits::default();
+    let mut scanner = Scanner::new("\"unterminated", &limits).expect("scanner");
     let error = loop {
-        match scanner.next_token() {
+        match scanner.next_token(&limits) {
             Ok(Some(_)) => {}
             Ok(None) => panic!("expected an error"),
             Err(error) => break error,
@@ -592,9 +598,9 @@ fn unterminated_quotes_and_unknown_escapes_error() {
     };
     assert_eq!(error.kind(), crate::error::ErrorKind::Scanner);
 
-    let mut scanner = Scanner::new("\"\\q\"", Limits::default()).expect("scanner");
+    let mut scanner = Scanner::new("\"\\q\"", &limits).expect("scanner");
     let error = loop {
-        match scanner.next_token() {
+        match scanner.next_token(&limits) {
             Ok(Some(_)) => {}
             Ok(None) => panic!("expected an error"),
             Err(error) => break error,
@@ -605,23 +611,21 @@ fn unterminated_quotes_and_unknown_escapes_error() {
 
 #[test]
 fn input_limit_is_enforced_before_scanning() {
-    let error = Scanner::new(
-        "x",
-        Limits {
-            max_input_bytes: 0,
-            ..Limits::default()
-        },
-    )
-    .expect_err("input limit");
+    let limits = Limits {
+        max_input_bytes: 0,
+        ..Limits::default()
+    };
+    let error = Scanner::new("x", &limits).expect_err("input limit");
     assert_eq!(error.kind(), crate::error::ErrorKind::Limit);
 }
 
 #[test]
 fn quoted_scalars_borrow_without_escapes_and_decode_escapes_and_breaks() {
     let input = "s1: 'plain café'\ns2: 'it''s\n  fine'\nd1: \"plain café\"\nd2: \"a\\nb\\u0041\"\n";
-    let mut scanner = Scanner::new(input, Limits::default()).expect("scanner");
+    let limits = Limits::default();
+    let mut scanner = Scanner::new(input, &limits).expect("scanner");
     let mut scalars = Vec::new();
-    while let Some(token) = scanner.next_token().expect("token") {
+    while let Some(token) = scanner.next_token(&limits).expect("token") {
         match token.kind {
             TokenKind::SingleQuotedScalar => scalars.push((
                 ScalarStyle::SingleQuoted,
@@ -653,21 +657,161 @@ fn quoted_scalars_borrow_without_escapes_and_decode_escapes_and_breaks() {
         ]
     );
     for bad in ["'unterminated", "\"unterminated", "\"unterminated\\"] {
-        let mut scanner = Scanner::new(bad, Limits::default()).expect("scanner");
+        let mut scanner = Scanner::new(bad, &limits).expect("scanner");
         let mut err = None;
-        while let Ok(Some(_)) = scanner.next_token().map_err(|e| err = Some(e)) {}
+        while let Ok(Some(_)) = scanner.next_token(&limits).map_err(|e| err = Some(e)) {}
         assert!(err.is_some(), "expected error for {bad:?}");
     }
 }
 
 fn scan_all(input: &str, fast: bool) -> Result<Vec<Token<'_>>, String> {
-    let mut scanner = Scanner::new(input, Limits::default()).map_err(|error| error.to_string())?;
+    let limits = Limits::default();
+    let mut scanner = Scanner::new(input, &limits).map_err(|error| error.to_string())?;
     scanner.fast_continuation = fast;
     let mut tokens = Vec::new();
-    while let Some(token) = scanner.next_token().map_err(|error| error.to_string())? {
+    while let Some(token) = scanner
+        .next_token(&limits)
+        .map_err(|error| error.to_string())?
+    {
         tokens.push(token);
     }
     Ok(tokens)
+}
+
+#[test]
+fn swar_scanners_handle_every_alignment_and_stop_byte() {
+    for prefix_len in 1..=24 {
+        let prefix = "a".repeat(prefix_len);
+        // Plain block scalar across warmup + SWAR + tail with `:` / `#` / UTF-8 / newline stops.
+        for suffix in [
+            "",
+            ": x",
+            " # comment",
+            "é_tail",
+            ":not_a_value",
+            "#not_a_comment",
+        ] {
+            let input = format!("{prefix}{suffix}\n");
+            let expected = match suffix {
+                ": x" | " # comment" => prefix.clone(),
+                other => format!("{prefix}{other}"),
+            };
+            let (value, style, _) = scalar(&input);
+            assert_eq!(style, ScalarStyle::Plain);
+            assert_eq!(value, expected, "input={input:?}");
+        }
+        // Single-quoted and double-quoted scalars across warmup + SWAR + tail.
+        let single_input = format!("'{prefix}''{prefix}'\n");
+        let (value, style, _) = scalar(&single_input);
+        assert_eq!(style, ScalarStyle::SingleQuoted);
+        assert_eq!(value, format!("{prefix}'{prefix}"));
+
+        let double_input = format!("\"{prefix}\\n{prefix}\"\n");
+        let (value, style, _) = scalar(&double_input);
+        assert_eq!(style, ScalarStyle::DoubleQuoted);
+        assert_eq!(value, format!("{prefix}\n{prefix}"));
+
+        // Borrowed single/double quoted over SWAR lengths.
+        let borrowed_single = format!("'{prefix}café{prefix}'\n");
+        let (value, _, _) = scalar(&borrowed_single);
+        assert_eq!(value, format!("{prefix}café{prefix}"));
+
+        let borrowed_double = format!("\"{prefix}café{prefix}\"\n");
+        let (value, _, _) = scalar(&borrowed_double);
+        assert_eq!(value, format!("{prefix}café{prefix}"));
+
+        // Flow plain scalar stopping on flow indicators.
+        for indicator in [",", "]", "}"] {
+            let flow = format!("[{prefix}{indicator}1]");
+            let limits = Limits::default();
+            let mut scanner = Scanner::new(&flow, &limits).expect("scanner");
+            let mut found = None;
+            while let Some(tok) = scanner.next_token(&limits).expect("tok") {
+                if matches!(tok.kind, TokenKind::PlainScalar) {
+                    found = Some(&flow[tok.span.start()..tok.span.end()]);
+                    break;
+                }
+            }
+            assert_eq!(found, Some(prefix.as_str()), "flow={flow:?}");
+        }
+
+        // Comment SWAR skip across alignment.
+        let commented = format!("k: v # {prefix}comment\nnext: 1\n");
+        let kinds = tokens(&commented);
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| matches!(k, TokenKind::PlainScalar))
+                .count(),
+            4
+        );
+    }
+}
+
+#[test]
+fn inline_non_printable_validation_rejects_every_forbidden_context() {
+    let scan_err = |input: &str| {
+        let limits = Limits::default();
+        let mut scanner = Scanner::new(input, &limits).expect("scanner");
+        loop {
+            match scanner.next_token(&limits) {
+                Ok(Some(_)) => {}
+                Ok(None) => return None,
+                Err(error) => return Some(error),
+            }
+        }
+    };
+    // C0 controls (other than \t, \n, \r) are forbidden everywhere, even inside quotes.
+    for ctrl in [0x00_u8, 0x01, 0x07, 0x08, 0x0b, 0x0c, 0x1b, 0x1f] {
+        let ch = ctrl as char;
+        for input in [
+            format!("plain{ch}text"),
+            format!("'single{ch}text'"),
+            format!("\"double{ch}text\""),
+            format!("a: 1 # comment{ch}text\n"),
+            format!("|\n  block{ch}text\n"),
+            format!("| # header{ch}text\n  ok\n"),
+            format!("&anc{ch}hor 1"),
+            format!("!tag{ch}x 1"),
+            format!("%TAG !e! {ch}\n---\n1\n"),
+            format!("{}plain{ch}after_swar", "x".repeat(32)),
+            format!("\"{}double{ch}after_swar\"", "x".repeat(32)),
+            format!("'{}single{ch}after_swar'", "x".repeat(32)),
+        ] {
+            let err = scan_err(&input).unwrap_or_else(|| panic!("expected error for {input:?}"));
+            assert_eq!(err.kind(), crate::error::ErrorKind::Scanner, "{input:?}");
+        }
+    }
+    // DEL, C1 (excluding NEL U+0085), U+FFFE, U+FFFF are forbidden outside quotes, allowed inside.
+    for ch in [
+        '\u{7f}', '\u{80}', '\u{84}', '\u{86}', '\u{9f}', '\u{fffe}', '\u{ffff}',
+    ] {
+        for bad in [
+            format!("plain{ch}text"),
+            format!("{}plain{ch}after_swar", "x".repeat(32)),
+            format!("a: 1 # comment{ch}text\n"),
+            format!("a: 1 # {}comment{ch}after_swar\n", "x".repeat(32)),
+            format!("|\n  block{ch}text\n"),
+            format!("|\n  {}block{ch}after_swar\n", "x".repeat(32)),
+            format!("&anc{ch} 1"),
+            format!("!tag{ch} 1"),
+        ] {
+            let err = scan_err(&bad).unwrap_or_else(|| panic!("expected error for {bad:?}"));
+            assert_eq!(err.kind(), crate::error::ErrorKind::Scanner, "{bad:?}");
+        }
+        // Allowed inside single and double quotes (including past SWAR warmup).
+        for good in [
+            format!("'quoted{ch}text'"),
+            format!("\"quoted{ch}text\""),
+            format!("'{}quoted{ch}after_swar'", "x".repeat(32)),
+            format!("\"{}quoted{ch}after_swar\"", "x".repeat(32)),
+        ] {
+            assert!(scan_err(&good).is_none(), "unexpected error for {good:?}");
+        }
+    }
+    // NEL U+0085 is printable everywhere in YAML 1.2.
+    assert!(scan_err("plain\u{85}text").is_none());
+    assert!(scan_err("a: 1 # comment\u{85}text\n").is_none());
 }
 
 const PLAIN_PIECES: &[&str] = &[

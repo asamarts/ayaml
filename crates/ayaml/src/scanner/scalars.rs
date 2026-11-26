@@ -2,20 +2,132 @@ use std::borrow::Cow;
 
 use super::ScalarToken;
 use super::line::{
-    Continuation, LineShape, LineStop, Owner, block_prefix, is_blank, is_line_break,
-    leading_spaces, line_shape, strip_comment, walk_line,
+    Continuation, LineShape, Owner, is_blank, is_line_break, leading_spaces, line_shape,
+    strip_comment,
 };
 use super::{
-    BOM_FIRST_BYTE, EMPTY_LINE_TAB, Error, ErrorCode, ScalarStyle, Scanner, Token, TokenKind,
-    starts_with_document_marker,
+    BOM_FIRST_BYTE, EMPTY_LINE_TAB, Error, ErrorCode, Limits, ScalarStyle, Scanner, Token,
+    TokenKind, starts_with_document_marker,
 };
+use crate::position::{
+    is_forbidden_control_byte, is_quoted_only_non_printable, line_start_of, location_at,
+};
+
+const LO_BYTES: u64 = 0x0101_0101_0101_0101;
+const HI_BYTES: u64 = 0x8080_8080_8080_8080;
+
+/// Whether any byte in `word` is `0x00`.
+#[inline]
+const fn has_zero_byte(word: u64) -> bool {
+    (word.wrapping_sub(LO_BYTES) & !word & HI_BYTES) != 0
+}
+
+/// Whether any byte in `word` equals `byte`.
+#[inline]
+const fn has_byte(word: u64, byte: u8) -> bool {
+    has_zero_byte(word ^ (LO_BYTES * byte as u64))
+}
+
+/// Whether any byte in `word` is non-ASCII (`>= 0x80`) or an ASCII control (`< 0x20`).
+#[inline]
+pub(super) const fn has_non_ascii_or_ctrl(word: u64) -> bool {
+    ((word | word.wrapping_sub(0x20 * LO_BYTES)) & HI_BYTES) != 0
+}
+
+/// Whether any byte in `word` is non-ASCII (`>= 0x80`), an ASCII control (`< 0x20`), or DEL (`0x7F`).
+#[inline]
+pub(super) const fn has_non_ascii_or_ctrl_or_del(word: u64) -> bool {
+    ((word | word.wrapping_sub(0x20 * LO_BYTES) | word.wrapping_add(LO_BYTES)) & HI_BYTES) != 0
+}
+
+/// Advance `pos` in 8-byte SWAR chunks over printable ASCII bytes (`0x20..=0x7E`).
+#[inline]
+pub(super) fn skip_printable_ascii_swar(bytes: &[u8], mut pos: usize) -> usize {
+    for &raw in bytes[pos..].as_chunks::<8>().0 {
+        if has_non_ascii_or_ctrl_or_del(u64::from_ne_bytes(raw)) {
+            break;
+        }
+        pos += 8;
+    }
+    pos
+}
+
+/// Advance `pos` in 8-byte SWAR chunks over block plain-scalar safe ASCII bytes (`0x20..=0x7E`,
+/// excluding `#` and `:`).
+#[inline]
+fn skip_plain_block_swar(bytes: &[u8], mut pos: usize) -> usize {
+    for &raw in bytes[pos..].as_chunks::<8>().0 {
+        let word = u64::from_ne_bytes(raw);
+        if has_non_ascii_or_ctrl_or_del(word) || has_byte(word, b'#') || has_byte(word, b':') {
+            break;
+        }
+        pos += 8;
+    }
+    pos
+}
+
+/// Advance `pos` in 8-byte SWAR chunks over flow plain-scalar safe ASCII bytes (`0x20..=0x7E`,
+/// excluding `#`, `:`, `,`, `[`, `]`, `{`, `}`).
+#[inline]
+fn skip_plain_flow_swar(bytes: &[u8], mut pos: usize) -> usize {
+    for &raw in bytes[pos..].as_chunks::<8>().0 {
+        let word = u64::from_ne_bytes(raw);
+        if has_non_ascii_or_ctrl_or_del(word)
+            || has_byte(word, b'#')
+            || has_byte(word, b':')
+            || has_byte(word, b',')
+            || has_byte(word, b'[')
+            || has_byte(word, b']')
+            || has_byte(word, b'{')
+            || has_byte(word, b'}')
+        {
+            break;
+        }
+        pos += 8;
+    }
+    pos
+}
+
+/// Advance `pos` in 8-byte SWAR chunks over single-quoted safe ASCII bytes (`0x20..=0x7F`,
+/// excluding `'`).
+#[inline]
+fn skip_single_quoted_swar(bytes: &[u8], mut pos: usize) -> usize {
+    for &raw in bytes[pos..].as_chunks::<8>().0 {
+        let word = u64::from_ne_bytes(raw);
+        if has_non_ascii_or_ctrl(word) || has_byte(word, b'\'') {
+            break;
+        }
+        pos += 8;
+    }
+    pos
+}
+
+/// Advance `pos` in 8-byte SWAR chunks over double-quoted safe ASCII bytes (`0x20..=0x7F`,
+/// excluding `"` and `\`).
+#[inline]
+fn skip_double_quoted_swar(bytes: &[u8], mut pos: usize) -> usize {
+    for &raw in bytes[pos..].as_chunks::<8>().0 {
+        let word = u64::from_ne_bytes(raw);
+        if has_non_ascii_or_ctrl(word) || has_byte(word, b'"') || has_byte(word, b'\\') {
+            break;
+        }
+        pos += 8;
+    }
+    pos
+}
 
 const PLAIN_STOP_BLOCK: [bool; 256] = {
     let mut table = [false; 256];
-    table[b'\n' as usize] = true;
-    table[b'\r' as usize] = true;
+    let mut i = 0;
+    while i < 0x20 {
+        table[i] = true;
+        i += 1;
+    }
+    table[b'\t' as usize] = false;
     table[b'#' as usize] = true;
     table[b':' as usize] = true;
+    table[0x7f] = true;
+    table[0xC2] = true;
     table[BOM_FIRST_BYTE as usize] = true;
     table
 };
@@ -30,24 +142,49 @@ const PLAIN_STOP_FLOW: [bool; 256] = {
     table
 };
 
+const SINGLE_QUOTE_STOP: [bool; 256] = {
+    let mut table = [false; 256];
+    let mut i = 0;
+    while i < 0x20 {
+        table[i] = true;
+        i += 1;
+    }
+    table[b'\t' as usize] = false;
+    table[b'\'' as usize] = true;
+    table
+};
+
+const DOUBLE_QUOTE_STOP: [bool; 256] = {
+    let mut table = [false; 256];
+    let mut i = 0;
+    while i < 0x20 {
+        table[i] = true;
+        i += 1;
+    }
+    table[b'\t' as usize] = false;
+    table[b'"' as usize] = true;
+    table[b'\\' as usize] = true;
+    table
+};
+
 impl<'a> Scanner<'a> {
-    pub(super) fn scan_single_quoted(&mut self) -> Result<Option<Token<'a>>, Error> {
+    pub(super) fn scan_single_quoted(
+        &mut self,
+        limits: &Limits,
+    ) -> Result<Option<Token<'a>>, Box<Error>> {
         let start = self.pos;
         self.pos += 1;
         let content_start = self.pos;
         let bytes = self.input.as_bytes();
         let mut index = content_start;
-        while index < bytes.len() {
-            match bytes[index] {
-                b'\'' => {
-                    if bytes.get(index + 1) == Some(&b'\'') {
-                        break;
-                    }
-                    self.pos = index + 1;
-                    return self.make(TokenKind::SingleQuotedScalar, start, self.pos);
-                }
-                b'\n' | b'\r' => break,
-                _ => index += 1,
+        let warmup_end = (index + 8).min(bytes.len());
+        while index < warmup_end && !SINGLE_QUOTE_STOP[bytes[index] as usize] {
+            index += 1;
+        }
+        if index == warmup_end {
+            index = skip_single_quoted_swar(bytes, index);
+            while index < bytes.len() && !SINGLE_QUOTE_STOP[bytes[index] as usize] {
+                index += 1;
             }
         }
         if index >= bytes.len() {
@@ -58,6 +195,19 @@ impl<'a> Scanner<'a> {
                 "unterminated single-quoted scalar",
             ));
         }
+        match bytes[index] {
+            b'\'' => {
+                if bytes.get(index + 1) != Some(&b'\'') {
+                    self.pos = index + 1;
+                    return self.make(TokenKind::SingleQuotedScalar, start, self.pos, limits);
+                }
+            }
+            b'\n' | b'\r' => {}
+            _ => {
+                self.pos = index;
+                return Err(self.non_printable_error_at(index));
+            }
+        }
 
         let mut held = None;
         let mut value = String::with_capacity((index - content_start).saturating_add(16));
@@ -66,8 +216,15 @@ impl<'a> Scanner<'a> {
         loop {
             let run_start = self.pos;
             let mut i = run_start;
-            while i < bytes.len() && !matches!(bytes[i], b'\'' | b'\n' | b'\r') {
+            let warmup_end = (i + 8).min(bytes.len());
+            while i < warmup_end && !SINGLE_QUOTE_STOP[bytes[i] as usize] {
                 i += 1;
+            }
+            if i == warmup_end {
+                i = skip_single_quoted_swar(bytes, i);
+                while i < bytes.len() && !SINGLE_QUOTE_STOP[bytes[i] as usize] {
+                    i += 1;
+                }
             }
             if i > run_start {
                 value.push_str(&self.input[run_start..i]);
@@ -93,7 +250,7 @@ impl<'a> Scanner<'a> {
                 b'\n' | b'\r' => {
                     self.scan_quoted_line_break(&mut value, '\'', start, &mut held, 0, false)?;
                 }
-                _ => unreachable!("loop stops only on quote or line break"),
+                _ => return Err(self.non_printable_error_at(self.pos)),
             }
         }
         let raw_text = &self.input[start..self.pos];
@@ -110,6 +267,7 @@ impl<'a> Scanner<'a> {
             })),
             start,
             self.pos,
+            limits,
         )
     }
 
@@ -134,7 +292,7 @@ impl<'a> Scanner<'a> {
         if self.may_continue_at_column_zero() {
             return (0, true);
         }
-        let line_start = self.line_index.line_start(start);
+        let line_start = self.line_start(start);
         let prefix = self.input[line_start..start].trim_end_matches(is_blank);
         let prefix = prefix.strip_prefix('\u{feff}').unwrap_or(prefix);
         let (counted_line, mut indent) = self.counted_indent;
@@ -182,7 +340,7 @@ impl<'a> Scanner<'a> {
     /// opens, as `k` in `- k: 'a` or the inner `-` in `- - 'a`. Only default mode holds a quoted
     /// scalar to it, and there no mark takes a column.
     pub(super) fn compact_column(&self, at: usize) -> Option<usize> {
-        let line_start = self.line_index.line_start(at);
+        let line_start = self.line_start(at);
         match self.shape_of_line(line_start, &self.input[line_start..at]) {
             LineShape::Owner(Owner::Block(column)) => Some(column),
             _ => None,
@@ -213,7 +371,13 @@ impl<'a> Scanner<'a> {
     /// The error for a line of the innermost open flow collection, starting its content at `at`,
     /// that isn't indented enough. Such a line most often follows a collection left open, so the
     /// error names where that collection opened, as the parser's flow errors do.
-    pub(super) fn flow_indent_error(&self, at: usize) -> Error {
+    #[cold]
+    #[inline(never)]
+    #[allow(
+        clippy::unnecessary_box_returns,
+        reason = "hot-path callers propagate Box<Error> to keep Result<_, Box<Error>> pointer-sized"
+    )]
+    pub(super) fn flow_indent_error(&self, at: usize) -> Box<Error> {
         let error = self.error_at(
             at,
             ErrorCode::InvalidFlowIndentation,
@@ -223,12 +387,12 @@ impl<'a> Scanner<'a> {
             return error;
         };
         let name = if open == '[' { "sequence" } else { "mapping" };
-        match self.line_index.marker(self.input, opened) {
-            Some(there) => error.with_context(&format!(
+        match location_at(self.input, opened, self.compat_flow) {
+            Some(there) => Box::new((*error).with_context(&format!(
                 ", in the flow {name} opened at line {} column {}",
                 there.line(),
                 there.column()
-            )),
+            ))),
             None => error,
         }
     }
@@ -244,7 +408,7 @@ impl<'a> Scanner<'a> {
         held: &mut Option<(usize, bool)>,
         protected_len: usize,
         escaped: bool,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Box<Error>> {
         // White space before an escaped line break is content.
         while !escaped && value.len() > protected_len && value.ends_with([' ', '\t']) {
             value.pop();
@@ -287,9 +451,7 @@ impl<'a> Scanner<'a> {
             Some(known) => known,
             None => *held.insert(self.quoted_indent(start)),
         };
-        let line_start = self.input[..self.pos]
-            .rfind(['\n', '\r'])
-            .map_or(0, |index| index + 1);
+        let line_start = self.current_line_start;
         let indentation = &self.input[line_start..self.pos];
         // Only spaces indent a quoted scalar's continuation. A tab after them is separation, but
         // a tab before any space is not indentation, whatever follows it.
@@ -351,20 +513,23 @@ impl<'a> Scanner<'a> {
         Ok(())
     }
 
-    pub(super) fn scan_double_quoted(&mut self) -> Result<Option<Token<'a>>, Error> {
+    pub(super) fn scan_double_quoted(
+        &mut self,
+        limits: &Limits,
+    ) -> Result<Option<Token<'a>>, Box<Error>> {
         let start = self.pos;
         self.pos += 1;
         let content_start = self.pos;
         let bytes = self.input.as_bytes();
         let mut index = content_start;
-        while index < bytes.len() {
-            match bytes[index] {
-                b'"' => {
-                    self.pos = index + 1;
-                    return self.make(TokenKind::DoubleQuotedScalar, start, self.pos);
-                }
-                b'\\' | b'\n' | b'\r' => break,
-                _ => index += 1,
+        let warmup_end = (index + 8).min(bytes.len());
+        while index < warmup_end && !DOUBLE_QUOTE_STOP[bytes[index] as usize] {
+            index += 1;
+        }
+        if index == warmup_end {
+            index = skip_double_quoted_swar(bytes, index);
+            while index < bytes.len() && !DOUBLE_QUOTE_STOP[bytes[index] as usize] {
+                index += 1;
             }
         }
         if index >= bytes.len() {
@@ -375,6 +540,17 @@ impl<'a> Scanner<'a> {
                 "unterminated double-quoted scalar",
             ));
         }
+        match bytes[index] {
+            b'"' => {
+                self.pos = index + 1;
+                return self.make(TokenKind::DoubleQuotedScalar, start, self.pos, limits);
+            }
+            b'\\' | b'\n' | b'\r' => {}
+            _ => {
+                self.pos = index;
+                return Err(self.non_printable_error_at(index));
+            }
+        }
 
         let mut held = None;
         let mut value = String::with_capacity((index - content_start).saturating_add(16));
@@ -384,8 +560,15 @@ impl<'a> Scanner<'a> {
         loop {
             let run_start = self.pos;
             let mut i = run_start;
-            while i < bytes.len() && !matches!(bytes[i], b'"' | b'\\' | b'\n' | b'\r') {
+            let warmup_end = (i + 8).min(bytes.len());
+            while i < warmup_end && !DOUBLE_QUOTE_STOP[bytes[i] as usize] {
                 i += 1;
+            }
+            if i == warmup_end {
+                i = skip_double_quoted_swar(bytes, i);
+                while i < bytes.len() && !DOUBLE_QUOTE_STOP[bytes[i] as usize] {
+                    i += 1;
+                }
             }
             if i > run_start {
                 value.push_str(&self.input[run_start..i]);
@@ -424,6 +607,9 @@ impl<'a> Scanner<'a> {
                             "unterminated escape",
                         ));
                     };
+                    if escape.is_ascii() && is_forbidden_control_byte(escape as u8) {
+                        return Err(self.non_printable_error_at(self.pos));
+                    }
                     self.pos += escape.len_utf8();
                     let before = value.len();
                     match escape {
@@ -469,7 +655,7 @@ impl<'a> Scanner<'a> {
                         false,
                     )?;
                 }
-                _ => unreachable!("loop stops only on quote, escape, or line break"),
+                _ => return Err(self.non_printable_error_at(self.pos)),
             }
         }
         let raw_text = &self.input[start..self.pos];
@@ -486,6 +672,7 @@ impl<'a> Scanner<'a> {
             })),
             start,
             self.pos,
+            limits,
         )
     }
 
@@ -493,7 +680,7 @@ impl<'a> Scanner<'a> {
         &mut self,
         digits: usize,
         escape_start: usize,
-    ) -> Result<char, Error> {
+    ) -> Result<char, Box<Error>> {
         let mut value = 0_u32;
         for _ in 0..digits {
             let Some(ch) = self.peek() else {
@@ -503,6 +690,9 @@ impl<'a> Scanner<'a> {
                     "short hexadecimal escape",
                 ));
             };
+            if ch.is_ascii() && is_forbidden_control_byte(ch as u8) {
+                return Err(self.non_printable_error_at(self.pos));
+            }
             let Some(digit) = ch.to_digit(16) else {
                 return Err(self.error_at(
                     self.pos,
@@ -530,7 +720,8 @@ impl<'a> Scanner<'a> {
         &mut self,
         start: usize,
         literal: bool,
-    ) -> Result<Option<Token<'a>>, Error> {
+        limits: &Limits,
+    ) -> Result<Option<Token<'a>>, Box<Error>> {
         self.pos += 1;
         // At most one chomping and one indentation indicator, in either order, right after the
         // `|` or `>` (YAML 1.2.2 production 162). Only blanks and a comment may follow them.
@@ -566,9 +757,15 @@ impl<'a> Scanner<'a> {
                             "a block scalar header comment requires preceding whitespace",
                         ));
                     }
+                    let bytes = self.input.as_bytes();
                     while let Some(ch) = self.peek() {
                         if is_line_break(ch) {
                             break;
+                        }
+                        if is_forbidden_control_byte(bytes[self.pos])
+                            || is_quoted_only_non_printable(bytes, self.pos)
+                        {
+                            return Err(self.non_printable_error_at(self.pos));
                         }
                         // A comment holds no mark (production 75), here as elsewhere. Compat
                         // reads one, as libyaml does.
@@ -585,6 +782,12 @@ impl<'a> Scanner<'a> {
                 }
                 Some(ch) if is_line_break(ch) => break,
                 Some(ch) => {
+                    let bytes = self.input.as_bytes();
+                    if is_forbidden_control_byte(bytes[self.pos])
+                        || is_quoted_only_non_printable(bytes, self.pos)
+                    {
+                        return Err(self.non_printable_error_at(self.pos));
+                    }
                     return Err(self.error_at(
                         self.pos,
                         ErrorCode::InvalidBlockScalarHeader,
@@ -601,10 +804,8 @@ impl<'a> Scanner<'a> {
                 "block scalar header must end at a line break",
             ));
         }
-        let base_indent = self.line_indent(start);
-        let line_start = self.input[..start]
-            .rfind(['\n', '\r'])
-            .map_or(0, |index| index + 1);
+        let line_start = self.current_line_start;
+        let base_indent = self.line_indent_at(line_start);
         let prefix = self.input[line_start..start].trim_matches(is_blank);
         let root_context = prefix.is_empty() || prefix == "---" || prefix == "...";
         if self.peek().is_some() {
@@ -616,7 +817,7 @@ impl<'a> Scanner<'a> {
         // line's indentation. Root scalars count from column 0, as libyaml
         // does.
         let owner = self.owner_of(start);
-        let header_indent = self.line_indent(start);
+        let header_indent = base_indent;
         // A header on the same line as its key or a root marker is already owned by that
         // line's structure; only a header on a line of its own needs the parent check.
         if line_start > 0
@@ -757,11 +958,9 @@ impl<'a> Scanner<'a> {
             let next = self.input[after_spaces..].chars().next();
             let blank = next.is_none_or(is_line_break);
             if blank {
-                if let Some(ch) = next {
-                    self.pos = after_spaces + ch.len_utf8();
-                    if ch == '\r' && self.peek() == Some('\n') {
-                        self.pos += 1;
-                    }
+                if next.is_some() {
+                    self.pos = after_spaces;
+                    self.consume_line_break();
                 } else {
                     self.pos = after_spaces;
                 }
@@ -832,21 +1031,48 @@ impl<'a> Scanner<'a> {
             let check_bom = !self.compat_flow;
             let mut position = text_start;
             while position < bytes.len() {
+                position = skip_printable_ascii_swar(bytes, position);
+                if position >= bytes.len() {
+                    break;
+                }
                 match bytes[position] {
                     b'\n' | b'\r' => break,
-                    BOM_FIRST_BYTE
+                    b'\t' => position += 1,
+                    0x00..=0x1f | 0x7f => {
+                        self.pos = position;
+                        return Err(self.non_printable_error_at(position));
+                    }
+                    0xC2 if is_quoted_only_non_printable(bytes, position) => {
+                        self.pos = position;
+                        return Err(self.non_printable_error_at(position));
+                    }
+                    BOM_FIRST_BYTE => {
                         if check_bom
                             && bytes.get(position + 1) == Some(&0xBB)
-                            && bytes.get(position + 2) == Some(&0xBF) =>
-                    {
-                        self.pos = position;
-                        return Err(self.error_at(
-                            position,
-                            ErrorCode::InvalidBom,
-                            "a byte order mark can only start a document",
-                        ));
+                            && bytes.get(position + 2) == Some(&0xBF)
+                        {
+                            self.pos = position;
+                            return Err(self.error_at(
+                                position,
+                                ErrorCode::InvalidBom,
+                                "a byte order mark can only start a document",
+                            ));
+                        }
+                        if is_quoted_only_non_printable(bytes, position) {
+                            self.pos = position;
+                            return Err(self.non_printable_error_at(position));
+                        }
+                        position += 1;
                     }
-                    _ => position += 1,
+                    _ => {
+                        position += 1;
+                        while position < bytes.len()
+                            && bytes[position] >= 0x80
+                            && !matches!(bytes[position], 0xC2 | BOM_FIRST_BYTE)
+                        {
+                            position += 1;
+                        }
+                    }
                 }
             }
             self.pos = position;
@@ -862,6 +1088,9 @@ impl<'a> Scanner<'a> {
             end = self.pos;
         }
         self.pos = end;
+        self.current_line_start = line_start_of(self.input.as_bytes(), self.pos);
+        self.line_has_block_prefix = false;
+        self.current_line_indent = None;
 
         let value = build_block_scalar(text, final_break, literal, chomping);
         self.make(
@@ -875,13 +1104,14 @@ impl<'a> Scanner<'a> {
             })),
             start,
             end,
+            limits,
         )
     }
 
     /// The block structure owning the node that starts at `start` (see
     /// [`Owner`]). Only meaningful in block context.
     pub(super) fn owner_of(&self, start: usize) -> Owner {
-        let line_start = self.line_index.line_start(start);
+        let line_start = self.line_start(start);
         match self.shape_of_line(line_start, &self.input[line_start..start]) {
             LineShape::Owner(owner) => owner,
             LineShape::Open => self.owner_from_previous_lines(line_start),
@@ -944,15 +1174,15 @@ impl<'a> Scanner<'a> {
                 previous_end -= 1;
             }
             if previous_end == end {
-                // A Unicode line break; the line index knows where it starts.
-                let start = self.line_index.line_start(end.saturating_sub(1));
+                // A Unicode line break; find where it starts.
+                let start = self.line_start(end.saturating_sub(1));
                 previous_end = self.input[start..end]
                     .char_indices()
                     .rev()
                     .find(|(_, ch)| !is_line_break(*ch))
                     .map_or(start, |(offset, ch)| start + offset + ch.len_utf8());
             }
-            let previous_start = self.line_index.line_start(previous_end);
+            let previous_start = self.line_start(previous_end);
             let line = self.after_line_boms(previous_start, previous_end);
             // In compat, the line can still hold its mark, and a comment may follow that. The
             // stream's first line can hold a run of them, which reads as one mark does.
@@ -990,7 +1220,10 @@ impl<'a> Scanner<'a> {
     }
 
     pub(super) fn line_indent(&self, position: usize) -> usize {
-        let line_start = self.line_index.line_start(position);
+        self.line_indent_at(self.line_start(position))
+    }
+
+    pub(super) fn line_indent_at(&self, line_start: usize) -> usize {
         let text = self.after_line_boms(line_start, self.input.len());
         // The spaces after a mark count only if it takes up a column. Otherwise, in compat, this
         // stops at the mark. By default, no mark is left here.
@@ -1005,7 +1238,7 @@ impl<'a> Scanner<'a> {
     pub(super) fn previous_line_bom_takes_column(&self, line_start: usize) -> bool {
         let mut end = line_start;
         while end > 0 {
-            let previous_start = self.line_index.line_start(end.saturating_sub(1));
+            let previous_start = self.line_start(end.saturating_sub(1));
             let line = &self.input[previous_start..end];
             let trimmed = line.trim_start_matches(is_blank);
             if trimmed.is_empty() {
@@ -1061,7 +1294,7 @@ impl<'a> Scanner<'a> {
         content_start: usize,
         base_indent: usize,
         allow_base: bool,
-    ) -> Result<usize, Error> {
+    ) -> Result<usize, Box<Error>> {
         let mut position = content_start;
         while position < self.input.len() {
             let spaces = self.count_spaces(position);
@@ -1084,8 +1317,12 @@ impl<'a> Scanner<'a> {
         Ok(base_indent + 1)
     }
 
-    pub(super) fn scan_plain(&mut self) -> Result<Option<Token<'a>>, Error> {
+    pub(super) fn scan_plain(&mut self, limits: &Limits) -> Result<Option<Token<'a>>, Box<Error>> {
         let start = self.pos;
+        let start_line_start = self.current_line_start;
+        let start_has_block_prefix =
+            !self.compat_flow && self.flow_level == 0 && self.line_has_block_prefix;
+        let mut cached_base_indent = self.current_line_indent;
         self.short_flow_scalar = None;
         if self.input.as_bytes().get(start) == Some(&b'#') {
             return Err(self.error_at(
@@ -1103,10 +1340,11 @@ impl<'a> Scanner<'a> {
         let mut value: Option<String> = None;
         loop {
             let content_start = self.pos;
-            // This loop runs for every byte of a plain scalar, using a 256-byte stop table so
-            // ordinary ASCII and multibyte UTF-8 pass through without per-character decoding.
+            // This loop runs for every byte of a plain scalar, using a 256-byte stop table for
+            // short runs and switching to 8-byte SWAR after an 8-byte warmup.
             let bytes = self.input.as_bytes();
-            let stop = if self.flow_level > 0 {
+            let in_flow = self.flow_level > 0;
+            let stop = if in_flow {
                 &PLAIN_STOP_FLOW
             } else {
                 &PLAIN_STOP_BLOCK
@@ -1114,8 +1352,19 @@ impl<'a> Scanner<'a> {
             let check_bom = !self.compat_flow;
             let mut position = content_start;
             while position < bytes.len() {
-                while position < bytes.len() && !stop[bytes[position] as usize] {
+                let warmup_end = (position + 8).min(bytes.len());
+                while position < warmup_end && !stop[bytes[position] as usize] {
                     position += 1;
+                }
+                if position == warmup_end {
+                    position = if in_flow {
+                        skip_plain_flow_swar(bytes, position)
+                    } else {
+                        skip_plain_block_swar(bytes, position)
+                    };
+                    while position < bytes.len() && !stop[bytes[position] as usize] {
+                        position += 1;
+                    }
                 }
                 if position >= bytes.len() {
                     break;
@@ -1134,6 +1383,17 @@ impl<'a> Scanner<'a> {
                         }
                         position += 1;
                     }
+                    0x00..=0x1f | 0x7f => {
+                        self.pos = position;
+                        return Err(self.non_printable_error_at(position));
+                    }
+                    0xC2 => {
+                        if is_quoted_only_non_printable(bytes, position) {
+                            self.pos = position;
+                            return Err(self.non_printable_error_at(position));
+                        }
+                        position += 1;
+                    }
                     BOM_FIRST_BYTE => {
                         if check_bom
                             && bytes.get(position + 1) == Some(&0xBB)
@@ -1146,9 +1406,21 @@ impl<'a> Scanner<'a> {
                                 "a byte order mark can only start a document",
                             ));
                         }
+                        if is_quoted_only_non_printable(bytes, position) {
+                            self.pos = position;
+                            return Err(self.non_printable_error_at(position));
+                        }
                         position += 1;
                     }
-                    _ => position += 1,
+                    _ => {
+                        position += 1;
+                        while position < bytes.len()
+                            && bytes[position] >= 0x80
+                            && !matches!(bytes[position], 0xC2 | BOM_FIRST_BYTE)
+                        {
+                            position += 1;
+                        }
+                    }
                 }
             }
             self.pos = position;
@@ -1169,10 +1441,12 @@ impl<'a> Scanner<'a> {
             #[cfg(not(test))]
             let fast_continuation = true;
             if fast_continuation
-                && self.has_block_prefix(start)
-                && self
-                    .next_content_indent()
-                    .is_some_and(|indent| indent <= self.line_indent(start))
+                && start_has_block_prefix
+                && self.next_content_indent().is_some_and(|indent| {
+                    let base = *cached_base_indent
+                        .get_or_insert_with(|| self.line_indent_at(start_line_start));
+                    indent <= base
+                })
             {
                 break;
             }
@@ -1223,26 +1497,37 @@ impl<'a> Scanner<'a> {
             })),
             None => TokenKind::PlainScalar,
         };
-        self.make(kind, start, end)
+        self.make(kind, start, end, limits)
     }
 
     /// The indentation of the next line after the current position that holds more than white
     /// space, without changing scanner state. An empty line, whatever spaces or tabs it holds,
     /// doesn't end a scalar, so `a:\n  k: x\n \n   y` goes on to `y`.
     pub(super) fn next_content_indent(&self) -> Option<usize> {
+        let bytes = self.input.as_bytes();
         let mut index = self.pos;
         let mut line_start = index;
-        while let Some(ch) = self.input[index..].chars().next() {
-            if is_line_break(ch) {
-                index += ch.len_utf8();
-                if ch == '\r' && self.input[index..].starts_with('\n') {
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\n' => {
                     index += 1;
+                    line_start = index;
                 }
-                line_start = index;
-            } else if is_blank(ch) {
-                index += 1;
-            } else {
-                return Some(leading_spaces(&self.input[line_start..index]));
+                b'\r' => {
+                    index += 1;
+                    if bytes.get(index) == Some(&b'\n') {
+                        index += 1;
+                    }
+                    line_start = index;
+                }
+                b' ' | b'\t' => index += 1,
+                _ => {
+                    let mut spaces = 0;
+                    while line_start + spaces < index && bytes[line_start + spaces] == b' ' {
+                        spaces += 1;
+                    }
+                    return Some(spaces);
+                }
             }
         }
         None
@@ -1263,7 +1548,7 @@ impl<'a> Scanner<'a> {
             // need at least `n + 1` spaces.
             Owner::Block(n) => Continuation::Indent(n + 1),
             Owner::Unknown => {
-                let line_start = self.line_index.line_start(start);
+                let line_start = self.line_start(start);
                 let prefix = &self.input[line_start..start];
                 Continuation::Line {
                     start_indent: self.line_indent(start),
@@ -1274,28 +1559,20 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// Whether a block indicator or a `:` value indicator comes before `start` on its line,
-    /// outside compat and flow collections. A `: ` in a node property, as in `&a: b`, is part of
-    /// its name. A scalar asks once for each of its lines, and this reads the text once.
-    pub(super) fn has_block_prefix(&mut self, start: usize) -> bool {
-        if self.compat_flow || self.flow_level > 0 {
-            return false;
-        }
-        if self.block_prefix.0 != start {
-            let prefix = &self.input[self.line_index.line_start(start)..start];
-            let (text, index, owner) = block_prefix(prefix, false);
-            let found = matches!(owner, Some(Owner::Block(_)))
-                || matches!(walk_line(&text[index..], self.names()), LineStop::Value(_));
-            self.block_prefix = (start, found);
-        }
-        self.block_prefix.1
-    }
-
     pub(super) fn try_plain_continuation(
         &mut self,
         continuation: Continuation,
-    ) -> Result<Option<usize>, Error> {
+    ) -> Result<Option<usize>, Box<Error>> {
         let saved = self.pos;
+        let saved_line_start = self.current_line_start;
+        let saved_block_prefix = self.line_has_block_prefix;
+        let saved_line_indent = self.current_line_indent;
+        let restore = |scanner: &mut Self| {
+            scanner.pos = saved;
+            scanner.current_line_start = saved_line_start;
+            scanner.line_has_block_prefix = saved_block_prefix;
+            scanner.current_line_indent = saved_line_indent;
+        };
         let mut breaks = 0;
         // In a flow collection under a block collection, a line needs one more space than that
         // collection's column, and a tab doesn't count. Compat refuses only a tab left of that
@@ -1338,7 +1615,7 @@ impl<'a> Scanner<'a> {
             break;
         }
         if breaks == 0 || self.pos >= self.input.len() {
-            self.pos = saved;
+            restore(self);
             return Ok(None);
         }
         // In a flow collection, an indicator on the next line ends the scalar, and the line
@@ -1350,10 +1627,10 @@ impl<'a> Scanner<'a> {
                 || (self.peek() == Some(':') && self.colon_indicator(self.pos))
                 || self.document_marker_starts_line(self.pos))
         {
-            self.pos = saved;
+            restore(self);
             return Ok(None);
         }
-        let line_start = self.line_index.line_start(self.pos);
+        let line_start = self.line_start(self.pos);
         let indent = self.input[line_start..self.pos]
             .chars()
             .take_while(|ch| *ch == ' ')
@@ -1391,7 +1668,7 @@ impl<'a> Scanner<'a> {
                 && self.looks_like_block_start(self.pos, allow_block_indicator))
             || self.peek() == Some('#')
         {
-            self.pos = saved;
+            restore(self);
             return Ok(None);
         }
         if let Some(tab) = empty_line_tab {
@@ -1571,4 +1848,29 @@ pub(super) fn build_block_scalar(
         Chomping::Keep => {}
     }
     value
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::{has_byte, has_non_ascii_or_ctrl, has_non_ascii_or_ctrl_or_del, has_zero_byte};
+
+    #[kani::proof]
+    fn verify_swar_byte_predicates() {
+        let word: u64 = kani::any();
+        let needle: u8 = kani::any();
+        let bytes = word.to_ne_bytes();
+
+        let ref_zero = bytes.contains(&0);
+        let ref_needle = bytes.contains(&needle);
+        let ref_non_ascii_or_ctrl = bytes.iter().any(|&b| b < 0x20 || b >= 0x80);
+        let ref_non_ascii_or_ctrl_or_del = bytes.iter().any(|&b| b < 0x20 || b >= 0x7f);
+
+        assert_eq!(has_zero_byte(word), ref_zero);
+        assert_eq!(has_byte(word, needle), ref_needle);
+        assert_eq!(has_non_ascii_or_ctrl(word), ref_non_ascii_or_ctrl);
+        assert_eq!(
+            has_non_ascii_or_ctrl_or_del(word),
+            ref_non_ascii_or_ctrl_or_del
+        );
+    }
 }

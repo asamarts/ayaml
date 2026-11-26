@@ -633,9 +633,13 @@ pub mod internals {
     ///
     /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
     pub fn scan_tokens(input: &str, limits: &Limits) -> Result<usize, Error> {
-        let mut scanner = crate::scanner::Scanner::new(input, limits.clone())?;
+        let mut scanner = crate::scanner::Scanner::new(input, limits).map_err(|error| *error)?;
         let mut count = 0;
-        while scanner.next_token()?.is_some() {
+        while scanner
+            .next_token(limits)
+            .map_err(|error| *error)?
+            .is_some()
+        {
             count += 1;
         }
         Ok(count)

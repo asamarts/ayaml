@@ -71,6 +71,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ASCII byte dispatch, plain scalar resolution, emitter scalar lookup tables, lookahead
   collection size hints, token-arena release before large whole-built target reads, non-cloning
   collection key comparisons, and linear-time complex-key resolution in `SpannedTree`.
+- Boxed `Tag` interior (`48 B -> 8 B`, shrinking `Event` from `144 B` to `104 B` with zero public
+  API changes) and internal `Box<Error>` hot-path results, eliminated the eager `LineStarts`
+  pre-pass in favor of inline non-printable validation and zero-allocation lazy error coordinates,
+  added safe 8-byte SWAR scanning (`#![forbid(unsafe_code)]`) for scalars and comments, replaced
+  the `flow_ends` `HashMap` with inline `u32` partner indices and flow-scalar fast paths (`Cont`
+  `<= 64 B`), deferred `Scanner` tag-handle maps, added a `<= 18`-digit `u64` integer fast path,
+  and added specialized `EventSink` scalar callbacks bypassing `Event::Scalar` construction for
+  internal composers and typed builders.
 
 ## [0.2.3] — 2026-11-21
 
