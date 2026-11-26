@@ -1,0 +1,205 @@
+---
+import { SCENARIO_DOT_PEERS, type ScenarioDotRow } from '../../lib/bench';
+
+interface Props {
+  id: string;
+  title: string;
+  description: string;
+  rows: ScenarioDotRow[];
+  caption?: string;
+}
+
+const { id, title, description, rows, caption } = Astro.props;
+
+const WIDTH = 760;
+const LABEL_X = 166;
+const PLOT_X = 180;
+const PLOT_W = 560;
+const TOP = 56;
+const ROW_H = 21;
+const BOTTOM = 26;
+const HEIGHT = TOP + rows.length * ROW_H + BOTTOM;
+
+const LEGEND_X = [118, 240, 344, 442, 526, 632] as const;
+const ticks = [0.25, 0.5, 1, 2, 4, 8, 16];
+const logMin = Math.log(ticks[0]);
+const logMax = Math.log(ticks[ticks.length - 1]);
+const xFor = (v: number): number => {
+  const clamped = Math.min(Math.max(v, ticks[0]), ticks[ticks.length - 1]);
+  return PLOT_X + ((Math.log(clamped) - logMin) / (logMax - logMin)) * PLOT_W;
+};
+
+// Apply a small deterministic vertical stagger (+/- 2.8px) whenever adjacent
+// peer markers within the same scenario row sit closer than 7.5px on the x-axis.
+function layoutRowPoints(points: ScenarioDotRow['points']) {
+  const sorted = points.map((pt) => ({ pt, x: xFor(pt.ratio), dy: 0 })).sort((a, b) => a.x - b.x);
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i].x - sorted[i - 1].x < 7.5) {
+      if (sorted[i - 1].dy === 0) sorted[i - 1].dy = -2.8;
+      sorted[i].dy = sorted[i - 1].dy < 0 ? 2.8 : -2.8;
+    }
+  }
+  return sorted;
+}
+---
+
+<figure class="chart-fig">
+  <div class="chart-scroll">
+    <svg
+      class="chart-svg"
+      data-chart="scenario-dot-strip"
+      role="img"
+      aria-labelledby={`${id}-title ${id}-desc`}
+      viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+    >
+      <title id={`${id}-title`}>{title}</title>
+      <desc id={`${id}-desc`}>{description}</desc>
+
+      {/* Top legend */}
+      <g>
+        <line x1="12" y1="15" x2="24" y2="15" stroke="var(--accent)" stroke-width="2" />
+        <text x="29" y="18.5" font-size="10.5" font-weight="700" fill="var(--accent-strong)">ayaml (1.0x)</text>
+        {
+          SCENARIO_DOT_PEERS.map((peer, idx) => {
+            const x = LEGEND_X[idx] ?? 122 + idx * 106;
+            const y = 15;
+            return (
+              <g>
+                {peer.shape === 'diamond-hollow' && (
+                  <polygon points={`${x},${y - 4.5} ${x + 4.5},${y} ${x},${y + 4.5} ${x - 4.5},${y}`} fill="var(--paper)" stroke={peer.color} stroke-width="1.8" />
+                )}
+                {peer.shape === 'square' && (
+                  <rect x={x - 3.5} y={y - 3.5} width="7" height="7" fill={peer.color} />
+                )}
+                {peer.shape === 'circle' && (
+                  <circle cx={x} cy={y} r="3.8" fill={peer.color} />
+                )}
+                {peer.shape === 'triangle' && (
+                  <polygon points={`${x},${y - 4.5} ${x + 4.5},${y + 3.8} ${x - 4.5},${y + 3.8}`} fill={peer.color} />
+                )}
+                {peer.shape === 'diamond' && (
+                  <polygon points={`${x},${y - 4.5} ${x + 4.5},${y} ${x},${y + 4.5} ${x - 4.5},${y}`} fill={peer.color} />
+                )}
+                {peer.shape === 'ring' && (
+                  <circle cx={x} cy={y} r="3.8" fill="var(--paper)" stroke={peer.color} stroke-width="2" />
+                )}
+                <text x={x + 8} y="18.5" font-size="10.5" fill="var(--text)">{peer.label}</text>
+              </g>
+            );
+          })
+        }
+      </g>
+
+      {/* Directional hint */}
+      <text x={PLOT_X} y="37" font-size="10" fill="var(--muted)">&larr; Faster than ayaml</text>
+      <text x={PLOT_X + PLOT_W} y="37" font-size="10" fill="var(--muted)" text-anchor="end">Slower than ayaml &rarr;</text>
+
+      {/* Vertical gridlines & tick labels */}
+      {
+        ticks.map((t) => {
+          const x = xFor(t);
+          const isOne = t === 1;
+          return (
+            <g>
+              <line
+                x1={x.toFixed(1)}
+                y1={TOP - 8}
+                x2={x.toFixed(1)}
+                y2={HEIGHT - BOTTOM + 4}
+                stroke={isOne ? 'var(--accent)' : 'var(--rule)'}
+                stroke-width={isOne ? '1.5' : '1'}
+                stroke-dasharray={isOne ? undefined : '2 3'}
+              />
+              <text
+                class="ch-mono"
+                x={x.toFixed(1)}
+                y={HEIGHT - 8}
+                font-size="10"
+                font-weight={isOne ? '700' : '500'}
+                fill={isOne ? 'var(--accent-strong)' : 'var(--muted)'}
+                text-anchor="middle"
+              >
+                {`${t}x`}
+              </text>
+            </g>
+          );
+        })
+      }
+      <line x1={PLOT_X} y1={TOP - 8} x2={PLOT_X + PLOT_W} y2={TOP - 8} stroke="var(--rule)" stroke-width="1" />
+
+      {/* 23 scenario rows */}
+      {
+        rows.map((row, idx) => {
+          const yTop = TOP + idx * ROW_H;
+          const yMid = yTop + ROW_H / 2;
+          return (
+            <g>
+              {idx % 2 === 1 && (
+                <rect x="4" y={yTop} width={WIDTH - 8} height={ROW_H} rx="3" fill="var(--surface)" opacity="0.75" />
+              )}
+              <line
+                x1={PLOT_X}
+                y1={yMid.toFixed(1)}
+                x2={PLOT_X + PLOT_W}
+                y2={yMid.toFixed(1)}
+                stroke="var(--rule)"
+                stroke-width="0.75"
+                opacity="0.55"
+              />
+              <text
+                class="ch-mono"
+                x={LABEL_X}
+                y={(yMid + 3.5).toFixed(1)}
+                font-size="10.5"
+                fill="var(--text)"
+                text-anchor="end"
+              >
+                {row.id}
+              </text>
+
+              {layoutRowPoints(row.points).map(({ pt, x, dy }) => {
+                const y = yMid + dy;
+                const tip = `${row.id}: ${pt.label} = ${pt.ratio.toFixed(2)}x time vs ayaml value`;
+                return (
+                  <g>
+                    <title>{tip}</title>
+                    {pt.shape === 'diamond-hollow' && (
+                      <polygon
+                        points={`${x.toFixed(1)},${(y - 4.5).toFixed(1)} ${(x + 4.5).toFixed(1)},${y.toFixed(1)} ${x.toFixed(1)},${(y + 4.5).toFixed(1)} ${(x - 4.5).toFixed(1)},${y.toFixed(1)}`}
+                        fill="var(--paper)"
+                        stroke={pt.color}
+                        stroke-width="1.8"
+                      />
+                    )}
+                    {pt.shape === 'square' && (
+                      <rect x={(x - 3.3).toFixed(1)} y={(y - 3.3).toFixed(1)} width="6.6" height="6.6" fill={pt.color} />
+                    )}
+                    {pt.shape === 'circle' && (
+                      <circle cx={x.toFixed(1)} cy={y.toFixed(1)} r="3.6" fill={pt.color} />
+                    )}
+                    {pt.shape === 'triangle' && (
+                      <polygon
+                        points={`${x.toFixed(1)},${(y - 4.3).toFixed(1)} ${(x + 4.3).toFixed(1)},${(y + 3.5).toFixed(1)} ${(x - 4.3).toFixed(1)},${(y + 3.5).toFixed(1)}`}
+                        fill={pt.color}
+                      />
+                    )}
+                    {pt.shape === 'diamond' && (
+                      <polygon
+                        points={`${x.toFixed(1)},${(y - 4.5).toFixed(1)} ${(x + 4.5).toFixed(1)},${y.toFixed(1)} ${x.toFixed(1)},${(y + 4.5).toFixed(1)} ${(x - 4.5).toFixed(1)},${y.toFixed(1)}`}
+                        fill={pt.color}
+                      />
+                    )}
+                    {pt.shape === 'ring' && (
+                      <circle cx={x.toFixed(1)} cy={y.toFixed(1)} r="3.6" fill="var(--paper)" stroke={pt.color} stroke-width="2" />
+                    )}
+                  </g>
+                );
+              })}
+            </g>
+          );
+        })
+      }
+    </svg>
+  </div>
+  {caption && <figcaption class="chart-cap">{caption}</figcaption>}
+</figure>

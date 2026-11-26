@@ -156,6 +156,130 @@ export function checkTextNoEmDashes(text, label) {
   return errors;
 }
 
+const SVG_BAD_NUM_ATTR_RE =
+  /\s(?:x|y|x1|x2|y1|y2|cx|cy|r|rx|ry|width|height|points|d|viewBox|transform|opacity|font-size|stroke-width)=(["'])(?:(?!\1)[^])*(?:\bNaN\b|\bInfinity\b|\bundefined\b)(?:(?!\1)[^])*\1/gi;
+const SVG_NEG_DIM_ATTR_RE = /\s(?:width|height|r|rx|ry)=(["'])\s*-[^"']*\1/gi;
+const SVG_BAD_TEXT_RE = /(?:^|[^A-Za-z0-9_])(?:NaN|Infinity|undefined)(?:x|%|[^A-Za-z0-9_]|$)/;
+
+function extractBalancedSvgs(html) {
+  const results = [];
+  const tokenRe = /<(\/)?svg(?=[\s>/])([^>]*)>/gi;
+  let depth = 0;
+  let startIdx = -1;
+  let openAttrs = '';
+  let openEnd = -1;
+  for (const m of html.matchAll(tokenRe)) {
+    const isClose = Boolean(m[1]);
+    const isSelfClose = !isClose && m[0].endsWith('/>');
+    if (!isClose) {
+      if (depth === 0) {
+        startIdx = m.index;
+        openAttrs = m[2];
+        openEnd = m.index + m[0].length;
+        if (isSelfClose) {
+          results.push({ full: m[0], attrs: openAttrs, inner: '' });
+          continue;
+        }
+      }
+      if (!isSelfClose) depth++;
+    } else if (depth > 0) {
+      depth--;
+      if (depth === 0) {
+        results.push({
+          full: html.slice(startIdx, m.index + m[0].length),
+          attrs: openAttrs,
+          inner: html.slice(openEnd, m.index),
+        });
+      }
+    }
+  }
+  return results;
+}
+
+/**
+ * Verify every build-time inline SVG chart (`<svg ... data-chart="...">`) has
+ * accessible semantics (`role="img"`, valid `aria-labelledby`, unique IDs,
+ * matching `<title>` and `<desc>`), a valid positive `viewBox`, and no
+ * NaN/Infinity/undefined geometry or negative dimensions.
+ */
+export function checkSvgCharts(html, sourceUrl) {
+  const errors = [];
+  const seenChartIds = new Set();
+  let count = 0;
+
+  for (const { full, attrs, inner } of extractBalancedSvgs(html)) {
+    const chartMatch = /\bdata-chart=(["'])([^"']+)\1/i.exec(attrs);
+    if (!chartMatch) continue;
+    count++;
+    const chartKind = chartMatch[2];
+
+    if (!/\brole=(["'])img\1/i.test(attrs)) {
+      errors.push(`${sourceUrl}: SVG chart (${chartKind}) missing role="img"`);
+    }
+
+    const vbMatch = /\bviewBox=(["'])([^"']+)\1/i.exec(attrs);
+    if (!vbMatch) {
+      errors.push(`${sourceUrl}: SVG chart (${chartKind}) missing viewBox`);
+    } else {
+      const nums = vbMatch[2].trim().split(/[\s,]+/).map(Number);
+      if (nums.length !== 4 || nums.some((n) => !Number.isFinite(n)) || nums[2] <= 0 || nums[3] <= 0) {
+        errors.push(`${sourceUrl}: SVG chart (${chartKind}) has invalid viewBox="${vbMatch[2]}"`);
+      }
+    }
+
+    const innerIds = new Set();
+    for (const idm of inner.matchAll(/\bid=(["'])([^"']+)\1/gi)) {
+      const idVal = idm[2];
+      innerIds.add(idVal);
+      if (seenChartIds.has(idVal)) {
+        errors.push(`${sourceUrl}: SVG chart (${chartKind}) duplicates id "${idVal}" on page`);
+      }
+      seenChartIds.add(idVal);
+    }
+
+    const labelledBy = /\baria-labelledby=(["'])([^"']+)\1/i.exec(attrs);
+    if (!labelledBy) {
+      errors.push(`${sourceUrl}: SVG chart (${chartKind}) missing aria-labelledby`);
+    } else {
+      const refIds = labelledBy[2].trim().split(/\s+/).filter(Boolean);
+      if (refIds.length === 0) {
+        errors.push(`${sourceUrl}: SVG chart (${chartKind}) has empty aria-labelledby`);
+      }
+      for (const refId of refIds) {
+        if (!innerIds.has(refId)) {
+          errors.push(`${sourceUrl}: SVG chart (${chartKind}) aria-labelledby references missing id "${refId}"`);
+        }
+      }
+      const titleMatch = /<title\b[^>]*\bid=(["'])([^"']+)\1[^>]*>([\s\S]*?)<\/title>/i.exec(inner);
+      const descMatch = /<desc\b[^>]*\bid=(["'])([^"']+)\1[^>]*>([\s\S]*?)<\/desc>/i.exec(inner);
+      if (!titleMatch || !titleMatch[3].trim()) {
+        errors.push(`${sourceUrl}: SVG chart (${chartKind}) missing non-empty <title id="...">`);
+      } else if (!refIds.includes(titleMatch[2])) {
+        errors.push(`${sourceUrl}: SVG chart (${chartKind}) aria-labelledby does not reference title id ${titleMatch[2]}`);
+      }
+      if (!descMatch || !descMatch[3].trim()) {
+        errors.push(`${sourceUrl}: SVG chart (${chartKind}) missing non-empty <desc id="...">`);
+      } else if (!refIds.includes(descMatch[2])) {
+        errors.push(`${sourceUrl}: SVG chart (${chartKind}) aria-labelledby does not reference desc id ${descMatch[2]}`);
+      }
+    }
+
+    for (const bad of full.matchAll(SVG_BAD_NUM_ATTR_RE)) {
+      errors.push(`${sourceUrl}: SVG chart (${chartKind}) has invalid numeric attribute: ${bad[0].trim()}`);
+    }
+    for (const neg of full.matchAll(SVG_NEG_DIM_ATTR_RE)) {
+      errors.push(`${sourceUrl}: SVG chart (${chartKind}) has negative dimension attribute: ${neg[0].trim()}`);
+    }
+    for (const tm of inner.matchAll(/<text\b[^>]*>([\s\S]*?)<\/text>/gi)) {
+      const textVal = tm[1].replace(/<[^>]+>/g, '').trim();
+      if (SVG_BAD_TEXT_RE.test(textVal)) {
+        errors.push(`${sourceUrl}: SVG chart (${chartKind}) rendered invalid text label: ${textVal}`);
+      }
+    }
+  }
+  return { count, errors };
+}
+
 /**
  * Inspect `llms-full.txt` text for unstripped rustdoc hidden lines outside
  * multiline Rust strings/comments and any unrewritten relative `.md` links
@@ -234,6 +358,7 @@ function main() {
   let totalLinks = 0;
   let totalFragments = 0;
   let totalRepoLinks = 0;
+  let totalSvgCharts = 0;
 
   for (const htmlPath of walkHtml(DIST)) {
     totalPages++;
@@ -241,6 +366,9 @@ function main() {
     const sourceUrl = htmlPathToUrl(htmlPath);
     const is404 = htmlPath === join(DIST, '404.html');
     extraErrors.push(...checkHtmlNoEmDashes(html, sourceUrl));
+    const svgCheck = checkSvgCharts(html, sourceUrl);
+    totalSvgCharts += svgCheck.count;
+    extraErrors.push(...svgCheck.errors);
 
     for (const match of html.matchAll(/\s(href|src)=["']([^"']+)["']/gi)) {
       const attr = match[1].toLowerCase();
@@ -390,6 +518,9 @@ function main() {
       }
     }
   }
+  if (totalSvgCharts === 0) {
+    extraErrors.push('expected rendered inline SVG benchmark charts (data-chart) in dist/, found 0');
+  }
   for (const err of extraErrors) {
     failed = true;
     console.error(`FAIL: ${err}`);
@@ -397,7 +528,7 @@ function main() {
 
   if (failed) process.exit(1);
   console.log(
-    `OK: verified ${totalLinks} internal links/assets, ${totalFragments} fragments, and ${totalRepoLinks} GitHub repo links across ${totalPages} pages (+ llms*.txt, sitemap, robots.txt, 404.html, pagefind)`,
+    `OK: verified ${totalLinks} internal links/assets, ${totalFragments} fragments, ${totalRepoLinks} GitHub repo links, and ${totalSvgCharts} SVG charts across ${totalPages} pages (+ llms*.txt, sitemap, robots.txt, 404.html, pagefind)`,
   );
 }
 

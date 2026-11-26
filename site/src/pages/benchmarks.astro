@@ -1,33 +1,144 @@
 ---
 import { Code } from 'astro:components';
 import BaseLayout from '../layouts/BaseLayout.astro';
+import DivergingRatioChart from '../components/charts/DivergingRatioChart.astro';
+import DualMetricBarChart from '../components/charts/DualMetricBarChart.astro';
+import GroupedBarChart from '../components/charts/GroupedBarChart.astro';
+import SpeedupBulletChart from '../components/charts/SpeedupBulletChart.astro';
+import ScalingPlot from '../components/charts/ScalingPlot.astro';
+import ScenarioDotStrip from '../components/charts/ScenarioDotStrip.astro';
 import { BASE, SITE_URL } from '../lib/site';
 import {
   ALL_SCENARIOS,
+  EMIT_AXIS,
   EMIT_SCENARIOS,
   HEADLINE,
   TIER1_PEERS,
   TIER2_PEERS,
+  TYPED_AXIS,
   TYPED_SCENARIOS,
+  compareNullableAsc,
   fingerprint,
   fmtBytes,
   fmtTimeUs,
+  formatRatio,
   getEmitRows,
   getMemory,
   getProgressSinceV023,
-  getScalingSteps,
+  getScalingSeries,
+  getScenarioDotRows,
   getSpeed,
   getTypedDecodeRows,
+  type PeerComparisonRow,
 } from '../lib/bench';
 
 const TITLE = 'Benchmarks & Performance | ayaml';
 const DESCRIPTION = `Pinned-JSONL throughput, latency, peak heap, allocation count, and 10x linear scaling benchmarks across ${HEADLINE.scenarioCount} timed and ${HEADLINE.memoryScenarioCount} memory YAML workloads.`;
 
-const maxTier2Ratio = Math.max(...TIER2_PEERS.map((r) => r.speedRatio));
-const maxTier1Ratio = Math.max(...TIER1_PEERS.map((r) => r.speedRatio));
 const progressRows = getProgressSinceV023();
-const maxSpeedup = Math.max(...progressRows.map((r) => r.speedup));
-const scalingSteps = getScalingSteps();
+const scalingSeries = getScalingSeries();
+const scenarioDotRows = getScenarioDotRows();
+const emitGroups = EMIT_SCENARIOS.map((sc) => ({ scenario: sc, rows: getEmitRows(sc) }));
+
+function sortPeers(list: PeerComparisonRow[], pick: (r: PeerComparisonRow) => number | null) {
+  return [...list].sort((a, b) => compareNullableAsc(pick(a), pick(b)));
+}
+
+const TIER2_TABS = [
+  {
+    id: 'time',
+    label: 'Parse time',
+    leftHint: 'Faster than ayaml',
+    rightHint: 'Slower than ayaml',
+    ticks: [0.25, 0.5, 1, 2, 4],
+    rows: sortPeers(TIER2_PEERS, (r) => r.speedRatio).map((r) => ({
+      label: r.label,
+      ratio: r.speedRatio,
+      isAyaml: r.isAyaml,
+      isBaseline: r.impl === 'ayaml' && r.op === 'value',
+      isUnsafeArena: r.isUnsafeArena,
+    })),
+    caption: 'Log-scale geometric-mean parse time across shared fixtures relative to ayaml (Value DOM) = 1.00x. Terracotta = ayaml, blue = unsafe C++ arena, gray = slower peer.',
+  },
+  {
+    id: 'peak',
+    label: 'Peak heap',
+    leftHint: 'Less peak heap',
+    rightHint: 'More peak heap',
+    ticks: [0.25, 0.5, 1, 2],
+    rows: sortPeers(TIER2_PEERS, (r) => r.peakRatio).map((r) => ({
+      label: r.label,
+      ratio: r.peakRatio,
+      isAyaml: r.isAyaml,
+      isBaseline: r.impl === 'ayaml' && r.op === 'value',
+      isUnsafeArena: r.isUnsafeArena,
+    })),
+    caption: 'Log-scale geometric-mean peak heap bytes across shared memory fixtures relative to ayaml (Value DOM) = 1.00x. Green = peer uses less peak heap; blue = unsafe C++ arena; gray = peer uses more.',
+  },
+  {
+    id: 'allocs',
+    label: 'Allocations',
+    leftHint: 'Fewer allocations',
+    rightHint: 'More allocations',
+    ticks: [0.25, 0.5, 1, 2, 4],
+    rows: sortPeers(TIER2_PEERS, (r) => r.allocRatio).map((r) => ({
+      label: r.label,
+      ratio: r.allocRatio,
+      isAyaml: r.isAyaml,
+      isBaseline: r.impl === 'ayaml' && r.op === 'value',
+      isUnsafeArena: r.isUnsafeArena,
+    })),
+    caption: 'Log-scale geometric-mean heap allocation count relative to ayaml (Value DOM) = 1.00x. Left arrow indicates rapidyaml allocates a handful of C++ arena blocks (2 to 17 per fixture, <0.01x).',
+  },
+];
+
+const TIER1_TABS = [
+  {
+    id: 'time',
+    label: 'Parse time',
+    leftHint: 'Faster than ayaml',
+    rightHint: 'Slower than ayaml',
+    ticks: [0.25, 0.5, 1, 2, 4, 8],
+    rows: sortPeers(TIER1_PEERS, (r) => r.speedRatio).map((r) => ({
+      label: r.label,
+      ratio: r.speedRatio,
+      isAyaml: r.isAyaml,
+      isBaseline: r.impl === 'ayaml' && r.op === 'events',
+      isUnsafeArena: r.isUnsafeArena,
+    })),
+    caption: 'Log-scale geometric-mean structural parse time relative to ayaml (spanned events) = 1.00x. Terracotta = ayaml, blue = unsafe C++ arena, gray = slower C peer.',
+  },
+  {
+    id: 'peak',
+    label: 'Peak heap',
+    leftHint: 'Less peak heap',
+    rightHint: 'More peak heap',
+    ticks: [0.01, 0.05, 0.25, 1, 2],
+    rows: sortPeers(TIER1_PEERS, (r) => r.peakRatio).map((r) => ({
+      label: r.label,
+      ratio: r.peakRatio,
+      isAyaml: r.isAyaml,
+      isBaseline: r.impl === 'ayaml' && r.op === 'events',
+      isUnsafeArena: r.isUnsafeArena,
+    })),
+    caption: 'Log-scale geometric-mean peak heap bytes relative to ayaml (spanned events) = 1.00x (green = lower peak, blue = C++ arena). Note: C event loops discard each event immediately (live_bytes = 0) while ayaml collects the document buffer.',
+  },
+  {
+    id: 'allocs',
+    label: 'Allocations',
+    leftHint: 'Fewer allocations',
+    rightHint: 'More allocations',
+    ticks: [0.05, 0.2, 1, 5, 25, 100],
+    rows: sortPeers(TIER1_PEERS, (r) => r.allocRatio).map((r) => ({
+      label: r.label,
+      ratio: r.allocRatio,
+      isAyaml: r.isAyaml,
+      isBaseline: r.impl === 'ayaml' && r.op === 'events',
+      isUnsafeArena: r.isUnsafeArena,
+    })),
+    caption: 'Log-scale geometric-mean heap allocation count relative to ayaml (spanned events) = 1.00x (n/a for reused C++ arena; blue = C++ arena, green = fewer allocs, gray = more allocs).',
+  },
+];
 
 // Precompute full 23-scenario matrix columns grouped cleanly by Tier 1 (structural/events) vs Tier 2 (DOM/Serde).
 const MATRIX_TIER1_COLS = [
@@ -158,33 +269,54 @@ tools/check_alloc_corpus.sh`;
   <section id="tier2" class="sec">
     <div class="wrap">
       <div class="sec-head">
-        <span class="sec-kicker">Tier 2 &middot; Full Semantic / Typed DOM &middot; Shorter bar = faster</span>
+        <span class="sec-kicker">Tier 2 &middot; Full Semantic / Typed DOM &middot; Log scale vs ayaml (1.00x)</span>
         <h2>Generic <code>Value</code> &amp; Serde DOM comparison</h2>
         <p class="sec-lede">
           Geometric mean across shared fixtures relative to <code>ayaml value</code> (<code>1.00x</code>).
-          Shorter bar = faster; a ratio above <code>1.00x</code> means <code>ayaml</code> is faster
-          (or uses less peak memory / fewer allocations), and below <code>1.00x</code> means the peer is faster.
+          Bars extending right mean <code>ayaml</code> is faster (or uses less peak heap / fewer
+          allocations); bars extending left mean the peer is lower on that metric.
         </p>
       </div>
 
-      <div class="bar-chart">
+      <div data-tabs>
+        <div class="tab-list" role="tablist" aria-label="Tier 2 chart metric">
+          {
+            TIER2_TABS.map((tab, i) => (
+              <button
+                class="tab-btn"
+                type="button"
+                role="tab"
+                id={`tier2-tab-${tab.id}`}
+                aria-selected={i === 0 ? 'true' : 'false'}
+                aria-controls={`tier2-panel-${tab.id}`}
+                tabindex={i === 0 ? 0 : -1}
+              >
+                {tab.label}
+              </button>
+            ))
+          }
+        </div>
         {
-          TIER2_PEERS.map((row) => (
-            <div class:list={['bar-row', { 'is-ayaml': row.isAyaml, 'is-arena': row.isUnsafeArena }]}>
-              <div class="bar-name">
-                <span>
-                  {row.label}
-                  {row.isUnsafeArena && <span class="pill pill-blue" style="margin-left: 6px;">C++ arena</span>}
-                </span>
-                <span class="bar-sub">{row.safety} &middot; {row.sharedScenarios} shared</span>
-              </div>
-              <div class="bar-track" aria-hidden="true">
-                <div
-                  class="bar-fill"
-                  style={`width: ${((row.speedRatio / maxTier2Ratio) * 100).toFixed(1)}%`}
-                />
-              </div>
-              <div class="bar-val">{row.speedRatio.toFixed(2)}x time</div>
+          TIER2_TABS.map((tab, i) => (
+            <div
+              id={`tier2-panel-${tab.id}`}
+              role="tabpanel"
+              aria-labelledby={`tier2-tab-${tab.id}`}
+              tabindex="0"
+              hidden={i !== 0}
+            >
+              <p class="nojs-panel-title">{tab.label}</p>
+              <DivergingRatioChart
+                id={`tier2-${tab.id}`}
+                title={`Tier 2 ${tab.label.toLowerCase()} comparison vs ayaml value`}
+                description={tab.caption}
+                baselineLabel="Baseline: ayaml (1.00x)"
+                leftHint={tab.leftHint}
+                rightHint={tab.rightHint}
+                ticks={tab.ticks}
+                rows={tab.rows}
+                caption={tab.caption}
+              />
             </div>
           ))
         }
@@ -213,9 +345,9 @@ tools/check_alloc_corpus.sh`;
                   <td class="num">
                     {r.sharedScenarios} / {r.memSharedScenarios}
                   </td>
-                  <td class="num">{r.speedRatio.toFixed(2)}x</td>
-                  <td class="num">{r.peakRatio !== null ? `${r.peakRatio.toFixed(2)}x` : 'n/a'}</td>
-                  <td class="num">{r.allocRatio !== null ? `${r.allocRatio.toFixed(2)}x` : 'n/a'}</td>
+                  <td class="num">{formatRatio(r.speedRatio)}</td>
+                  <td class="num">{formatRatio(r.peakRatio)}</td>
+                  <td class="num">{formatRatio(r.allocRatio)}</td>
                 </tr>
               ))
             }
@@ -228,10 +360,10 @@ tools/check_alloc_corpus.sh`;
   <section id="tier1" class="sec">
     <div class="wrap">
       <div class="sec-head">
-        <span class="sec-kicker">Tier 1 &middot; Zero-Copy &amp; Structural Parsing &middot; Shorter bar = faster</span>
+        <span class="sec-kicker">Tier 1 &middot; Zero-Copy &amp; Structural Parsing &middot; Log scale vs ayaml events (1.00x)</span>
         <h2>Spanned event stream vs C &amp; C++ structural parsers</h2>
         <p class="sec-lede">
-          Geometric mean relative to <code>ayaml events</code> (<code>1.00x</code>; shorter bar = faster).
+          Geometric mean relative to <code>ayaml events</code> (<code>1.00x</code>).
           <code>ayaml</code>'s pull-based spanned event stream beats both C <code>libyaml</code>
           (<code>{HEADLINE.vsLibyamlEvents.toFixed(2)}x</code> faster with
           <code>{HEADLINE.vsLibyamlEventsAllocs.toFixed(0)}x</code> fewer allocations) and C
@@ -239,21 +371,45 @@ tools/check_alloc_corpus.sh`;
         </p>
       </div>
 
-      <div class="bar-chart">
+      <div data-tabs>
+        <div class="tab-list" role="tablist" aria-label="Tier 1 chart metric">
+          {
+            TIER1_TABS.map((tab, i) => (
+              <button
+                class="tab-btn"
+                type="button"
+                role="tab"
+                id={`tier1-tab-${tab.id}`}
+                aria-selected={i === 0 ? 'true' : 'false'}
+                aria-controls={`tier1-panel-${tab.id}`}
+                tabindex={i === 0 ? 0 : -1}
+              >
+                {tab.label}
+              </button>
+            ))
+          }
+        </div>
         {
-          TIER1_PEERS.map((row) => (
-            <div class:list={['bar-row', { 'is-ayaml': row.isAyaml, 'is-arena': row.isUnsafeArena }]}>
-              <div class="bar-name">
-                <span>{row.label}</span>
-                <span class="bar-sub">{row.safety} &middot; {row.sharedScenarios} shared</span>
-              </div>
-              <div class="bar-track" aria-hidden="true">
-                <div
-                  class="bar-fill"
-                  style={`width: ${((row.speedRatio / maxTier1Ratio) * 100).toFixed(1)}%`}
-                />
-              </div>
-              <div class="bar-val">{row.speedRatio.toFixed(2)}x time</div>
+          TIER1_TABS.map((tab, i) => (
+            <div
+              id={`tier1-panel-${tab.id}`}
+              role="tabpanel"
+              aria-labelledby={`tier1-tab-${tab.id}`}
+              tabindex="0"
+              hidden={i !== 0}
+            >
+              <p class="nojs-panel-title">{tab.label}</p>
+              <DivergingRatioChart
+                id={`tier1-${tab.id}`}
+                title={`Tier 1 ${tab.label.toLowerCase()} comparison vs ayaml events`}
+                description={tab.caption}
+                baselineLabel="Baseline: ayaml (1.00x)"
+                leftHint={tab.leftHint}
+                rightHint={tab.rightHint}
+                ticks={tab.ticks}
+                rows={tab.rows}
+                caption={tab.caption}
+              />
             </div>
           ))
         }
@@ -282,9 +438,9 @@ tools/check_alloc_corpus.sh`;
                   <td class="num">
                     {r.sharedScenarios} / {r.memSharedScenarios}
                   </td>
-                  <td class="num">{r.speedRatio.toFixed(2)}x</td>
-                  <td class="num">{r.peakRatio !== null ? `${r.peakRatio.toFixed(2)}x` : 'n/a'}</td>
-                  <td class="num">{r.allocRatio !== null ? `${r.allocRatio.toFixed(2)}x` : 'n/a'}</td>
+                  <td class="num">{formatRatio(r.speedRatio)}</td>
+                  <td class="num">{formatRatio(r.peakRatio)}</td>
+                  <td class="num">{formatRatio(r.allocRatio)}</td>
                 </tr>
               ))
             }
@@ -304,15 +460,15 @@ tools/check_alloc_corpus.sh`;
   <section id="typed" class="sec">
     <div class="wrap">
       <div class="sec-head">
-        <span class="sec-kicker">Typed Rust Serde Decode &middot; Longer bar = faster</span>
+        <span class="sec-kicker">Typed Rust Serde Decode &middot; Speed &amp; Peak Heap Side-by-Side</span>
         <h2>Owned &amp; zero-copy borrowed struct deserialization</h2>
         <p class="sec-lede">
-          Direct struct decoding across small frontmatter and the 4 KiB streaming boundary (longer
-          bar = higher throughput). <code>ayaml::from_str_borrowed</code> and
-          <code>ayaml::from_str</code> lead every measured Rust Serde crate in latency and throughput
-          while cutting peak heap by up to
-          <code>{HEADLINE.typedMaxPeakSavingsVsYamlSerde.toFixed(1)}x</code> compared to
-          <code>yaml-serde</code>.
+          Direct struct decoding across small frontmatter and the 4 KiB streaming boundary. All
+          three scenario tabs share a fixed <code>0 to {TYPED_AXIS.throughputMax} MiB/s</code> speed
+          axis and <code>0 to {TYPED_AXIS.peakKibMax} KiB</code> peak-heap axis so the
+          {HEADLINE.typedStreamingHeapDropPct.toFixed(0)}% streaming heap drop above 4 KiB and up to
+          <code>{HEADLINE.typedMaxPeakSavingsVsYamlSerde.toFixed(1)}x</code> peak-heap savings vs
+          <code>yaml-serde</code> are directly comparable.
         </p>
       </div>
 
@@ -341,8 +497,8 @@ tools/check_alloc_corpus.sh`;
         {
           TYPED_SCENARIOS.map((sc, i) => {
             const rows = getTypedDecodeRows(sc.id);
-            const maxT = Math.max(...rows.map((r) => r.throughput));
             const meta = ALL_SCENARIOS.find((s) => s.id === sc.id);
+            const sizeStr = meta ? fmtBytes(meta.bytes) : sc.id;
             return (
               <div
                 id={`typed-panel-${sc.id}`}
@@ -352,25 +508,17 @@ tools/check_alloc_corpus.sh`;
                 hidden={i !== 0}
               >
                 <p class="nojs-panel-title">
-                  {sc.label} ({meta ? fmtBytes(meta.bytes) : sc.id})
+                  {sc.label} ({sizeStr})
                 </p>
-                <div class="bar-chart">
-                  {rows.map((r) => (
-                    <div class:list={['bar-row', { 'is-ayaml': r.isAyaml }]}>
-                      <div class="bar-name">
-                        <span>{r.label}</span>
-                        <span class="bar-sub">
-                          {fmtTimeUs(r.medianUs)} &middot; Peak {fmtBytes(r.peakBytes)} &middot;
-                          Live {fmtBytes(r.liveBytes)} &middot; {r.allocations} allocs
-                        </span>
-                      </div>
-                      <div class="bar-track" aria-hidden="true">
-                        <div class="bar-fill" style={`width: ${((r.throughput / maxT) * 100).toFixed(1)}%`} />
-                      </div>
-                      <div class="bar-val">{r.throughput.toFixed(1)} MiB/s</div>
-                    </div>
-                  ))}
-                </div>
+                <DualMetricBarChart
+                  id={`typed-${sc.id}`}
+                  title={`Typed Serde throughput and peak heap for ${sc.label}`}
+                  description={`Side-by-side throughput (MiB/s) and peak heap (KiB) with allocation counts for ${sc.label} (${sizeStr}).`}
+                  rows={rows}
+                  throughputMax={TYPED_AXIS.throughputMax}
+                  peakKibMax={TYPED_AXIS.peakKibMax}
+                  caption={`Scenario: ${sc.id} (${sizeStr}). Shared axes across all three tabs (0 to ${TYPED_AXIS.throughputMax} MiB/s and 0 to ${TYPED_AXIS.peakKibMax} KiB) make cross-size memory shifts visible.`}
+                />
               </div>
             );
           })
@@ -382,7 +530,7 @@ tools/check_alloc_corpus.sh`;
   <section id="emit" class="sec">
     <div class="wrap">
       <div class="sec-head">
-        <span class="sec-kicker">Serialization &amp; Emission &middot; Longer bar = faster</span>
+        <span class="sec-kicker">Serialization &amp; Emission &middot; Higher = faster</span>
         <h2>Deterministic YAML emission throughput</h2>
         <p class="sec-lede">
           Higher is faster (MiB/s). <code>ayaml</code> emits canonical output with YAML 1.1-safe
@@ -397,40 +545,21 @@ tools/check_alloc_corpus.sh`;
         </p>
       </div>
 
-      <div class="emit-grid">
-        {
-          EMIT_SCENARIOS.map((sc) => {
-            const rows = getEmitRows(sc);
-            const maxT = Math.max(...rows.map((r) => r.throughput));
-            return (
-              <div class="emit-card">
-                <h3><code>{sc}</code></h3>
-                <div class="bar-chart" style="margin-top: var(--s3);">
-                  {rows.map((r) => (
-                    <div class:list={['bar-row', { 'is-ayaml': r.isAyaml, 'is-arena': r.isUnsafeArena }]}>
-                      <div class="bar-name">
-                        <span>{r.label}</span>
-                        <span class="bar-sub">{fmtTimeUs(r.medianUs)}</span>
-                      </div>
-                      <div class="bar-val">{r.throughput.toFixed(1)} MiB/s</div>
-                      <div class="bar-track" aria-hidden="true">
-                        <div class="bar-fill" style={`width: ${((r.throughput / maxT) * 100).toFixed(1)}%`} />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            );
-          })
-        }
-      </div>
+      <GroupedBarChart
+        id="emit-throughput"
+        title="YAML emission throughput across frontmatter, CI workflow, and OpenAPI fixtures"
+        description="Grouped horizontal bar chart comparing YAML emission throughput in MiB/s across rapidyaml, ayaml, fkYAML, noyalib, and yaml-serde."
+        groups={emitGroups}
+        tickMax={EMIT_AXIS.tickMax}
+        caption="Median emission throughput (MiB/s) across three representative fixtures. rapidyaml emits from an unsafe C++ arena; ayaml emits canonical YAML 1.2.2 in safe Rust."
+      />
     </div>
   </section>
 
   <section id="progress" class="sec">
     <div class="wrap">
       <div class="sec-head">
-        <span class="sec-kicker">Progress since v0.2.3 &middot; Longer bar = larger speedup</span>
+        <span class="sec-kicker">Progress since v0.2.3 &middot; Baseline 1.0x = v0.2.3</span>
         <h2>Speedups &amp; memory reductions since <code>v0.2.3</code></h2>
         <p class="sec-lede">
           Same hardware, same compiler (<code>{fingerprint.rustc}</code>), same SHA-256 verified
@@ -445,27 +574,13 @@ tools/check_alloc_corpus.sh`;
         </p>
       </div>
 
-      <div class="bar-chart">
-        {
-          progressRows.map((r) => (
-            <div class="bar-row is-ayaml">
-              <div class="bar-name">
-                <span>{r.label}</span>
-                <span class="bar-sub">
-                  {r.v023Mib.toFixed(1)} &rarr; {r.curMib.toFixed(1)} MiB/s
-                  {r.peakRatio !== null && r.peakRatio > 1.02
-                    ? ` · ${r.peakRatio.toFixed(2)}x lower peak heap`
-                    : ''}
-                </span>
-              </div>
-              <div class="bar-track" aria-hidden="true">
-                <div class="bar-fill" style={`width: ${((r.speedup / maxSpeedup) * 100).toFixed(1)}%`} />
-              </div>
-              <div class="bar-val">{r.speedup.toFixed(2)}x faster</div>
-            </div>
-          ))
-        }
-      </div>
+      <SpeedupBulletChart
+        id="progress-v023"
+        title="Speedups and peak-heap reductions since ayaml v0.2.3"
+        description="Lollipop range chart anchored at 1.0x (v0.2.3) showing speedup factor, old to current throughput in MiB/s, and peak-heap reduction badges."
+        rows={progressRows}
+        caption="All 10 highlighted workloads anchored at v0.2.3 = 1.0x. Green pills show peak-heap reduction where peak bytes dropped by more than 2%; n/a marks emit rows not included in the memory probe."
+      />
     </div>
   </section>
 
@@ -475,15 +590,19 @@ tools/check_alloc_corpus.sh`;
         <span class="sec-kicker">Full dataset &middot; All {HEADLINE.scenarioCount} timed scenarios</span>
         <h2>Per-scenario throughput, latency, peak heap, and allocations</h2>
         <p class="sec-lede">
-          Switch metrics below to inspect every workload in the pinned qualification run, grouped by
-          Tier 1 (structural / event parsers) and Tier 2 (full Value / Serde DOM parsers).
+          Inspect the log-scale visual map across all {HEADLINE.scenarioCount} timed scenarios or
+          switch to the full numeric tables grouped by Tier 1 (structural / event parsers) and
+          Tier 2 (full Value / Serde DOM parsers).
         </p>
       </div>
 
       <div data-tabs>
         <div class="tab-list" role="tablist" aria-label="Matrix metric selector">
-          <button class="tab-btn" type="button" role="tab" id="mat-tab-mib" aria-selected="true" aria-controls="mat-panel-mib" tabindex="0">
-            Throughput (MiB/s, higher is faster)
+          <button class="tab-btn" type="button" role="tab" id="mat-tab-visual" aria-selected="true" aria-controls="mat-panel-visual" tabindex="0">
+            Visual map (CPU speed)
+          </button>
+          <button class="tab-btn" type="button" role="tab" id="mat-tab-mib" aria-selected="false" aria-controls="mat-panel-mib" tabindex="-1">
+            Throughput (MiB/s)
           </button>
           <button class="tab-btn" type="button" role="tab" id="mat-tab-us" aria-selected="false" aria-controls="mat-panel-us" tabindex="-1">
             Median latency (µs / ms)
@@ -496,19 +615,35 @@ tools/check_alloc_corpus.sh`;
           </button>
         </div>
 
+        <div
+          id="mat-panel-visual"
+          role="tabpanel"
+          aria-labelledby="mat-tab-visual"
+          tabindex="0"
+        >
+          <p class="nojs-panel-title">Visual map (all {HEADLINE.scenarioCount} timed scenarios)</p>
+          <ScenarioDotStrip
+            id="matrix-dot-strip"
+            title={`Per-scenario relative parse time across all ${HEADLINE.scenarioCount} timed workloads`}
+            description={`Dot strip plotting peer parse time relative to ayaml value = 1.0x on a log2 scale from 0.25x to 16x across all ${HEADLINE.scenarioCount} pinned scenarios.`}
+            rows={scenarioDotRows}
+            caption="Each row plots peer median parse time divided by ayaml value median parse time (log2 axis, 0.25x to 16x). Hover any marker for exact ratio; switch tabs above for complete numeric tables."
+          />
+        </div>
+
         {
           [
             { id: 'mib', title: 'Throughput (MiB/s)', fmt: (c: typeof scenarioMatrix[0]['cells'][0]) => (c.mib !== null ? c.mib.toFixed(1) : 'n/a') },
             { id: 'us', title: 'Median latency (µs / ms)', fmt: (c: typeof scenarioMatrix[0]['cells'][0]) => (c.us !== null ? fmtTimeUs(c.us) : 'n/a') },
             { id: 'peak', title: 'Peak heap (KiB / MiB)', fmt: (c: typeof scenarioMatrix[0]['cells'][0]) => (c.peakBytes !== null ? fmtBytes(c.peakBytes) : 'n/a') },
             { id: 'allocs', title: 'Heap allocations (count)', fmt: (c: typeof scenarioMatrix[0]['cells'][0]) => (c.allocs !== null ? c.allocs.toLocaleString('en-US') : 'n/a') },
-          ].map((metric, idx) => (
+          ].map((metric) => (
             <div
               id={`mat-panel-${metric.id}`}
               role="tabpanel"
               aria-labelledby={`mat-tab-${metric.id}`}
               tabindex="0"
-              hidden={idx !== 0}
+              hidden
             >
               <p class="nojs-panel-title">{metric.title}</p>
               <div class="table-wrap">
@@ -564,33 +699,41 @@ tools/check_alloc_corpus.sh`;
         </p>
       </div>
 
-      <div class="table-wrap">
+      <ScalingPlot
+        id="scaling-ladder"
+        title="10x linear scaling for peak heap and parse time across 10 KiB, 100 KiB, and 1 MiB workloads"
+        description="Two-panel plot showing log-log peak heap growth alongside an O(n) slope guide on the left, and normalized 10x step ratios relative to 1.00x on the right."
+        series={scalingSeries}
+        caption="Left: peak heap scales parallel to the O(n) slope guide across two orders of magnitude. Right: every 100 KiB to 1 MiB peak-heap step settles at or below 1.00x."
+      />
+
+      <div class="table-wrap" style="margin-top: var(--s5);">
         <table class="data-table">
           <thead>
             <tr>
               <th>Workload family</th>
-              <th>Step</th>
-              <th class="num">Size ratio</th>
-              <th class="num">Normalized time ratio</th>
-              <th class="num">Normalized peak-heap ratio</th>
+              <th class="num">10 KiB &rarr; 100 KiB time</th>
+              <th class="num">10 KiB &rarr; 100 KiB peak</th>
+              <th class="num">100 KiB &rarr; 1 MiB peak</th>
             </tr>
           </thead>
           <tbody>
             {
-              scalingSteps.map((s) => (
+              scalingSeries.map((s) => (
                 <tr>
                   <td><strong>{s.family}</strong></td>
-                  <td><code>{s.from}</code> &rarr; <code>{s.to}</code></td>
-                  <td class="num">{s.sizeRatio.toFixed(2)}x</td>
                   <td class="num">
-                    {s.timeNorm !== null ? (
-                      <span class="pill pill-green">{s.timeNorm.toFixed(2)}x</span>
+                    {s.time10to100 !== null ? (
+                      <span class="pill pill-green">{s.time10to100.toFixed(2)}x</span>
                     ) : (
-                      'mem-only'
+                      'n/a'
                     )}
                   </td>
                   <td class="num">
-                    <span class="pill pill-muted">{s.peakNorm.toFixed(2)}x</span>
+                    <span class="pill pill-muted">{s.peak10to100.toFixed(2)}x</span>
+                  </td>
+                  <td class="num">
+                    <span class="pill pill-green">{s.peak100to1m.toFixed(2)}x</span>
                   </td>
                 </tr>
               ))
@@ -618,7 +761,7 @@ tools/check_alloc_corpus.sh`;
           <code>{HEADLINE.rymlAheadOfEvents.toFixed(2)}x to {HEADLINE.rymlAheadOfValue.toFixed(2)}x</code>
           faster on geometric mean because its output model does much less per-node work. It parses
           raw bytes into a flat, unsafe C++ index arena (optionally mutating the input buffer in
-          place) with 2 to 3 allocations, skipping Rust UTF-8 ownership checks, duplicate-key
+          place) with a handful of arena allocations (2 to 17 across fixtures), skipping Rust UTF-8 ownership checks, duplicate-key
           hashing, YAML 1.2.2 Core schema resolution on the arena path, and owned per-node
           <code>Value</code> / <code>Mapping</code> structures.
         </p>
@@ -738,27 +881,6 @@ tools/check_alloc_corpus.sh`;
     color: var(--muted);
     font-size: var(--t-note);
     line-height: 1.5;
-  }
-  .emit-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
-    gap: var(--s5);
-  }
-  .emit-card {
-    padding: var(--s5);
-    border: 1px solid var(--rule);
-    border-radius: var(--radius);
-    background: var(--surface);
-    min-width: 0;
-  }
-  /* Stack emit bars into 2 clean rows so tracks always span the full card width */
-  .emit-card .bar-row {
-    grid-template-columns: 1fr auto;
-    grid-template-rows: auto auto;
-    gap: 6px 12px;
-  }
-  .emit-card .bar-track {
-    grid-column: 1 / -1;
   }
   .tier-group-row th {
     font-size: 0.75rem;
