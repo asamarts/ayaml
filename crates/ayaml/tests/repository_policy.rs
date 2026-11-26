@@ -948,6 +948,7 @@ fn docs_book_and_reference_pages_are_complete_and_doctested_in_ci() {
         "(migrating-from/serde-yaml.md)",
         "(migrating-from/serde-yml-and-forks.md)",
         "(migrating-from/yaml-rust2-and-saphyr.md)",
+        "(correctness.md)",
         "(api-reference.md)",
         "(tools.md)",
         "(error-codes.md)",
@@ -961,6 +962,17 @@ fn docs_book_and_reference_pages_are_complete_and_doctested_in_ci() {
             "docs/SUMMARY.md must list {required}"
         );
     }
+
+    let site_ts = read(&root, "site/src/lib/site.ts");
+    assert!(
+        site_ts.contains("{ label: 'Correctness', href: `${BASE}/docs/correctness/` }"),
+        "site/src/lib/site.ts must expose Correctness in top-level NAV_ITEMS"
+    );
+    let site_nav = read(&root, "site/src/components/SiteNav.astro");
+    assert!(
+        site_nav.contains("!currentPath.startsWith(`${BASE}/docs/correctness/`)"),
+        "site/src/components/SiteNav.astro must exclude /docs/correctness/ from Docs active fallback"
+    );
 
     let security = read(&root, "docs/security.md");
     for topic in ["Limits", "untrusted", "Error::masked()", "MaskedError"] {

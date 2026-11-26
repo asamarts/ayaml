@@ -32,6 +32,7 @@ export const WORKSPACE_VERSION = readWorkspaceVersion();
 
 export const NAV_ITEMS = [
   { label: 'Docs', href: `${BASE}/docs/` },
+  { label: 'Correctness', href: `${BASE}/docs/correctness/` },
   { label: 'Benchmarks', href: `${BASE}/benchmarks/` },
   { label: 'Migrating', href: `${BASE}/docs/migrating-from/serde-yaml/` },
   { label: 'Cookbook', href: `${BASE}/docs/cookbook/` },

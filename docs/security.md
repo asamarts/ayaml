@@ -97,6 +97,8 @@ per-reader accounting rules.
 - Continuous fuzzing covers all ten targets (`parse`, `emit`, `borrowed`, `structured`,
   `spanned`, `merge_keys`, `masked_errors`, `event_emit`, `typed_equiv`, and `edit`). A bounded
   fuzz run is evidence rather than a proof of absence of bugs.
+- For the full testing, fuzzing, Miri, Kani, and mutation-testing architecture, see
+  [Correctness and verification](correctness.md).
 
 ## What errors may contain
 

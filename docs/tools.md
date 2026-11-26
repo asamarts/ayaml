@@ -2,7 +2,9 @@
 
 `ayaml` ships with a reproducible verification stack covering YAML 1.2.2
 conformance, performance and memory regression gates, fuzzing, formal
-verification, and mutation testing.
+verification, and mutation testing. For an accessible overview of what each
+verification technique proves and which bug classes it catches, see
+[Correctness and verification](correctness.md).
 
 ## Local CI runner (`tools/ci-local.sh`)
 

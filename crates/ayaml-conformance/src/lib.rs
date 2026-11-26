@@ -56,6 +56,9 @@ pub mod book_doctests {
     #[doc = include_str!("../../../docs/api-reference.md")]
     pub struct ApiReference;
 
+    #[doc = include_str!("../../../docs/correctness.md")]
+    pub struct Correctness;
+
     #[doc = include_str!("../../../docs/error-codes.md")]
     pub struct ErrorCodes;
 

@@ -20,6 +20,7 @@
 
 # Reference
 
+- [Correctness and verification](correctness.md)
 - [API reference and caveats](api-reference.md)
 - [Error codes](error-codes.md)
 - [Security and untrusted input](security.md)
