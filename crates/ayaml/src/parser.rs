@@ -7,14 +7,14 @@
 //! `Parser::run`), so nesting depth costs heap, not native stack.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
 use crate::composer::StreamingComposer;
 use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::{Anchor, CollectionStyle, Event, ScalarStyle};
 use crate::limits::Limits;
-use crate::position::LineStarts;
-use crate::scanner::{Scanner, Token, TokenKind};
+use crate::position::{column_on_line, has_line_break, lines_at_most, location_at};
+use crate::scanner::{Scanner, Token, TokenKind, UNMATCHED_FLOW};
 use crate::span::{Location, Span};
 use crate::tag::Tag;
 use crate::value::Value;
@@ -28,15 +28,50 @@ mod grammar;
 #[cfg(kani)]
 mod kani_proofs;
 mod pull;
+mod state;
 #[cfg(test)]
 mod tests;
 
+use state::{
+    BlockState, Call, Cont, DUPLICATE_PROPERTIES, FlowLack, FlowState, NO_VALUE_INDEX, NodeBounds,
+    Opening, Properties, Run, Step,
+};
+
+/// Convert a bounded parser index or count to `u32`, returning an event-count limit error if it
+/// would overflow (unreachable below 4 billion tokens/lines/columns).
+#[inline]
+fn to_u32(value: usize, span: Span, input: &str, compat: bool) -> Result<u32, Box<Error>> {
+    u32::try_from(value).map_err(|_| {
+        Box::new(
+            Error::from(crate::limits::LimitExceeded::new(
+                crate::limits::LimitKind::Events,
+                u64::from(u32::MAX),
+                u64::try_from(value).unwrap_or(u64::MAX),
+            ))
+            .with_span(span)
+            .with_input_location(input, compat),
+        )
+    })
+}
+
+/// Convert an index already known to fit in `u32` (for example a sub-offset of a `Run` or `Line`).
+#[inline]
+fn fit_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+/// Decode an inline flow closing partner index (`UNMATCHED_FLOW` means unmatched).
+#[inline]
+pub(super) fn matched_flow_end(end: u32) -> Option<usize> {
+    (end != UNMATCHED_FLOW).then_some(end as usize)
+}
+
 /// A logical line's token range in the parser's shared token arena.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct Line {
-    start: usize,
-    end: usize,
-    indent: usize,
+    start: u32,
+    end: u32,
+    indent: u32,
 }
 
 impl Line {
@@ -48,8 +83,9 @@ impl Line {
         start: usize,
         end: usize,
         input: &str,
-        positions: &LineStarts,
-    ) -> Self {
+        compat: bool,
+    ) -> Result<Self, Box<Error>> {
+        let first_span = tokens.get(start).map_or_else(|| Span::empty(0), |t| t.span);
         let indent = tokens.get(start).map_or(0, |token| {
             let offset = token.span.start();
             let bytes = input.as_bytes();
@@ -68,28 +104,48 @@ impl Line {
             if i == 0 || matches!(bytes[i - 1], b'\n' | b'\r') {
                 first_tab.map_or(offset - i, |tab| tab - i)
             } else {
-                let column = positions
-                    .marker(input, offset)
-                    .map_or(0, |position| position.column().saturating_sub(1));
+                let column = column_on_line(input, offset, compat).saturating_sub(1);
                 match first_tab {
                     Some(tab) => column.saturating_sub(offset - tab),
                     None => column,
                 }
             }
         });
-        Self { start, end, indent }
+        Ok(Self {
+            start: to_u32(start, first_span, input, compat)?,
+            end: to_u32(end, first_span, input, compat)?,
+            indent: to_u32(indent, first_span, input, compat)?,
+        })
     }
 
-    fn len(&self) -> usize {
-        self.end - self.start
+    #[inline]
+    fn start(self) -> usize {
+        self.start as usize
     }
 
-    fn is_empty(&self) -> bool {
+    #[inline]
+    fn end(self) -> usize {
+        self.end as usize
+    }
+
+    #[inline]
+    fn indent(self) -> usize {
+        self.indent as usize
+    }
+
+    #[inline]
+    fn len(self) -> usize {
+        (self.end - self.start) as usize
+    }
+
+    #[inline]
+    fn is_empty(self) -> bool {
         self.start == self.end
     }
 
+    #[inline]
     fn advance(&mut self, count: usize) {
-        self.start = self.start.saturating_add(count).min(self.end);
+        self.start = self.start.saturating_add(fit_u32(count)).min(self.end);
     }
 }
 
@@ -107,19 +163,21 @@ fn reserve_tokens(
     additional: usize,
     most: usize,
     span: Span,
-    positions: &LineStarts,
     input: &str,
-) -> Result<(), Error> {
+    compat: bool,
+) -> Result<(), Box<Error>> {
     tokens.try_reserve_exact(additional).map_err(|_| {
         let observed = u64::try_from(tokens.len().saturating_add(additional)).unwrap_or(u64::MAX);
         let limit = u64::try_from(most).unwrap_or(u64::MAX);
-        Error::from(crate::limits::LimitExceeded::new(
-            crate::limits::LimitKind::Events,
-            limit,
-            observed,
-        ))
-        .with_span(span)
-        .with_location_from(positions, input)
+        Box::new(
+            Error::from(crate::limits::LimitExceeded::new(
+                crate::limits::LimitKind::Events,
+                limit,
+                observed,
+            ))
+            .with_span(span)
+            .with_input_location(input, compat),
+        )
     })
 }
 
@@ -129,14 +187,13 @@ fn push_token<'a>(
     token: Token<'a>,
     chunk: usize,
     most: usize,
-    positions: &LineStarts,
     input: &str,
-) -> Result<(), Error> {
+) -> Result<(), Box<Error>> {
     if tokens.len() == tokens.capacity() {
         // The scanner refuses the token after `most`, so no arena holds more than that.
         let room = most.saturating_sub(tokens.len()).max(1);
         let additional = arena_growth(tokens.len(), chunk).min(room);
-        reserve_tokens(tokens, additional, most, token.span, positions, input)?;
+        reserve_tokens(tokens, additional, most, token.span, input, false)?;
     }
     tokens.push(token);
     Ok(())
@@ -159,10 +216,9 @@ struct Lines<'a> {
     tokens: Vec<Token<'a>>,
     stream_start: Option<Span>,
     stream_end: Option<Span>,
-    positions: LineStarts,
     /// A scanner failure deferred until the parser checks earlier tokens, so raising
     /// `max_depth` cannot swap an earlier error for a later scanner error.
-    scanner_error: Option<Error>,
+    scanner_error: Option<Box<Error>>,
     /// Whether the final line in `lines` was truncated mid-line by `scanner_error`.
     truncated_last_line: bool,
     /// How many times the token arena was reallocated, which the tests bound.
@@ -248,21 +304,28 @@ fn prefix_token_capacity(
 /// This avoids first collecting every token in one vector and then copying
 /// them into per-line vectors. A block scalar consumes the rest of its line,
 /// so it flushes the logical line immediately.
-fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
+fn read_lines<'a>(scanner: &mut Scanner<'a>, limits: &Limits) -> Result<Lines<'a>, Box<Error>> {
     let input = scanner.input();
     let input_len = scanner.input_len();
-    let line_count = scanner.line_index().line_count();
+    let compat = scanner.is_compat();
+    let most = limits.max_events;
+    let mut mid_capacity = None;
     let (initial_chunk, chunk) = match input_len {
         0..=4096 => (TOKEN_ARENA_SMALL_CHUNK, TOKEN_ARENA_SMALL_CHUNK),
-        4097..=32768 => (TOKEN_ARENA_MID_CHUNK, TOKEN_ARENA_MID_CHUNK),
+        4097..=32768 => {
+            let line_count = lines_at_most(input.as_bytes());
+            mid_capacity = mid_input_token_capacity(input_len, line_count, most);
+            (TOKEN_ARENA_MID_CHUNK, TOKEN_ARENA_MID_CHUNK)
+        }
         _ => {
-            // Short lines carry many tokens for their bytes, so a wider first chunk saves
-            // reallocations. A few long lines, such as one large scalar, start with the small
-            // chunk so a sparse document does not reserve 256 KiB; if tokens turn out dense on a
-            // single long line, subsequent growth steps up to `TOKEN_ARENA_CHUNK`.
-            if line_count == 0 || input_len / line_count > 80 {
+            // Sample the first 4 KiB without allocating a line index: short lines carry many
+            // tokens for their bytes, while a few long lines (such as one large scalar) start
+            // with the small chunk and step up only if tokens turn out dense.
+            let sample = &input.as_bytes()[..4096];
+            let sample_lines = lines_at_most(sample);
+            if sample_lines == 0 || sample.len() / sample_lines > 80 {
                 (TOKEN_ARENA_SMALL_CHUNK, TOKEN_ARENA_CHUNK)
-            } else if input_len / line_count <= 10 {
+            } else if sample.len() / sample_lines <= 10 {
                 (TOKEN_ARENA_WIDE_CHUNK, TOKEN_ARENA_WIDE_CHUNK)
             } else {
                 (TOKEN_ARENA_CHUNK, TOKEN_ARENA_CHUNK)
@@ -271,16 +334,8 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
     };
     let mut lines = Vec::new();
     let mut tokens = Vec::new();
-    let most = scanner.max_tokens();
-    if let Some(capacity) = mid_input_token_capacity(input_len, line_count, most) {
-        reserve_tokens(
-            &mut tokens,
-            capacity,
-            most,
-            Span::empty(0),
-            scanner.line_index(),
-            input,
-        )?;
+    if let Some(capacity) = mid_capacity {
+        reserve_tokens(&mut tokens, capacity, most, Span::empty(0), input, compat)?;
     }
     let mut last_tokens = 0_usize;
     let mut last_consumed = 0_usize;
@@ -292,7 +347,7 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
     #[cfg(test)]
     let mut growths = 0;
     loop {
-        let token = match scanner.next_token() {
+        let token = match scanner.next_token(limits) {
             Ok(Some(token)) => token,
             Ok(None) => break,
             Err(error) => {
@@ -312,13 +367,7 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
             }
             TokenKind::LineBreak => {
                 if tokens.len() > line_start {
-                    lines.push(Line::new(
-                        &tokens,
-                        line_start,
-                        tokens.len(),
-                        input,
-                        scanner.line_index(),
-                    ));
+                    lines.push(Line::new(&tokens, line_start, tokens.len(), input, compat)?);
                     line_start = tokens.len();
                 }
             }
@@ -336,10 +385,7 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
                 let capacity_before = tokens.capacity();
                 if tokens.len() == tokens.capacity() {
                     let room = most.saturating_sub(tokens.len()).max(1);
-                    let step_chunk = if tokens.is_empty()
-                        || (initial_chunk == TOKEN_ARENA_SMALL_CHUNK
-                            && consumed / (tokens.len() + 1) > 80)
-                    {
+                    let step_chunk = if tokens.is_empty() {
                         initial_chunk
                     } else {
                         chunk
@@ -358,14 +404,7 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
                     } else {
                         arena_growth(tokens.len(), step_chunk).min(room)
                     };
-                    reserve_tokens(
-                        &mut tokens,
-                        additional,
-                        most,
-                        token.span,
-                        scanner.line_index(),
-                        input,
-                    )?;
+                    reserve_tokens(&mut tokens, additional, most, token.span, input, compat)?;
                 }
                 tokens.push(token);
                 #[cfg(test)]
@@ -373,26 +412,14 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
                     growths += usize::from(tokens.capacity() != capacity_before);
                 }
                 if block_scalar {
-                    lines.push(Line::new(
-                        &tokens,
-                        line_start,
-                        tokens.len(),
-                        input,
-                        scanner.line_index(),
-                    ));
+                    lines.push(Line::new(&tokens, line_start, tokens.len(), input, compat)?);
                     line_start = tokens.len();
                 }
             }
         }
     }
     if tokens.len() > line_start {
-        lines.push(Line::new(
-            &tokens,
-            line_start,
-            tokens.len(),
-            input,
-            scanner.line_index(),
-        ));
+        lines.push(Line::new(&tokens, line_start, tokens.len(), input, compat)?);
     }
     // Small token arenas gain more from exact capacity than the one-time copy
     // costs in peak memory. Large arenas keep their growth capacity so the
@@ -400,12 +427,14 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
     if tokens.len() <= 8192 {
         tokens.shrink_to_fit();
     }
+    if scanner.saw_flow_start() {
+        link_flow_ends(&mut tokens);
+    }
     Ok(Lines {
         lines,
         tokens,
         stream_start,
         stream_end,
-        positions: scanner.line_index().clone(),
         scanner_error,
         truncated_last_line,
         #[cfg(test)]
@@ -470,7 +499,8 @@ impl<'a> EventSink<'a> {
         }
     }
 
-    fn event(&mut self, event: Event<'a>) -> Result<(), Error> {
+    #[inline]
+    fn event(&mut self, event: Event<'a>) -> Result<(), Box<Error>> {
         match self {
             Self::Events(events) => {
                 // Grow by half instead of doubling. The capacity estimate is close but can be
@@ -484,11 +514,65 @@ impl<'a> EventSink<'a> {
             Self::Streaming(composer) => composer.event(event),
             Self::Typed(builder) => builder.push_event(event),
             #[cfg(test)]
-            Self::Consumer(consumer) => consumer.event(event),
+            Self::Consumer(consumer) => consumer.event(event).map_err(Box::new),
             Self::Queue { events, .. } => {
                 events.push_back(event);
                 Ok(())
             }
+        }
+    }
+
+    /// Specialized scalar callback so internal composers and typed builders bypass constructing
+    /// `Event::Scalar` values on the hot path.
+    #[inline]
+    fn scalar(
+        &mut self,
+        value: Cow<'a, str>,
+        raw: &'a str,
+        style: ScalarStyle,
+        tag: Option<Tag>,
+        anchor: Option<Anchor<'a>>,
+        span: Span,
+    ) -> Result<(), Box<Error>> {
+        match self {
+            Self::Streaming(composer) => {
+                composer.scalar(value, style, tag.as_ref(), anchor.as_ref(), span)
+            }
+            Self::Typed(builder) => {
+                builder.push_scalar(value, raw, style, tag.as_ref(), anchor.as_ref(), span)
+            }
+            _ => self.event(Event::Scalar {
+                value,
+                raw: Cow::Borrowed(raw),
+                style,
+                tag,
+                anchor,
+                span,
+            }),
+        }
+    }
+
+    /// Specialized callback for untagged, unanchored single-line plain scalars.
+    #[inline]
+    fn plain_scalar(&mut self, value: &'a str, span: Span) -> Result<(), Box<Error>> {
+        match self {
+            Self::Streaming(composer) => composer.plain_scalar(value, span),
+            Self::Typed(builder) => builder.push_scalar(
+                Cow::Borrowed(value),
+                value,
+                ScalarStyle::Plain,
+                None,
+                None,
+                span,
+            ),
+            _ => self.event(Event::Scalar {
+                value: Cow::Borrowed(value),
+                raw: Cow::Borrowed(value),
+                style: ScalarStyle::Plain,
+                tag: None,
+                anchor: None,
+                span,
+            }),
         }
     }
 }
@@ -500,12 +584,9 @@ impl<'a> EventSink<'a> {
 struct Parser<'a> {
     lines: Vec<Line>,
     token_arena: Vec<Token<'a>>,
-    /// Matching closing token positions for every flow collection, by absolute token index.
-    flow_ends: HashMap<usize, usize>,
     sink: EventSink<'a>,
     limits: Limits,
     input: &'a str,
-    positions: LineStarts,
     /// Word a malformed flow collection's error as libyaml does, and count positions as compat's
     /// scanner does.
     compat: bool,
@@ -523,27 +604,38 @@ struct Parser<'a> {
     /// document's first token. An empty node after the last line is placed here.
     end: usize,
     /// Deferred scanner failure recorded after earlier tokens were scanned.
-    scanner_error: Option<Error>,
+    scanner_error: Option<Box<Error>>,
     /// Whether the last line in `lines` was truncated mid-line by `scanner_error`.
     truncated_last_line: bool,
+    /// Last computed `(line_index, byte_offset, 1-based column)` for incremental compact-block
+    /// column lookup without rescanning from line start at each nesting level.
+    column_cache: (u32, u32, u32),
 }
 
-/// Pair every flow collection's opening token with its closing token.
-fn flow_ends(tokens: &[Token<'_>]) -> HashMap<usize, usize> {
-    let mut ends = HashMap::new();
+/// Pair every flow collection's opening token with its closing token index in place, without
+/// allocating a `HashMap`.
+fn link_flow_ends(tokens: &mut [Token<'_>]) {
     let mut stack = Vec::new();
-    for (index, token) in tokens.iter().enumerate() {
-        match token.kind {
-            TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart => stack.push(index),
+    for index in 0..tokens.len() {
+        match tokens[index].kind {
+            TokenKind::FlowSequenceStart { .. } | TokenKind::FlowMappingStart { .. } => {
+                stack.push(index);
+            }
             TokenKind::FlowSequenceEnd | TokenKind::FlowMappingEnd => {
-                if let Some(open) = stack.pop() {
-                    ends.insert(open, index);
+                if let Some(open) = stack.pop()
+                    && let Ok(close) = u32::try_from(index)
+                    && close != UNMATCHED_FLOW
+                {
+                    match &mut tokens[open].kind {
+                        TokenKind::FlowSequenceStart { end }
+                        | TokenKind::FlowMappingStart { end } => *end = close,
+                        _ => {}
+                    }
                 }
             }
             _ => {}
         }
     }
-    ends
 }
 
 /// The number of top-level entries between a flow collection's opening and closing tokens. An
@@ -554,7 +646,7 @@ fn flow_entry_count(tokens: &[Token<'_>], open: usize, close: usize) -> usize {
     let mut content = false;
     for token in &tokens[open + 1..close] {
         match token.kind {
-            TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart => {
+            TokenKind::FlowSequenceStart { .. } | TokenKind::FlowMappingStart { .. } => {
                 content |= depth == 0;
                 depth += 1;
             }
@@ -590,15 +682,12 @@ fn parse_lines<'a>(
     compat: bool,
 ) -> Result<(Vec<Event<'a>>, usize, usize), Error> {
     let event_capacity = event_capacity(&lines.lines, &lines.tokens);
-    let flow_ends = flow_ends(&lines.tokens);
     let mut parser = Parser {
         lines: lines.lines,
         token_arena: lines.tokens,
-        flow_ends,
         sink: EventSink::Events(Vec::with_capacity(event_capacity)),
         limits: limits.clone(),
         input,
-        positions: lines.positions,
         compat,
         documents,
         emitted: counted,
@@ -607,8 +696,9 @@ fn parse_lines<'a>(
         end,
         scanner_error: lines.scanner_error,
         truncated_last_line: lines.truncated_last_line,
+        column_cache: (u32::MAX, 0, 0),
     };
-    parser.parse_stream()?;
+    parser.parse_stream().map_err(|error| *error)?;
     match parser.sink {
         EventSink::Events(events) => Ok((events, parser.emitted, parser.documents)),
         _ => unreachable!("event sink kind changed during parsing"),
@@ -616,7 +706,7 @@ fn parse_lines<'a>(
 }
 
 fn event_capacity(lines: &[Line], tokens: &[Token<'_>]) -> usize {
-    let base_headroom = if lines.iter().any(|line| line.indent > 0) {
+    let base_headroom = if lines.iter().any(|line| line.indent() > 0) {
         256
     } else {
         200
@@ -674,27 +764,23 @@ pub(crate) fn parse_document_typed<'a>(
     compat_flow: bool,
     builder: crate::typed::Builder<'a>,
 ) -> Result<crate::typed::Node<'a>, Error> {
-    let mut scanner = Scanner::with_compat(input, limits.clone(), compat_flow)?;
+    let mut scanner = Scanner::with_compat(input, limits, compat_flow).map_err(|error| *error)?;
     let Lines {
         lines,
         tokens,
         stream_start,
         stream_end,
-        positions,
         scanner_error,
         truncated_last_line,
         ..
-    } = read_lines(&mut scanner)?;
-    let flow_ends = flow_ends(&tokens);
+    } = read_lines(&mut scanner, limits).map_err(|error| *error)?;
     let end = stream_end.map_or(input.len(), Span::start);
     let mut parser = Parser {
         lines,
         token_arena: tokens,
-        flow_ends,
         sink: EventSink::Typed(Box::new(builder)),
         limits: limits.clone(),
         input,
-        positions,
         compat: compat_flow,
         documents: 0,
         emitted: 0,
@@ -703,14 +789,19 @@ pub(crate) fn parse_document_typed<'a>(
         end,
         scanner_error,
         truncated_last_line,
+        column_cache: (u32::MAX, 0, 0),
     };
-    parser.emit(Event::StreamStart {
-        span: stream_start.unwrap_or_else(|| Span::empty(0)),
-    })?;
-    parser.parse_stream()?;
-    parser.emit(Event::StreamEnd {
-        span: stream_end.unwrap_or_else(|| Span::empty(input.len())),
-    })?;
+    parser
+        .emit(Event::StreamStart {
+            span: stream_start.unwrap_or_else(|| Span::empty(0)),
+        })
+        .map_err(|error| *error)?;
+    parser.parse_stream().map_err(|error| *error)?;
+    parser
+        .emit(Event::StreamEnd {
+            span: stream_end.unwrap_or_else(|| Span::empty(input.len())),
+        })
+        .map_err(|error| *error)?;
     match parser.sink {
         EventSink::Typed(mut builder) => builder.finish_document_node(),
         _ => unreachable!("event sink kind changed during parsing"),
@@ -724,27 +815,23 @@ pub(crate) fn parse_document_with_consumer<'a>(
     compat_flow: bool,
     consumer: Box<dyn EventConsumer<'a> + 'a>,
 ) -> Result<(), Error> {
-    let mut scanner = Scanner::with_compat(input, limits.clone(), compat_flow)?;
+    let mut scanner = Scanner::with_compat(input, limits, compat_flow).map_err(|error| *error)?;
     let Lines {
         lines,
         tokens,
         stream_start,
         stream_end,
-        positions,
         scanner_error,
         truncated_last_line,
         ..
-    } = read_lines(&mut scanner)?;
-    let flow_ends = flow_ends(&tokens);
+    } = read_lines(&mut scanner, limits).map_err(|error| *error)?;
     let end = stream_end.map_or(input.len(), Span::start);
     let mut parser = Parser {
         lines,
         token_arena: tokens,
-        flow_ends,
         sink: EventSink::Consumer(consumer),
         limits: limits.clone(),
         input,
-        positions,
         compat: compat_flow,
         documents: 0,
         emitted: 0,
@@ -753,14 +840,19 @@ pub(crate) fn parse_document_with_consumer<'a>(
         end,
         scanner_error,
         truncated_last_line,
+        column_cache: (u32::MAX, 0, 0),
     };
-    parser.emit(Event::StreamStart {
-        span: stream_start.unwrap_or_else(|| Span::empty(0)),
-    })?;
-    parser.parse_stream()?;
-    parser.emit(Event::StreamEnd {
-        span: stream_end.unwrap_or_else(|| Span::empty(input.len())),
-    })?;
+    parser
+        .emit(Event::StreamStart {
+            span: stream_start.unwrap_or_else(|| Span::empty(0)),
+        })
+        .map_err(|error| *error)?;
+    parser.parse_stream().map_err(|error| *error)?;
+    parser
+        .emit(Event::StreamEnd {
+            span: stream_end.unwrap_or_else(|| Span::empty(input.len())),
+        })
+        .map_err(|error| *error)?;
     match parser.sink {
         EventSink::Consumer(mut consumer) => consumer.finish(),
         _ => unreachable!("event sink kind changed during parsing"),
@@ -774,29 +866,25 @@ fn parse_events_with_compat<'a>(
     single_document: bool,
     stop_at_second: bool,
 ) -> Result<Vec<Event<'a>>, Error> {
-    let mut scanner = Scanner::with_compat(input, limits.clone(), compat_flow)?;
+    let mut scanner = Scanner::with_compat(input, limits, compat_flow).map_err(|error| *error)?;
     let Lines {
         lines,
         tokens,
         stream_start,
         stream_end,
-        positions,
         scanner_error,
         truncated_last_line,
         ..
-    } = read_lines(&mut scanner)?;
+    } = read_lines(&mut scanner, limits).map_err(|error| *error)?;
 
     let event_capacity = event_capacity(&lines, &tokens).saturating_add(2);
-    let flow_ends = flow_ends(&tokens);
     let end = stream_end.map_or(input.len(), Span::start);
     let mut parser = Parser {
         lines,
         token_arena: tokens,
-        flow_ends,
         sink: EventSink::Events(Vec::with_capacity(event_capacity)),
         limits: limits.clone(),
         input,
-        positions,
         compat: compat_flow,
         documents: 0,
         emitted: 0,
@@ -805,14 +893,19 @@ fn parse_events_with_compat<'a>(
         end,
         scanner_error,
         truncated_last_line,
+        column_cache: (u32::MAX, 0, 0),
     };
-    parser.emit(Event::StreamStart {
-        span: stream_start.unwrap_or_else(|| Span::empty(0)),
-    })?;
-    parser.parse_stream()?;
-    parser.emit(Event::StreamEnd {
-        span: stream_end.unwrap_or_else(|| Span::empty(input.len())),
-    })?;
+    parser
+        .emit(Event::StreamStart {
+            span: stream_start.unwrap_or_else(|| Span::empty(0)),
+        })
+        .map_err(|error| *error)?;
+    parser.parse_stream().map_err(|error| *error)?;
+    parser
+        .emit(Event::StreamEnd {
+            span: stream_end.unwrap_or_else(|| Span::empty(input.len())),
+        })
+        .map_err(|error| *error)?;
     match parser.sink {
         EventSink::Events(events) => Ok(events),
         _ => unreachable!("event sink kind changed during parsing"),
@@ -822,20 +915,17 @@ fn parse_events_with_compat<'a>(
 /// Compose a single document directly from the parser without allocating an event vector or
 /// single-element document `Vec`. A second document is an error at its start.
 pub(crate) fn parse_value(input: &str, limits: &Limits) -> Result<Value, Error> {
-    let mut scanner = Scanner::new(input, limits.clone())?;
-    let lines = read_lines(&mut scanner)?;
-    let flow_ends = flow_ends(&lines.tokens);
+    let mut scanner = Scanner::new(input, limits).map_err(|error| *error)?;
+    let lines = read_lines(&mut scanner, limits).map_err(|error| *error)?;
     let mut parser = Parser {
         lines: lines.lines,
         token_arena: lines.tokens,
-        flow_ends,
         sink: EventSink::Streaming(Box::new(StreamingComposer::new_single(
             limits.clone(),
             input.len(),
         ))),
         limits: limits.clone(),
         input,
-        positions: lines.positions,
         compat: false,
         documents: 0,
         emitted: 0,
@@ -844,31 +934,33 @@ pub(crate) fn parse_value(input: &str, limits: &Limits) -> Result<Value, Error> 
         end: lines.stream_end.map_or(input.len(), Span::start),
         scanner_error: lines.scanner_error,
         truncated_last_line: lines.truncated_last_line,
+        column_cache: (u32::MAX, 0, 0),
     };
-    parser.emit(Event::StreamStart {
-        span: lines.stream_start.unwrap_or_else(|| Span::empty(0)),
-    })?;
+    parser
+        .emit(Event::StreamStart {
+            span: lines.stream_start.unwrap_or_else(|| Span::empty(0)),
+        })
+        .map_err(|error| *error)?;
     parser
         .parse_stream()
-        .map_err(|error| error.with_location_from(&parser.positions, input))?;
-    parser.emit(Event::StreamEnd {
-        span: lines.stream_end.unwrap_or_else(|| Span::empty(input.len())),
-    })?;
+        .map_err(|error| (*error).with_input_location(input, false))?;
+    parser
+        .emit(Event::StreamEnd {
+            span: lines.stream_end.unwrap_or_else(|| Span::empty(input.len())),
+        })
+        .map_err(|error| *error)?;
     let Parser {
         lines: parser_lines,
         token_arena,
-        flow_ends,
-        positions,
         sink,
         ..
     } = parser;
     drop(parser_lines);
     drop(token_arena);
-    drop(flow_ends);
     match sink {
         EventSink::Streaming(composer) => composer
             .finish_single()
-            .map_err(|error| error.with_location_from(&positions, input)),
+            .map_err(|error| error.with_input_location(input, false)),
         _ => unreachable!("event sink kind changed during parsing"),
     }
 }
@@ -880,20 +972,17 @@ pub(crate) fn parse_documents(
     limits: &Limits,
     single_document: bool,
 ) -> Result<Vec<Value>, Error> {
-    let mut scanner = Scanner::new(input, limits.clone())?;
-    let lines = read_lines(&mut scanner)?;
-    let flow_ends = flow_ends(&lines.tokens);
+    let mut scanner = Scanner::new(input, limits).map_err(|error| *error)?;
+    let lines = read_lines(&mut scanner, limits).map_err(|error| *error)?;
     let mut parser = Parser {
         lines: lines.lines,
         token_arena: lines.tokens,
-        flow_ends,
         sink: EventSink::Streaming(Box::new(StreamingComposer::new(
             limits.clone(),
             input.len(),
         ))),
         limits: limits.clone(),
         input,
-        positions: lines.positions,
         compat: false,
         documents: 0,
         emitted: 0,
@@ -902,32 +991,34 @@ pub(crate) fn parse_documents(
         end: lines.stream_end.map_or(input.len(), Span::start),
         scanner_error: lines.scanner_error,
         truncated_last_line: lines.truncated_last_line,
+        column_cache: (u32::MAX, 0, 0),
     };
     // The composer ignores the stream events, but they count as an event parse counts them.
-    parser.emit(Event::StreamStart {
-        span: lines.stream_start.unwrap_or_else(|| Span::empty(0)),
-    })?;
+    parser
+        .emit(Event::StreamStart {
+            span: lines.stream_start.unwrap_or_else(|| Span::empty(0)),
+        })
+        .map_err(|error| *error)?;
     parser
         .parse_stream()
-        .map_err(|error| error.with_location_from(&parser.positions, input))?;
-    parser.emit(Event::StreamEnd {
-        span: lines.stream_end.unwrap_or_else(|| Span::empty(input.len())),
-    })?;
+        .map_err(|error| (*error).with_input_location(input, false))?;
+    parser
+        .emit(Event::StreamEnd {
+            span: lines.stream_end.unwrap_or_else(|| Span::empty(input.len())),
+        })
+        .map_err(|error| *error)?;
     let Parser {
         lines: parser_lines,
         token_arena,
-        flow_ends,
-        positions,
         sink,
         ..
     } = parser;
     drop(parser_lines);
     drop(token_arena);
-    drop(flow_ends);
     match sink {
         EventSink::Streaming(composer) => composer
             .finish()
-            .map_err(|error| error.with_location_from(&positions, input)),
+            .map_err(|error| error.with_input_location(input, false)),
         _ => unreachable!("event sink kind changed during parsing"),
     }
 }
@@ -947,14 +1038,14 @@ impl<'a> Parser<'a> {
         if !structural {
             return None;
         }
-        let indent = self.lines.get(index)?.indent;
+        let indent = self.lines.get(index)?.indent();
         if index == 0 && indent > 0 {
             return Some("a document's first node cannot be indented".to_owned());
         }
         let parent = (0..index)
             .rev()
-            .find(|&line| self.lines[line].indent < indent)?;
-        if indent != self.lines[parent].indent + 1 {
+            .find(|&line| self.lines[line].indent() < indent)?;
+        if indent != self.lines[parent].indent() + 1 {
             return None;
         }
         let token = self.line_first(parent)?;
@@ -971,24 +1062,83 @@ impl<'a> Parser<'a> {
         ))
     }
 
+    #[cold]
     fn at(&self, offset: usize) -> Location {
-        self.positions
-            .marker(self.input, offset)
-            .unwrap_or_default()
+        location_at(self.input, offset, self.compat).unwrap_or_default()
+    }
+
+    #[inline]
+    pub(super) fn column_at(&mut self, line: usize, offset: usize) -> usize {
+        let (cached_line, cached_offset, cached_col) = self.column_cache;
+        if cached_line as usize == line
+            && offset >= cached_offset as usize
+            && !has_line_break(&self.input.as_bytes()[cached_offset as usize..offset])
+        {
+            let slice = &self.input[cached_offset as usize..offset];
+            let delta = if slice.is_ascii() {
+                slice.len()
+            } else {
+                slice.chars().count()
+            };
+            let col = cached_col as usize + delta;
+            if let (Ok(o), Ok(c)) = (u32::try_from(offset), u32::try_from(col)) {
+                self.column_cache = (cached_line, o, c);
+            }
+            return col;
+        }
+        let col = column_on_line(self.input, offset, self.compat);
+        if let (Ok(l), Ok(o), Ok(c)) = (
+            u32::try_from(line),
+            u32::try_from(offset),
+            u32::try_from(col),
+        ) {
+            self.column_cache = (l, o, c);
+        }
+        col
+    }
+
+    /// Whether an implicit key starting at `start` and ending before `:` at `colon_start` lies on
+    /// one line and fits within `MAX_IMPLICIT_KEY_CHARS` Unicode scalar values.
+    #[inline]
+    pub(super) fn implicit_key_fits_range(&self, start: usize, colon_start: usize) -> bool {
+        if start > colon_start || colon_start > self.input.len() {
+            return false;
+        }
+        // Every UTF-8 scalar value is at most 4 bytes, so any slice longer than
+        // `4 * MAX_IMPLICIT_KEY_CHARS` bytes exceeds `MAX_IMPLICIT_KEY_CHARS` characters.
+        if colon_start - start > MAX_IMPLICIT_KEY_CHARS * 4 {
+            return false;
+        }
+        if has_line_break(&self.input.as_bytes()[start..colon_start]) {
+            return false;
+        }
+        if colon_start - start <= MAX_IMPLICIT_KEY_CHARS {
+            return true;
+        }
+        self.input[start..colon_start]
+            .chars()
+            .take(MAX_IMPLICIT_KEY_CHARS + 1)
+            .count()
+            <= MAX_IMPLICIT_KEY_CHARS
     }
 
     /// The number of top-level entries in the flow collection that opens at `tokens.start + start`,
     /// or `None` when the collection is malformed or not flow.
     fn flow_entries(&self, tokens: Run, start: usize) -> Option<usize> {
-        let open = self.lines[tokens.line].start + tokens.start + start;
-        let close = *self.flow_ends.get(&open)?;
+        let open = self.lines[tokens.line()].start() + tokens.start() + start;
+        let close = match self.token_arena.get(open)?.kind {
+            TokenKind::FlowSequenceStart { end } | TokenKind::FlowMappingStart { end } => {
+                matched_flow_end(end)?
+            }
+            _ => return None,
+        };
         Some(flow_entry_count(&self.token_arena, open, close))
     }
 
     /// Surface a deferred scanner error once parsing reaches the truncated EOF boundary, before
     /// synthesizing an empty node or closing a block collection at EOF.
     #[inline]
-    pub(super) fn check_truncated_eof(&mut self, index: usize) -> Result<(), Error> {
+    pub(super) fn check_truncated_eof(&mut self, index: usize) -> Result<(), Box<Error>> {
         if self.scanner_error.is_some() && index >= self.lines.len() {
             return self.take_deferred_scanner_error();
         }
@@ -998,12 +1148,16 @@ impl<'a> Parser<'a> {
     /// Surface a deferred scanner error once parsing reaches the end of a truncated final line,
     /// before synthesizing a null scalar or reporting a missing `:` on a truncated prefix.
     #[inline]
-    pub(super) fn check_truncated_run_end(&mut self, run: Run, index: usize) -> Result<(), Error> {
+    pub(super) fn check_truncated_run_end(
+        &mut self,
+        run: Run,
+        index: usize,
+    ) -> Result<(), Box<Error>> {
         if self.truncated_last_line
             && self.scanner_error.is_some()
             && index >= run.len()
-            && run.line + 1 == self.lines.len()
-            && run.end == self.lines[run.line].len()
+            && run.line() + 1 == self.lines.len()
+            && run.end() == self.lines[run.line()].len()
         {
             return self.take_deferred_scanner_error();
         }
@@ -1022,7 +1176,7 @@ impl<'a> Parser<'a> {
         self.truncated_last_line
             && self.scanner_error.is_some()
             && current_index + 1 == self.lines.len()
-            && self.lines[current_index].indent == indent
+            && self.lines[current_index].indent() == indent
             && !self.line_starts_with(current_index, |kind| {
                 matches!(
                     kind,
@@ -1035,7 +1189,7 @@ impl<'a> Parser<'a> {
 
     #[cold]
     #[inline(never)]
-    fn take_deferred_scanner_error(&mut self) -> Result<(), Error> {
+    fn take_deferred_scanner_error(&mut self) -> Result<(), Box<Error>> {
         if let Some(error) = self.scanner_error.take() {
             return Err(error);
         }
@@ -1043,7 +1197,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Read every document of the stream.
-    fn parse_stream(&mut self) -> Result<(), Error> {
+    fn parse_stream(&mut self) -> Result<(), Box<Error>> {
         let mut index = 0;
         let mut directives = false;
         while index < self.lines.len() {
@@ -1077,7 +1231,7 @@ impl<'a> Parser<'a> {
         &mut self,
         mut index: usize,
         mut saw_directive: bool,
-    ) -> Result<Opening<'a>, Error> {
+    ) -> Result<Opening<'a>, Box<Error>> {
         while let Some(TokenKind::Directive(directive)) =
             self.line_first(index).map(|token| &token.kind)
         {
@@ -1217,7 +1371,7 @@ impl<'a> Parser<'a> {
             Ok(Opening::Root {
                 call: Some(Call::Node {
                     index,
-                    indent: self.lines[index].indent,
+                    indent: self.lines[index].indent(),
                     depth: 0,
                     tag: None,
                     anchor: None,
@@ -1229,7 +1383,7 @@ impl<'a> Parser<'a> {
         } else {
             self.check_truncated_eof(index)?;
             let span = self.empty_span(index);
-            self.emit(self.null_scalar(span))?;
+            self.emit_null_scalar(span)?;
             Ok(Opening::Root {
                 call: None,
                 index,
@@ -1240,7 +1394,7 @@ impl<'a> Parser<'a> {
 
     /// End the document whose root stops before line `index`, and return the line the next one
     /// starts at. `root_block` says whether the root is a block collection.
-    fn close_document(&mut self, mut index: usize, root_block: bool) -> Result<usize, Error> {
+    fn close_document(&mut self, mut index: usize, root_block: bool) -> Result<usize, Box<Error>> {
         let mut explicit_end = false;
         let mut document_end_span = self.last_span(index);
         if index < self.lines.len()
@@ -1297,7 +1451,7 @@ impl<'a> Parser<'a> {
                     | TokenKind::DoubleQuotedScalar
                     | TokenKind::Scalar(_),
                 ) if root_block
-                    && self.lines[index].indent > 0
+                    && self.lines[index].indent() > 0
                     && previous_line_is_blank(self.input, span.start()) =>
                 {
                     (
@@ -1327,7 +1481,11 @@ impl<'a> Parser<'a> {
             // A node that only a tab seemed to indent under a key or an entry sits at its
             // line's left edge, so it ends up here.
             return Err(if tabbed {
-                error.with_context(", indented by a tab, which YAML doesn't count as indentation")
+                Box::new(
+                    (*error).with_context(
+                        ", indented by a tab, which YAML doesn't count as indentation",
+                    ),
+                )
             } else {
                 error
             });
@@ -1345,7 +1503,7 @@ impl<'a> Parser<'a> {
     /// each other directly, but only along an acyclic graph: a direct call
     /// that can lead back to its caller nests a native frame per entry or
     /// level. Every loop over entries goes through this driver.
-    fn run(&mut self, call: Call<'a>) -> Result<usize, Error> {
+    fn run(&mut self, call: Call<'a>) -> Result<usize, Box<Error>> {
         let mut stack: Vec<Cont> = Vec::new();
         let mut step = self.call(call, &mut stack)?;
         loop {
@@ -1359,7 +1517,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn call(&mut self, call: Call<'a>, stack: &mut Vec<Cont>) -> Result<Step<'a>, Error> {
+    fn call(&mut self, call: Call<'a>, stack: &mut Vec<Cont>) -> Result<Step<'a>, Box<Error>> {
         match call {
             Call::Node {
                 index,
@@ -1441,7 +1599,7 @@ impl<'a> Parser<'a> {
         cont: Cont,
         value: usize,
         stack: &mut Vec<Cont>,
-    ) -> Result<Step<'a>, Error> {
+    ) -> Result<Step<'a>, Box<Error>> {
         match cont {
             Cont::NodeInline { rest, index } => {
                 self.expect_consumed(
@@ -1450,7 +1608,7 @@ impl<'a> Parser<'a> {
                     ErrorCode::UnexpectedToken,
                     "unexpected token after node",
                 )?;
-                Ok(Step::Return(index + 1))
+                Ok(Step::Return(index as usize + 1))
             }
             Cont::ItemInline {
                 content,
@@ -1462,22 +1620,23 @@ impl<'a> Parser<'a> {
                     ErrorCode::UnexpectedToken,
                     "unexpected token after node",
                 )?;
-                Ok(Step::Return(next_index))
+                Ok(Step::Return(next_index as usize))
             }
             Cont::Sequence(mut state) => {
-                state.current_index = value;
+                state.current_index = fit_u32(value);
                 self.sequence_loop(state, stack)
             }
             Cont::MappingExplicitKey(mut state) => {
-                state.current_index = value;
+                state.current_index = fit_u32(value);
                 self.mapping_after_explicit_key(state, stack)
             }
             Cont::MappingImplicitKey {
                 state,
                 tokens,
                 value_index,
-                key,
             } => {
+                let value_index = (value_index != NO_VALUE_INDEX).then_some(value_index as usize);
+                let key = value_index.map_or(tokens, |index| tokens.until(index));
                 self.expect_consumed(
                     key,
                     value,
@@ -1487,7 +1646,7 @@ impl<'a> Parser<'a> {
                 self.mapping_after_implicit_key(state, tokens, value_index, stack)
             }
             Cont::MappingEntry(mut state) => {
-                state.current_index = value;
+                state.current_index = fit_u32(value);
                 self.mapping_loop(state, stack)
             }
             Cont::ValueInline {
@@ -1500,23 +1659,23 @@ impl<'a> Parser<'a> {
                     ErrorCode::UnexpectedMappingValue,
                     "unexpected token in mapping value",
                 )?;
-                Ok(Step::Return(current_index))
+                Ok(Step::Return(current_index as usize))
             }
             Cont::FlowSequenceItem { mut state, inline } => {
                 if inline {
                     if value == 0 {
                         return Err(self.error(
-                            self.token(state.tokens, state.index).span,
+                            self.token(state.tokens, state.index as usize).span,
                             ErrorCode::InvalidFlowCollection,
                             "expected a flow item",
                         ));
                     }
-                    state.index += value;
+                    state.index = fit_u32(state.index as usize + value);
                 } else {
-                    state.index = value;
+                    state.index = fit_u32(value);
                 }
                 match self
-                    .token_at(state.tokens, state.index)
+                    .token_at(state.tokens, state.index as usize)
                     .map(|token| &token.kind)
                 {
                     Some(TokenKind::FlowEntry) => state.index += 1,
@@ -1524,59 +1683,71 @@ impl<'a> Parser<'a> {
                     _ => {
                         return Err(self.flow_error(
                             state.tokens,
-                            state.index,
+                            state.index as usize,
                             FlowLack::Separator,
                         ));
                     }
                 }
                 self.flow_sequence_loop(state, stack)
             }
+            Cont::FlowSequenceNext(state) => self.flow_sequence_loop(state, stack),
             Cont::FlowExplicitKey {
                 tokens,
                 start_span,
-                key,
+                key_start,
                 key_end,
                 depth,
             } => {
+                let key = tokens.slice(key_start as usize, key_end as usize);
                 self.expect_flow_consumed(key, value)?;
-                self.flow_explicit_value(tokens, start_span, key_end, depth, stack)
+                self.flow_explicit_value(
+                    tokens,
+                    start_span,
+                    key_end as usize,
+                    depth as usize,
+                    stack,
+                )
             }
             Cont::FlowExplicitValue {
                 tokens,
                 start_span,
-                value: value_tokens,
+                value_start,
                 value_end,
             } => {
+                let value_tokens = tokens.slice(value_start as usize, value_end as usize);
                 self.expect_flow_consumed(value_tokens, value)?;
-                self.flow_mapping_end(tokens, start_span, value_end)
+                self.flow_mapping_end(tokens, start_span, value_end as usize)
             }
             Cont::ImplicitFlowKey {
                 tokens,
                 start_span,
-                key,
+                key_start,
                 colon,
                 depth,
             } => {
+                let key = tokens.slice(key_start as usize, colon as usize);
                 self.expect_flow_consumed(key, value)?;
-                self.implicit_flow_value(tokens, start_span, colon, depth, stack)
+                self.implicit_flow_value(tokens, start_span, colon as usize, depth as usize, stack)
             }
             Cont::ImplicitFlowValue {
                 tokens,
                 start_span,
-                value: value_tokens,
+                value_start,
                 value_end,
             } => {
+                let value_tokens = tokens.slice(value_start as usize, value_end as usize);
                 self.expect_flow_consumed(value_tokens, value)?;
-                self.flow_mapping_end(tokens, start_span, value_end)
+                self.flow_mapping_end(tokens, start_span, value_end as usize)
             }
-            Cont::FlowMappingKey { state, key } => {
+            Cont::FlowMappingKey { state, key_start } => {
+                let key = state.tokens.slice(key_start as usize, state.index as usize);
                 self.expect_flow_consumed(key, value)?;
                 self.flow_mapping_after_key(state, stack)
             }
-            Cont::FlowMappingValue {
-                state,
-                value: value_tokens,
-            } => {
+            Cont::FlowMappingValue { state, value_start } => {
+                let value_tokens = state
+                    .tokens
+                    .slice(value_start as usize, state.index as usize);
                 self.expect_flow_consumed(value_tokens, value)?;
                 self.flow_mapping_next(state, stack)
             }
@@ -1587,7 +1758,7 @@ impl<'a> Parser<'a> {
     /// Fail unless a node consumed all of `run`.
     /// A flow key or value that stops short has something after it where `,` or a closing bracket
     /// belongs.
-    fn expect_flow_consumed(&mut self, run: Run, consumed: usize) -> Result<(), Error> {
+    fn expect_flow_consumed(&mut self, run: Run, consumed: usize) -> Result<(), Box<Error>> {
         if consumed == run.len() {
             Ok(())
         } else {
@@ -1601,7 +1772,7 @@ impl<'a> Parser<'a> {
         consumed: usize,
         code: ErrorCode,
         message: &str,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Box<Error>> {
         if consumed == run.len() {
             Ok(())
         } else {
@@ -1636,7 +1807,7 @@ fn value_indicator_index(tokens: &[Token<'_>]) -> Option<usize> {
     let mut depth = 0usize;
     for (index, token) in tokens.iter().enumerate() {
         match token.kind {
-            TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart => depth += 1,
+            TokenKind::FlowSequenceStart { .. } | TokenKind::FlowMappingStart { .. } => depth += 1,
             TokenKind::FlowSequenceEnd | TokenKind::FlowMappingEnd => {
                 depth = depth.saturating_sub(1);
             }
@@ -1653,11 +1824,11 @@ fn value_indicator_index(tokens: &[Token<'_>]) -> Option<usize> {
 fn flow_brackets_match(tokens: &[Token<'_>]) -> bool {
     let mut open = Vec::new();
     tokens.iter().all(|token| match token.kind {
-        TokenKind::FlowSequenceStart => {
+        TokenKind::FlowSequenceStart { .. } => {
             open.push(TokenKind::FlowSequenceEnd);
             true
         }
-        TokenKind::FlowMappingStart => {
+        TokenKind::FlowMappingStart { .. } => {
             open.push(TokenKind::FlowMappingEnd);
             true
         }
@@ -1673,299 +1844,8 @@ fn flow_brackets_match(tokens: &[Token<'_>]) -> bool {
 /// the same limit).
 const MAX_IMPLICIT_KEY_CHARS: usize = 1024;
 
-/// Whether an implicit key starting at `key` and ending before the `:` at
-/// `colon`, on the same line, is short enough.
-fn implicit_key_fits(key: Location, colon: Location) -> bool {
-    colon.column().saturating_sub(key.column()) <= MAX_IMPLICIT_KEY_CHARS
-}
-
 fn has_value_indicator(tokens: &[Token<'_>]) -> bool {
     value_indicator_index(tokens).is_some()
-}
-
-/// Where a block node that starts on a later line may sit, relative to its
-/// parent at column `n` (YAML 1.2.2 section 8.2): content lines at
-/// `min_indent` (n + 1) or deeper, and the `-` lines of its block sequence
-/// at `sequence_indent` (`seq-spaces` + 1).
-#[derive(Clone, Copy, Debug)]
-struct NodeBounds {
-    min_indent: usize,
-    sequence_indent: usize,
-}
-
-impl NodeBounds {
-    /// A sequence entry's node, for an entry at column `n`.
-    fn block_in(n: usize) -> Self {
-        Self {
-            min_indent: n + 1,
-            sequence_indent: n + 1,
-        }
-    }
-
-    /// A mapping value or explicit key's node, for a key at column `n`. Its
-    /// block sequence may sit at the key's column.
-    fn block_out(n: usize) -> Self {
-        Self {
-            min_indent: n + 1,
-            sequence_indent: n,
-        }
-    }
-}
-
-const DUPLICATE_PROPERTIES: &str = "a node cannot have duplicate tag or anchor properties";
-
-/// A node's tag and anchor, and how many tokens they take up.
-type Properties<'a> = (Option<Tag>, Option<Anchor<'a>>, usize);
-
-/// What a malformed flow collection lacks where it fails.
-enum FlowLack {
-    /// `,` or its closing bracket.
-    Separator,
-    /// A node, with its error code and what stands there instead.
-    Node(ErrorCode, String),
-}
-
-/// A run of one logical line's tokens in the shared token arena.
-/// Every token slice the grammar works on is one; a flow collection is
-/// always on one logical line.
-#[derive(Clone, Copy, Debug)]
-struct Run {
-    line: usize,
-    start: usize,
-    end: usize,
-}
-
-impl Run {
-    fn len(self) -> usize {
-        self.end - self.start
-    }
-
-    fn is_empty(self) -> bool {
-        self.start == self.end
-    }
-
-    /// The tokens from `offset` on.
-    fn from(self, offset: usize) -> Self {
-        Self {
-            start: self.start + offset,
-            ..self
-        }
-    }
-
-    /// The tokens before `offset`.
-    fn until(self, offset: usize) -> Self {
-        Self {
-            end: self.start + offset,
-            ..self
-        }
-    }
-
-    /// The tokens in `start..end`, relative to this run.
-    fn slice(self, start: usize, end: usize) -> Self {
-        Self {
-            line: self.line,
-            start: self.start + start,
-            end: self.start + end,
-        }
-    }
-}
-
-/// A block collection between entries.
-#[derive(Debug)]
-struct BlockState {
-    indent: usize,
-    depth: usize,
-    entries: usize,
-    /// The line after the last entry parsed so far.
-    current_index: usize,
-    /// The first entry's tokens, before it is parsed: a collection starts
-    /// on the line, or part of the line, that opened it.
-    first: Option<Run>,
-}
-
-/// A flow collection between entries.
-#[derive(Debug)]
-struct FlowState {
-    tokens: Run,
-    start_span: Span,
-    /// The next token to parse, relative to `tokens`.
-    index: usize,
-    entries: usize,
-    depth: usize,
-}
-
-/// What the lines at a document's start lead to.
-enum Opening<'a> {
-    /// The stream has no more to read, or the reader stops at a second document.
-    End,
-    /// A line that opens no document, such as a lone `...`. The stream goes on at this line.
-    NoDocument(usize),
-    /// Directives of a document, with more of them or its start still to read from this line.
-    Directives(usize),
-    /// A document. Its root is read by `call`, or is empty; either way it stops before line
-    /// `index` or the line that the call returns. `block` says whether it is a block collection.
-    Root {
-        call: Option<Call<'a>>,
-        index: usize,
-        block: bool,
-    },
-}
-
-/// A grammar function to run, with its arguments. Each returns a line
-/// index (the block forms) or a token index relative to its run (the
-/// flow and inline forms).
-enum Call<'a> {
-    Node {
-        index: usize,
-        indent: usize,
-        depth: usize,
-        tag: Option<Tag>,
-        anchor: Option<Anchor<'a>>,
-        bounds: NodeBounds,
-    },
-    SequenceFirst {
-        index: usize,
-        first: Run,
-        indent: usize,
-        depth: usize,
-        tag: Option<Tag>,
-        anchor: Option<Anchor<'a>>,
-    },
-    SequenceItem {
-        rest: Run,
-        next_index: usize,
-        indent: usize,
-        depth: usize,
-    },
-    MappingFirst {
-        first: Run,
-        next_index: usize,
-        indent: usize,
-        depth: usize,
-        tag: Option<Tag>,
-        anchor: Option<Anchor<'a>>,
-    },
-    /// Returns the line after the value.
-    MappingValue {
-        value: Run,
-        current_index: usize,
-        indent: usize,
-        depth: usize,
-        allow_compact: bool,
-    },
-    /// Returns how many of `tokens` the node consumed.
-    Inline {
-        tokens: Run,
-        depth: usize,
-        tag: Option<Tag>,
-        anchor: Option<Anchor<'a>>,
-    },
-    FlowSequence {
-        tokens: Run,
-        start: usize,
-        depth: usize,
-        tag: Option<Tag>,
-        anchor: Option<Anchor<'a>>,
-    },
-    FlowExplicitMapping {
-        tokens: Run,
-        start: usize,
-        depth: usize,
-    },
-    ImplicitFlowMapping {
-        tokens: Run,
-        start: usize,
-        colon: usize,
-        depth: usize,
-    },
-    FlowMapping {
-        tokens: Run,
-        start: usize,
-        depth: usize,
-        tag: Option<Tag>,
-        anchor: Option<Anchor<'a>>,
-    },
-}
-
-/// The rest of a grammar function, waiting for a nested call's result.
-#[derive(Debug)]
-enum Cont {
-    /// A node's inline content must consume the rest of line `index`.
-    NodeInline {
-        rest: Run,
-        index: usize,
-    },
-    /// A sequence entry's inline content must consume `content`.
-    ItemInline {
-        content: Run,
-        next_index: usize,
-    },
-    /// A block sequence entry ended at the returned line.
-    Sequence(BlockState),
-    /// An explicit block key ended at the returned line.
-    MappingExplicitKey(BlockState),
-    /// An implicit block key consumed the returned number of `key` tokens.
-    MappingImplicitKey {
-        state: BlockState,
-        tokens: Run,
-        value_index: Option<usize>,
-        key: Run,
-    },
-    /// A block mapping value ended at the returned line.
-    MappingEntry(BlockState),
-    /// An inline block mapping value consumed the returned number of tokens.
-    ValueInline {
-        value: Run,
-        current_index: usize,
-    },
-    /// A flow sequence entry ended at the returned index; with `inline`,
-    /// the index is relative to the entry.
-    FlowSequenceItem {
-        state: FlowState,
-        inline: bool,
-    },
-    FlowExplicitKey {
-        tokens: Run,
-        start_span: Span,
-        key: Run,
-        key_end: usize,
-        depth: usize,
-    },
-    FlowExplicitValue {
-        tokens: Run,
-        start_span: Span,
-        value: Run,
-        value_end: usize,
-    },
-    ImplicitFlowKey {
-        tokens: Run,
-        start_span: Span,
-        key: Run,
-        colon: usize,
-        depth: usize,
-    },
-    ImplicitFlowValue {
-        tokens: Run,
-        start_span: Span,
-        value: Run,
-        value_end: usize,
-    },
-    FlowMappingKey {
-        state: FlowState,
-        key: Run,
-    },
-    FlowMappingValue {
-        state: FlowState,
-        value: Run,
-    },
-    /// A flow mapping entry without a value node is complete.
-    FlowMappingNext(FlowState),
-}
-
-/// What a grammar function does next: run a call in its place, or return.
-enum Step<'a> {
-    Call(Call<'a>),
-    Return(usize),
 }
 
 fn is_mapping_line(tokens: &[Token<'_>]) -> bool {

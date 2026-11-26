@@ -13,7 +13,10 @@ use std::fmt;
 use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::ScalarStyle;
 use crate::limits::Limits;
-use crate::position::{LineStarts, starts_with_document_marker};
+use crate::position::{
+    is_forbidden_control_byte, is_quoted_only_non_printable, line_start_of, location_at,
+    starts_with_document_marker,
+};
 use crate::span::Span;
 use crate::tag::{Tag, verbatim_reads_back};
 
@@ -44,6 +47,9 @@ const BOM_FIRST_BYTE: u8 = 0xEF;
 const EMPTY_LINE_TAB: &str =
     "a tab cannot indent an empty line inside a scalar under a block collection";
 
+/// Sentinel partner index for an unmatched flow opener (`[` or `{`).
+pub(crate) const UNMATCHED_FLOW: u32 = u32::MAX;
+
 /// The token vocabulary the scanner currently produces.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TokenKind<'a> {
@@ -55,9 +61,9 @@ pub(crate) enum TokenKind<'a> {
     BlockEntry,
     Key,
     Value,
-    FlowSequenceStart,
+    FlowSequenceStart { end: u32 },
     FlowSequenceEnd,
-    FlowMappingStart,
+    FlowMappingStart { end: u32 },
     FlowMappingEnd,
     FlowEntry,
     LineBreak,
@@ -67,7 +73,7 @@ pub(crate) enum TokenKind<'a> {
     Scalar(Box<ScalarToken<'a>>),
     Anchor,
     Alias,
-    Tag(Box<Tag>),
+    Tag(Tag),
 }
 
 /// A `%YAML` or `%TAG` directive's name and value.
@@ -115,9 +121,9 @@ impl fmt::Display for TokenKind<'_> {
             Self::BlockEntry => formatter.write_str("block entry"),
             Self::Key => formatter.write_str("key indicator"),
             Self::Value => formatter.write_str("value indicator"),
-            Self::FlowSequenceStart => formatter.write_str("["),
+            Self::FlowSequenceStart { .. } => formatter.write_str("["),
             Self::FlowSequenceEnd => formatter.write_str("]"),
-            Self::FlowMappingStart => formatter.write_str("{"),
+            Self::FlowMappingStart { .. } => formatter.write_str("{"),
             Self::FlowMappingEnd => formatter.write_str("}"),
             Self::FlowEntry => formatter.write_str(","),
             Self::LineBreak => formatter.write_str("line break"),
@@ -132,6 +138,13 @@ impl fmt::Display for TokenKind<'_> {
     }
 }
 
+/// Active and pending `%TAG` handle tables, allocated lazily only when a document defines `%TAG`.
+#[derive(Debug, Default)]
+struct TagHandles {
+    active: HashMap<String, String>,
+    pending: HashMap<String, String>,
+}
+
 /// An iterative scanner over a UTF-8 YAML input.
 #[derive(Debug)]
 #[allow(
@@ -141,8 +154,12 @@ impl fmt::Display for TokenKind<'_> {
 pub(crate) struct Scanner<'a> {
     input: &'a str,
     pos: usize,
-    line_index: LineStarts,
-    limits: Limits,
+    /// Byte offset where the line containing `pos` begins (invariant: matches `line_start_of`).
+    current_line_start: usize,
+    /// Whether a block indicator (`-`, `?`, `:`) has been emitted on the current line outside flow.
+    line_has_block_prefix: bool,
+    /// Leading space count of `current_line_start` when already observed on a non-BOM line.
+    current_line_indent: Option<usize>,
     /// The tokens a reader keeps, which count against `max_events`: every token but the stream's
     /// start and end and the line breaks, which no reader stores.
     tokens: usize,
@@ -160,12 +177,11 @@ pub(crate) struct Scanner<'a> {
     flow_allow_zero_indent: Vec<bool>,
     previous_flow_end: bool,
     yaml_directive_seen: bool,
-    /// The handles this document's `%TAG` directives define. `!` and `!!` otherwise have their
-    /// built-in prefixes, so most documents pay nothing here.
-    tag_handles: HashMap<String, String>,
+    /// The handles this document's `%TAG` directives define, allocated lazily so documents without
+    /// `%TAG` directives never initialize a `HashMap` or `RandomState`.
+    tag_handles: Option<Box<TagHandles>>,
     /// The bytes that tag handles have expanded to in this stream.
     tag_expansion_bytes: usize,
-    pending_tag_handles: HashMap<String, String>,
     started: bool,
     finished: bool,
     /// The next call returns a depth-limit error: a flow start went over the depth limit, so the
@@ -204,8 +220,6 @@ pub(crate) struct Scanner<'a> {
     /// Where the last `-`, `?`, or `:` indicator, `---`, or `...` ends. Blanks right after it, as
     /// at a line's start, are where a block collection's indentation would go.
     indicator_end: usize,
-    /// The start of the plain scalar last checked for a block prefix, and the answer.
-    block_prefix: (usize, bool),
     /// Where the line of the last tab checked for indenting a block collection ends.
     checked_line_end: usize,
     /// The start of the last line a tab was checked on, and where the byte order marks that start
@@ -220,10 +234,6 @@ pub(crate) struct Scanner<'a> {
     /// The start of the last outermost flow collection whose owner a quoted scalar or a line in it
     /// asked for, that owner, and its column if it's a compact collection on the same line.
     flow_owner: (usize, Owner, Option<usize>),
-    /// Byte offsets of the non-printable characters that only a quoted
-    /// scalar may hold, in order, and the first one not yet checked.
-    quoted_only: Vec<usize>,
-    quoted_only_next: usize,
     /// Whether the plain-scalar continuation fast path may reject a line. Tests turn it off to
     /// compare the fast path with the full analysis.
     #[cfg(test)]
@@ -232,44 +242,32 @@ pub(crate) struct Scanner<'a> {
 
 impl<'a> Scanner<'a> {
     /// Create a scanner and check the input-size limit.
-    pub(crate) fn new(input: &'a str, limits: Limits) -> Result<Self, Error> {
+    pub(crate) fn new(input: &'a str, limits: &Limits) -> Result<Self, Box<Error>> {
         Self::with_compat(input, limits, false)
     }
 
     pub(crate) fn with_compat(
         input: &'a str,
-        limits: Limits,
+        limits: &Limits,
         compat_flow: bool,
-    ) -> Result<Self, Error> {
-        limits.validate()?;
+    ) -> Result<Self, Box<Error>> {
+        limits.validate().map_err(Box::new)?;
         limits.check_input(input.len()).map_err(|error| {
-            Error::from(error)
-                .with_span(Span::empty(0))
-                .with_location(crate::span::Location::new(1, 1))
+            Box::new(
+                Error::from(error)
+                    .with_span(Span::empty(0))
+                    .with_location(crate::span::Location::new(1, 1)),
+            )
         })?;
-        let (line_index, quoted_only) = match LineStarts::new_checked(input, compat_flow) {
-            Ok(checked) => checked,
-            Err(index) => {
-                let marker = if compat_flow {
-                    LineStarts::counting_line_boms(input).marker(input, index)
-                } else {
-                    LineStarts::new(input).marker(input, index)
-                };
-                let error = non_printable_error(input, index);
-                return Err(match marker {
-                    Some(marker) => error.with_span(Span::empty(index)).with_location(marker),
-                    None => error,
-                });
-            }
-        };
         let initial_bom_end = input.len() - input.trim_start_matches('\u{feff}').len();
         let initial_bom = initial_bom_end > 0;
         let pos = initial_bom_end;
         Ok(Self {
             input,
             pos,
-            line_index,
-            limits,
+            current_line_start: 0,
+            line_has_block_prefix: false,
+            current_line_indent: None,
             tokens: 0,
             anchors: 0,
             flow_level: 0,
@@ -279,9 +277,8 @@ impl<'a> Scanner<'a> {
             flow_allow_zero_indent: Vec::new(),
             previous_flow_end: false,
             yaml_directive_seen: false,
-            tag_handles: HashMap::new(),
+            tag_handles: None,
             tag_expansion_bytes: 0,
-            pending_tag_handles: HashMap::new(),
             started: false,
             finished: false,
             stop_after: false,
@@ -299,15 +296,12 @@ impl<'a> Scanner<'a> {
             bom_run: Cell::new((usize::MAX, 0)),
             tab_run_end: 0,
             indicator_end: usize::MAX,
-            block_prefix: (usize::MAX, false),
             checked_line_end: 0,
             line_marks: (usize::MAX, 0),
             block_run: 0,
             counted_indent: (usize::MAX, 0),
             flow_start: 0,
             flow_owner: (usize::MAX, Owner::Unknown, None),
-            quoted_only,
-            quoted_only_next: 0,
             #[cfg(test)]
             fast_continuation: true,
         })
@@ -323,14 +317,9 @@ impl<'a> Scanner<'a> {
         self.input
     }
 
-    /// The line index built for this input, for a parser that needs columns.
-    pub(crate) fn line_index(&self) -> &LineStarts {
-        &self.line_index
-    }
-
-    /// The most tokens a reader can keep: the scanner refuses the token after this many.
-    pub(crate) fn max_tokens(&self) -> usize {
-        self.limits.max_events
+    /// Whether compatibility mode is active.
+    pub(crate) const fn is_compat(&self) -> bool {
+        self.compat_flow
     }
 
     /// Current nesting depth of open flow collections (`[` and `{`).
@@ -345,10 +334,10 @@ impl<'a> Scanner<'a> {
 
     #[cold]
     #[inline(never)]
-    fn finish_depth_stop(&mut self) -> Result<Option<Token<'a>>, Error> {
+    fn finish_depth_stop(&mut self, limits: &Limits) -> Result<Option<Token<'a>>, Box<Error>> {
         self.stop_after = false;
         self.finished = true;
-        match self.limits.check_depth(self.flow_level) {
+        match limits.check_depth(self.flow_level) {
             Err(limit) => Err(self.limit_at(self.stop_depth_start, limit)),
             Ok(()) => Ok(None),
         }
@@ -359,16 +348,16 @@ impl<'a> Scanner<'a> {
         clippy::too_many_lines,
         reason = "the routine is one linear state machine; splitting it would obscure its state"
     )]
-    pub(crate) fn next_token(&mut self) -> Result<Option<Token<'a>>, Error> {
+    pub(crate) fn next_token(&mut self, limits: &Limits) -> Result<Option<Token<'a>>, Box<Error>> {
         if !self.started {
             self.started = true;
-            return self.make(TokenKind::StreamStart, self.pos, self.pos);
+            return self.make(TokenKind::StreamStart, self.pos, self.pos, limits);
         }
         if self.finished {
             return Ok(None);
         }
         if self.stop_after {
-            return self.finish_depth_stop();
+            return self.finish_depth_stop(limits);
         }
 
         let bytes = self.input.as_bytes();
@@ -376,7 +365,7 @@ impl<'a> Scanner<'a> {
             self.skip_insignificant()?;
             if self.pos >= bytes.len() {
                 self.finished = true;
-                return self.make(TokenKind::StreamEnd, self.pos, self.pos);
+                return self.make(TokenKind::StreamEnd, self.pos, self.pos, limits);
             }
             let next_byte = bytes[self.pos];
             if next_byte == BOM_FIRST_BYTE
@@ -466,28 +455,38 @@ impl<'a> Scanner<'a> {
             && self.pos == self.initial_bom_end()
             && self.initial_bom
             && self.input[self.pos..].starts_with("...\n")
-            && let Some(token) = self.scan_document_marker()?
+            && let Some(token) = self.scan_document_marker(limits)?
         {
             return Ok(Some(token));
         }
         if self.flow_level == 0 && self.at_line_start() {
-            if let Some(token) = self.scan_document_marker()? {
+            if let Some(token) = self.scan_document_marker(limits)? {
                 return Ok(Some(token));
             }
             if self.peek() == Some('%') {
-                return self.scan_directive();
+                return self.scan_directive(limits);
             }
         }
 
         let start = self.pos;
         let Some(&byte) = bytes.get(start) else {
             self.finished = true;
-            return self.make(TokenKind::StreamEnd, self.pos, self.pos);
+            return self.make(TokenKind::StreamEnd, self.pos, self.pos, limits);
         };
+        if is_forbidden_control_byte(byte) || is_quoted_only_non_printable(bytes, start) {
+            return Err(self.non_printable_error_at(start));
+        }
         match byte {
             b'[' => {
                 let allow_zero = self.may_continue_at_column_zero();
-                let token = self.make(TokenKind::FlowSequenceStart, start, start + 1)?;
+                let token = self.make(
+                    TokenKind::FlowSequenceStart {
+                        end: UNMATCHED_FLOW,
+                    },
+                    start,
+                    start + 1,
+                    limits,
+                )?;
                 if self.flow_level == 0 {
                     self.flow_start = start;
                 }
@@ -498,7 +497,7 @@ impl<'a> Scanner<'a> {
                 // The parser checks depth from this token. Stop reading ahead here and yield the
                 // depth limit on the next call, so earlier errors still win while a truncated
                 // flow-key line cannot masquerade as trailing content (AY-027).
-                if self.limits.check_depth(self.flow_level).is_err() {
+                if limits.check_depth(self.flow_level).is_err() {
                     self.stop_after = true;
                     self.stop_depth_start = start;
                 }
@@ -510,11 +509,18 @@ impl<'a> Scanner<'a> {
                 self.flow_level = self.flow_level.saturating_sub(1);
                 self.flow_stack.pop();
                 self.flow_allow_zero_indent.pop();
-                self.make(TokenKind::FlowSequenceEnd, start, self.pos)
+                self.make(TokenKind::FlowSequenceEnd, start, self.pos, limits)
             }
             b'{' => {
                 let allow_zero = self.may_continue_at_column_zero();
-                let token = self.make(TokenKind::FlowMappingStart, start, start + 1)?;
+                let token = self.make(
+                    TokenKind::FlowMappingStart {
+                        end: UNMATCHED_FLOW,
+                    },
+                    start,
+                    start + 1,
+                    limits,
+                )?;
                 if self.flow_level == 0 {
                     self.flow_start = start;
                 }
@@ -522,7 +528,7 @@ impl<'a> Scanner<'a> {
                 self.flow_stack.push(('{', start, false));
                 self.flow_allow_zero_indent.push(allow_zero);
                 self.saw_flow_start = true;
-                if self.limits.check_depth(self.flow_level).is_err() {
+                if limits.check_depth(self.flow_level).is_err() {
                     self.stop_after = true;
                     self.stop_depth_start = start;
                 }
@@ -534,14 +540,14 @@ impl<'a> Scanner<'a> {
                 self.flow_level = self.flow_level.saturating_sub(1);
                 self.flow_stack.pop();
                 self.flow_allow_zero_indent.pop();
-                self.make(TokenKind::FlowMappingEnd, start, self.pos)
+                self.make(TokenKind::FlowMappingEnd, start, self.pos, limits)
             }
             b',' => {
                 if let Some(top) = self.flow_stack.last_mut() {
                     top.2 = false;
                 }
                 self.pos += 1;
-                self.make(TokenKind::FlowEntry, start, self.pos)
+                self.make(TokenKind::FlowEntry, start, self.pos, limits)
             }
             b'-' if self.indicator_follows(start, 1)
                 && !(self.compat_flow
@@ -553,7 +559,7 @@ impl<'a> Scanner<'a> {
                     && matches!(bytes.get(start + 1), Some(b',' | b']' | b'}'))) =>
             {
                 self.pos += 1;
-                self.make_indicator(TokenKind::BlockEntry, start, self.pos)
+                self.make_indicator(TokenKind::BlockEntry, start, self.pos, limits)
             }
             // A flow `?` before a flow indicator is neither a key's indicator, which needs a
             // space or a line break after it (`ns-flow-map-entry`, `ns-flow-pair`), nor a plain
@@ -578,7 +584,7 @@ impl<'a> Scanner<'a> {
                     top.2 = true;
                 }
                 self.pos += 1;
-                self.make_indicator(TokenKind::Key, start, self.pos)
+                self.make_indicator(TokenKind::Key, start, self.pos, limits)
             }
             b':' if self.colon_indicator(start)
                 || (self.flow_level > 0 && self.previous_flow_end) =>
@@ -596,15 +602,15 @@ impl<'a> Scanner<'a> {
                     return Err(self.flow_indent_error(line));
                 }
                 self.pos += 1;
-                self.make_indicator(TokenKind::Value, start, self.pos)
+                self.make_indicator(TokenKind::Value, start, self.pos, limits)
             }
-            b'&' => self.scan_anchor(false),
-            b'*' => self.scan_anchor(true),
-            b'!' => self.scan_tag(),
-            b'\'' => self.scan_single_quoted(),
-            b'"' => self.scan_double_quoted(),
-            b'|' => self.scan_block_scalar(start, true),
-            b'>' => self.scan_block_scalar(start, false),
+            b'&' => self.scan_anchor(false, limits),
+            b'*' => self.scan_anchor(true, limits),
+            b'!' => self.scan_tag(limits),
+            b'\'' => self.scan_single_quoted(limits),
+            b'"' => self.scan_double_quoted(limits),
+            b'|' => self.scan_block_scalar(start, true, limits),
+            b'>' => self.scan_block_scalar(start, false, limits),
             // Indicators that cannot start a plain scalar (`ns-plain-first`);
             // libyaml rejects them too.
             b'%' | b'@' | b'`' => {
@@ -615,42 +621,57 @@ impl<'a> Scanner<'a> {
                     format!("{ch:?} is a reserved indicator and cannot start a plain scalar"),
                 );
                 Err(if self.reserved_after_bom(start) {
-                    error.with_reserved_after_bom()
+                    Box::new((*error).with_reserved_after_bom())
                 } else {
                     error
                 })
             }
-            _ => self.scan_plain(),
+            _ => self.scan_plain(limits),
         }
     }
 
-    /// Every non-printable character the scanner has passed must sit inside
-    /// `quoted`, the quoted scalar being made, if any.
+    /// Byte offset where the line containing `offset` starts. Uses the tracked `current_line_start`
+    /// in O(1) for positions on the current line and falls back to a backward scan for earlier lines.
+    #[inline]
+    pub(super) fn line_start(&self, offset: usize) -> usize {
+        if offset >= self.current_line_start && offset <= self.pos {
+            return self.current_line_start;
+        }
+        line_start_of(self.input.as_bytes(), offset)
+    }
+
+    #[cold]
+    #[inline(never)]
     #[allow(
-        clippy::needless_pass_by_value,
-        reason = "the small owned value keeps the shared call site simple"
+        clippy::unnecessary_box_returns,
+        reason = "hot-path callers propagate Box<Error> to keep Result<_, Box<Error>> pointer-sized"
     )]
-    fn check_quoted_only(&mut self, quoted: Option<std::ops::Range<usize>>) -> Result<(), Error> {
-        while let Some(&index) = self.quoted_only.get(self.quoted_only_next) {
-            if index >= self.pos {
-                break;
+    pub(super) fn non_printable_error_at(&self, index: usize) -> Box<Error> {
+        let error = non_printable_error(self.input, index);
+        Box::new(match location_at(self.input, index, self.compat_flow) {
+            Some(marker) => error.with_span(Span::empty(index)).with_location(marker),
+            None => error,
+        })
+    }
+
+    /// Reject any disallowed non-printable character inside `start..end` outside quoted scalars.
+    fn check_non_printable_slice(&self, start: usize, end: usize) -> Result<(), Box<Error>> {
+        let bytes = self.input.as_bytes();
+        let mut i = start;
+        while i < end {
+            let byte = bytes[i];
+            if is_forbidden_control_byte(byte) || is_quoted_only_non_printable(bytes, i) {
+                return Err(self.non_printable_error_at(i));
             }
-            if !quoted.as_ref().is_some_and(|range| range.contains(&index)) {
-                let error = non_printable_error(self.input, index);
-                return Err(match self.line_index.marker(self.input, index) {
-                    Some(marker) => error.with_span(Span::empty(index)).with_location(marker),
-                    None => error,
-                });
-            }
-            self.quoted_only_next += 1;
+            i += 1;
         }
         Ok(())
     }
 
     /// Count a token that a reader keeps against `max_events`.
-    fn count_token(&mut self, start: usize) -> Result<(), Error> {
+    fn count_token(&mut self, start: usize, limits: &Limits) -> Result<(), Box<Error>> {
         self.tokens += 1;
-        self.limits
+        limits
             .check_events(self.tokens)
             .map_err(|error| self.limit_at(start, error))
     }
@@ -662,18 +683,19 @@ impl<'a> Scanner<'a> {
         kind: TokenKind<'a>,
         start: usize,
         end: usize,
-    ) -> Result<Option<Token<'a>>, Error> {
-        self.count_token(start)?;
+        limits: &Limits,
+    ) -> Result<Option<Token<'a>>, Box<Error>> {
+        self.count_token(start, limits)?;
         if matches!(kind, TokenKind::BlockEntry) {
             self.block_run += 1;
-            if let Err(limit) = self.limits.check_depth(self.block_run) {
+            if let Err(limit) = limits.check_depth(self.block_run) {
                 return Err(self.limit_at(start, limit));
             }
         } else {
             self.block_run = 0;
         }
-        if self.quoted_only_next < self.quoted_only.len() {
-            self.check_quoted_only(None)?;
+        if self.flow_level == 0 {
+            self.line_has_block_prefix = true;
         }
         self.previous_flow_end = false;
         self.last_token_end = end;
@@ -688,11 +710,12 @@ impl<'a> Scanner<'a> {
     /// belongs to the token for diagnostics and event consumers. No reader
     /// keeps a line break, so it doesn't count against `max_events`, and a
     /// blank or comment line costs nothing there.
-    fn make_line_break(&mut self, start: usize, end: usize) -> Result<Option<Token<'a>>, Error> {
+    fn make_line_break(
+        &mut self,
+        start: usize,
+        end: usize,
+    ) -> Result<Option<Token<'a>>, Box<Error>> {
         self.block_run = 0;
-        if self.quoted_only_next < self.quoted_only.len() {
-            self.check_quoted_only(None)?;
-        }
         self.previous_flow_end = false;
         let span = self.span(start, end)?;
         Ok(Some(Token {
@@ -707,7 +730,8 @@ impl<'a> Scanner<'a> {
         kind: TokenKind<'a>,
         start: usize,
         end: usize,
-    ) -> Result<Option<Token<'a>>, Error> {
+        limits: &Limits,
+    ) -> Result<Option<Token<'a>>, Box<Error>> {
         // No reader keeps the stream's start and end tokens: they become its
         // stream events, which count as events.
         if !matches!(
@@ -717,21 +741,7 @@ impl<'a> Scanner<'a> {
             self.block_run = 0;
         }
         if !matches!(kind, TokenKind::StreamStart | TokenKind::StreamEnd) {
-            self.count_token(start)?;
-        }
-        if self.quoted_only_next < self.quoted_only.len() {
-            let quoted = matches!(
-                kind,
-                TokenKind::SingleQuotedScalar | TokenKind::DoubleQuotedScalar
-            ) || matches!(
-                kind,
-                TokenKind::Scalar(ref scalar)
-                    if matches!(
-                        scalar.style,
-                        ScalarStyle::SingleQuoted | ScalarStyle::DoubleQuoted
-                    )
-            );
-            self.check_quoted_only(quoted.then_some(start..end))?;
+            self.count_token(start, limits)?;
         }
         // A scalar's size is the larger of its text and its value: `\L` and
         // `\P` take 2 bytes of text and 3 of value.
@@ -744,7 +754,7 @@ impl<'a> Scanner<'a> {
             _ => None,
         };
         if let Some(bytes) = scalar_bytes {
-            self.limits
+            limits
                 .check_scalar_bytes(bytes)
                 .map_err(|error| self.limit_at(start, error))?;
         }
@@ -827,18 +837,30 @@ impl<'a> Scanner<'a> {
     }
 
     #[inline]
-    fn span(&self, start: usize, end: usize) -> Result<Span, Error> {
-        self.line_index.span(self.input, start, end).ok_or_else(|| {
-            self.error_at(start, ErrorCode::UnexpectedToken, "invalid span position")
-        })
+    fn span(&self, start: usize, end: usize) -> Result<Span, Box<Error>> {
+        if start <= end
+            && end <= self.input.len()
+            && self.input.is_char_boundary(start)
+            && self.input.is_char_boundary(end)
+        {
+            Ok(Span::new(start, end))
+        } else {
+            Err(self.error_at(start, ErrorCode::UnexpectedToken, "invalid span position"))
+        }
     }
 
-    fn limit_at(&self, index: usize, limit: crate::limits::LimitExceeded) -> Error {
+    #[cold]
+    #[inline(never)]
+    #[allow(
+        clippy::unnecessary_box_returns,
+        reason = "hot-path callers propagate Box<Error> to keep Result<_, Box<Error>> pointer-sized"
+    )]
+    fn limit_at(&self, index: usize, limit: crate::limits::LimitExceeded) -> Box<Error> {
         let mut error = Error::from(limit);
-        if let Some(marker) = self.line_index.marker(self.input, index) {
+        if let Some(marker) = location_at(self.input, index, self.compat_flow) {
             error = error.with_span(Span::empty(index)).with_location(marker);
         }
-        error
+        Box::new(error)
     }
 
     /// Where the stream-start run of byte order marks ends.
@@ -861,14 +883,20 @@ impl<'a> Scanner<'a> {
         before.is_empty() || before.ends_with(['\n', '\r'])
     }
 
-    fn error_at(&self, index: usize, code: ErrorCode, message: impl Into<String>) -> Error {
-        let marker = self.line_index.marker(self.input, index);
+    #[cold]
+    #[inline(never)]
+    #[allow(
+        clippy::unnecessary_box_returns,
+        reason = "hot-path callers propagate Box<Error> to keep Result<_, Box<Error>> pointer-sized"
+    )]
+    fn error_at(&self, index: usize, code: ErrorCode, message: impl Into<String>) -> Box<Error> {
+        let marker = location_at(self.input, index, self.compat_flow);
         let mut error =
             Error::coded(ErrorKind::Scanner, code, message).with_span(Span::empty(index));
         if let Some(marker) = marker {
             error = error.with_location(marker);
         }
-        error
+        Box::new(error)
     }
 
     fn peek(&self) -> Option<char> {
@@ -882,10 +910,13 @@ impl<'a> Scanner<'a> {
     }
 
     fn at_line_start(&self) -> bool {
-        if self.pos == 0 || self.pos == self.after_line_bom {
+        if self.pos == self.current_line_start || self.pos == self.after_line_bom {
             return true;
         }
-        matches!(self.input.as_bytes().get(self.pos - 1), Some(b'\n' | b'\r'))
+        matches!(
+            self.input.as_bytes().get(self.pos.saturating_sub(1)),
+            Some(b'\n' | b'\r')
+        )
     }
 
     fn indicator_follows(&self, start: usize, offset: usize) -> bool {
@@ -906,17 +937,26 @@ impl<'a> Scanner<'a> {
             || (self.flow_level > 0 && matches!(byte, b',' | b']' | b'}'))
     }
 
-    fn skip_insignificant(&mut self) -> Result<(), Error> {
+    fn skip_insignificant(&mut self) -> Result<(), Box<Error>> {
         let bytes = self.input.as_bytes();
         while self.pos < bytes.len() {
             match bytes[self.pos] {
                 b' ' => {
+                    let at_line_start =
+                        self.pos == self.current_line_start && self.current_line_indent.is_none();
+                    let run_start = self.pos;
                     self.pos += 1;
                     while self.pos < bytes.len() && bytes[self.pos] == b' ' {
                         self.pos += 1;
                     }
+                    if at_line_start {
+                        self.current_line_indent = Some(self.pos - run_start);
+                    }
                 }
                 b'\t' => {
+                    if self.pos == self.current_line_start && self.current_line_indent.is_none() {
+                        self.current_line_indent = Some(0);
+                    }
                     if self.flow_level == 0 && self.pos >= self.tab_run_end {
                         self.tab_run_end = self.end_of_blanks(self.pos);
                         if self.tab_indents_block_collection(self.pos, self.tab_run_end) {
@@ -943,26 +983,62 @@ impl<'a> Scanner<'a> {
                     let check_bom = !self.compat_flow;
                     let mut i = self.pos + 1;
                     while i < bytes.len() {
-                        match bytes[i] {
+                        i = scalars::skip_printable_ascii_swar(bytes, i);
+                        if i >= bytes.len() {
+                            break;
+                        }
+                        let byte = bytes[i];
+                        match byte {
                             b'\n' | b'\r' => break,
-                            BOM_FIRST_BYTE
+                            b'\t' => i += 1,
+                            0x00..=0x1f | 0x7f => {
+                                self.pos = i;
+                                return Err(self.non_printable_error_at(i));
+                            }
+                            0xC2 if is_quoted_only_non_printable(bytes, i) => {
+                                self.pos = i;
+                                return Err(self.non_printable_error_at(i));
+                            }
+                            BOM_FIRST_BYTE => {
                                 if check_bom
                                     && bytes.get(i + 1) == Some(&0xBB)
-                                    && bytes.get(i + 2) == Some(&0xBF) =>
-                            {
-                                self.pos = i;
-                                return Err(self.error_at(
-                                    i,
-                                    ErrorCode::InvalidBom,
-                                    "a byte order mark can only start a document",
-                                ));
+                                    && bytes.get(i + 2) == Some(&0xBF)
+                                {
+                                    self.pos = i;
+                                    return Err(self.error_at(
+                                        i,
+                                        ErrorCode::InvalidBom,
+                                        "a byte order mark can only start a document",
+                                    ));
+                                }
+                                if is_quoted_only_non_printable(bytes, i) {
+                                    self.pos = i;
+                                    return Err(self.non_printable_error_at(i));
+                                }
+                                i += 1;
                             }
-                            _ => i += 1,
+                            _ => {
+                                i += 1;
+                                while i < bytes.len()
+                                    && bytes[i] >= 0x80
+                                    && !matches!(bytes[i], 0xC2 | BOM_FIRST_BYTE)
+                                {
+                                    i += 1;
+                                }
+                            }
                         }
                     }
                     self.pos = i;
                 }
-                _ => return Ok(()),
+                byte => {
+                    if self.pos == self.current_line_start
+                        && self.current_line_indent.is_none()
+                        && byte != BOM_FIRST_BYTE
+                    {
+                        self.current_line_indent = Some(0);
+                    }
+                    return Ok(());
+                }
             }
         }
         Ok(())
@@ -989,7 +1065,7 @@ impl<'a> Scanner<'a> {
     /// collection. Elsewhere, as after a key or a node property, a tab separates as a space does.
     fn tab_indents_block_collection(&mut self, tab: usize, content: usize) -> bool {
         let blanks_start = self.input[..tab].trim_end_matches([' ', '\t']).len();
-        let line_start = self.line_index.line_start(blanks_start);
+        let line_start = self.line_start(blanks_start);
         if self.line_marks.0 != line_start {
             let rest = &self.input[line_start..];
             let marks = rest.len() - rest.trim_start_matches('\u{feff}').len();
@@ -1027,6 +1103,7 @@ impl<'a> Scanner<'a> {
                 && previous.is_some_and(|ch| matches!(ch, '[' | '{' | ',' | '?')))
     }
 
+    #[inline]
     fn consume_line_break(&mut self) {
         let bytes = self.input.as_bytes();
         let Some(&byte) = bytes.get(self.pos) else {
@@ -1039,9 +1116,12 @@ impl<'a> Scanner<'a> {
         } else if let Some(ch) = self.peek() {
             self.pos += ch.len_utf8();
         }
+        self.current_line_start = self.pos;
+        self.line_has_block_prefix = false;
+        self.current_line_indent = None;
     }
 
-    fn scan_document_marker(&mut self) -> Result<Option<Token<'a>>, Error> {
+    fn scan_document_marker(&mut self, limits: &Limits) -> Result<Option<Token<'a>>, Box<Error>> {
         let start = self.pos;
         // In compat, a stream-start BOM is content for marker detection, so
         // `BOM---` is a plain scalar rather than an explicit document start.
@@ -1057,18 +1137,26 @@ impl<'a> Scanner<'a> {
             self.pos += 3;
             self.yaml_directive_seen = false;
             self.colon_anchors = None;
-            self.tag_handles.clear();
-            self.tag_handles
-                .extend(std::mem::take(&mut self.pending_tag_handles));
-            return self.make(TokenKind::DocumentStart { explicit: true }, start, self.pos);
+            if let Some(handles) = &mut self.tag_handles {
+                handles.active.clear();
+                handles.active.extend(handles.pending.drain());
+            }
+            return self.make(
+                TokenKind::DocumentStart { explicit: true },
+                start,
+                self.pos,
+                limits,
+            );
         }
         if rest.starts_with("...") && self.marker_follows(start, 3) {
             self.pos += 3;
             self.yaml_directive_seen = false;
             self.colon_anchors = None;
-            self.tag_handles.clear();
-            self.pending_tag_handles.clear();
-            return self.make(TokenKind::DocumentEnd, start, self.pos);
+            if let Some(handles) = &mut self.tag_handles {
+                handles.active.clear();
+                handles.pending.clear();
+            }
+            return self.make(TokenKind::DocumentEnd, start, self.pos, limits);
         }
         Ok(None)
     }
@@ -1085,11 +1173,11 @@ impl<'a> Scanner<'a> {
     fn document_marker_starts_line(&self, position: usize) -> bool {
         let rest = &self.input[position..];
         (rest.starts_with("---") || rest.starts_with("..."))
-            && self.line_index.line_start(position) == position
+            && self.line_start(position) == position
             && self.marker_follows(position, 3)
     }
 
-    fn scan_directive(&mut self) -> Result<Option<Token<'a>>, Error> {
+    fn scan_directive(&mut self, limits: &Limits) -> Result<Option<Token<'a>>, Box<Error>> {
         let start = self.pos;
         self.pos += 1;
         let name_start = self.pos;
@@ -1117,6 +1205,7 @@ impl<'a> Scanner<'a> {
             }
             self.pos += ch.len_utf8();
         }
+        self.check_non_printable_slice(name_start, self.pos)?;
         let value = Cow::Borrowed(self.input[value_start..self.pos].trim_end_matches(is_blank));
         // Directive names and parameters are `ns-char`s, which exclude the
         // byte order mark; libyaml rejects it too. A comment after them may hold one in compat,
@@ -1204,7 +1293,11 @@ impl<'a> Scanner<'a> {
             }
             // One document may give a handle one prefix, even the same one twice (YAML 1.2.2
             // section 6.8.2.2).
-            if self.pending_tag_handles.contains_key(handle) {
+            if self
+                .tag_handles
+                .as_ref()
+                .is_some_and(|handles| handles.pending.contains_key(handle))
+            {
                 return Err(self.error_at(
                     start,
                     ErrorCode::DuplicateDirective,
@@ -1237,22 +1330,36 @@ impl<'a> Scanner<'a> {
                     "tag %-escapes do not form valid UTF-8",
                 )
             })?;
-            self.pending_tag_handles.insert(handle.to_owned(), prefix);
+            self.tag_handles
+                .get_or_insert_with(Box::default)
+                .pending
+                .insert(handle.to_owned(), prefix);
         }
         self.make(
             TokenKind::Directive(Box::new(Directive { name, value })),
             start,
             self.pos,
+            limits,
         )
     }
 
-    fn scan_anchor(&mut self, alias: bool) -> Result<Option<Token<'a>>, Error> {
+    fn scan_anchor(
+        &mut self,
+        alias: bool,
+        limits: &Limits,
+    ) -> Result<Option<Token<'a>>, Box<Error>> {
         let start = self.pos;
         self.pos += 1;
         let name_start = self.pos;
+        let bytes = self.input.as_bytes();
         while let Some(ch) = self.peek() {
             if is_blank(ch) || matches!(ch, '[' | ']' | '{' | '}' | ',') {
                 break;
+            }
+            if is_forbidden_control_byte(bytes[self.pos])
+                || is_quoted_only_non_printable(bytes, self.pos)
+            {
+                return Err(self.non_printable_error_at(self.pos));
             }
             // Anchor names are `ns-char`s, which exclude the BOM; libyaml
             // allows only word characters.
@@ -1314,10 +1421,10 @@ impl<'a> Scanner<'a> {
         }
         let name = Cow::Borrowed(&self.input[name_start..self.pos]);
         if alias {
-            self.make(TokenKind::Alias, start, self.pos)
+            self.make(TokenKind::Alias, start, self.pos, limits)
         } else {
             self.anchors += 1;
-            self.limits
+            limits
                 .check_anchors(self.anchors)
                 .map_err(|error| self.limit_at(start, error))?;
             if self.compat_flow && name.ends_with(':') {
@@ -1326,7 +1433,7 @@ impl<'a> Scanner<'a> {
                     .entry(&self.input[name_start..self.pos])
                     .or_insert(start);
             }
-            self.make(TokenKind::Anchor, start, self.pos)
+            self.make(TokenKind::Anchor, start, self.pos, limits)
         }
     }
 
@@ -1342,15 +1449,24 @@ impl<'a> Scanner<'a> {
     /// The prefix `handle` stands for, or `None` if nothing defines it. Each use counts the whole
     /// prefix, because every tag holds its own copy, so one long prefix would otherwise make each
     /// short tag cost that much memory.
-    fn expand_tag_handle(&mut self, start: usize, handle: &str) -> Result<Option<String>, Error> {
-        let prefix = match (self.tag_handles.get(handle), handle) {
+    fn expand_tag_handle(
+        &mut self,
+        start: usize,
+        handle: &str,
+        limits: &Limits,
+    ) -> Result<Option<String>, Box<Error>> {
+        let custom = self
+            .tag_handles
+            .as_ref()
+            .and_then(|handles| handles.active.get(handle));
+        let prefix = match (custom, handle) {
             (Some(prefix), _) => prefix.as_str(),
             (None, "!") => "!",
             (None, "!!") => CORE_TAG_PREFIX,
             (None, _) => return Ok(None),
         };
         let total = self.tag_expansion_bytes.saturating_add(prefix.len());
-        self.limits
+        limits
             .check_tag_expansion(total)
             .map_err(|error| self.limit_at(start, error))?;
         let prefix = prefix.to_owned();
@@ -1368,7 +1484,7 @@ impl<'a> Scanner<'a> {
         Tag::new("", full)
     }
 
-    fn scan_tag(&mut self) -> Result<Option<Token<'a>>, Error> {
+    fn scan_tag(&mut self, limits: &Limits) -> Result<Option<Token<'a>>, Box<Error>> {
         let start = self.pos;
         self.pos += 1;
         // A shorthand's handle needs a suffix after it (YAML 1.2.2 production 99), so `!!` and
@@ -1396,23 +1512,31 @@ impl<'a> Scanner<'a> {
                     self.pos += ch.len_utf8();
                 }
             }
-            let prefix = self.expand_tag_handle(start, "!!")?.ok_or_else(|| {
-                self.error_at(
-                    start,
-                    ErrorCode::UndefinedTagHandle,
-                    "undefined secondary tag handle",
-                )
-            })?;
+            let prefix = self
+                .expand_tag_handle(start, "!!", limits)?
+                .ok_or_else(|| {
+                    self.error_at(
+                        start,
+                        ErrorCode::UndefinedTagHandle,
+                        "undefined secondary tag handle",
+                    )
+                })?;
             no_suffix = self.pos == suffix_start;
             Self::resolved_tag(&prefix, &self.decode_tag_suffix(suffix_start)?)
         } else if self.peek() == Some('<') {
             self.pos += 1;
             let suffix_start = self.pos;
+            let bytes = self.input.as_bytes();
             while let Some(ch) = self.peek() {
                 if ch == '>' {
                     break;
                 }
                 if !is_uri_char(ch) {
+                    if is_forbidden_control_byte(bytes[self.pos])
+                        || is_quoted_only_non_printable(bytes, self.pos)
+                    {
+                        return Err(self.non_printable_error_at(self.pos));
+                    }
                     return Err(self.error_at(
                         self.pos,
                         ErrorCode::InvalidTag,
@@ -1484,7 +1608,7 @@ impl<'a> Scanner<'a> {
                     }
                     self.pos += ch.len_utf8();
                 }
-                let prefix = self.expand_tag_handle(start, "!")?.ok_or_else(|| {
+                let prefix = self.expand_tag_handle(start, "!", limits)?.ok_or_else(|| {
                     self.error_at(
                         start,
                         ErrorCode::UndefinedTagHandle,
@@ -1497,13 +1621,15 @@ impl<'a> Scanner<'a> {
                 let suffix_start = self.pos;
                 self.consume_tag_suffix();
                 let handle = &self.input[handle_start - 1..suffix_start];
-                let prefix = self.expand_tag_handle(start, handle)?.ok_or_else(|| {
-                    self.error_at(
-                        start,
-                        ErrorCode::UndefinedTagHandle,
-                        format!("undefined tag handle {handle:?}"),
-                    )
-                })?;
+                let prefix = self
+                    .expand_tag_handle(start, handle, limits)?
+                    .ok_or_else(|| {
+                        self.error_at(
+                            start,
+                            ErrorCode::UndefinedTagHandle,
+                            format!("undefined tag handle {handle:?}"),
+                        )
+                    })?;
                 no_suffix = self.pos == suffix_start;
                 Self::resolved_tag(&prefix, &self.decode_tag_suffix(suffix_start)?)
             } else {
@@ -1511,7 +1637,7 @@ impl<'a> Scanner<'a> {
                 let prefix = if self.pos == handle_start {
                     "!".to_owned()
                 } else {
-                    self.expand_tag_handle(start, "!")?.ok_or_else(|| {
+                    self.expand_tag_handle(start, "!", limits)?.ok_or_else(|| {
                         self.error_at(
                             start,
                             ErrorCode::UndefinedTagHandle,
@@ -1525,6 +1651,12 @@ impl<'a> Scanner<'a> {
         if self.peek().is_some_and(|ch| {
             !(is_blank(ch) || (self.flow_level > 0 && matches!(ch, ',' | ']' | '}')))
         }) {
+            let bytes = self.input.as_bytes();
+            if is_forbidden_control_byte(bytes[self.pos])
+                || is_quoted_only_non_printable(bytes, self.pos)
+            {
+                return Err(self.non_printable_error_at(self.pos));
+            }
             return Err(self.error_at(
                 self.pos,
                 ErrorCode::InvalidTag,
@@ -1538,13 +1670,13 @@ impl<'a> Scanner<'a> {
                 "a tag's handle needs a suffix after it",
             ));
         }
-        self.make(TokenKind::Tag(Box::new(tag)), start, self.pos)
+        self.make(TokenKind::Tag(tag), start, self.pos, limits)
     }
 
     /// The shorthand tag suffix from `start` to the current position, with
     /// `%XX` escapes decoded (YAML 1.2.2 §6.8.2; suite 6CK3). Verbatim tags
     /// are delivered as written.
-    fn decode_tag_suffix(&self, start: usize) -> Result<String, Error> {
+    fn decode_tag_suffix(&self, start: usize) -> Result<String, Box<Error>> {
         decode_percent_escapes(&self.input[start..self.pos]).map_err(|error| match error {
             PercentError::Escape(index) => self.error_at(
                 start + index,

@@ -110,7 +110,7 @@ enum NodeKind<'de> {
     String(Cow<'de, str>),
     Sequence(Vec<Node<'de>>),
     Mapping(Vec<(Node<'de>, Node<'de>)>),
-    Tagged(Box<Tag>, Box<Node<'de>>),
+    Tagged(Tag, Box<Node<'de>>),
     Alias(Arc<Node<'de>>),
 }
 
@@ -512,8 +512,33 @@ enum Frame<'de> {
 }
 
 impl<'de> Builder<'de> {
-    pub(crate) fn push_event(&mut self, event: Event<'de>) -> Result<(), Error> {
-        self.push(event)
+    pub(crate) fn push_event(&mut self, event: Event<'de>) -> Result<(), Box<Error>> {
+        self.push(event).map_err(Box::new)
+    }
+
+    #[inline]
+    pub(crate) fn push_scalar(
+        &mut self,
+        value: Cow<'de, str>,
+        raw: &'de str,
+        style: ScalarStyle,
+        tag: Option<&Tag>,
+        anchor: Option<&Anchor<'de>>,
+        span: Span,
+    ) -> Result<(), Box<Error>> {
+        if !self.in_document {
+            return Err(Box::new(self.error_at(span, "expected a document start")));
+        }
+        self.pending_capacity = None;
+        if self.root.is_some() && self.stack.is_empty() {
+            return Err(Box::new(self.error_at(span, "expected document end")));
+        }
+        let raw = Cow::Borrowed(raw);
+        let node = plain_scalar(value, &raw, style, tag, span, self.options.drop_global_tags)
+            .map_err(Box::new)?;
+        let size = estimate_size(&node, self.limits.node_cost_bytes);
+        let built = self.anchored(anchor, node, size, 0, Anchors::define);
+        self.attach_built(built).map_err(Box::new)
     }
 
     pub(crate) fn finish_document_node(&mut self) -> Result<Node<'de>, Error> {
@@ -817,6 +842,11 @@ impl<'de> Builder<'de> {
             },
             _ => return Err(self.error_at(event_span, "unexpected event in node position")),
         };
+        self.attach_built(built)
+    }
+
+    #[inline]
+    fn attach_built(&mut self, built: Built<'de>) -> Result<(), Error> {
         match self.stack.last_mut() {
             None => self.root = Some(built.node),
             Some(Frame::Sequence {
@@ -970,7 +1000,7 @@ fn apply_tag(tag: Option<Tag>, node: Node<'_>, drop_global_tags: bool) -> Node<'
         Some(tag) if collection_drops(&tag, drop_global_tags) => node,
         Some(tag) => {
             let span = node.span;
-            Node::new(NodeKind::Tagged(Box::new(tag), Box::new(node)), span)
+            Node::new(NodeKind::Tagged(tag, Box::new(node)), span)
         }
         None => node,
     }
@@ -1033,7 +1063,7 @@ fn scalar_node<'de>(
         Some(tag) if tag.is_non_specific() => {
             let inner = Node::scalar(NodeKind::String(scalar_text), Text::None, span);
             Ok(Node::scalar(
-                NodeKind::Tagged(Box::new(tag.clone()), Box::new(inner)),
+                NodeKind::Tagged(tag.clone(), Box::new(inner)),
                 Text::None,
                 span,
             ))
@@ -1052,7 +1082,7 @@ fn scalar_node<'de>(
             _ => {
                 let inner = Node::scalar(NodeKind::String(scalar_text), Text::None, span);
                 Ok(Node::scalar(
-                    NodeKind::Tagged(Box::new(tag.clone()), Box::new(inner)),
+                    NodeKind::Tagged(tag.clone(), Box::new(inner)),
                     Text::None,
                     span,
                 ))
@@ -1073,7 +1103,7 @@ fn scalar_node<'de>(
                 Node::scalar(NodeKind::String(scalar_text), Text::None, span)
             };
             Ok(Node::scalar(
-                NodeKind::Tagged(Box::new(tag.clone()), Box::new(inner)),
+                NodeKind::Tagged(tag.clone(), Box::new(inner)),
                 Text::None,
                 span,
             ))
@@ -1122,10 +1152,7 @@ fn node_from_value<'de>(
         ),
         Value::Tagged(tagged) => {
             let inner = node_from_value(tagged.value, scalar_text.clone(), raw, style, span);
-            (
-                NodeKind::Tagged(Box::new(tagged.tag), Box::new(inner)),
-                scalar_text,
-            )
+            (NodeKind::Tagged(tagged.tag, Box::new(inner)), scalar_text)
         }
     };
     // A plain scalar keeps its source text. A quoted or block scalar reaches here only when a
@@ -1173,10 +1200,9 @@ fn owned_node<'de>(value: Value, span: Span) -> Node<'de> {
                 .map(|(key, value)| (owned_node(key, span), owned_node(value, span)))
                 .collect(),
         ),
-        Value::Tagged(tagged) => NodeKind::Tagged(
-            Box::new(tagged.tag),
-            Box::new(owned_node(tagged.value, span)),
-        ),
+        Value::Tagged(tagged) => {
+            NodeKind::Tagged(tagged.tag, Box::new(owned_node(tagged.value, span)))
+        }
     };
     Node::new(kind, span)
 }

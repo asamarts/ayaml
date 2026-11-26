@@ -8,6 +8,12 @@ use crate::value::Value;
 
 const CORE_PREFIX: &str = "tag:yaml.org,2002:";
 
+#[derive(Clone, Debug)]
+struct TagInner {
+    handle: String,
+    suffix: String,
+}
+
 /// A tag, stored as the prefix its handle resolved to plus a suffix.
 ///
 /// Two tags are equal when they name the same tag: equality, ordering, and
@@ -21,13 +27,28 @@ const CORE_PREFIX: &str = "tag:yaml.org,2002:";
 /// writer adds to the document, such as `%TAG !t0! tag:x:` for `tag:x:a b`.
 /// A tag that is neither local nor core and has fewer than two characters has
 /// no form, and writing it is an error.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Tag {
-    handle: String,
-    suffix: String,
+    inner: Box<TagInner>,
+}
+
+impl fmt::Debug for Tag {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Tag")
+            .field("handle", &self.inner.handle)
+            .field("suffix", &self.inner.suffix)
+            .finish()
+    }
 }
 
 impl Tag {
+    fn from_parts(handle: String, suffix: String) -> Self {
+        Self {
+            inner: Box::new(TagInner { handle, suffix }),
+        }
+    }
+
     /// Create a tag from its handle prefix and suffix.
     ///
     /// A full name that starts with the core prefix `tag:yaml.org,2002:` is
@@ -49,19 +70,13 @@ impl Tag {
         {
             let full = format!("{handle}{suffix}");
             if let Some(rest) = full.strip_prefix(CORE_PREFIX) {
-                return Self {
-                    handle: CORE_PREFIX.to_owned(),
-                    suffix: rest.to_owned(),
-                };
+                return Self::from_parts(CORE_PREFIX.to_owned(), rest.to_owned());
             }
         }
         if handle.is_empty()
             && let Some(rest) = suffix.strip_prefix('!')
         {
-            return Self {
-                handle: "!".to_owned(),
-                suffix: rest.to_owned(),
-            };
+            return Self::from_parts("!".to_owned(), rest.to_owned());
         }
         // A full name with a URI scheme and no explicit handle is split like a writer would:
         // after its last `:`, `/`, or `#`. That keeps the handle/suffix pair independent of
@@ -74,13 +89,10 @@ impl Tag {
                 .rfind([':', '/', '#'])
                 .map_or(last, |index| index + 1);
             if cut < suffix.len() {
-                return Self {
-                    handle: suffix[..cut].to_owned(),
-                    suffix: suffix[cut..].to_owned(),
-                };
+                return Self::from_parts(suffix[..cut].to_owned(), suffix[cut..].to_owned());
             }
         }
-        Self { handle, suffix }
+        Self::from_parts(handle, suffix)
     }
 
     /// Whether this is a core collection tag (`!!seq`, `!!map`, `!!set`,
@@ -103,13 +115,13 @@ impl Tag {
     /// or starts with `!` or `<` is bracketed too, so that
     /// [`Tag::from_serde_name`] reads every name back.
     pub(crate) fn serde_name(&self) -> String {
-        if let Some(prefix) = self.handle.strip_prefix('!') {
-            let name = format!("{prefix}{}", self.suffix);
+        if let Some(prefix) = self.inner.handle.strip_prefix('!') {
+            let name = format!("{prefix}{}", self.inner.suffix);
             if bare_serde_name(&name) {
                 return name;
             }
         }
-        format!("<{}{}>", self.handle, self.suffix)
+        format!("<{}{}>", self.inner.handle, self.inner.suffix)
     }
 
     /// The name of the enum variant this tag selects: a local tag's name after its first `!`, as
@@ -119,21 +131,22 @@ impl Tag {
     /// written, and a local tag spelled `!%3Ctag:x:B%3E` selects the variant that `!<tag:x:B>`
     /// selects.
     pub(crate) fn variant_name(&self) -> String {
-        match self.handle.strip_prefix('!') {
-            Some(prefix) => format!("{prefix}{}", self.suffix),
-            None => format!("<{}{}>", self.handle, self.suffix),
+        match self.inner.handle.strip_prefix('!') {
+            Some(prefix) => format!("{prefix}{}", self.inner.suffix),
+            None => format!("<{}{}>", self.inner.handle, self.inner.suffix),
         }
     }
 
     /// Whether this is the non-specific tag `!`, which makes a scalar a string (YAML 1.2.2
     /// section 6.9.1). It is the same as a local tag with an empty name.
     pub(crate) fn is_non_specific(&self) -> bool {
-        self.handle == "!" && self.suffix.is_empty()
+        self.inner.handle == "!" && self.inner.suffix.is_empty()
     }
 
     /// Whether this is a local tag (its full name starts with `!`), the non-specific `!` included.
     pub(crate) fn is_local(&self) -> bool {
-        self.handle.starts_with('!') || (self.handle.is_empty() && self.suffix.starts_with('!'))
+        self.inner.handle.starts_with('!')
+            || (self.inner.handle.is_empty() && self.inner.suffix.starts_with('!'))
     }
 
     /// Whether this is a global tag outside the YAML 1.2 core schema, such as `!!timestamp`,
@@ -145,8 +158,8 @@ impl Tag {
     /// [`Tag::variant_name`], which moves the suffix of a tag written with `!` rather than
     /// copying it.
     pub(crate) fn into_variant_name(self) -> String {
-        if self.handle == "!" {
-            self.suffix
+        if self.inner.handle == "!" {
+            self.inner.suffix
         } else {
             self.variant_name()
         }
@@ -166,7 +179,7 @@ impl Tag {
     }
 
     fn full(&self) -> impl Iterator<Item = u8> + '_ {
-        self.handle.bytes().chain(self.suffix.bytes())
+        self.inner.handle.bytes().chain(self.inner.suffix.bytes())
     }
 
     /// Create a core-schema tag such as `!!str`.
@@ -184,30 +197,34 @@ impl Tag {
     /// The tag handle.
     #[must_use]
     pub fn handle(&self) -> &str {
-        &self.handle
+        &self.inner.handle
     }
 
     /// The bytes of text this tag holds, which every copy of it holds too.
     pub(crate) fn text_len(&self) -> usize {
-        self.handle.len().saturating_add(self.suffix.len())
+        self.inner
+            .handle
+            .len()
+            .saturating_add(self.inner.suffix.len())
     }
 
     /// The tag suffix.
     #[must_use]
     pub fn suffix(&self) -> &str {
-        &self.suffix
+        &self.inner.suffix
     }
 
     /// Whether this is a core-schema tag.
     #[must_use]
     pub fn is_core(&self) -> bool {
-        self.handle == CORE_PREFIX
+        self.inner.handle == CORE_PREFIX
     }
 }
 
 impl PartialEq for Tag {
     fn eq(&self, other: &Self) -> bool {
-        self.handle.len() + self.suffix.len() == other.handle.len() + other.suffix.len()
+        self.inner.handle.len() + self.inner.suffix.len()
+            == other.inner.handle.len() + other.inner.suffix.len()
             && self.full().eq(other.full())
     }
 }
@@ -239,12 +256,12 @@ impl Ord for Tag {
 
 impl fmt::Display for Tag {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.handle == "!" {
-            write!(formatter, "!{}", self.suffix)
-        } else if self.handle == CORE_PREFIX {
-            write!(formatter, "!!{}", self.suffix)
+        if self.inner.handle == "!" {
+            write!(formatter, "!{}", self.inner.suffix)
+        } else if self.inner.handle == CORE_PREFIX {
+            write!(formatter, "!!{}", self.inner.suffix)
         } else {
-            write!(formatter, "{}{}", self.handle, self.suffix)
+            write!(formatter, "{}{}", self.inner.handle, self.inner.suffix)
         }
     }
 }
@@ -449,5 +466,16 @@ mod tests {
         let tagged = TaggedValue::new(Tag::local("Custom"), Value::from(1_u64));
         assert_eq!(tagged.tag.to_string(), "!Custom");
         assert_eq!(tagged.value, Value::from(1_u64));
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn tag_is_pointer_sized() {
+        assert_eq!(size_of::<Tag>(), 8);
+        assert_eq!(size_of::<Option<Tag>>(), 8);
+        assert_eq!(
+            format!("{:?}", Tag::local("Custom")),
+            "Tag { handle: \"!\", suffix: \"Custom\" }"
+        );
     }
 }

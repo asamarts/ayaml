@@ -1,19 +1,23 @@
-//! Byte-offset to line/column mapping: the readers' own index, and the public [`LineIndex`].
+//! Byte-offset to line/column mapping: zero-allocation error-path coordinates and the public
+//! [`LineIndex`].
 //!
-//! The scanner builds one [`LineStarts`] per input. It understands LF, CR, CRLF, and a
-//! UTF-8 BOM at the start of a line; in default mode the BOM takes up no column,
-//! while compatibility mode counts one on a later line. NEL (U+0085), LS
-//! (U+2028), and PS (U+2029) are content in YAML 1.2, not line breaks.
+//! Coordinates understand LF, CR, CRLF, and a UTF-8 BOM at the start of a line; in default mode
+//! the BOM takes up no column, while compatibility mode counts one on a later line. NEL
+//! (U+0085), LS (U+2028), and PS (U+2029) are content in YAML 1.2, not line breaks.
 //!
 //! [`LineIndex`] is the same mapping for a caller, in the names and rules that the format
 //! contract gives the positions layer: `to_position`, `to_offset`, and `line_count`, with
 //! zero-based positions.
 
+#[cfg(test)]
 use std::cell::Cell;
 use std::fmt;
+#[cfg(test)]
 use std::sync::Arc;
 
-use crate::span::{Location, Position, Span};
+#[cfg(test)]
+use crate::span::Span;
+use crate::span::{Location, Position};
 
 /// The unit that a [`LineIndex`] column counts. A later release may add a unit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -57,8 +61,9 @@ impl fmt::Display for PositionError {
 
 impl std::error::Error for PositionError {}
 
-/// The readers' line-start index over a UTF-8 input. It doesn't hold the input, since a reader
-/// has it, and it remembers where it last looked, since a reader asks in order.
+/// The readers' line-start index over a UTF-8 input, kept in tests as a reference oracle against
+/// the zero-allocation coordinate helpers.
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub(crate) struct LineStarts {
     starts: Arc<Vec<usize>>,
@@ -72,6 +77,139 @@ pub(crate) struct LineStarts {
     /// The last column counted outside ASCII: its line, byte index, and column. Tokens come in
     /// order, so counting on from it keeps a long line from being read again for each token.
     counted_column: Cell<(usize, usize, usize)>,
+}
+
+/// Whether an ASCII byte is unconditionally forbidden anywhere in YAML (C0 control characters
+/// other than `\t`, `\n`, and `\r`).
+#[inline]
+pub(crate) const fn is_forbidden_control_byte(byte: u8) -> bool {
+    byte < 0x20 && !matches!(byte, b'\t' | b'\n' | b'\r')
+}
+
+/// Whether `bytes[pos..]` starts with a non-printable character that YAML allows only inside
+/// quoted scalars: DEL (`0x7F`), C1 controls (`U+0080..=U+0084`, `U+0086..=U+009F`, excluding
+/// printable NEL `U+0085`), and noncharacters `U+FFFE` / `U+FFFF`.
+#[inline]
+pub(crate) fn is_quoted_only_non_printable(bytes: &[u8], pos: usize) -> bool {
+    match bytes[pos] {
+        0x7f => true,
+        0xC2 => matches!(bytes.get(pos + 1), Some(0x80..=0x84 | 0x86..=0x9f)),
+        0xEF => {
+            bytes.get(pos + 1) == Some(&0xBF) && matches!(bytes.get(pos + 2), Some(0xBE | 0xBF))
+        }
+        _ => false,
+    }
+}
+
+/// Whether `bytes` contains any YAML 1.2 line break (`\n` or `\r`).
+#[inline]
+pub(crate) fn has_line_break(bytes: &[u8]) -> bool {
+    bytes.iter().any(|&byte| byte == b'\n' || byte == b'\r')
+}
+
+/// Byte offset where the line containing `offset` begins, handling LF, CR, and CRLF.
+#[inline]
+pub(crate) fn line_start_of(bytes: &[u8], offset: usize) -> usize {
+    let mut i = offset.min(bytes.len());
+    // An offset between `\r` and `\n` of one CRLF belongs to the line before the CRLF.
+    if i > 0 && bytes[i - 1] == b'\r' && bytes.get(i) == Some(&b'\n') {
+        i -= 1;
+    }
+    while i > 0 {
+        let byte = bytes[i - 1];
+        if byte == b'\n' || byte == b'\r' {
+            return i;
+        }
+        i -= 1;
+    }
+    0
+}
+
+/// Byte offset where columns begin on the line starting at `line_start`.
+#[inline]
+fn line_content_start_at(input: &str, line_start: usize, count_line_boms: bool) -> usize {
+    if line_start == 0 {
+        if count_line_boms {
+            compat_content_start(input)
+        } else {
+            input.len() - input.trim_start_matches('\u{feff}').len()
+        }
+    } else if !count_line_boms {
+        let mut start = line_start;
+        while input[start..].starts_with('\u{feff}') {
+            start += '\u{feff}'.len_utf8();
+        }
+        start
+    } else {
+        line_start
+    }
+}
+
+/// One-based Unicode scalar column of `offset` on its line, without allocating a line index.
+#[inline]
+pub(crate) fn column_on_line(input: &str, offset: usize, count_line_boms: bool) -> usize {
+    let line_start = line_start_of(input.as_bytes(), offset);
+    let content_start = line_content_start_at(input, line_start, count_line_boms);
+    if offset <= content_start {
+        return 1;
+    }
+    let slice = &input[content_start..offset];
+    if slice.is_ascii() {
+        slice.len() + 1
+    } else {
+        slice.chars().count() + 1
+    }
+}
+
+/// One-based line and Unicode scalar column of `offset` in `input`, computed in a single
+/// zero-allocation scan (intended for cold diagnostic and error paths).
+#[cold]
+pub(crate) fn location_at(input: &str, offset: usize, count_line_boms: bool) -> Option<Location> {
+    if offset > input.len() || !input.is_char_boundary(offset) {
+        return None;
+    }
+    let bytes = input.as_bytes();
+    let mut line = 1_usize;
+    let mut line_start = 0_usize;
+    let mut i = 0_usize;
+    while i < offset {
+        match bytes[i] {
+            b'\n' => {
+                i += 1;
+                line += 1;
+                line_start = i;
+            }
+            b'\r' => {
+                if bytes.get(i + 1) == Some(&b'\n') {
+                    if i + 2 <= offset {
+                        i += 2;
+                        line += 1;
+                        line_start = i;
+                    } else {
+                        // `offset` sits between `\r` and `\n`: still on the line before CRLF.
+                        break;
+                    }
+                } else {
+                    i += 1;
+                    line += 1;
+                    line_start = i;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    let content_start = line_content_start_at(input, line_start, count_line_boms);
+    let column = if offset <= content_start {
+        1
+    } else {
+        let slice = &input[content_start..offset];
+        if slice.is_ascii() {
+            slice.len() + 1
+        } else {
+            slice.chars().count() + 1
+        }
+    };
+    Some(Location::new(line, column))
 }
 
 /// Whether `text` starts with a document marker: `---` or `...` and then a blank, a line break, or
@@ -101,7 +239,7 @@ fn compat_content_start(input: &str) -> usize {
 /// when no CR is followed by an LF. Otherwise it counts each CRLF twice, which stays under twice the
 /// line count, since every CRLF ends a line, and under one more than the bytes. NEL, LS, and PS are
 /// content, and no byte of their UTF-8 is a CR or LF.
-fn lines_at_most(bytes: &[u8]) -> usize {
+pub(crate) fn lines_at_most(bytes: &[u8]) -> usize {
     // A byte-wide sum over chunks of 240 bytes, which can't overflow, is vectorized. Counting into a
     // `usize` for each byte, or counting a CRLF once, cost as much again as building the index.
     1 + bytes
@@ -115,6 +253,7 @@ fn lines_at_most(bytes: &[u8]) -> usize {
 }
 
 /// Whether a non-ASCII code point may appear outside a quoted scalar.
+#[cfg(any(test, kani))]
 fn is_printable_non_ascii(code: u32) -> bool {
     code == 0x85
         || (0xa0..=0xd7ff).contains(&code)
@@ -191,7 +330,7 @@ fn scan_line_starts<const CHECK: bool>(
         let Some(ch) = input[index..].chars().next() else {
             break;
         };
-        if CHECK && !is_printable_non_ascii(u32::from(ch)) {
+        if CHECK && is_quoted_only_non_printable(bytes, index) {
             quoted_only.push(index);
         }
         index += ch.len_utf8();
@@ -199,6 +338,7 @@ fn scan_line_starts<const CHECK: bool>(
     Ok((starts, ascii))
 }
 
+#[cfg(test)]
 impl LineStarts {
     /// Build an index for `input`.
     #[must_use]
@@ -388,6 +528,7 @@ impl LineStarts {
 ///
 /// Checks `last_line` and `last_line + 1` in O(1) for sequential token scans before falling back
 /// to binary search (`partition_point`).
+#[cfg(any(test, kani))]
 #[inline]
 fn lookup_line_index(starts: &[usize], last_line: usize, index: usize) -> usize {
     if index >= starts[last_line] {
@@ -965,6 +1106,87 @@ mod tests {
             Err(PositionError::SplitSurrogate)
         );
     }
+
+    #[test]
+    fn zero_alloc_position_helpers_match_line_starts_oracle() {
+        use super::{
+            column_on_line, is_forbidden_control_byte, is_printable_non_ascii,
+            is_quoted_only_non_printable, line_start_of, location_at,
+        };
+
+        // Exhaustive check over every Unicode scalar value for non-printable classification.
+        for cp in 0..=0x10_FFFF_u32 {
+            let Some(ch) = char::from_u32(cp) else {
+                continue;
+            };
+            let mut buf = [0_u8; 4];
+            let encoded = ch.encode_utf8(&mut buf).as_bytes();
+            if cp < 0x80 {
+                let byte = encoded[0];
+                let expected_forbidden = byte < 0x20 && !matches!(byte, b'\t' | b'\n' | b'\r');
+                assert_eq!(
+                    is_forbidden_control_byte(byte),
+                    expected_forbidden,
+                    "U+{cp:04X}"
+                );
+                assert_eq!(
+                    is_quoted_only_non_printable(encoded, 0),
+                    byte == 0x7f,
+                    "U+{cp:04X}"
+                );
+            } else {
+                assert!(!is_forbidden_control_byte(encoded[0]), "U+{cp:04X}");
+                assert_eq!(
+                    is_quoted_only_non_printable(encoded, 0),
+                    !is_printable_non_ascii(cp),
+                    "U+{cp:04X}"
+                );
+            }
+        }
+
+        // Exact agreement with `LineStarts` across ASCII, UTF-8, CR, LF, CRLF, and BOM lines.
+        let samples = [
+            "",
+            "a",
+            "a\nb\rc\r\nd\n",
+            "\r\n\r\n",
+            "é: 1\nkéy: 🚀\r\nend",
+            "\u{feff}k: v\n\u{feff}\u{feff}x: 1\r\n\u{feff}y",
+            "\u{feff}---\nx\n",
+            "\u{feff}\u{feff}--- a\n\u{feff}b",
+            "\u{feff}\u{feff}a\n",
+            "a\u{85}b\u{2028}c\u{2029}d",
+        ];
+        for input in samples {
+            for count_line_boms in [false, true] {
+                let oracle = if count_line_boms {
+                    LineStarts::counting_line_boms(input)
+                } else {
+                    LineStarts::new(input)
+                };
+                for offset in 0..=input.len() + 1 {
+                    let expected = oracle.marker(input, offset);
+                    let actual = location_at(input, offset, count_line_boms);
+                    assert_eq!(
+                        actual, expected,
+                        "location_at mismatch: input={input:?} offset={offset} compat={count_line_boms}"
+                    );
+                    if offset <= input.len() && input.is_char_boundary(offset) {
+                        assert_eq!(
+                            line_start_of(input.as_bytes(), offset),
+                            oracle.line_start(offset),
+                            "line_start_of mismatch: input={input:?} offset={offset}"
+                        );
+                        assert_eq!(
+                            column_on_line(input, offset, count_line_boms),
+                            expected.expect("valid boundary").column(),
+                            "column_on_line mismatch: input={input:?} offset={offset} compat={count_line_boms}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(kani)]
@@ -1154,5 +1376,26 @@ mod kani_proofs {
         assert!(line2 < starts.len());
         assert!(starts[line2] <= idx2);
         assert!(line2 + 1 == starts.len() || idx2 < starts[line2 + 1]);
+    }
+
+    #[kani::proof]
+    fn verify_non_printable_utf8_classification_matches_scalar_oracle() {
+        let ch: char = kani::any();
+        let mut buf = [0_u8; 4];
+        let encoded = ch.encode_utf8(&mut buf).as_bytes();
+        let cp = ch as u32;
+        if cp < 0x80 {
+            assert_eq!(
+                super::is_forbidden_control_byte(encoded[0]),
+                cp < 0x20 && cp != 0x09 && cp != 0x0a && cp != 0x0d
+            );
+            assert_eq!(super::is_quoted_only_non_printable(encoded, 0), cp == 0x7f);
+        } else {
+            assert!(!super::is_forbidden_control_byte(encoded[0]));
+            assert_eq!(
+                super::is_quoted_only_non_printable(encoded, 0),
+                !super::is_printable_non_ascii(cp)
+            );
+        }
     }
 }

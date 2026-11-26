@@ -463,6 +463,7 @@ impl Error {
     }
 
     /// Create an error with an explicit [`ErrorCode`].
+    #[cold]
     #[must_use]
     pub(crate) fn coded(kind: ErrorKind, code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
@@ -530,37 +531,21 @@ impl Error {
         self
     }
 
-    /// Fill in the line and column from this error's byte span, using `input`'s line index.
+    /// Fill in the line and column from this error's byte span, using `input` directly without
+    /// allocating a line index.
     ///
     /// This is the boundary step for an error that was built from a byte span deeper in a
     /// reader. It leaves an error that already has a location, or has no span, unchanged.
+    #[cold]
     #[must_use]
-    pub(crate) fn with_input_location(self, input: &str, compat: bool) -> Self {
-        if self.location.is_some() || self.span.is_none() {
-            return self;
-        }
-        let index = if compat {
-            crate::position::LineStarts::counting_line_boms(input)
-        } else {
-            crate::position::LineStarts::new(input)
-        };
-        self.with_location_from(&index, input)
-    }
-
-    /// Fill in the line and column from an index the reader already holds.
-    #[must_use]
-    pub(crate) fn with_location_from(
-        mut self,
-        index: &crate::position::LineStarts,
-        input: &str,
-    ) -> Self {
+    pub(crate) fn with_input_location(mut self, input: &str, compat: bool) -> Self {
         if self.location.is_some() {
             return self;
         }
         let Some(span) = self.span else {
             return self;
         };
-        if let Ok(position) = index.location(input, span.start(), crate::ColumnEncoding::Scalar) {
+        if let Some(position) = crate::position::location_at(input, span.start(), compat) {
             self.location = Some(position);
         }
         self

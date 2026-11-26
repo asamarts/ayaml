@@ -4,14 +4,14 @@
 )]
 
 use super::{
-    DocumentEvents, EventSink, TOKEN_ARENA_CHUNK, TOKEN_ARENA_MID_CHUNK, TOKEN_ARENA_SMALL_CHUNK,
-    arena_growth, flow_ends, flow_entry_count, parse_document_events, parse_events, push_token,
-    read_lines,
+    Cont, DocumentEvents, EventSink, Line, Run, TOKEN_ARENA_CHUNK, TOKEN_ARENA_MID_CHUNK,
+    TOKEN_ARENA_SMALL_CHUNK, arena_growth, flow_entry_count, parse_document_events, parse_events,
+    push_token, read_lines,
 };
 use crate::error::{Error, ErrorKind};
 use crate::event::Event;
 use crate::limits::Limits;
-use crate::scanner::{Token, TokenKind};
+use crate::scanner::{Token, TokenKind, UNMATCHED_FLOW};
 use crate::span::Span;
 
 fn fixture(name: &str) -> Option<String> {
@@ -75,7 +75,6 @@ fn push_token_grows_a_full_arena_as_arena_growth_says() {
         kind: TokenKind::FlowEntry,
         span: Span::empty(0),
     };
-    let positions = crate::position::LineStarts::new("");
     for chunk in [
         TOKEN_ARENA_SMALL_CHUNK,
         TOKEN_ARENA_MID_CHUNK,
@@ -85,15 +84,7 @@ fn push_token_grows_a_full_arena_as_arena_growth_says() {
         let (mut capacity, mut growths) = (0, 0);
         for _ in 0..40 * chunk {
             let before = tokens.capacity();
-            push_token(
-                &mut tokens,
-                token.clone(),
-                chunk,
-                usize::MAX,
-                &positions,
-                "",
-            )
-            .expect("reserve");
+            push_token(&mut tokens, token.clone(), chunk, usize::MAX, "").expect("reserve");
             if tokens.capacity() != before {
                 assert_eq!(before + 1, tokens.len(), "{chunk}: grew before it was full");
                 capacity += arena_growth(before, chunk);
@@ -112,15 +103,7 @@ fn push_token_grows_a_full_arena_as_arena_growth_says() {
     // The arena stops at the tokens the limits let a reader keep: 64, then 100 and not 128.
     let mut tokens = Vec::new();
     for _ in 0..100 {
-        push_token(
-            &mut tokens,
-            token.clone(),
-            TOKEN_ARENA_SMALL_CHUNK,
-            100,
-            &positions,
-            "",
-        )
-        .expect("reserve");
+        push_token(&mut tokens, token.clone(), TOKEN_ARENA_SMALL_CHUNK, 100, "").expect("reserve");
     }
     assert_eq!(tokens.capacity(), 100);
 }
@@ -1021,9 +1004,9 @@ fn an_estimated_arena_grows_within_its_bounds() {
 
 /// What [`read_lines`] ends with for `input`: the arena's capacity, its tokens, and how many
 /// times it was reallocated.
-fn arena_of(input: &str, limits: Limits) -> (usize, usize, usize) {
+fn arena_of(input: &str, limits: &Limits) -> (usize, usize, usize) {
     let mut scanner = crate::scanner::Scanner::new(input, limits).expect("scanner");
-    let lines = read_lines(&mut scanner).expect("lines");
+    let lines = read_lines(&mut scanner, limits).expect("lines");
     (lines.tokens.capacity(), lines.tokens.len(), lines.growths)
 }
 
@@ -1034,12 +1017,13 @@ fn a_document_of_even_density_takes_few_reservations() {
     let short_lines = "- ab\n".repeat(150_000);
     let long_lines = "- [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]\n".repeat(40_000);
     let one_line = format!("[{}a]\n", "a,".repeat(300_000));
+    let max_limits = Limits::for_max_input();
     for (name, input, tokens) in [
         ("short lines", &short_lines, 300_000),
         ("long lines", &long_lines, 880_000),
         ("one line", &one_line, 600_003),
     ] {
-        let (capacity, len, growths) = arena_of(input, Limits::for_max_input());
+        let (capacity, len, growths) = arena_of(input, &max_limits);
         assert_eq!(len, tokens, "{name}");
         assert!(
             capacity <= len + len / 32,
@@ -1052,7 +1036,7 @@ fn a_document_of_even_density_takes_few_reservations() {
 #[test]
 fn a_single_large_scalar_keeps_the_token_arena_small() {
     let input = format!("{}\n", "x".repeat(1_000_000));
-    let (capacity, len, growths) = arena_of(&input, Limits::for_max_input());
+    let (capacity, len, growths) = arena_of(&input, &Limits::for_max_input());
     assert_eq!(len, 1);
     assert!(
         capacity <= TOKEN_ARENA_SMALL_CHUNK,
@@ -1068,7 +1052,7 @@ fn a_dense_prefix_reserves_no_arena_for_a_sparse_rest() {
     // them never arrive. The arena stays within eight times the tokens it holds.
     let mut input = "a: b\n".repeat(20_000);
     input.push_str(&"#\n".repeat(1_000_000));
-    let (capacity, len, growths) = arena_of(&input, Limits::for_max_input());
+    let (capacity, len, growths) = arena_of(&input, &Limits::for_max_input());
     assert_eq!(len, 60_000);
     assert!(
         capacity <= len * super::TOKEN_ARENA_AHEAD,
@@ -1083,7 +1067,7 @@ fn a_sparse_prefix_grows_to_a_dense_rest_in_few_steps() {
     // estimated again, so the copies stay few and the arena ends close to its tokens.
     let mut input = "key: value # a long comment that holds no token at all\n".repeat(600);
     input.push_str(&"- a\n".repeat(300_000));
-    let (capacity, len, growths) = arena_of(&input, Limits::for_max_input());
+    let (capacity, len, growths) = arena_of(&input, &Limits::for_max_input());
     assert_eq!(len, 601_800);
     assert!(
         capacity <= len + len / 8,
@@ -1098,7 +1082,8 @@ fn a_megabyte_sparse_head_before_a_dense_tail_takes_few_reservations() {
     let mut comments = "# comment line padding to make a megabyte sparse head\n".repeat(20_000);
     assert!(comments.len() >= 1024 * 1024);
     comments.push_str(&"- a\n".repeat(250_000));
-    let (capacity, len, growths) = arena_of(&comments, Limits::for_max_input());
+    let max_limits = Limits::for_max_input();
+    let (capacity, len, growths) = arena_of(&comments, &max_limits);
     assert_eq!(len, 500_000);
     assert!(
         capacity <= len + len / 8,
@@ -1111,7 +1096,7 @@ fn a_megabyte_sparse_head_before_a_dense_tail_takes_few_reservations() {
     block.push_str(&format!("  {}\n", "x".repeat(1024)).repeat(1_024));
     assert!(block.len() >= 1024 * 1024);
     block.push_str(&"- a\n".repeat(100_000));
-    let (capacity, len, growths) = arena_of(&block, Limits::for_max_input());
+    let (capacity, len, growths) = arena_of(&block, &max_limits);
     assert_eq!(len, 200_002);
     assert!(
         capacity <= len + len / 8,
@@ -1123,14 +1108,13 @@ fn a_megabyte_sparse_head_before_a_dense_tail_takes_few_reservations() {
 #[test]
 fn overflowing_token_reservation_returns_token_limit_error_without_panicking() {
     let mut tokens: Vec<Token<'_>> = Vec::new();
-    let positions = crate::position::LineStarts::new("a\n");
     let err = super::reserve_tokens(
         &mut tokens,
         usize::MAX,
         usize::MAX,
         Span::empty(0),
-        &positions,
         "a\n",
+        false,
     )
     .expect_err("overflowing reservation must return an error");
     assert_eq!(err.kind(), ErrorKind::Limit);
@@ -1146,13 +1130,13 @@ fn the_arena_never_reserves_past_the_token_limit() {
     // would pass the limit, and the arena stops at it.
     let input = "- a\n".repeat(50_000);
     let limits = Limits::default().with_max_events(100_000);
-    let (capacity, len, _) = arena_of(&input, limits);
+    let (capacity, len, _) = arena_of(&input, &limits);
     assert_eq!((capacity, len), (100_000, 100_000));
     // One token more than the limit allows is refused, by the scanner.
     let input = "- a\n".repeat(50_001);
     let limits = Limits::default().with_max_events(100_000);
-    let mut scanner = crate::scanner::Scanner::new(&input, limits).expect("scanner");
-    let Err(error) = read_lines(&mut scanner) else {
+    let mut scanner = crate::scanner::Scanner::new(&input, &limits).expect("scanner");
+    let Err(error) = read_lines(&mut scanner, &limits) else {
         panic!("the input is over the token limit");
     };
     assert_eq!(
@@ -1207,27 +1191,181 @@ fn a_token_stays_small() {
 }
 
 #[test]
+fn internal_parser_types_stay_compact() {
+    assert!(size_of::<Cont>() <= 64, "{}", size_of::<Cont>());
+    assert_eq!(size_of::<Line>(), 12);
+    assert_eq!(size_of::<Run>(), 12);
+    assert_eq!(size_of::<Box<Error>>(), size_of::<usize>());
+}
+
+#[test]
+fn flow_fast_path_handles_nested_errors_limits_and_edge_cases() {
+    // Nested flow collections via flow mapping fast path (Pattern 1 & Pattern 2).
+    let nested = r#"{"a": [1, 2, {"b": [3, 4], "c": "x"}], "d": {}, "e": []}"#;
+    let evs = events(nested);
+    assert_eq!(
+        evs.iter()
+            .filter(|e| matches!(e, Event::MappingStart { .. }))
+            .count(),
+        3
+    );
+    assert_eq!(
+        evs.iter()
+            .filter(|e| matches!(e, Event::SequenceStart { .. }))
+            .count(),
+        3
+    );
+
+    // Trailing commas, empty collections, and long flow collections crossing `QUEUE_ROOM = 16`.
+    let long_seq = format!(
+        "[{}]",
+        (0..40)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let long_map = format!(
+        "{{{}}}",
+        (0..24)
+            .map(|i| format!("k{i}: {i}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for valid in [
+        "[1, 2,]",
+        r#"{"a": 1, "b": 2,}"#,
+        r#"{"a": [1,], "b": {"c": 3,},}"#,
+        "[[[]]]",
+        r#"{"a": {"b": {"c": 1}}}"#,
+        &long_seq,
+        &long_map,
+    ] {
+        let collected = parse_document_events(valid, &Limits::default(), false).expect(valid);
+        let (on_demand, _) = events_on_demand(valid, &Limits::default(), false).expect(valid);
+        assert_eq!(collected, on_demand, "{valid:?}");
+    }
+
+    // Mismatched/malformed flow brackets and missing commas must still fail cleanly with exact
+    // error parity across `DocumentEvents` lookahead queue refills (`QUEUE_ROOM = 16`, hitting the
+    // exact yield boundary at 13 sequence items [3+13=16] and 7 mapping pairs [3+14=17]).
+    let boundary_seq_double_comma = format!(
+        "[{}, , 1]",
+        (0..13)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let boundary_map_double_comma = format!(
+        "{{{}, , a: 1}}",
+        (0..7)
+            .map(|i| format!("k{i}: {i}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let long_seq_double_comma = format!(
+        "[{}, , 1]",
+        (0..20)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let long_map_double_comma = format!(
+        "{{{}, , a: 1}}",
+        (0..12)
+            .map(|i| format!("k{i}: {i}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for invalid in [
+        r#"{"a": [1, 2}, "b": 3}"#,
+        r#"{"a": [1] ]}"#,
+        r#"{"a": [1]"#,
+        r#"{"a": 1 "b": 2}"#,
+        "{a: 1, , b: 2}",
+        "[1, , 2]",
+        r#"{"a": [1, 2] "b": 3}"#,
+        &boundary_seq_double_comma,
+        &boundary_map_double_comma,
+        &long_seq_double_comma,
+        &long_map_double_comma,
+    ] {
+        let collected =
+            parse_document_events(invalid, &Limits::default(), false).expect_err(invalid);
+        let on_demand = events_on_demand(invalid, &Limits::default(), false).expect_err(invalid);
+        assert_eq!(
+            format!("{collected:?}"),
+            format!("{on_demand:?}"),
+            "{invalid:?}"
+        );
+    }
+
+    // Deep nested long flow implicit keys must stay O(1) per level via the 4096-byte ceiling.
+    let deep_long_flow_key = format!(
+        "{}{}a{}",
+        "[".repeat(64),
+        "a,".repeat(2_000),
+        "]:1".repeat(64)
+    );
+    assert!(parse_events(&deep_long_flow_key, &Limits::default()).is_err());
+
+    // Deep compact block sequence with wide leading indent verifies incremental `column_cache`.
+    let compact_block = format!("{}{}a\n", " ".repeat(4_096), "- ".repeat(64));
+    let compact_evs = events(&compact_block);
+    assert_eq!(
+        compact_evs
+            .iter()
+            .filter(|e| matches!(e, Event::SequenceStart { .. }))
+            .count(),
+        64
+    );
+
+    // Collection entry limit inside fast-path flow sequence & mapping.
+    let limited = Limits::default().with_max_collection_entries(2);
+    let seq_err = parse_events("[1, 2, 3]", &limited).expect_err("seq limit");
+    assert_eq!(seq_err.kind(), ErrorKind::Limit);
+    let map_err = parse_events(r#"{"a": 1, "b": 2, "c": 3}"#, &limited).expect_err("map limit");
+    assert_eq!(map_err.kind(), ErrorKind::Limit);
+    let nested_map_err =
+        parse_events(r#"{"a": [1], "b": [2], "c": [3]}"#, &limited).expect_err("nested map limit");
+    assert_eq!(nested_map_err.kind(), ErrorKind::Limit);
+
+    // Depth limit inside Pattern 2 nested flow mapping value.
+    let shallow = Limits::default().with_max_depth(2);
+    let depth_err = parse_events(r#"{"a": {"b": {"c": 1}}}"#, &shallow).expect_err("depth limit");
+    assert_eq!(depth_err.kind(), ErrorKind::Limit);
+}
+
+#[test]
 fn root_flow_collections_count_their_entries() {
     let input = "[1, 2, {a: 3, b: [4, 5]}]\n";
-    let mut scanner = crate::scanner::Scanner::new(input, Limits::default()).expect("scanner");
-    let lines = read_lines(&mut scanner).expect("lines");
-    let ends = flow_ends(&lines.tokens);
-    let open = lines
+    let limits = Limits::default();
+    let mut scanner = crate::scanner::Scanner::new(input, &limits).expect("scanner");
+    let lines = read_lines(&mut scanner, &limits).expect("lines");
+    let (open, open_end) = lines
         .tokens
         .iter()
-        .position(|token| matches!(token.kind, TokenKind::FlowSequenceStart))
+        .enumerate()
+        .find_map(|(i, token)| match token.kind {
+            TokenKind::FlowSequenceStart { end } => Some((i, end as usize)),
+            _ => None,
+        })
         .expect("sequence start");
-    assert_eq!(flow_entry_count(&lines.tokens, open, ends[&open]), 3);
-    let mapping = lines
+    assert_eq!(flow_entry_count(&lines.tokens, open, open_end), 3);
+    let (mapping, mapping_end) = lines
         .tokens
         .iter()
-        .position(|token| matches!(token.kind, TokenKind::FlowMappingStart))
+        .enumerate()
+        .find_map(|(i, token)| match token.kind {
+            TokenKind::FlowMappingStart { end } => Some((i, end as usize)),
+            _ => None,
+        })
         .expect("mapping start");
-    assert_eq!(flow_entry_count(&lines.tokens, mapping, ends[&mapping]), 2);
+    assert_eq!(flow_entry_count(&lines.tokens, mapping, mapping_end), 2);
 }
 
 #[test]
 fn separators_alone_count_no_flow_entry() {
+    let limits = Limits::default();
     for (input, entries) in [
         ("[]\n", 0),
         ("[1]\n", 1),
@@ -1235,11 +1373,16 @@ fn separators_alone_count_no_flow_entry() {
         ("[[], {}]\n", 2),
         ("{a: 1, b: 2}\n", 2),
     ] {
-        let mut scanner = crate::scanner::Scanner::new(input, Limits::default()).expect("scanner");
-        let lines = read_lines(&mut scanner).expect("lines");
-        let ends = flow_ends(&lines.tokens);
+        let mut scanner = crate::scanner::Scanner::new(input, &limits).expect("scanner");
+        let lines = read_lines(&mut scanner, &limits).expect("lines");
+        let close = match lines.tokens[0].kind {
+            TokenKind::FlowSequenceStart { end } | TokenKind::FlowMappingStart { end } => {
+                end as usize
+            }
+            _ => panic!("expected root flow collection for {input:?}"),
+        };
         assert_eq!(
-            flow_entry_count(&lines.tokens, 0, ends[&0]),
+            flow_entry_count(&lines.tokens, 0, close),
             entries,
             "{input:?}"
         );
@@ -1250,7 +1393,9 @@ fn separators_alone_count_no_flow_entry() {
         span: Span::empty(0),
     };
     let commas = [
-        indicator(TokenKind::FlowSequenceStart),
+        indicator(TokenKind::FlowSequenceStart {
+            end: UNMATCHED_FLOW,
+        }),
         indicator(TokenKind::FlowEntry),
         indicator(TokenKind::FlowEntry),
         indicator(TokenKind::FlowEntry),
@@ -1266,9 +1411,9 @@ fn event_capacity_reserves_from_the_token_count() {
         span: Span::empty(0),
     };
     let tokens = vec![token.clone(); 1_000];
-    let lines = vec![super::Line {
+    let lines = vec![Line {
         start: 0,
-        end: tokens.len(),
+        end: u32::try_from(tokens.len()).expect("u32"),
         indent: 0,
     }];
     assert_eq!(super::event_capacity(&lines, &tokens), 1_000 * 4 / 5 + 200);
@@ -1276,7 +1421,7 @@ fn event_capacity_reserves_from_the_token_count() {
     // Small documents scale proportionally rather than reserving +200..+256 flat headroom.
     let small_tokens = vec![token; 40];
     let small_lines = vec![
-        super::Line {
+        Line {
             start: 0,
             end: 40,
             indent: 2,

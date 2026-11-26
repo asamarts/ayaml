@@ -10,13 +10,14 @@
 //! tree being built, plus the node's size estimate and nesting height, so a
 //! node is copied only when an alias materializes it.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::error::{Error, ErrorCode, ErrorKind};
-use crate::event::{Anchor, Event};
+use crate::event::{Anchor, Event, ScalarStyle};
 use crate::limits::{AliasBudget, Limits};
 use crate::mapping::{Mapping, SMALL_LIMIT};
-use crate::resolver::resolve_scalar_cow;
+use crate::resolver::{resolve_plain, resolve_scalar_cow};
 use crate::span::Span;
 use crate::tag::{Tag, TaggedValue};
 use crate::value::Value;
@@ -45,7 +46,7 @@ pub(crate) fn compose_documents_with_budget<'a>(
 ) -> Result<Vec<Value>, Error> {
     let mut composer = StreamingComposer::with_budget(limits.clone(), input_len, *budget);
     for event in events {
-        composer.event(event)?;
+        composer.event(event).map_err(|error| *error)?;
     }
     let (documents, spent) = composer.finish_with_budget()?;
     *budget = spent;
@@ -402,24 +403,63 @@ impl<'a> StreamingComposer<'a> {
         self.next_capacity = entries.min(self.limits.max_collection_entries);
     }
 
-    pub(crate) fn event(&mut self, event: Event<'a>) -> Result<(), Error> {
+    /// Fast path for an untagged, unanchored plain scalar directly from the parser.
+    #[inline]
+    pub(crate) fn plain_scalar(&mut self, value: &str, span: Span) -> Result<(), Box<Error>> {
+        self.next_capacity = 0;
+        let resolved = resolve_plain(value).unwrap_or_else(|| Value::String(value.to_owned()));
+        let size = if self.anchors.is_empty() {
+            0
+        } else {
+            estimate_size(&resolved, self.limits.node_cost_bytes)
+        };
+        self.feed(resolved, span, size, 0)
+    }
+
+    /// Direct scalar entry point bypassing `Event::Scalar` construction and unused `raw` slices.
+    #[inline]
+    pub(crate) fn scalar(
+        &mut self,
+        value: Cow<'a, str>,
+        style: ScalarStyle,
+        tag: Option<&Tag>,
+        anchor: Option<&Anchor<'a>>,
+        span: Span,
+    ) -> Result<(), Box<Error>> {
+        self.next_capacity = 0;
+        let resolved = resolve_scalar_cow(value, style, tag)
+            .map_err(|error| Box::new(error.with_span(span)))?;
+        // Skip size estimation when no anchor is open or being defined in this document.
+        // Scalar values always have collection nesting height 0.
+        let size = if anchor.is_some() || !self.anchors.is_empty() {
+            estimate_size(&resolved, self.limits.node_cost_bytes)
+        } else {
+            0
+        };
+        self.record_anchor(anchor, size, 0, Anchors::define);
+        self.feed(resolved, span, size, 0)
+    }
+
+    pub(crate) fn event(&mut self, event: Event<'a>) -> Result<(), Box<Error>> {
         let reserved = std::mem::take(&mut self.next_capacity);
         match event {
             Event::StreamStart { .. } | Event::StreamEnd { .. } | Event::Directive { .. } => {}
             Event::DocumentStart { span, .. } => {
                 if !self.stack.is_empty() {
-                    return Err(Error::new(
+                    return Err(Box::new(Error::new(
                         ErrorKind::Composition,
                         "document started inside a collection",
-                    ));
+                    )));
                 }
                 if self.single_document && self.single_completed {
-                    return Err(Error::coded(
-                        ErrorKind::Parser,
-                        ErrorCode::TrailingDocuments,
-                        "expected a single YAML document, but found trailing documents",
-                    )
-                    .with_span(span));
+                    return Err(Box::new(
+                        Error::coded(
+                            ErrorKind::Parser,
+                            ErrorCode::TrailingDocuments,
+                            "expected a single YAML document, but found trailing documents",
+                        )
+                        .with_span(span),
+                    ));
                 }
                 // Anchors are scoped to a document; an alias may not see a
                 // definition from an earlier document.
@@ -448,37 +488,29 @@ impl<'a> StreamingComposer<'a> {
                 span,
                 ..
             } => {
-                let resolved = resolve_scalar_cow(value, style, tag.as_ref())
-                    .map_err(|error| error.with_span(span))?;
-                // Skip size estimation when no anchor is open or being defined in this document.
-                // Scalar values always have collection nesting height 0.
-                let size = if anchor.is_some() || !self.anchors.is_empty() {
-                    estimate_size(&resolved, self.limits.node_cost_bytes)
-                } else {
-                    0
-                };
-                self.record_anchor(anchor.as_ref(), size, 0, Anchors::define);
-                self.feed(resolved, span, size, 0)?;
+                return self.scalar(value, style, tag.as_ref(), anchor.as_ref(), span);
             }
             Event::Alias { anchor, span } => {
                 let (size, height, value) = {
-                    let definition = self
-                        .anchors
-                        .resolve(anchor.as_str())
-                        .map_err(|(code, message)| self.error_at(span, message).with_code(code))?;
+                    let definition =
+                        self.anchors
+                            .resolve(anchor.as_str())
+                            .map_err(|(code, message)| {
+                                Box::new((*self.error_at(span, message)).with_code(code))
+                            })?;
                     let size = definition.size;
                     let height = definition.height;
                     // Charge before cloning: the clone is the allocation this
                     // budget exists to bound.
                     self.budget
                         .charge(&self.limits, self.input_len, size)
-                        .map_err(|error| error.with_span(span))?;
+                        .map_err(|error| Box::new(error.with_span(span)))?;
                     // The alias nests its target here, so the target's
                     // collections count toward the depth.
                     if height > 0 {
                         self.limits
                             .check_depth(self.stack.len() + height)
-                            .map_err(|error| Error::from(error).with_span(span))?;
+                            .map_err(|error| Box::new(Error::from(error).with_span(span)))?;
                     }
                     let value = anchored_value(
                         &self.stack,
@@ -488,8 +520,10 @@ impl<'a> StreamingComposer<'a> {
                     )
                     .cloned()
                     .ok_or_else(|| {
-                        self.error_at(span, "unknown anchor")
-                            .with_code(ErrorCode::UnknownAnchor)
+                        Box::new(
+                            (*self.error_at(span, "unknown anchor"))
+                                .with_code(ErrorCode::UnknownAnchor),
+                        )
                     })?;
                     (size, height, value)
                 };
@@ -500,7 +534,7 @@ impl<'a> StreamingComposer<'a> {
             } => {
                 self.limits
                     .check_depth(self.stack.len() + 1)
-                    .map_err(|error| Error::from(error).with_span(span))?;
+                    .map_err(|error| Box::new(Error::from(error).with_span(span)))?;
                 if let Some(anchor) = &anchor {
                     self.anchors.open(anchor.as_str());
                 }
@@ -527,7 +561,7 @@ impl<'a> StreamingComposer<'a> {
             } => {
                 self.limits
                     .check_depth(self.stack.len() + 1)
-                    .map_err(|error| Error::from(error).with_span(span))?;
+                    .map_err(|error| Box::new(Error::from(error).with_span(span)))?;
                 if let Some(anchor) = &anchor {
                     self.anchors.open(anchor.as_str());
                 }
@@ -555,7 +589,7 @@ impl<'a> StreamingComposer<'a> {
     }
 
     #[inline]
-    fn finish_sequence(&mut self, span: Span) -> Result<(), Error> {
+    fn finish_sequence(&mut self, span: Span) -> Result<(), Box<Error>> {
         let Some(Frame::Sequence {
             tag,
             anchor,
@@ -590,7 +624,7 @@ impl<'a> StreamingComposer<'a> {
     }
 
     #[inline]
-    fn finish_mapping(&mut self, span: Span) -> Result<(), Error> {
+    fn finish_mapping(&mut self, span: Span) -> Result<(), Box<Error>> {
         let Some(Frame::Mapping {
             tag,
             anchor,
@@ -604,11 +638,13 @@ impl<'a> StreamingComposer<'a> {
             return Err(self.error_at(span, "unexpected mapping end"));
         };
         if let Some((key, key_span)) = pending_key {
-            return Err(Error::new(
-                ErrorKind::Composition,
-                format!("mapping key without value: {key:?}"),
-            )
-            .with_span(key_span));
+            return Err(Box::new(
+                Error::new(
+                    ErrorKind::Composition,
+                    format!("mapping key without value: {key:?}"),
+                )
+                .with_span(key_span),
+            ));
         }
         let mapping = match mapping {
             MapBuf::Scratch { len: 0, .. } => Mapping::new(),
@@ -699,7 +735,13 @@ impl<'a> StreamingComposer<'a> {
         (value, size)
     }
 
-    fn feed(&mut self, value: Value, span: Span, size: usize, height: usize) -> Result<(), Error> {
+    fn feed(
+        &mut self,
+        value: Value,
+        span: Span,
+        size: usize,
+        height: usize,
+    ) -> Result<(), Box<Error>> {
         match self.stack.last_mut() {
             Some(Frame::Sequence {
                 items,
@@ -745,14 +787,16 @@ impl<'a> StreamingComposer<'a> {
                             if let Some((existing_key, _)) =
                                 existing.iter().find(|(k, _)| k == &key)
                             {
-                                return Err(Error::new(
-                                    ErrorKind::DuplicateKey,
-                                    format!(
-                                        "duplicate mapping key: {}",
-                                        crate::value::key_text(existing_key)
-                                    ),
-                                )
-                                .with_span(key_span));
+                                return Err(Box::new(
+                                    Error::new(
+                                        ErrorKind::DuplicateKey,
+                                        format!(
+                                            "duplicate mapping key: {}",
+                                            crate::value::key_text(existing_key)
+                                        ),
+                                    )
+                                    .with_span(key_span),
+                                ));
                             }
                             if usize::from(*len) < SMALL_LIMIT {
                                 if self.scratch_entries.capacity() == 0 {
@@ -771,11 +815,13 @@ impl<'a> StreamingComposer<'a> {
                         }
                         MapBuf::Large(large) => {
                             if let Err(duplicate) = large.insert_new(key, value) {
-                                return Err(Error::new(
-                                    ErrorKind::DuplicateKey,
-                                    format!("duplicate mapping key: {duplicate}"),
-                                )
-                                .with_span(key_span));
+                                return Err(Box::new(
+                                    Error::new(
+                                        ErrorKind::DuplicateKey,
+                                        format!("duplicate mapping key: {duplicate}"),
+                                    )
+                                    .with_span(key_span),
+                                ));
                             }
                         }
                     }
@@ -809,12 +855,15 @@ impl<'a> StreamingComposer<'a> {
         }
     }
 
+    #[cold]
+    #[inline(never)]
     #[allow(
         clippy::unused_self,
-        reason = "the method is part of a uniform grammar or diagnostic surface"
+        clippy::unnecessary_box_returns,
+        reason = "hot-path callers propagate Box<Error> to keep Result<_, Box<Error>> pointer-sized"
     )]
-    fn error_at(&self, span: Span, message: impl Into<String>) -> Error {
-        Error::new(ErrorKind::Composition, message).with_span(span)
+    fn error_at(&self, span: Span, message: impl Into<String>) -> Box<Error> {
+        Box::new(Error::new(ErrorKind::Composition, message).with_span(span))
     }
 }
 

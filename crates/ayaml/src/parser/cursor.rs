@@ -3,11 +3,10 @@
 use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 
-use super::{Line, Lines, parse_lines};
+use super::{Line, Lines, link_flow_ends, parse_lines};
 use crate::error::Error;
 use crate::event::{Event, ScalarStyle};
 use crate::limits::Limits;
-use crate::position::LineStarts;
 use crate::scanner::{Scanner, Token, TokenKind};
 use crate::span::Span;
 
@@ -21,7 +20,6 @@ pub(crate) struct EventCursor<'a> {
     scanner: Scanner<'a>,
     limits: Limits,
     input: &'a str,
-    positions: LineStarts,
     pending_line: Option<Vec<Token<'a>>>,
     pub(super) queue: VecDeque<Event<'a>>,
     stream_started: bool,
@@ -40,12 +38,13 @@ pub(crate) struct EventCursor<'a> {
     ///
     /// Scanner errors hold only owned metadata (no dynamic `source`), so wrapping in
     /// `AssertUnwindSafe` preserves `EventStream` and `Deserializer`'s `UnwindSafe` auto-trait.
-    scanner_error: Option<AssertUnwindSafe<Error>>,
+    scanner_error: Option<AssertUnwindSafe<Box<Error>>>,
     /// Whether the final line scanned before `scanner_error` was truncated mid-line.
     truncated_last_line: bool,
 }
 
 impl<'a> EventCursor<'a> {
+    #[cold]
     #[allow(
         clippy::unused_self,
         reason = "the method is part of a uniform grammar or diagnostic surface"
@@ -53,7 +52,7 @@ impl<'a> EventCursor<'a> {
     fn limit_at(&self, span: Span, limit: crate::limits::LimitExceeded) -> Error {
         Error::from(limit)
             .with_span(span)
-            .with_location_from(&self.positions, self.input)
+            .with_input_location(self.input, self.compat)
     }
 
     pub(crate) fn new(input: &'a str, limits: &Limits) -> Result<Self, Error> {
@@ -71,13 +70,11 @@ impl<'a> EventCursor<'a> {
         limits: &Limits,
         compat: bool,
     ) -> Result<Self, Error> {
-        let scanner = Scanner::with_compat(input, limits.clone(), compat)?;
-        let positions = scanner.line_index().clone();
+        let scanner = Scanner::with_compat(input, limits, compat).map_err(|error| *error)?;
         Ok(Self {
             scanner,
             limits: limits.clone(),
             input,
-            positions,
             pending_line: None,
             queue: VecDeque::new(),
             stream_started: false,
@@ -100,7 +97,7 @@ impl<'a> EventCursor<'a> {
         }
         self.stream_started = true;
         let result = (|| {
-            let span = match self.scanner.next_token()? {
+            let span = match self.scanner.next_token(&self.limits).map_err(|e| *e)? {
                 Some(token) if matches!(token.kind, TokenKind::StreamStart) => token.span,
                 _ => Span::empty(0),
             };
@@ -110,7 +107,7 @@ impl<'a> EventCursor<'a> {
                 .map_err(|error| self.limit_at(span, error))?;
             Ok(span)
         })()
-        .map_err(|error: Error| error.with_location_from(&self.positions, self.input));
+        .map_err(|error: Error| error.with_input_location(self.input, self.compat));
         if result.is_err() {
             self.stream_ended = true;
             self.queue.clear();
@@ -122,7 +119,7 @@ impl<'a> EventCursor<'a> {
     pub(crate) fn next_document(&mut self) -> Result<Option<Vec<Event<'a>>>, Error> {
         let result = self
             .next_document_inner()
-            .map_err(|error| error.with_location_from(&self.positions, self.input));
+            .map_err(|error| error.with_input_location(self.input, self.compat));
         if result.is_err() {
             self.stream_ended = true;
             self.queue.clear();
@@ -133,7 +130,7 @@ impl<'a> EventCursor<'a> {
     fn next_document_inner(&mut self) -> Result<Option<Vec<Event<'a>>>, Error> {
         if !self.stream_started {
             self.stream_started = true;
-            let span = match self.scanner.next_token()? {
+            let span = match self.scanner.next_token(&self.limits).map_err(|e| *e)? {
                 Some(token) if matches!(token.kind, TokenKind::StreamStart) => token.span,
                 _ => Span::empty(0),
             };
@@ -205,7 +202,7 @@ impl<'a> EventCursor<'a> {
     fn next_event_slow(&mut self) -> Result<Option<Event<'a>>, Error> {
         let result = self
             .next_event_inner()
-            .map_err(|error| error.with_location_from(&self.positions, self.input));
+            .map_err(|error| error.with_input_location(self.input, self.compat));
         if result.is_err() {
             self.stream_ended = true;
             self.queue.clear();
@@ -218,7 +215,7 @@ impl<'a> EventCursor<'a> {
             self.stream_started = true;
             // The scanner's stream start is where an eager parse puts the event,
             // after a byte order mark.
-            let span = match self.scanner.next_token()? {
+            let span = match self.scanner.next_token(&self.limits).map_err(|e| *e)? {
                 Some(token) if matches!(token.kind, TokenKind::StreamStart) => token.span,
                 _ => Span::empty(0),
             };
@@ -276,22 +273,22 @@ impl<'a> EventCursor<'a> {
                 break;
             }
             seen_document |= is_start || !matches!(first_kind, TokenKind::Directive(_));
-            lines.push(Line::new(
-                &tokens,
-                start,
-                tokens.len(),
-                self.input,
-                &self.positions,
-            ));
+            lines.push(
+                Line::new(&tokens, start, tokens.len(), self.input, self.compat)
+                    .map_err(|error| *error)?,
+            );
             if is_end {
                 break;
             }
         }
         if lines.is_empty() {
             if let Some(error) = self.scanner_error.take() {
-                return Err(error.0);
+                return Err(*error.0);
             }
             return Ok(None);
+        }
+        if self.scanner.saw_flow_start() {
+            link_flow_ends(&mut tokens);
         }
         // The document ends where an eager parse would go on: at the next document's first
         // token, or at the stream end. When a deferred scanner error halted scanning before
@@ -324,7 +321,6 @@ impl<'a> EventCursor<'a> {
                 tokens,
                 stream_start: None,
                 stream_end: None,
-                positions: self.positions.clone(),
                 scanner_error,
                 truncated_last_line,
                 #[cfg(test)]
@@ -351,7 +347,7 @@ impl<'a> EventCursor<'a> {
         }
         let start = out.len();
         loop {
-            match self.scanner.next_token() {
+            match self.scanner.next_token(&self.limits) {
                 Ok(None) => {
                     self.eof = true;
                     return Ok(out.len() > start);
@@ -378,7 +374,7 @@ impl<'a> EventCursor<'a> {
                 }
                 Err(error) => {
                     if !self.scanner.saw_flow_start() {
-                        return Err(error);
+                        return Err(*error);
                     }
                     self.eof = true;
                     self.scanner_error = Some(AssertUnwindSafe(error));

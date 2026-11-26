@@ -6,13 +6,12 @@
 //! and the value. A step that emits a run of events, of scalar entries or of directives, stops
 //! within the run, so the events that wait stay a few however long the run is.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
-use super::{Cont, EventSink, Lines, Opening, Parser, Step, flow_ends, read_lines};
+use super::{Cont, EventSink, Lines, Opening, Parser, Step, matched_flow_end, read_lines};
 use crate::error::{Error, ErrorKind};
 use crate::event::Event;
 use crate::limits::Limits;
-use crate::position::LineStarts;
 use crate::scanner::Scanner;
 use crate::span::Span;
 
@@ -50,31 +49,28 @@ enum State {
 impl<'a> DocumentEvents<'a> {
     /// Scan the input. An error here is the scanner's, before any event.
     pub(crate) fn new(input: &'a str, limits: &Limits, compat_flow: bool) -> Result<Self, Error> {
-        let mut scanner = Scanner::with_compat(input, limits.clone(), compat_flow)?;
+        let mut scanner =
+            Scanner::with_compat(input, limits, compat_flow).map_err(|error| *error)?;
         let Lines {
             lines,
             tokens,
             stream_start,
             stream_end,
-            positions,
             scanner_error,
             truncated_last_line,
             ..
-        } = read_lines(&mut scanner)?;
-        let flow_ends = flow_ends(&tokens);
+        } = read_lines(&mut scanner, limits).map_err(|error| *error)?;
         let end = stream_end.map_or(input.len(), Span::start);
         Ok(Self {
             parser: Parser {
                 lines,
                 token_arena: tokens,
-                flow_ends,
                 sink: EventSink::Queue {
                     events: VecDeque::with_capacity(2 * EventSink::QUEUE_ROOM),
                     root_entries: None,
                 },
                 limits: limits.clone(),
                 input,
-                positions,
                 compat: compat_flow,
                 documents: 0,
                 emitted: 0,
@@ -83,6 +79,7 @@ impl<'a> DocumentEvents<'a> {
                 end,
                 scanner_error,
                 truncated_last_line,
+                column_cache: (u32::MAX, 0, 0),
             },
             state: State::Start,
             step: None,
@@ -210,8 +207,6 @@ impl<'a> DocumentEvents<'a> {
     fn clear_parser_storage(&mut self) {
         self.parser.lines = Vec::new();
         self.parser.token_arena = Vec::new();
-        self.parser.flow_ends = HashMap::new();
-        self.parser.positions = LineStarts::new("");
         self.stack = Vec::new();
     }
 
@@ -255,9 +250,9 @@ impl<'a> DocumentEvents<'a> {
                         return true;
                     }
                 }
-                TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart => {
+                TokenKind::FlowSequenceStart { end } | TokenKind::FlowMappingStart { end } => {
                     // An implicit complex flow key (`[...]: v` or `{...}: v`) is built whole.
-                    if let Some(&close) = self.parser.flow_ends.get(&index)
+                    if let Some(close) = matched_flow_end(*end)
                         && close.saturating_sub(index) >= large_span
                         && matches!(
                             tokens.get(close + 1).map(|t| &t.kind),
@@ -285,15 +280,11 @@ impl<'a> DocumentEvents<'a> {
         ) {
             index += 1;
         }
-        if matches!(
-            tokens.get(index).map(|t| &t.kind),
-            Some(TokenKind::FlowSequenceStart | TokenKind::FlowMappingStart)
-        ) {
-            return self
-                .parser
-                .flow_ends
-                .get(&index)
-                .is_some_and(|&close| close.saturating_sub(index) >= large_span);
+        if let Some(TokenKind::FlowSequenceStart { end } | TokenKind::FlowMappingStart { end }) =
+            tokens.get(index).map(|t| &t.kind)
+        {
+            return matched_flow_end(*end)
+                .is_some_and(|close| close.saturating_sub(index) >= large_span);
         }
         false
     }
@@ -310,6 +301,10 @@ impl<'a> DocumentEvents<'a> {
     /// taken up once for several events. An error in what is read ahead is the document's, and
     /// the document's error is the one a reader reports, wherever its target stands.
     fn fill(&mut self) -> Result<(), Error> {
+        self.fill_inner().map_err(|error| *error)
+    }
+
+    fn fill_inner(&mut self) -> Result<(), Box<Error>> {
         while !self.parser.sink.is_full() {
             // An error leaves the state finished, so nothing is read after it.
             let state = std::mem::replace(&mut self.state, State::Finished);
@@ -340,7 +335,7 @@ impl<'a> DocumentEvents<'a> {
 
     /// Read a document's directives and its start from line `index`, as `Parser::parse_stream`
     /// does.
-    fn open(&mut self, index: usize, directives: bool) -> Result<State, Error> {
+    fn open(&mut self, index: usize, directives: bool) -> Result<State, Box<Error>> {
         Ok(match self.parser.open_document(index, directives)? {
             Opening::End => self.end()?,
             Opening::NoDocument(next) => State::Between(next),
@@ -362,7 +357,7 @@ impl<'a> DocumentEvents<'a> {
     }
 
     /// Run a root's steps, as `Parser::run` does, until enough events wait or the root ends.
-    fn root(&mut self, block: bool) -> Result<State, Error> {
+    fn root(&mut self, block: bool) -> Result<State, Box<Error>> {
         let Some(mut step) = self.step.take() else {
             return Ok(State::Finished);
         };
@@ -383,7 +378,7 @@ impl<'a> DocumentEvents<'a> {
         }
     }
 
-    fn end(&mut self) -> Result<State, Error> {
+    fn end(&mut self) -> Result<State, Box<Error>> {
         self.parser.emit(Event::StreamEnd {
             span: self.stream_end,
         })?;

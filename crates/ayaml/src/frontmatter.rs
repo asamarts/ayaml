@@ -9,7 +9,6 @@
 use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::limits::Limits;
 use crate::options::ParseOptions;
-use crate::position::LineStarts;
 use crate::span::{Location, Span};
 use crate::value::Value;
 
@@ -378,14 +377,13 @@ fn next_line_len_bounded(s: &str, max_len: usize) -> Option<usize> {
 
 fn missing_closing_delimiter(input: &str, open_span: Span) -> Error {
     let prefix = &input[..open_span.end()];
-    let index = LineStarts::new(prefix);
     Error::coded(
         ErrorKind::Parser,
         ErrorCode::UnexpectedToken,
         "unterminated frontmatter: expected closing `---` or `...` delimiter",
     )
     .with_span(open_span)
-    .with_location_from(&index, prefix)
+    .with_input_location(prefix, false)
 }
 
 #[cfg(kani)]

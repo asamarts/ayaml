@@ -224,4 +224,14 @@ mod tests {
         assert_eq!(event.span(), span(8, 13));
         assert!(matches!(event, Event::Alias { .. }));
     }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn event_stays_compact() {
+        assert!(
+            size_of::<Event<'_>>() <= 104,
+            "size={}",
+            size_of::<Event<'_>>()
+        );
+    }
 }

@@ -1,8 +1,8 @@
 use super::{
     Anchor, BlockState, Call, CollectionStyle, Cont, Cow, DUPLICATE_PROPERTIES, Error, ErrorCode,
-    Event, FlowLack, NodeBounds, Parser, Run, ScalarStyle, Span, Step, Tag, TokenKind,
-    flow_brackets_match, has_value_indicator, implicit_key_fits, is_mapping_line,
-    value_indicator_index,
+    Event, FlowLack, NO_VALUE_INDEX, NodeBounds, Parser, Run, ScalarStyle, Span, Step, Tag,
+    TokenKind, fit_u32, flow_brackets_match, has_line_break, has_value_indicator, is_mapping_line,
+    to_u32, value_indicator_index,
 };
 
 impl<'a> Parser<'a> {
@@ -19,7 +19,7 @@ impl<'a> Parser<'a> {
         mut anchor: Option<Anchor<'a>>,
         bounds: NodeBounds,
         stack: &mut Vec<Cont>,
-    ) -> Result<Step<'a>, Error> {
+    ) -> Result<Step<'a>, Box<Error>> {
         let span = self.empty_span(index);
         self.limits
             .check_depth(depth)
@@ -44,7 +44,7 @@ impl<'a> Parser<'a> {
                 }
                 let next_index = index + 1;
                 let has_properties = tag.is_some() || anchor.is_some();
-                let next_indent = self.lines.get(next_index).map_or(0, |line| line.indent);
+                let next_indent = self.lines.get(next_index).map_or(0, |line| line.indent());
                 // After a property-only line, a `-` line may start the node's
                 // block sequence down to the parent's bound: a mapping value's
                 // sequence may sit at the key's column, a sequence entry's
@@ -73,13 +73,12 @@ impl<'a> Parser<'a> {
                     });
                 if has_properties && next_is_node {
                     index = next_index;
-                    indent = self.lines[index].indent;
+                    indent = self.lines[index].indent();
                     continue;
                 }
                 self.check_truncated_eof(next_index)?;
                 let span = self.empty_span(index);
-                let scalar = self.null_scalar_with(span, tag, anchor);
-                self.emit(scalar)?;
+                self.emit_null_scalar_with(span, tag, anchor)?;
                 return Ok(Step::Return(index + 1));
             }
 
@@ -130,7 +129,10 @@ impl<'a> Parser<'a> {
                     DUPLICATE_PROPERTIES,
                 ));
             }
-            stack.push(Cont::NodeInline { rest, index });
+            stack.push(Cont::NodeInline {
+                rest,
+                index: fit_u32(index),
+            });
             return Ok(Step::Call(Call::Inline {
                 tokens: rest,
                 depth,
@@ -153,7 +155,7 @@ impl<'a> Parser<'a> {
         tag: Option<Tag>,
         anchor: Option<Anchor<'a>>,
         stack: &mut Vec<Cont>,
-    ) -> Result<Step<'a>, Error> {
+    ) -> Result<Step<'a>, Box<Error>> {
         let start_span = self.token(first, 0).span;
         self.limits
             .check_depth(depth + 1)
@@ -165,10 +167,10 @@ impl<'a> Parser<'a> {
             span: start_span,
         })?;
         let state = BlockState {
-            indent,
-            depth,
+            indent: to_u32(indent, start_span, self.input, self.compat)?,
+            depth: fit_u32(depth),
             entries: 0,
-            current_index: index + 1,
+            current_index: fit_u32(index + 1),
             first: Some(first.from(1)),
         };
         self.sequence_loop(state, stack)
@@ -178,14 +180,14 @@ impl<'a> Parser<'a> {
         &mut self,
         mut state: BlockState,
         stack: &mut Vec<Cont>,
-    ) -> Result<Step<'a>, Error> {
+    ) -> Result<Step<'a>, Box<Error>> {
         loop {
             let (rest, next_index) = if let Some(rest) = state.first.take() {
-                (rest, state.current_index)
+                (rest, state.current_index as usize)
             } else {
-                let current_index = state.current_index;
+                let current_index = state.current_index as usize;
                 if current_index >= self.lines.len()
-                    || self.lines[current_index].indent != state.indent
+                    || self.lines[current_index].indent() != state.indent as usize
                     || !self.line_starts_with(current_index, |kind| {
                         matches!(kind, TokenKind::BlockEntry)
                     })
@@ -199,24 +201,16 @@ impl<'a> Parser<'a> {
                 (self.line_run(current_index).from(1), current_index + 1)
             };
             state.entries += 1;
-            let span = self.last_span(state.current_index);
+            let span = self.last_span(state.current_index as usize);
             self.limits
-                .check_collection_entries(state.entries)
+                .check_collection_entries(state.entries as usize)
                 .map_err(|error| self.limit_at(span, error))?;
             // The overwhelmingly common block-sequence entry is one scalar.
             // Emit it inline so a wide sequence does not pay a continuation
             // stack push/pop and nested parser call for every item.
-            if let Some((value, style, span)) = self.take_single_scalar(rest) {
-                let event = Event::Scalar {
-                    value,
-                    raw: Cow::Borrowed(&self.input[span.start()..span.end()]),
-                    style,
-                    tag: None,
-                    anchor: None,
-                    span,
-                };
-                self.emit(event)?;
-                state.current_index = next_index;
+            if self.is_single_scalar(rest) {
+                self.emit_scalar_token(rest, 0, None, None)?;
+                state.current_index = fit_u32(next_index);
                 // A reader that takes the events one at a time gets its turn here, so that
                 // they don't all wait for it at once.
                 if self.sink.is_full() {
@@ -225,7 +219,7 @@ impl<'a> Parser<'a> {
                 }
                 continue;
             }
-            let (indent, depth) = (state.indent, state.depth);
+            let (indent, depth) = (state.indent as usize, state.depth as usize);
             stack.push(Cont::Sequence(state));
             return Ok(Step::Call(Call::SequenceItem {
                 rest,
@@ -249,80 +243,6 @@ impl<'a> Parser<'a> {
             )
     }
 
-    /// Take a one-token scalar entry in a single arena lookup, moving owned escaped/block scalar
-    /// strings out of `token_arena` without cloning.
-    #[inline]
-    pub(super) fn take_single_scalar(
-        &mut self,
-        run: Run,
-    ) -> Option<(Cow<'a, str>, ScalarStyle, Span)> {
-        if run.len() != 1 {
-            return None;
-        }
-        let abs = self.lines[run.line].start + run.start;
-        let token = &mut self.token_arena[abs];
-        let span = token.span;
-        match &mut token.kind {
-            TokenKind::PlainScalar => Some((
-                Cow::Borrowed(&self.input[span.start()..span.end()]),
-                ScalarStyle::Plain,
-                span,
-            )),
-            TokenKind::SingleQuotedScalar => Some((
-                Cow::Borrowed(&self.input[span.start() + 1..span.end() - 1]),
-                ScalarStyle::SingleQuoted,
-                span,
-            )),
-            TokenKind::DoubleQuotedScalar => Some((
-                Cow::Borrowed(&self.input[span.start() + 1..span.end() - 1]),
-                ScalarStyle::DoubleQuoted,
-                span,
-            )),
-            TokenKind::Scalar(scalar) => Some((
-                std::mem::replace(&mut scalar.value, Cow::Borrowed("")),
-                scalar.style,
-                span,
-            )),
-            _ => None,
-        }
-    }
-
-    /// Move or borrow a scalar token's decoded value out of `token_arena`, avoiding a `String`
-    /// clone when consuming owned escaped or block scalars.
-    #[inline]
-    pub(super) fn take_scalar_token(
-        &mut self,
-        run: Run,
-        offset: usize,
-    ) -> (Cow<'a, str>, ScalarStyle, Span) {
-        let abs = self.lines[run.line].start + run.start + offset;
-        let token = &mut self.token_arena[abs];
-        let span = token.span;
-        match &mut token.kind {
-            TokenKind::PlainScalar => (
-                Cow::Borrowed(&self.input[span.start()..span.end()]),
-                ScalarStyle::Plain,
-                span,
-            ),
-            TokenKind::SingleQuotedScalar => (
-                Cow::Borrowed(&self.input[span.start() + 1..span.end() - 1]),
-                ScalarStyle::SingleQuoted,
-                span,
-            ),
-            TokenKind::DoubleQuotedScalar => (
-                Cow::Borrowed(&self.input[span.start() + 1..span.end() - 1]),
-                ScalarStyle::DoubleQuoted,
-                span,
-            ),
-            TokenKind::Scalar(scalar) => (
-                std::mem::replace(&mut scalar.value, Cow::Borrowed("")),
-                scalar.style,
-                span,
-            ),
-            _ => unreachable!("take_scalar_token called on non-scalar token"),
-        }
-    }
-
     pub(super) fn sequence_item(
         &mut self,
         rest: Run,
@@ -330,12 +250,12 @@ impl<'a> Parser<'a> {
         indent: usize,
         depth: usize,
         stack: &mut Vec<Cont>,
-    ) -> Result<Step<'a>, Error> {
+    ) -> Result<Step<'a>, Box<Error>> {
         if rest.is_empty() {
-            if next_index < self.lines.len() && self.lines[next_index].indent > indent {
+            if next_index < self.lines.len() && self.lines[next_index].indent() > indent {
                 return Ok(Step::Call(Call::Node {
                     index: next_index,
-                    indent: self.lines[next_index].indent,
+                    indent: self.lines[next_index].indent(),
                     depth,
                     tag: None,
                     anchor: None,
@@ -344,17 +264,17 @@ impl<'a> Parser<'a> {
             }
             self.check_truncated_eof(next_index)?;
             let span = self.empty_span(next_index);
-            self.emit(self.null_scalar(span))?;
+            self.emit_null_scalar(span)?;
             return Ok(Step::Return(next_index));
         }
         let (tag, anchor, rest_start) = self.properties(rest)?;
         let content = rest.from(rest_start);
         if content.is_empty() {
             if tag.is_some() || anchor.is_some() {
-                if next_index < self.lines.len() && self.lines[next_index].indent > indent {
+                if next_index < self.lines.len() && self.lines[next_index].indent() > indent {
                     return Ok(Step::Call(Call::Node {
                         index: next_index,
-                        indent: self.lines[next_index].indent,
+                        indent: self.lines[next_index].indent(),
                         depth,
                         tag,
                         anchor,
@@ -363,11 +283,11 @@ impl<'a> Parser<'a> {
                 }
                 self.check_truncated_eof(next_index)?;
                 let span = self.empty_span(next_index);
-                self.emit(self.null_scalar_with(span, tag, anchor))?;
+                self.emit_null_scalar_with(span, tag, anchor)?;
                 return Ok(Step::Return(next_index));
             }
             let span = self.empty_span(next_index);
-            self.emit(self.null_scalar(span))?;
+            self.emit_null_scalar(span)?;
             return Ok(Step::Return(next_index));
         }
         let content_first = self.token(content, 0);
@@ -380,8 +300,7 @@ impl<'a> Parser<'a> {
                 ));
             }
             let nested_indent = self
-                .at(content_first.span.start())
-                .column()
+                .column_at(content.line(), content_first.span.start())
                 .saturating_sub(1);
             return Ok(Step::Call(Call::SequenceFirst {
                 index: next_index.saturating_sub(1),
@@ -404,10 +323,8 @@ impl<'a> Parser<'a> {
             // On a sequence item, properties before the first block key belong
             // to that key, not to the mapping node, so the mapping starts at
             // the first property (`- &x a: b` has its keys at column 2).
-            let mapping_indent = self
-                .at(self.token(rest, 0).span.start())
-                .column()
-                .saturating_sub(1);
+            let rest_start = self.token(rest, 0).span.start();
+            let mapping_indent = self.column_at(rest.line(), rest_start).saturating_sub(1);
             return Ok(Step::Call(Call::MappingFirst {
                 first: rest,
                 next_index,
@@ -419,7 +336,7 @@ impl<'a> Parser<'a> {
         }
         stack.push(Cont::ItemInline {
             content,
-            next_index,
+            next_index: fit_u32(next_index),
         });
         Ok(Step::Call(Call::Inline {
             tokens: content,
@@ -442,7 +359,7 @@ impl<'a> Parser<'a> {
         tag: Option<Tag>,
         anchor: Option<Anchor<'a>>,
         stack: &mut Vec<Cont>,
-    ) -> Result<Step<'a>, Error> {
+    ) -> Result<Step<'a>, Box<Error>> {
         let start_span = self.token(first, 0).span;
         self.limits
             .check_depth(depth + 1)
@@ -454,10 +371,10 @@ impl<'a> Parser<'a> {
             span: start_span,
         })?;
         let state = BlockState {
-            indent,
-            depth,
+            indent: to_u32(indent, start_span, self.input, self.compat)?,
+            depth: fit_u32(depth),
             entries: 0,
-            current_index: next_index,
+            current_index: fit_u32(next_index),
             first: Some(first),
         };
         self.mapping_loop(state, stack)
@@ -471,17 +388,17 @@ impl<'a> Parser<'a> {
         &mut self,
         mut state: BlockState,
         stack: &mut Vec<Cont>,
-    ) -> Result<Step<'a>, Error> {
+    ) -> Result<Step<'a>, Box<Error>> {
         loop {
             let tokens = if let Some(first) = state.first.take() {
                 first
             } else {
-                let current_index = state.current_index;
+                let current_index = state.current_index as usize;
                 if current_index >= self.lines.len()
-                    || self.lines[current_index].indent != state.indent
+                    || self.lines[current_index].indent() != state.indent as usize
                     || !is_mapping_line(self.line_tokens(current_index))
                 {
-                    if self.is_truncated_mapping_key_line(current_index, state.indent) {
+                    if self.is_truncated_mapping_key_line(current_index, state.indent as usize) {
                         state.current_index += 1;
                         self.line_run(current_index)
                     } else {
@@ -496,44 +413,29 @@ impl<'a> Parser<'a> {
                     self.line_run(current_index)
                 }
             };
-            let (indent, depth) = (state.indent, state.depth);
+            let (indent, depth) = (state.indent as usize, state.depth as usize);
 
             // A very common explicit entry is `? key` followed by `: value`,
             // both single plain scalars. Emit the pair inline instead of paying
             // continuation frames for the key and value nodes.
             if matches!(self.token(tokens, 0).kind, TokenKind::Key) {
                 let key_rest = tokens.from(1);
-                let current_index = state.current_index;
+                let current_index = state.current_index as usize;
                 if self.is_single_scalar(key_rest)
                     && current_index < self.lines.len()
-                    && self.lines[current_index].indent == indent
+                    && self.lines[current_index].indent() == indent
                     && self.line_starts_with(current_index, |kind| matches!(kind, TokenKind::Value))
                 {
                     let value_run = self.line_run(current_index).from(1);
                     if self.is_single_scalar(value_run) {
-                        let (key_val, key_style, key_span) = self.take_scalar_token(key_rest, 0);
-                        let (val_val, val_style, value_span) = self.take_scalar_token(value_run, 0);
+                        let key_span = self.token(key_rest, 0).span;
                         state.entries += 1;
                         self.limits
-                            .check_collection_entries(state.entries)
+                            .check_collection_entries(state.entries as usize)
                             .map_err(|error| self.limit_at(key_span, error))?;
-                        self.emit(Event::Scalar {
-                            value: key_val,
-                            raw: Cow::Borrowed(&self.input[key_span.start()..key_span.end()]),
-                            style: key_style,
-                            tag: None,
-                            anchor: None,
-                            span: key_span,
-                        })?;
-                        self.emit(Event::Scalar {
-                            value: val_val,
-                            raw: Cow::Borrowed(&self.input[value_span.start()..value_span.end()]),
-                            style: val_style,
-                            tag: None,
-                            anchor: None,
-                            span: value_span,
-                        })?;
-                        state.current_index = current_index + 1;
+                        self.emit_scalar_token(key_rest, 0, None, None)?;
+                        self.emit_scalar_token(value_run, 0, None, None)?;
+                        state.current_index = fit_u32(current_index + 1);
                         if self.sink.is_full() {
                             stack.push(Cont::MappingEntry(state));
                             return Ok(Step::Return(current_index + 1));
@@ -548,10 +450,10 @@ impl<'a> Parser<'a> {
                 // `:` on this line belongs to a compact mapping inside the key.
                 // The entry's value is a separate `:` line at this indentation.
                 let key_rest = tokens.from(1);
-                let current_index = state.current_index;
+                let current_index = state.current_index as usize;
                 if key_rest.is_empty() {
                     if current_index < self.lines.len() {
-                        let next_indent = self.lines[current_index].indent;
+                        let next_indent = self.lines[current_index].indent();
                         let indentless_sequence = next_indent == indent
                             && self.line_starts_with(current_index, |kind| {
                                 matches!(kind, TokenKind::BlockEntry)
@@ -570,7 +472,7 @@ impl<'a> Parser<'a> {
                     }
                     self.check_truncated_eof(current_index)?;
                     let span = Span::empty(self.token(tokens, 0).span.end());
-                    self.emit(self.null_scalar(span))?;
+                    self.emit_null_scalar(span)?;
                     return self.mapping_after_explicit_key(state, stack);
                 }
                 // Properties alone on the `?` line may be followed by an indentless
@@ -578,7 +480,7 @@ impl<'a> Parser<'a> {
                 let (tag, anchor, rest_start) = self.properties(key_rest)?;
                 if rest_start == key_rest.len()
                     && current_index < self.lines.len()
-                    && self.lines[current_index].indent == indent
+                    && self.lines[current_index].indent() == indent
                     && self.line_starts_with(current_index, |kind| {
                         matches!(kind, TokenKind::BlockEntry)
                     })
@@ -605,56 +507,29 @@ impl<'a> Parser<'a> {
             // Fast path for the overwhelmingly common implicit single-line scalar key entry:
             // `PlainScalar`, `SingleQuotedScalar`, and `DoubleQuotedScalar` are guaranteed
             // single-line, and a byte distance <= 1024 to `:` guarantees <= 1024 characters
-            // without querying `LineStarts::location`.
+            // without counting scalar columns.
             if tokens.len() >= 2 && matches!(self.token(tokens, 1).kind, TokenKind::Value) {
                 let first = self.token(tokens, 0);
                 let key_span = first.span;
-                let key_parts = match first.kind {
-                    TokenKind::PlainScalar => Some((
-                        &self.input[key_span.start()..key_span.end()],
-                        ScalarStyle::Plain,
-                    )),
-                    TokenKind::SingleQuotedScalar => Some((
-                        &self.input[key_span.start() + 1..key_span.end() - 1],
-                        ScalarStyle::SingleQuoted,
-                    )),
-                    TokenKind::DoubleQuotedScalar => Some((
-                        &self.input[key_span.start() + 1..key_span.end() - 1],
-                        ScalarStyle::DoubleQuoted,
-                    )),
-                    _ => None,
-                };
-                if let Some((key_text, key_style)) = key_parts {
+                let single_line_scalar = matches!(
+                    first.kind,
+                    TokenKind::PlainScalar
+                        | TokenKind::SingleQuotedScalar
+                        | TokenKind::DoubleQuotedScalar
+                );
+                if single_line_scalar {
                     let colon_start = self.token(tokens, 1).span.start();
                     if colon_start.saturating_sub(key_span.start()) <= 1024 {
-                        self.emit(Event::Scalar {
-                            value: Cow::Borrowed(key_text),
-                            raw: Cow::Borrowed(&self.input[key_span.start()..key_span.end()]),
-                            style: key_style,
-                            tag: None,
-                            anchor: None,
-                            span: key_span,
-                        })?;
+                        self.emit_scalar_token(tokens, 0, None, None)?;
                         let value_run = tokens.from(2);
-                        if let Some((val_value, val_style, value_span)) =
-                            self.take_single_scalar(value_run)
-                        {
+                        if self.is_single_scalar(value_run) {
                             state.entries += 1;
                             self.limits
-                                .check_collection_entries(state.entries)
+                                .check_collection_entries(state.entries as usize)
                                 .map_err(|error| self.limit_at(key_span, error))?;
-                            self.emit(Event::Scalar {
-                                value: val_value,
-                                raw: Cow::Borrowed(
-                                    &self.input[value_span.start()..value_span.end()],
-                                ),
-                                style: val_style,
-                                tag: None,
-                                anchor: None,
-                                span: value_span,
-                            })?;
+                            self.emit_scalar_token(value_run, 0, None, None)?;
                             if self.sink.is_full() {
-                                let next_index = state.current_index;
+                                let next_index = state.current_index as usize;
                                 stack.push(Cont::MappingEntry(state));
                                 return Ok(Step::Return(next_index));
                             }
@@ -669,22 +544,20 @@ impl<'a> Parser<'a> {
             let key = value_index.map_or(tokens, |index| tokens.until(index));
             if !key.is_empty() {
                 let key_tokens = self.tokens(key);
-                let key_line = self.at(key_tokens[0].span.start()).line();
-                if key_tokens.iter().any(|token| {
-                    self.at(token.span.start()).line() != key_line
-                        || self.at(token.span.end()).line() != key_line
-                }) && flow_brackets_match(key_tokens)
-                {
-                    return Err(self.error(
-                        key_tokens[0].span,
-                        ErrorCode::InvalidImplicitKey,
-                        "implicit mapping keys must be on one line",
-                    ));
-                }
-                if let Some(value_index) = value_index
-                    && !implicit_key_fits(
-                        self.at(key_tokens[0].span.start()),
-                        self.at(self.token(tokens, value_index).span.start()),
+                let first_start = key_tokens[0].span.start();
+                let last_end = key_tokens[key_tokens.len() - 1].span.end();
+                if has_line_break(&self.input.as_bytes()[first_start..last_end]) {
+                    if flow_brackets_match(key_tokens) {
+                        return Err(self.error(
+                            key_tokens[0].span,
+                            ErrorCode::InvalidImplicitKey,
+                            "implicit mapping keys must be on one line",
+                        ));
+                    }
+                } else if let Some(value_index) = value_index
+                    && !self.implicit_key_fits_range(
+                        first_start,
+                        self.token(tokens, value_index).span.start(),
                     )
                 {
                     return Err(self.error(
@@ -696,14 +569,13 @@ impl<'a> Parser<'a> {
             }
             if key.is_empty() {
                 let span = Span::empty(self.token(tokens, 0).span.start());
-                self.emit(self.null_scalar(span))?;
+                self.emit_null_scalar(span)?;
                 return self.mapping_after_implicit_key(state, tokens, value_index, stack);
             }
             stack.push(Cont::MappingImplicitKey {
                 state,
                 tokens,
-                value_index,
-                key,
+                value_index: value_index.map_or(NO_VALUE_INDEX, fit_u32),
             });
             // The key is inside the mapping, as an explicit key and a value are.
             return Ok(Step::Call(Call::Inline {
@@ -719,20 +591,24 @@ impl<'a> Parser<'a> {
         &mut self,
         mut state: BlockState,
         stack: &mut Vec<Cont>,
-    ) -> Result<Step<'a>, Error> {
+    ) -> Result<Step<'a>, Box<Error>> {
         state.entries += 1;
-        let span = self.empty_span(state.current_index);
+        let current_index = state.current_index as usize;
+        let span = self.empty_span(current_index);
         self.limits
-            .check_collection_entries(state.entries)
+            .check_collection_entries(state.entries as usize)
             .map_err(|error| self.limit_at(span, error))?;
-        let current_index = state.current_index;
         let has_value_line = current_index < self.lines.len()
-            && self.lines[current_index].indent == state.indent
+            && self.lines[current_index].indent() == state.indent as usize
             && self.line_starts_with(current_index, |kind| matches!(kind, TokenKind::Value));
         if has_value_line {
             let value = self.line_run(current_index).from(1);
             state.current_index += 1;
-            let (current_index, indent, depth) = (state.current_index, state.indent, state.depth);
+            let (current_index, indent, depth) = (
+                state.current_index as usize,
+                state.indent as usize,
+                state.depth as usize,
+            );
             stack.push(Cont::MappingEntry(state));
             return Ok(Step::Call(Call::MappingValue {
                 value,
@@ -744,7 +620,7 @@ impl<'a> Parser<'a> {
         }
         self.check_truncated_eof(current_index)?;
         let span = self.empty_span(current_index);
-        self.emit(self.null_scalar(span))?;
+        self.emit_null_scalar(span)?;
         // Continue through the driver rather than calling `mapping_loop`:
         // a run of `?` entries must not nest a native frame per entry.
         stack.push(Cont::MappingEntry(state));
@@ -757,7 +633,7 @@ impl<'a> Parser<'a> {
         tokens: Run,
         value_index: Option<usize>,
         stack: &mut Vec<Cont>,
-    ) -> Result<Step<'a>, Error> {
+    ) -> Result<Step<'a>, Box<Error>> {
         let Some(value_index) = value_index else {
             self.check_truncated_run_end(tokens, tokens.len())?;
             return Err(self.error(
@@ -769,9 +645,13 @@ impl<'a> Parser<'a> {
         state.entries += 1;
         let span = self.token(tokens, 0).span;
         self.limits
-            .check_collection_entries(state.entries)
+            .check_collection_entries(state.entries as usize)
             .map_err(|error| self.limit_at(span, error))?;
-        let (current_index, indent, depth) = (state.current_index, state.indent, state.depth);
+        let (current_index, indent, depth) = (
+            state.current_index as usize,
+            state.indent as usize,
+            state.depth as usize,
+        );
         stack.push(Cont::MappingEntry(state));
         Ok(Step::Call(Call::MappingValue {
             value: tokens.from(value_index + 1),
@@ -790,11 +670,14 @@ impl<'a> Parser<'a> {
         depth: usize,
         allow_compact: bool,
         stack: &mut Vec<Cont>,
-    ) -> Result<Step<'a>, Error> {
+    ) -> Result<Step<'a>, Box<Error>> {
         let (tag, anchor, rest_start) = self.properties(value)?;
         let content = value.from(rest_start);
         if content.is_empty() {
-            let next_indent = self.lines.get(current_index).map_or(0, |line| line.indent);
+            let next_indent = self
+                .lines
+                .get(current_index)
+                .map_or(0, |line| line.indent());
             let indentless_sequence = next_indent == indent
                 && self
                     .line_starts_with(current_index, |kind| matches!(kind, TokenKind::BlockEntry));
@@ -808,7 +691,8 @@ impl<'a> Parser<'a> {
                 })
                 && self
                     .line_first(current_index)
-                    .is_some_and(|token| self.at(token.span.start()).column() == 1)
+                    .map(|token| token.span.start())
+                    .is_some_and(|offset| self.column_at(current_index, offset) == 1)
                 && current_index > 0
                 && self
                     .line_tokens(current_index - 1)
@@ -819,7 +703,7 @@ impl<'a> Parser<'a> {
             {
                 return Ok(Step::Call(Call::Node {
                     index: current_index,
-                    indent: self.lines[current_index].indent,
+                    indent: self.lines[current_index].indent(),
                     depth: depth + 1,
                     tag,
                     anchor,
@@ -828,7 +712,7 @@ impl<'a> Parser<'a> {
             }
             self.check_truncated_eof(current_index)?;
             let span = self.empty_span(current_index);
-            self.emit(self.null_scalar_with(span, tag, anchor))?;
+            self.emit_null_scalar_with(span, tag, anchor)?;
             return Ok(Step::Return(current_index));
         }
         let content_first = self.token(content, 0);
@@ -840,9 +724,9 @@ impl<'a> Parser<'a> {
                     "properties cannot precede a compact block sequence",
                 ));
             }
+            let content_start = content_first.span.start();
             let sequence_indent = self
-                .at(content_first.span.start())
-                .column()
+                .column_at(content.line(), content_start)
                 .saturating_sub(1);
             return Ok(Step::Call(Call::SequenceFirst {
                 index: current_index.saturating_sub(1),
@@ -864,10 +748,8 @@ impl<'a> Parser<'a> {
             }
             // As on a sequence item: properties belong to the first key, and
             // the compact mapping starts at the first property.
-            let mapping_indent = self
-                .at(self.token(value, 0).span.start())
-                .column()
-                .saturating_sub(1);
+            let value_start = self.token(value, 0).span.start();
+            let mapping_indent = self.column_at(value.line(), value_start).saturating_sub(1);
             return Ok(Step::Call(Call::MappingFirst {
                 first: value,
                 next_index: current_index,
@@ -879,7 +761,7 @@ impl<'a> Parser<'a> {
         }
         stack.push(Cont::ValueInline {
             value,
-            current_index,
+            current_index: fit_u32(current_index),
         });
         Ok(Step::Call(Call::Inline {
             tokens: value,
@@ -897,7 +779,7 @@ impl<'a> Parser<'a> {
         depth: usize,
         mut tag: Option<Tag>,
         mut anchor: Option<Anchor<'a>>,
-    ) -> Result<Step<'a>, Error> {
+    ) -> Result<Step<'a>, Box<Error>> {
         let mut index = 0;
         if self.starts_with_property(tokens) {
             let (own_tag, own_anchor, count) = self.read_properties(tokens)?;
@@ -909,7 +791,7 @@ impl<'a> Parser<'a> {
             self.check_truncated_run_end(tokens, index)?;
             if index > 0 {
                 let span = Span::empty(self.token(tokens, index - 1).span.end());
-                self.emit(self.null_scalar_with(span, tag, anchor))?;
+                self.emit_null_scalar_with(span, tag, anchor)?;
                 return Ok(Step::Return(index));
             }
             return Err(self.flow_error(
@@ -918,58 +800,59 @@ impl<'a> Parser<'a> {
                 FlowLack::Node(ErrorCode::UnexpectedToken, "expected a node".to_owned()),
             ));
         }
-        let abs = self.lines[tokens.line].start + tokens.start + index;
+        let abs = self.lines[tokens.line()].start() + tokens.start() + index;
         let token = &mut self.token_arena[abs];
         let span = token.span;
         match &mut token.kind {
             TokenKind::PlainScalar => {
-                let event = Event::Scalar {
-                    value: Cow::Borrowed(&self.input[span.start()..span.end()]),
-                    raw: Cow::Borrowed(&self.input[span.start()..span.end()]),
-                    style: ScalarStyle::Plain,
-                    tag,
-                    anchor,
-                    span,
-                };
-                self.emit(event)?;
+                let text = &self.input[span.start()..span.end()];
+                if tag.is_none() && anchor.is_none() {
+                    self.emit_plain_scalar(text, span)?;
+                } else {
+                    self.emit_scalar(
+                        Cow::Borrowed(text),
+                        text,
+                        ScalarStyle::Plain,
+                        tag,
+                        anchor,
+                        span,
+                    )?;
+                }
                 Ok(Step::Return(index + 1))
             }
             TokenKind::SingleQuotedScalar => {
-                let event = Event::Scalar {
-                    value: Cow::Borrowed(&self.input[span.start() + 1..span.end() - 1]),
-                    raw: Cow::Borrowed(&self.input[span.start()..span.end()]),
-                    style: ScalarStyle::SingleQuoted,
+                self.emit_scalar(
+                    Cow::Borrowed(&self.input[span.start() + 1..span.end() - 1]),
+                    &self.input[span.start()..span.end()],
+                    ScalarStyle::SingleQuoted,
                     tag,
                     anchor,
                     span,
-                };
-                self.emit(event)?;
+                )?;
                 Ok(Step::Return(index + 1))
             }
             TokenKind::DoubleQuotedScalar => {
-                let event = Event::Scalar {
-                    value: Cow::Borrowed(&self.input[span.start() + 1..span.end() - 1]),
-                    raw: Cow::Borrowed(&self.input[span.start()..span.end()]),
-                    style: ScalarStyle::DoubleQuoted,
+                self.emit_scalar(
+                    Cow::Borrowed(&self.input[span.start() + 1..span.end() - 1]),
+                    &self.input[span.start()..span.end()],
+                    ScalarStyle::DoubleQuoted,
                     tag,
                     anchor,
                     span,
-                };
-                self.emit(event)?;
+                )?;
                 Ok(Step::Return(index + 1))
             }
             TokenKind::Scalar(scalar) => {
                 let value = std::mem::replace(&mut scalar.value, Cow::Borrowed(""));
                 let style = scalar.style;
-                let event = Event::Scalar {
+                self.emit_scalar(
                     value,
-                    raw: Cow::Borrowed(&self.input[span.start()..span.end()]),
+                    &self.input[span.start()..span.end()],
                     style,
                     tag,
                     anchor,
                     span,
-                };
-                self.emit(event)?;
+                )?;
                 Ok(Step::Return(index + 1))
             }
             TokenKind::Alias => {
@@ -987,14 +870,14 @@ impl<'a> Parser<'a> {
                 self.emit(event)?;
                 Ok(Step::Return(index + 1))
             }
-            TokenKind::FlowSequenceStart => Ok(Step::Call(Call::FlowSequence {
+            TokenKind::FlowSequenceStart { .. } => Ok(Step::Call(Call::FlowSequence {
                 tokens,
                 start: index,
                 depth,
                 tag,
                 anchor,
             })),
-            TokenKind::FlowMappingStart => Ok(Step::Call(Call::FlowMapping {
+            TokenKind::FlowMappingStart { .. } => Ok(Step::Call(Call::FlowMapping {
                 tokens,
                 start: index,
                 depth,
@@ -1006,7 +889,7 @@ impl<'a> Parser<'a> {
             TokenKind::FlowEntry | TokenKind::FlowSequenceEnd | TokenKind::FlowMappingEnd
                 if index > 0 =>
             {
-                self.emit(self.null_scalar_with(Span::empty(span.start()), tag, anchor))?;
+                self.emit_null_scalar_with(Span::empty(span.start()), tag, anchor)?;
                 Ok(Step::Return(index))
             }
             kind => {

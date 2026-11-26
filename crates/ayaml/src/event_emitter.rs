@@ -547,10 +547,11 @@ where
         let line = format!("%{name} {value}\n");
         // The stream's start, and then the directive or the reason it is none. Only the
         // line's syntax is asked about, so the caller's limits on what it reads stay out.
-        let scan = |compat: bool| -> Result<(), Error> {
-            let mut scanner = Scanner::with_compat(&line, Limits::default(), compat)?;
-            scanner.next_token()?;
-            scanner.next_token()?;
+        let limits = Limits::default();
+        let scan = |compat: bool| -> Result<(), Box<Error>> {
+            let mut scanner = Scanner::with_compat(&line, &limits, compat)?;
+            scanner.next_token(&limits)?;
+            scanner.next_token(&limits)?;
             Ok(())
         };
         if scan(false).is_err()
