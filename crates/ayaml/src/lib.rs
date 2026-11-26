@@ -1076,15 +1076,7 @@ fn parse_single_value(input: &str, limits: &Limits) -> Result<Value, Error> {
             .with_span(Span::empty(0))
             .with_location(Location::new(1, 1))
     })?;
-    let mut documents = parser::parse_documents(input, limits, true)?;
-    if documents.len() > 1 {
-        return Err(Error::coded(
-            ErrorKind::Parser,
-            ErrorCode::TrailingDocuments,
-            "expected a single YAML document, but found trailing documents",
-        ));
-    }
-    Ok(documents.pop().unwrap_or(Value::Null))
+    parser::parse_value(input, limits)
 }
 
 /// Parse every YAML document in the stream into generic values.

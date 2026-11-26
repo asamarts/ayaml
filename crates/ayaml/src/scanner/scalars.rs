@@ -44,14 +44,7 @@ impl<'a> Scanner<'a> {
                         break;
                     }
                     self.pos = index + 1;
-                    return self.make(
-                        TokenKind::Scalar(Box::new(ScalarToken {
-                            value: Cow::Borrowed(&self.input[content_start..index]),
-                            style: ScalarStyle::SingleQuoted,
-                        })),
-                        start,
-                        self.pos,
-                    );
+                    return self.make(TokenKind::SingleQuotedScalar, start, self.pos);
                 }
                 b'\n' | b'\r' => break,
                 _ => index += 1,
@@ -368,14 +361,7 @@ impl<'a> Scanner<'a> {
             match bytes[index] {
                 b'"' => {
                     self.pos = index + 1;
-                    return self.make(
-                        TokenKind::Scalar(Box::new(ScalarToken {
-                            value: Cow::Borrowed(&self.input[content_start..index]),
-                            style: ScalarStyle::DoubleQuoted,
-                        })),
-                        start,
-                        self.pos,
-                    );
+                    return self.make(TokenKind::DoubleQuotedScalar, start, self.pos);
                 }
                 b'\\' | b'\n' | b'\r' => break,
                 _ => index += 1,

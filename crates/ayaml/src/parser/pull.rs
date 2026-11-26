@@ -127,11 +127,6 @@ impl<'a> DocumentEvents<'a> {
         self.parser.sink.waiting().and_then(VecDeque::pop_front)
     }
 
-    /// Drop the event that waits, if one does.
-    pub(crate) fn discard(&mut self) {
-        drop(self.pop());
-    }
-
     /// How many events wait for the reader.
     #[cfg(test)]
     pub(crate) fn waiting(&mut self) -> usize {

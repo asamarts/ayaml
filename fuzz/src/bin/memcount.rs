@@ -484,6 +484,18 @@ fn format_jsonl_row(
 fn measure_fixture_mode(fixture: &ayaml_fixtures::Fixture, mode: &str) -> Result<String, String> {
     let input = &fixture.content;
     let sample = match mode {
+        "scan" => {
+            let limits = ayaml::Limits::default();
+            measure_op(false, || {
+                ayaml::internals::scan_tokens(input, &limits).expect("scan_tokens")
+            })
+        }
+        "events" => {
+            let limits = ayaml::Limits::default();
+            measure_op(false, || {
+                ayaml::internals::parse_events(input, &limits).expect("parse_events")
+            })
+        }
         "parse_value" => {
             if fixture.multi_document {
                 measure_op(false, || ayaml::parse_documents(input).expect("parse_docs"))

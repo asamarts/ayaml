@@ -29,7 +29,7 @@ use crate::event::{Anchor, Event, ScalarStyle};
 use crate::limits::{AliasBudget, Limits};
 use crate::number::Number;
 use crate::parser;
-use crate::resolver::{plain_resolves_to_string, resolve_scalar};
+use crate::resolver::{resolve_explicit_core, resolve_plain};
 use crate::span::{Location, Span};
 use crate::tag::Tag;
 use crate::value::Value;
@@ -315,7 +315,7 @@ pub(crate) fn from_str_by_tree<'de, T: DeserializeSeed<'de>>(
 ) -> Result<T::Value, Error> {
     let node = parse_document(input, limits, options)
         .map_err(|error| error.with_input_location(input, options.compat_flow))?;
-    seed.deserialize(NodeDeserializer::new(&node))
+    seed.deserialize(NodeDeserializer::from_owned(node))
         .map_err(|error| error.with_input_location(input, options.compat_flow))
 }
 
@@ -340,7 +340,7 @@ pub(crate) fn from_events<'de, T: Deserialize<'de>>(
     budget: &mut AliasBudget,
 ) -> Result<T, Error> {
     let node = build(events, input_len, limits, NodeOptions::default(), budget)?;
-    T::deserialize(NodeDeserializer::new(&node))
+    T::deserialize(NodeDeserializer::from_owned(node))
 }
 
 pub(crate) fn from_events_seed<'de, T: DeserializeSeed<'de>>(
@@ -351,7 +351,7 @@ pub(crate) fn from_events_seed<'de, T: DeserializeSeed<'de>>(
     seed: T,
 ) -> Result<T::Value, Error> {
     let node = build(events, input_len, limits, NodeOptions::default(), budget)?;
-    seed.deserialize(NodeDeserializer::new(&node))
+    seed.deserialize(NodeDeserializer::from_owned(node))
 }
 
 /// Decode one document from an already-collected event slice with a seed whose lifetime is
@@ -364,7 +364,7 @@ pub(crate) fn from_events_seed_owned<'a, 'de, T: DeserializeSeed<'de>>(
     seed: T,
 ) -> Result<T::Value, Error> {
     let node = build(events, input_len, limits, NodeOptions::default(), budget)?;
-    seed.deserialize(NodeDeserializer::owned(&node))
+    seed.deserialize(NodeDeserializer::owned_from_owned(node))
 }
 
 /// Inputs above this size are read from their events, and built as a tree only to report an
@@ -694,7 +694,7 @@ impl<'de> Builder<'de> {
                 span,
             } => {
                 let node = plain_scalar(
-                    &value,
+                    value,
                     &raw,
                     style,
                     tag.as_ref(),
@@ -978,7 +978,7 @@ fn apply_tag(tag: Option<Tag>, node: Node<'_>, drop_global_tags: bool) -> Node<'
 
 /// The node of a scalar event, before any anchor on it is recorded.
 fn plain_scalar<'de>(
-    value: &Cow<'de, str>,
+    value: Cow<'de, str>,
     raw: &Cow<'de, str>,
     style: ScalarStyle,
     tag: Option<&Tag>,
@@ -994,69 +994,91 @@ fn plain_scalar<'de>(
         };
         return Ok(Node::scalar(NodeKind::String(scalar_text), text, span));
     }
-    let mut node = scalar_node(value.as_ref(), value, raw, style, tag, span)
-        .map_err(|error| error.with_span(span))?;
+    let mut node =
+        scalar_node(value, raw, style, tag, span).map_err(|error| error.with_span(span))?;
     if tag.is_some_and(|tag| tag.is_core() || tag.is_non_specific()) {
         forget_string_text(&mut node);
     }
     Ok(node)
 }
 
-/// Build a scalar node without materializing a `Value` when the scalar stays a string.
+/// Build a scalar node without materializing a `Value` when the scalar stays a string, and
+/// resolving plain scalars at most once.
 fn scalar_node<'de>(
-    text: &str,
-    value: &Cow<'de, str>,
+    value: Cow<'de, str>,
     raw: &Cow<'de, str>,
     style: ScalarStyle,
     tag: Option<&Tag>,
     span: Span,
 ) -> Result<Node<'de>, Error> {
     let scalar_text = borrowed_or_owned(value, raw, style);
-    let string = match tag {
+    match tag {
+        None => {
+            if style != ScalarStyle::Plain {
+                return Ok(Node::scalar(
+                    NodeKind::String(scalar_text),
+                    Text::None,
+                    span,
+                ));
+            }
+            match resolve_plain(scalar_text.as_ref()) {
+                None => Ok(Node::scalar(
+                    NodeKind::String(scalar_text),
+                    string_text(raw, style),
+                    span,
+                )),
+                Some(resolved) => Ok(node_from_value(resolved, scalar_text, raw, style, span)),
+            }
+        }
         Some(tag) if tag.is_non_specific() => {
-            let inner = Node::scalar(NodeKind::String(scalar_text.clone()), Text::None, span);
-            return Ok(Node::scalar(
+            let inner = Node::scalar(NodeKind::String(scalar_text), Text::None, span);
+            Ok(Node::scalar(
                 NodeKind::Tagged(Box::new(tag.clone()), Box::new(inner)),
                 Text::None,
                 span,
-            ));
+            ))
         }
-        Some(tag) if tag.is_core() => {
-            if !matches!(tag.suffix(), "str" | "int" | "float" | "bool" | "null") {
-                let inner = Node::scalar(NodeKind::String(scalar_text.clone()), Text::None, span);
-                return Ok(Node::scalar(
+        Some(tag) if tag.is_core() => match tag.suffix() {
+            "str" => Ok(Node::scalar(
+                NodeKind::String(scalar_text),
+                string_text(raw, style),
+                span,
+            )),
+            "int" | "float" | "bool" | "null" => {
+                let resolved = resolve_explicit_core(scalar_text.as_ref(), tag.suffix(), tag)
+                    .map_err(|error| error.with_span(span))?;
+                Ok(node_from_value(resolved, scalar_text, raw, style, span))
+            }
+            _ => {
+                let inner = Node::scalar(NodeKind::String(scalar_text), Text::None, span);
+                Ok(Node::scalar(
                     NodeKind::Tagged(Box::new(tag.clone()), Box::new(inner)),
                     Text::None,
                     span,
-                ));
+                ))
             }
-            !matches!(tag.suffix(), "int" | "float" | "bool" | "null")
-        }
+        },
         Some(tag) => {
-            if style != ScalarStyle::Plain || plain_resolves_to_string(text) {
-                // A custom tag doesn't make the scalar a string, its text does, so the string
-                // keeps that text as an untagged one would: `!port 080` reads into a float.
-                let inner = Node::scalar(
-                    NodeKind::String(scalar_text.clone()),
-                    string_text(raw, style),
-                    span,
-                );
-                return Ok(Node::scalar(
-                    NodeKind::Tagged(Box::new(tag.clone()), Box::new(inner)),
-                    Text::None,
-                    span,
-                ));
-            }
-            false
+            let inner = if style == ScalarStyle::Plain {
+                match resolve_plain(scalar_text.as_ref()) {
+                    None => {
+                        // A custom tag doesn't make the scalar a string, its text does, so the
+                        // string keeps that text as an untagged one would: `!port 080` reads into
+                        // a float.
+                        Node::scalar(NodeKind::String(scalar_text), string_text(raw, style), span)
+                    }
+                    Some(resolved) => node_from_value(resolved, scalar_text, raw, style, span),
+                }
+            } else {
+                Node::scalar(NodeKind::String(scalar_text), Text::None, span)
+            };
+            Ok(Node::scalar(
+                NodeKind::Tagged(Box::new(tag.clone()), Box::new(inner)),
+                Text::None,
+                span,
+            ))
         }
-        None => style != ScalarStyle::Plain || plain_resolves_to_string(text),
-    };
-    if string {
-        let text = string_text(raw, style);
-        return Ok(Node::scalar(NodeKind::String(scalar_text), text, span));
     }
-    let resolved = resolve_scalar(text, style, tag).map_err(|error| error.with_span(span))?;
-    Ok(node_from_value(resolved, value, raw, style, span))
 }
 
 /// The text a string keeps beside its value: a plain scalar's, which only a float target reads
@@ -1070,32 +1092,40 @@ fn string_text<'de>(raw: &Cow<'de, str>, style: ScalarStyle) -> Text<'de> {
 
 fn node_from_value<'de>(
     value: Value,
-    text: &Cow<'de, str>,
+    scalar_text: Cow<'de, str>,
     raw: &Cow<'de, str>,
     style: ScalarStyle,
     span: Span,
 ) -> Node<'de> {
-    let scalar_text = borrowed_or_owned(text, raw, style);
-    let kind = match value {
-        Value::Null => NodeKind::Null,
-        Value::Bool(value) => NodeKind::Bool(value),
-        Value::Number(value) => NodeKind::Number(value),
-        Value::String(_) => NodeKind::String(scalar_text.clone()),
-        Value::Sequence(sequence) => NodeKind::Sequence(
-            sequence
-                .into_iter()
-                .map(|value| owned_node(value, span))
-                .collect(),
+    let (kind, scalar_text) = match value {
+        Value::Null => (NodeKind::Null, scalar_text),
+        Value::Bool(value) => (NodeKind::Bool(value), scalar_text),
+        Value::Number(value) => (NodeKind::Number(value), scalar_text),
+        Value::String(_) => (NodeKind::String(scalar_text.clone()), scalar_text),
+        Value::Sequence(sequence) => (
+            NodeKind::Sequence(
+                sequence
+                    .into_iter()
+                    .map(|value| owned_node(value, span))
+                    .collect(),
+            ),
+            scalar_text,
         ),
-        Value::Mapping(mapping) => NodeKind::Mapping(
-            mapping
-                .into_iter()
-                .map(|(key, value)| (owned_node(key, span), owned_node(value, span)))
-                .collect(),
+        Value::Mapping(mapping) => (
+            NodeKind::Mapping(
+                mapping
+                    .into_iter()
+                    .map(|(key, value)| (owned_node(key, span), owned_node(value, span)))
+                    .collect(),
+            ),
+            scalar_text,
         ),
         Value::Tagged(tagged) => {
-            let inner = node_from_value(tagged.value, text, raw, style, span);
-            NodeKind::Tagged(Box::new(tagged.tag), Box::new(inner))
+            let inner = node_from_value(tagged.value, scalar_text.clone(), raw, style, span);
+            (
+                NodeKind::Tagged(Box::new(tagged.tag), Box::new(inner)),
+                scalar_text,
+            )
         }
     };
     // A plain scalar keeps its source text. A quoted or block scalar reaches here only when a
@@ -1152,26 +1182,31 @@ fn owned_node<'de>(value: Value, span: Span) -> Node<'de> {
 }
 
 fn borrowed_or_owned<'de>(
-    value: &Cow<'de, str>,
+    value: Cow<'de, str>,
     raw: &Cow<'de, str>,
     style: ScalarStyle,
 ) -> Cow<'de, str> {
-    let raw = match raw {
-        Cow::Borrowed(raw) => Some(*raw),
-        Cow::Owned(_) => None,
-    };
-    let candidate = raw.and_then(|raw| match style {
-        // A plain scalar's text keeps the blanks before a comment or the line's end, and its
-        // value doesn't.
-        ScalarStyle::Plain => Some(raw.trim_end_matches([' ', '\t'])),
-        ScalarStyle::SingleQuoted | ScalarStyle::DoubleQuoted => {
-            raw.get(1..raw.len().saturating_sub(1))
+    match value {
+        Cow::Borrowed(borrowed) => Cow::Borrowed(borrowed),
+        Cow::Owned(owned) => {
+            if let Cow::Borrowed(raw) = raw {
+                let candidate = match style {
+                    // A plain scalar's text keeps the blanks before a comment or the line's end,
+                    // and its value doesn't.
+                    ScalarStyle::Plain => Some(raw.trim_end_matches([' ', '\t'])),
+                    ScalarStyle::SingleQuoted | ScalarStyle::DoubleQuoted => {
+                        raw.get(1..raw.len().saturating_sub(1))
+                    }
+                    ScalarStyle::Literal | ScalarStyle::Folded => None,
+                };
+                if let Some(candidate) = candidate
+                    && candidate == owned
+                {
+                    return Cow::Borrowed(candidate);
+                }
+            }
+            Cow::Owned(owned)
         }
-        ScalarStyle::Literal | ScalarStyle::Folded => None,
-    });
-    match candidate {
-        Some(candidate) if candidate == value.as_ref() => Cow::Borrowed(candidate),
-        _ => Cow::Owned(value.as_ref().to_owned()),
     }
 }
 

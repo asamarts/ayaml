@@ -1050,6 +1050,18 @@ fn a_document_of_even_density_takes_few_reservations() {
 }
 
 #[test]
+fn a_single_large_scalar_keeps_the_token_arena_small() {
+    let input = format!("{}\n", "x".repeat(1_000_000));
+    let (capacity, len, growths) = arena_of(&input, Limits::for_max_input());
+    assert_eq!(len, 1);
+    assert!(
+        capacity <= TOKEN_ARENA_SMALL_CHUNK,
+        "{capacity} tokens reserved for 1 large scalar"
+    );
+    assert!(growths <= 1, "{growths} reallocations");
+}
+
+#[test]
 fn a_dense_prefix_reserves_no_arena_for_a_sparse_rest() {
     // 20,000 dense entries, then comment lines that hold no token. The density of the prefix
     // says the whole input is as dense, which would be over a million tokens, and the rest of

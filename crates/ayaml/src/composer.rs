@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::{Anchor, Event};
 use crate::limits::{AliasBudget, Limits};
-use crate::mapping::Mapping;
-use crate::resolver::resolve_scalar;
+use crate::mapping::{Mapping, SMALL_LIMIT};
+use crate::resolver::resolve_scalar_cow;
 use crate::span::Span;
 use crate::tag::{Tag, TaggedValue};
 use crate::value::Value;
@@ -105,6 +105,12 @@ impl<T> Anchors<T> {
         }
     }
 
+    /// Whether any anchors have been opened or defined in the current document.
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
     /// Forget every anchor at the start of a document.
     pub(crate) fn clear(&mut self) {
         self.nodes.clear();
@@ -171,11 +177,46 @@ struct AnchorDef {
     height: usize,
 }
 
+/// Maximum number of sequence items buffered in `StreamingComposer::scratch_items` before
+/// spilling to an owned `Vec<Value>`, keeping small sequences exact-sized (1 allocation, 0 slack)
+/// without temporarily doubling peak memory on huge sequences.
+const SEQ_SCRATCH_LIMIT: usize = 64;
+
+enum SeqBuf {
+    Scratch { start: usize, len: usize },
+    Owned(Vec<Value>),
+}
+
+impl SeqBuf {
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            Self::Scratch { len, .. } => *len,
+            Self::Owned(items) => items.len(),
+        }
+    }
+}
+
+enum MapBuf {
+    Scratch { start: usize, len: u8 },
+    Large(Mapping),
+}
+
+impl MapBuf {
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            Self::Scratch { len, .. } => usize::from(*len),
+            Self::Large(mapping) => mapping.len(),
+        }
+    }
+}
+
 enum Frame<'a> {
     Sequence {
         tag: Option<Tag>,
         anchor: Option<Anchor<'a>>,
-        items: Vec<Value>,
+        items: SeqBuf,
         span: Span,
         size: usize,
         height: usize,
@@ -183,7 +224,7 @@ enum Frame<'a> {
     Mapping {
         tag: Option<Tag>,
         anchor: Option<Anchor<'a>>,
-        mapping: Mapping,
+        mapping: MapBuf,
         pending_key: Option<(Value, Span)>,
         span: Span,
         size: usize,
@@ -206,9 +247,18 @@ impl Frame<'_> {
     }
 
     /// A finished child.
-    fn child(&self, step: Step) -> Option<&Value> {
+    fn child<'b>(
+        &'b self,
+        step: Step,
+        scratch_items: &'b [Value],
+        scratch_entries: &'b [(Value, Value)],
+    ) -> Option<&'b Value> {
         match (self, step) {
-            (Self::Sequence { items, .. }, Step::Item(index)) => items.get(index),
+            (Self::Sequence { items, .. }, Step::Item(index)) => match items {
+                SeqBuf::Scratch { start, len } if index < *len => scratch_items.get(*start + index),
+                SeqBuf::Scratch { .. } => None,
+                SeqBuf::Owned(items) => items.get(index),
+            },
             (
                 Self::Mapping {
                     mapping,
@@ -216,14 +266,30 @@ impl Frame<'_> {
                     ..
                 },
                 Step::Key(index),
-            ) => match mapping.get_index(index) {
-                Some((key, _)) => Some(key),
-                None if index == mapping.len() => pending_key.as_ref().map(|(key, _)| key),
-                None => None,
+            ) => match mapping {
+                MapBuf::Scratch { start, len } => {
+                    let count = usize::from(*len);
+                    match index.cmp(&count) {
+                        std::cmp::Ordering::Less => {
+                            scratch_entries.get(*start + index).map(|(key, _)| key)
+                        }
+                        std::cmp::Ordering::Equal => pending_key.as_ref().map(|(key, _)| key),
+                        std::cmp::Ordering::Greater => None,
+                    }
+                }
+                MapBuf::Large(mapping) => match mapping.get_index(index) {
+                    Some((key, _)) => Some(key),
+                    None if index == mapping.len() => pending_key.as_ref().map(|(key, _)| key),
+                    None => None,
+                },
             },
-            (Self::Mapping { mapping, .. }, Step::Value(index)) => {
-                mapping.get_index(index).map(|(_, value)| value)
-            }
+            (Self::Mapping { mapping, .. }, Step::Value(index)) => match mapping {
+                MapBuf::Scratch { start, len } if index < usize::from(*len) => {
+                    scratch_entries.get(*start + index).map(|(_, value)| value)
+                }
+                MapBuf::Scratch { .. } => None,
+                MapBuf::Large(mapping) => mapping.get_index(index).map(|(_, value)| value),
+            },
             _ => None,
         }
     }
@@ -244,19 +310,43 @@ fn child_of(mut value: &Value, step: Step) -> Option<&Value> {
     }
 }
 
-/// The value nesting height: the collections on its deepest path.
-fn value_height(value: &Value) -> usize {
-    match value {
-        Value::Sequence(items) => 1 + items.iter().map(value_height).max().unwrap_or(0),
-        Value::Mapping(mapping) => {
-            1 + mapping
-                .iter()
-                .map(|(key, value)| value_height(key).max(value_height(value)))
-                .max()
-                .unwrap_or(0)
+/// Resolve an anchor path against the active composer stack and scratch buffers without borrowing
+/// `self.anchors`.
+fn anchored_value<'b>(
+    stack: &'b [Frame<'_>],
+    scratch_items: &'b [Value],
+    scratch_entries: &'b [(Value, Value)],
+    path: &[Step],
+) -> Option<&'b Value> {
+    for (depth, step) in path.iter().enumerate() {
+        let frame = stack.get(depth)?;
+        if depth + 1 < stack.len() && frame.position() == *step {
+            continue;
         }
-        Value::Tagged(tagged) => value_height(&tagged.value),
-        _ => 0,
+        let mut value = frame.child(*step, scratch_items, scratch_entries)?;
+        for step in &path[depth + 1..] {
+            value = child_of(value, *step)?;
+        }
+        return Some(value);
+    }
+    None
+}
+
+/// Trim excess capacity on a finished root collection (looking through tags). Called only
+/// after the parser's token arena and composer scratch buffers have been dropped so the
+/// reallocation copy does not stack on top of the parse peak.
+fn shrink_root_value(mut value: &mut Value) {
+    while let Value::Tagged(tagged) = value {
+        value = &mut tagged.value;
+    }
+    match value {
+        Value::Sequence(items) => {
+            if items.capacity() > items.len() {
+                items.shrink_to_fit();
+            }
+        }
+        Value::Mapping(mapping) => mapping.shrink_to_fit(),
+        _ => {}
     }
 }
 
@@ -268,13 +358,26 @@ pub(crate) struct StreamingComposer<'a> {
     anchors: Anchors<AnchorDef>,
     documents: Vec<Value>,
     document: Option<Value>,
+    /// Single-document mode avoids wrapping the root document in `self.documents`.
+    single_document: bool,
+    single_completed: bool,
+    /// Optional entry-count hint from the parser for the next root flow collection.
+    next_capacity: usize,
     stack: Vec<Frame<'a>>,
+    scratch_items: Vec<Value>,
+    scratch_entries: Vec<(Value, Value)>,
     budget: AliasBudget,
 }
 
 impl<'a> StreamingComposer<'a> {
     pub(crate) fn new(limits: Limits, input_len: usize) -> Self {
         Self::with_budget(limits, input_len, AliasBudget::default())
+    }
+
+    pub(crate) fn new_single(limits: Limits, input_len: usize) -> Self {
+        let mut composer = Self::with_budget(limits, input_len, AliasBudget::default());
+        composer.single_document = true;
+        composer
     }
 
     pub(crate) fn with_budget(limits: Limits, input_len: usize, budget: AliasBudget) -> Self {
@@ -284,20 +387,39 @@ impl<'a> StreamingComposer<'a> {
             anchors: Anchors::new(),
             documents: Vec::new(),
             document: None,
+            single_document: false,
+            single_completed: false,
+            next_capacity: 0,
             stack: Vec::new(),
+            scratch_items: Vec::new(),
+            scratch_entries: Vec::new(),
             budget,
         }
     }
 
+    /// Reserve room for the next collection when the parser already counted its entries.
+    pub(crate) fn reserve_collection(&mut self, entries: usize) {
+        self.next_capacity = entries.min(self.limits.max_collection_entries);
+    }
+
     pub(crate) fn event(&mut self, event: Event<'a>) -> Result<(), Error> {
+        let reserved = std::mem::take(&mut self.next_capacity);
         match event {
             Event::StreamStart { .. } | Event::StreamEnd { .. } | Event::Directive { .. } => {}
-            Event::DocumentStart { .. } => {
+            Event::DocumentStart { span, .. } => {
                 if !self.stack.is_empty() {
                     return Err(Error::new(
                         ErrorKind::Composition,
                         "document started inside a collection",
                     ));
+                }
+                if self.single_document && self.single_completed {
+                    return Err(Error::coded(
+                        ErrorKind::Parser,
+                        ErrorCode::TrailingDocuments,
+                        "expected a single YAML document, but found trailing documents",
+                    )
+                    .with_span(span));
                 }
                 // Anchors are scoped to a document; an alias may not see a
                 // definition from an earlier document.
@@ -308,8 +430,15 @@ impl<'a> StreamingComposer<'a> {
                 if !self.stack.is_empty() {
                     return Err(self.error_at(span, "document ended inside a collection"));
                 }
-                let value = self.document.take().unwrap_or(Value::Null);
-                self.documents.push(value);
+                if self.single_document {
+                    if self.document.is_none() {
+                        self.document = Some(Value::Null);
+                    }
+                    self.single_completed = true;
+                } else {
+                    let value = self.document.take().unwrap_or(Value::Null);
+                    self.documents.push(value);
+                }
             }
             Event::Scalar {
                 value,
@@ -319,36 +448,52 @@ impl<'a> StreamingComposer<'a> {
                 span,
                 ..
             } => {
-                let resolved = resolve_scalar(value.as_ref(), style, tag.as_ref())
+                let resolved = resolve_scalar_cow(value, style, tag.as_ref())
                     .map_err(|error| error.with_span(span))?;
-                let size = estimate_size(&resolved, self.limits.node_cost_bytes);
-                let height = value_height(&resolved);
-                self.record_anchor(anchor.as_ref(), size, height, Anchors::define);
-                self.feed(resolved, span, size, height)?;
+                // Skip size estimation when no anchor is open or being defined in this document.
+                // Scalar values always have collection nesting height 0.
+                let size = if anchor.is_some() || !self.anchors.is_empty() {
+                    estimate_size(&resolved, self.limits.node_cost_bytes)
+                } else {
+                    0
+                };
+                self.record_anchor(anchor.as_ref(), size, 0, Anchors::define);
+                self.feed(resolved, span, size, 0)?;
             }
             Event::Alias { anchor, span } => {
-                let definition = self
-                    .anchors
-                    .resolve(anchor.as_str())
+                let (size, height, value) = {
+                    let definition = self
+                        .anchors
+                        .resolve(anchor.as_str())
+                        .map_err(|(code, message)| self.error_at(span, message).with_code(code))?;
+                    let size = definition.size;
+                    let height = definition.height;
+                    // Charge before cloning: the clone is the allocation this
+                    // budget exists to bound.
+                    self.budget
+                        .charge(&self.limits, self.input_len, size)
+                        .map_err(|error| error.with_span(span))?;
+                    // The alias nests its target here, so the target's
+                    // collections count toward the depth.
+                    if height > 0 {
+                        self.limits
+                            .check_depth(self.stack.len() + height)
+                            .map_err(|error| Error::from(error).with_span(span))?;
+                    }
+                    let value = anchored_value(
+                        &self.stack,
+                        &self.scratch_items,
+                        &self.scratch_entries,
+                        &definition.path,
+                    )
                     .cloned()
-                    .map_err(|(code, message)| self.error_at(span, message).with_code(code))?;
-                // Charge before cloning: the clone is the allocation this
-                // budget exists to bound.
-                self.budget
-                    .charge(&self.limits, self.input_len, definition.size)
-                    .map_err(|error| error.with_span(span))?;
-                // The alias nests its target here, so the target's
-                // collections count toward the depth.
-                if definition.height > 0 {
-                    self.limits
-                        .check_depth(self.stack.len() + definition.height)
-                        .map_err(|error| Error::from(error).with_span(span))?;
-                }
-                let value = self.anchored(&definition.path).cloned().ok_or_else(|| {
-                    self.error_at(span, "unknown anchor")
-                        .with_code(ErrorCode::UnknownAnchor)
-                })?;
-                self.feed(value, span, definition.size, definition.height)?;
+                    .ok_or_else(|| {
+                        self.error_at(span, "unknown anchor")
+                            .with_code(ErrorCode::UnknownAnchor)
+                    })?;
+                    (size, height, value)
+                };
+                self.feed(value, span, size, height)?;
             }
             Event::SequenceStart {
                 tag, anchor, span, ..
@@ -359,32 +504,24 @@ impl<'a> StreamingComposer<'a> {
                 if let Some(anchor) = &anchor {
                     self.anchors.open(anchor.as_str());
                 }
+                let items = if reserved > SEQ_SCRATCH_LIMIT {
+                    SeqBuf::Owned(Vec::with_capacity(reserved))
+                } else {
+                    SeqBuf::Scratch {
+                        start: self.scratch_items.len(),
+                        len: 0,
+                    }
+                };
                 self.stack.push(Frame::Sequence {
                     tag,
                     anchor,
-                    items: Vec::new(),
+                    items,
                     span,
                     size: self.limits.node_cost_bytes,
                     height: 0,
                 });
             }
-            Event::SequenceEnd { span } => {
-                let Some(Frame::Sequence {
-                    tag,
-                    anchor,
-                    items,
-                    span: start_span,
-                    size,
-                    height,
-                }) = self.stack.pop()
-                else {
-                    return Err(self.error_at(span, "unexpected sequence end"));
-                };
-                let (value, size) =
-                    self.finish_collection(tag.as_ref(), Value::Sequence(items), size);
-                self.record_anchor(anchor.as_ref(), size, height + 1, Anchors::close);
-                self.feed(value, start_span, size, height + 1)?;
-            }
+            Event::SequenceEnd { span } => self.finish_sequence(span)?,
             Event::MappingStart {
                 tag, anchor, span, ..
             } => {
@@ -394,58 +531,160 @@ impl<'a> StreamingComposer<'a> {
                 if let Some(anchor) = &anchor {
                     self.anchors.open(anchor.as_str());
                 }
+                let mapping = if reserved > SMALL_LIMIT {
+                    MapBuf::Large(Mapping::with_capacity(reserved))
+                } else {
+                    MapBuf::Scratch {
+                        start: self.scratch_entries.len(),
+                        len: 0,
+                    }
+                };
                 self.stack.push(Frame::Mapping {
                     tag,
                     anchor,
-                    mapping: Mapping::new(),
+                    mapping,
                     pending_key: None,
                     span,
                     size: self.limits.node_cost_bytes,
                     height: 0,
                 });
             }
-            Event::MappingEnd { span } => {
-                let Some(Frame::Mapping {
-                    tag,
-                    anchor,
-                    mapping,
-                    pending_key,
-                    span: start_span,
-                    size,
-                    height,
-                }) = self.stack.pop()
-                else {
-                    return Err(self.error_at(span, "unexpected mapping end"));
-                };
-                if let Some((key, key_span)) = pending_key {
-                    return Err(Error::new(
-                        ErrorKind::Composition,
-                        format!("mapping key without value: {key:?}"),
-                    )
-                    .with_span(key_span));
-                }
-                let (value, size) =
-                    self.finish_collection(tag.as_ref(), Value::Mapping(mapping), size);
-                self.record_anchor(anchor.as_ref(), size, height + 1, Anchors::close);
-                self.feed(value, start_span, size, height + 1)?;
-            }
+            Event::MappingEnd { span } => self.finish_mapping(span)?,
         }
         Ok(())
+    }
+
+    #[inline]
+    fn finish_sequence(&mut self, span: Span) -> Result<(), Error> {
+        let Some(Frame::Sequence {
+            tag,
+            anchor,
+            items,
+            span: start_span,
+            size,
+            height,
+        }) = self.stack.pop()
+        else {
+            return Err(self.error_at(span, "unexpected sequence end"));
+        };
+        let items = match items {
+            SeqBuf::Scratch { len: 0, .. } => Vec::new(),
+            SeqBuf::Scratch { start, len } => {
+                let mut exact = Vec::with_capacity(len);
+                exact.extend(self.scratch_items.drain(start..));
+                exact
+            }
+            SeqBuf::Owned(mut items) => {
+                // Shrink small-to-medium nested sequences immediately; defer large or root
+                // shrinks until after the parser drops its token arena so the copy does
+                // not stack on top of the parse peak.
+                if !self.stack.is_empty() && items.len() <= 256 && items.capacity() > items.len() {
+                    items.shrink_to_fit();
+                }
+                items
+            }
+        };
+        let (value, size) = self.finish_collection(tag.as_ref(), Value::Sequence(items), size);
+        self.record_anchor(anchor.as_ref(), size, height + 1, Anchors::close);
+        self.feed(value, start_span, size, height + 1)
+    }
+
+    #[inline]
+    fn finish_mapping(&mut self, span: Span) -> Result<(), Error> {
+        let Some(Frame::Mapping {
+            tag,
+            anchor,
+            mapping,
+            pending_key,
+            span: start_span,
+            size,
+            height,
+        }) = self.stack.pop()
+        else {
+            return Err(self.error_at(span, "unexpected mapping end"));
+        };
+        if let Some((key, key_span)) = pending_key {
+            return Err(Error::new(
+                ErrorKind::Composition,
+                format!("mapping key without value: {key:?}"),
+            )
+            .with_span(key_span));
+        }
+        let mapping = match mapping {
+            MapBuf::Scratch { len: 0, .. } => Mapping::new(),
+            MapBuf::Scratch { start, .. } => {
+                Mapping::from_small_drain(self.scratch_entries.drain(start..))
+            }
+            MapBuf::Large(mut mapping) => {
+                if !self.stack.is_empty() && mapping.len() <= 256 {
+                    mapping.shrink_to_fit();
+                }
+                mapping
+            }
+        };
+        let (value, size) = self.finish_collection(tag.as_ref(), Value::Mapping(mapping), size);
+        self.record_anchor(anchor.as_ref(), size, height + 1, Anchors::close);
+        self.feed(value, start_span, size, height + 1)
     }
 
     pub(crate) fn finish(self) -> Result<Vec<Value>, Error> {
         self.finish_with_budget().map(|(documents, _)| documents)
     }
 
-    /// Finish the stream and hand back the alias budget it spent.
-    pub(crate) fn finish_with_budget(self) -> Result<(Vec<Value>, AliasBudget), Error> {
-        if !self.stack.is_empty() {
+    /// Finish a single-document parse without wrapping the root value in a `Vec`.
+    pub(crate) fn finish_single(self) -> Result<Value, Error> {
+        let Self {
+            stack,
+            document,
+            scratch_items,
+            scratch_entries,
+            anchors,
+            documents,
+            ..
+        } = self;
+        if !stack.is_empty() {
             return Err(Error::new(
                 ErrorKind::Composition,
                 "unterminated collection at end of stream",
             ));
         }
-        Ok((self.documents, self.budget))
+        drop(stack);
+        drop(scratch_items);
+        drop(scratch_entries);
+        drop(anchors);
+        drop(documents);
+        let mut value = document.unwrap_or(Value::Null);
+        shrink_root_value(&mut value);
+        Ok(value)
+    }
+
+    /// Finish the stream and hand back the alias budget it spent.
+    pub(crate) fn finish_with_budget(self) -> Result<(Vec<Value>, AliasBudget), Error> {
+        let Self {
+            stack,
+            mut documents,
+            scratch_items,
+            scratch_entries,
+            anchors,
+            document,
+            budget,
+            ..
+        } = self;
+        if !stack.is_empty() {
+            return Err(Error::new(
+                ErrorKind::Composition,
+                "unterminated collection at end of stream",
+            ));
+        }
+        drop(stack);
+        drop(scratch_items);
+        drop(scratch_entries);
+        drop(anchors);
+        drop(document);
+        for doc in &mut documents {
+            shrink_root_value(doc);
+        }
+        Ok((documents, budget))
     }
 
     /// Tag a finished collection; a tag adds one node and its text to the size estimate.
@@ -470,7 +709,25 @@ impl<'a> StreamingComposer<'a> {
             }) => {
                 *total = total.saturating_add(size);
                 *deepest = (*deepest).max(height);
-                items.push(value);
+                match items {
+                    SeqBuf::Scratch { start, len } => {
+                        if *len < SEQ_SCRATCH_LIMIT {
+                            if self.scratch_items.capacity() == 0 {
+                                self.scratch_items.reserve_exact(16);
+                            }
+                            self.scratch_items.push(value);
+                            *len += 1;
+                        } else {
+                            let mut owned = Vec::with_capacity(SEQ_SCRATCH_LIMIT * 2);
+                            owned.extend(self.scratch_items.drain(*start..));
+                            owned.push(value);
+                            *items = SeqBuf::Owned(owned);
+                        }
+                    }
+                    SeqBuf::Owned(owned) => {
+                        owned.push(value);
+                    }
+                }
             }
             Some(Frame::Mapping {
                 mapping,
@@ -482,14 +739,46 @@ impl<'a> StreamingComposer<'a> {
                 *total = total.saturating_add(size);
                 *deepest = (*deepest).max(height);
                 if let Some((key, key_span)) = pending_key.take() {
-                    if mapping.contains_key(&key) {
-                        return Err(Error::new(
-                            ErrorKind::DuplicateKey,
-                            format!("duplicate mapping key: {}", crate::value::key_text(&key)),
-                        )
-                        .with_span(key_span));
+                    match mapping {
+                        MapBuf::Scratch { start, len } => {
+                            let existing = &self.scratch_entries[*start..];
+                            if let Some((existing_key, _)) =
+                                existing.iter().find(|(k, _)| k == &key)
+                            {
+                                return Err(Error::new(
+                                    ErrorKind::DuplicateKey,
+                                    format!(
+                                        "duplicate mapping key: {}",
+                                        crate::value::key_text(existing_key)
+                                    ),
+                                )
+                                .with_span(key_span));
+                            }
+                            if usize::from(*len) < SMALL_LIMIT {
+                                if self.scratch_entries.capacity() == 0 {
+                                    self.scratch_entries.reserve_exact(SMALL_LIMIT);
+                                }
+                                self.scratch_entries.push((key, value));
+                                *len += 1;
+                            } else {
+                                let mut large = Mapping::with_capacity(SMALL_LIMIT * 2);
+                                for (k, v) in self.scratch_entries.drain(*start..) {
+                                    drop(large.insert(k, v));
+                                }
+                                drop(large.insert(key, value));
+                                *mapping = MapBuf::Large(large);
+                            }
+                        }
+                        MapBuf::Large(large) => {
+                            if let Err(duplicate) = large.insert_new(key, value) {
+                                return Err(Error::new(
+                                    ErrorKind::DuplicateKey,
+                                    format!("duplicate mapping key: {duplicate}"),
+                                )
+                                .with_span(key_span));
+                            }
+                        }
                     }
-                    mapping.insert(key, value);
                 } else {
                     *pending_key = Some((value, span));
                 }
@@ -518,24 +807,6 @@ impl<'a> StreamingComposer<'a> {
             let definition = AnchorDef { path, size, height };
             record(&mut self.anchors, anchor.as_str(), definition);
         }
-    }
-
-    /// The finished node at `path`. The path's first steps run through the
-    /// open collections; once a step leaves the open child, it reaches a
-    /// finished value, and the rest of the path descends inside it.
-    fn anchored(&self, path: &[Step]) -> Option<&Value> {
-        for (depth, step) in path.iter().enumerate() {
-            let frame = self.stack.get(depth)?;
-            if depth + 1 < self.stack.len() && frame.position() == *step {
-                continue;
-            }
-            let mut value = frame.child(*step)?;
-            for step in &path[depth + 1..] {
-                value = child_of(value, *step)?;
-            }
-            return Some(value);
-        }
-        None
     }
 
     #[allow(
@@ -665,5 +936,71 @@ mod tests {
         assert_eq!(value["version"].as_u64(), Some(1));
         assert!(value["facts"].is_sequence());
         assert!(value["rules"].is_sequence());
+    }
+
+    #[test]
+    fn duplicate_key_diagnostic_matches_across_small_and_large_mappings() {
+        let small_float = "0.0: 1\n-0.0: 2\n";
+        let mut large_float = String::new();
+        for idx in 0..8 {
+            use std::fmt::Write as _;
+            let _ = writeln!(large_float, "k{idx}: {idx}");
+        }
+        large_float.push_str(small_float);
+        let small_err = crate::parse_value(small_float).expect_err("small duplicate");
+        let large_err = crate::parse_value(&large_float).expect_err("large duplicate");
+        assert_eq!(small_err.kind(), ErrorKind::DuplicateKey);
+        assert_eq!(large_err.kind(), ErrorKind::DuplicateKey);
+        assert_eq!(small_err.message(), large_err.message());
+
+        let small_map = "? {a: 1, b: 2}\n: 1\n? {b: 2, a: 1}\n: 2\n";
+        let mut large_map = String::new();
+        for idx in 0..8 {
+            use std::fmt::Write as _;
+            let _ = writeln!(large_map, "k{idx}: {idx}");
+        }
+        large_map.push_str(small_map);
+        let small_err = crate::parse_value(small_map).expect_err("small complex duplicate");
+        let large_err = crate::parse_value(&large_map).expect_err("large complex duplicate");
+        assert_eq!(small_err.message(), large_err.message());
+    }
+
+    #[test]
+    fn aliases_resolve_across_scratch_and_spilled_collections_and_pending_keys() {
+        // Sequence spilling past SEQ_SCRATCH_LIMIT (64) with aliases before and after the spill.
+        let mut seq_yaml = String::from("- &first {a: 1, b: 2}\n- *first\n");
+        for idx in 0..70 {
+            use std::fmt::Write as _;
+            let _ = writeln!(seq_yaml, "- {idx}");
+        }
+        seq_yaml.push_str("- *first\n");
+        let seq = crate::parse_value(&seq_yaml).expect("spilled seq with aliases");
+        let items = seq.as_sequence().expect("sequence");
+        assert_eq!(items.len(), 73);
+        assert_eq!(items[0], items[1]);
+        assert_eq!(items[0], items[72]);
+
+        // Mapping spilling past SMALL_LIMIT (8) with aliases before and after the spill.
+        let mut map_yaml = String::from("a0: &m0 [1, 2]\na1: *m0\n");
+        for idx in 2..12 {
+            use std::fmt::Write as _;
+            let _ = writeln!(map_yaml, "a{idx}: {idx}");
+        }
+        map_yaml.push_str("tail: *m0\n");
+        let map = crate::parse_value(&map_yaml).expect("spilled map with aliases");
+        assert_eq!(map["a0"], map["a1"]);
+        assert_eq!(map["a0"], map["tail"]);
+
+        // Alias targeting an anchored pending complex key while a nested mapping spills to Large.
+        let mut complex_yaml = String::from("? &pk {k: [1, 2]}\n:\n");
+        for idx in 0..10 {
+            use std::fmt::Write as _;
+            let _ = writeln!(complex_yaml, "  n{idx}: {idx}");
+        }
+        complex_yaml.push_str("  ref_key: *pk\n");
+        let complex = crate::parse_value(&complex_yaml).expect("alias to pending complex key");
+        let root_map = complex.as_mapping().expect("root mapping");
+        let (key_val, val_map) = root_map.get_index(0).expect("first entry");
+        assert_eq!(&val_map["ref_key"], key_val);
     }
 }

@@ -62,6 +62,8 @@ pub(crate) enum TokenKind<'a> {
     FlowEntry,
     LineBreak,
     PlainScalar,
+    SingleQuotedScalar,
+    DoubleQuotedScalar,
     Scalar(Box<ScalarToken<'a>>),
     Anchor,
     Alias,
@@ -76,7 +78,7 @@ pub(crate) struct Directive<'a> {
 }
 
 /// A scalar token's decoded value and presentation, boxed because most tokens are plain
-/// scalars, whose value is their source span.
+/// or unescaped single-line quoted scalars, whose value is sliced directly from their source span.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ScalarToken<'a> {
     pub(crate) value: Cow<'a, str>,
@@ -88,6 +90,8 @@ impl TokenKind<'_> {
     pub(crate) fn scalar_style(&self) -> Option<ScalarStyle> {
         match self {
             Self::PlainScalar => Some(ScalarStyle::Plain),
+            Self::SingleQuotedScalar => Some(ScalarStyle::SingleQuoted),
+            Self::DoubleQuotedScalar => Some(ScalarStyle::DoubleQuoted),
             Self::Scalar(scalar) => Some(scalar.style),
             _ => None,
         }
@@ -117,7 +121,10 @@ impl fmt::Display for TokenKind<'_> {
             Self::FlowMappingEnd => formatter.write_str("}"),
             Self::FlowEntry => formatter.write_str(","),
             Self::LineBreak => formatter.write_str("line break"),
-            Self::PlainScalar | Self::Scalar(_) => formatter.write_str("scalar"),
+            Self::PlainScalar
+            | Self::SingleQuotedScalar
+            | Self::DoubleQuotedScalar
+            | Self::Scalar(_) => formatter.write_str("scalar"),
             Self::Anchor => formatter.write_str("anchor"),
             Self::Alias => formatter.write_str("alias"),
             Self::Tag(_) => formatter.write_str("tag"),
@@ -715,6 +722,9 @@ impl<'a> Scanner<'a> {
         if self.quoted_only_next < self.quoted_only.len() {
             let quoted = matches!(
                 kind,
+                TokenKind::SingleQuotedScalar | TokenKind::DoubleQuotedScalar
+            ) || matches!(
+                kind,
                 TokenKind::Scalar(ref scalar)
                     if matches!(
                         scalar.style,
@@ -726,23 +736,33 @@ impl<'a> Scanner<'a> {
         // A scalar's size is the larger of its text and its value: `\L` and
         // `\P` take 2 bytes of text and 3 of value.
         // A scalar whose value is empty still has its text to count.
-        let scalar_value = match &kind {
-            TokenKind::PlainScalar => Some(end - start),
-            TokenKind::Scalar(scalar) => Some(scalar.value.len()),
+        let scalar_bytes = match &kind {
+            TokenKind::PlainScalar
+            | TokenKind::SingleQuotedScalar
+            | TokenKind::DoubleQuotedScalar => Some(end - start),
+            TokenKind::Scalar(scalar) => Some((end - start).max(scalar.value.len())),
             _ => None,
         };
-        if let Some(value) = scalar_value {
+        if let Some(bytes) = scalar_bytes {
             self.limits
-                .check_scalar_bytes((end - start).max(value))
+                .check_scalar_bytes(bytes)
                 .map_err(|error| self.limit_at(start, error))?;
         }
         self.last_token_end = end;
-        self.previous_flow_end =
-            matches!(kind, TokenKind::FlowSequenceEnd | TokenKind::FlowMappingEnd)
-                || matches!(
-                    kind.scalar_style(),
-                    Some(ScalarStyle::SingleQuoted | ScalarStyle::DoubleQuoted)
-                );
+        self.previous_flow_end = matches!(
+            kind,
+            TokenKind::FlowSequenceEnd
+                | TokenKind::FlowMappingEnd
+                | TokenKind::SingleQuotedScalar
+                | TokenKind::DoubleQuotedScalar
+        ) || matches!(
+            kind,
+            TokenKind::Scalar(ref scalar)
+                if matches!(
+                    scalar.style,
+                    ScalarStyle::SingleQuoted | ScalarStyle::DoubleQuoted
+                )
+        );
         match kind {
             TokenKind::DocumentEnd => {
                 self.document_open = false;

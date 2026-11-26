@@ -126,7 +126,7 @@ pub(super) fn scalar_key_text<'de>(node: &Node<'de>) -> Option<Cow<'de, str>> {
     let node = resolve(node);
     match &node.kind {
         NodeKind::Null => Some(Cow::Borrowed("null")),
-        NodeKind::Bool(value) => Some(Cow::Owned(value.to_string())),
+        NodeKind::Bool(value) => Some(Cow::Borrowed(if *value { "true" } else { "false" })),
         NodeKind::Number(value) => Some(Cow::Owned(value.to_string())),
         NodeKind::String(value) => Some(value.clone()),
         _ => None,

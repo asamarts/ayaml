@@ -251,24 +251,26 @@ fn prefix_token_capacity(
 fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
     let input = scanner.input();
     let input_len = scanner.input_len();
-    let chunk = match input_len {
-        0..=4096 => TOKEN_ARENA_SMALL_CHUNK,
-        4097..=32768 => TOKEN_ARENA_MID_CHUNK,
+    let line_count = scanner.line_index().line_count();
+    let (initial_chunk, chunk) = match input_len {
+        0..=4096 => (TOKEN_ARENA_SMALL_CHUNK, TOKEN_ARENA_SMALL_CHUNK),
+        4097..=32768 => (TOKEN_ARENA_MID_CHUNK, TOKEN_ARENA_MID_CHUNK),
         _ => {
             // Short lines carry many tokens for their bytes, so a wider first chunk saves
-            // reallocations. A few long lines, such as one large scalar, keep the small chunk so
-            // an empty arena does not reserve a wide one.
-            let lines = scanner.line_index().line_count();
-            if lines > 0 && input_len / lines <= 10 {
-                TOKEN_ARENA_WIDE_CHUNK
+            // reallocations. A few long lines, such as one large scalar, start with the small
+            // chunk so a sparse document does not reserve 256 KiB; if tokens turn out dense on a
+            // single long line, subsequent growth steps up to `TOKEN_ARENA_CHUNK`.
+            if line_count == 0 || input_len / line_count > 80 {
+                (TOKEN_ARENA_SMALL_CHUNK, TOKEN_ARENA_CHUNK)
+            } else if input_len / line_count <= 10 {
+                (TOKEN_ARENA_WIDE_CHUNK, TOKEN_ARENA_WIDE_CHUNK)
             } else {
-                TOKEN_ARENA_CHUNK
+                (TOKEN_ARENA_CHUNK, TOKEN_ARENA_CHUNK)
             }
         }
     };
     let mut lines = Vec::new();
     let mut tokens = Vec::new();
-    let line_count = scanner.line_index().line_count();
     let most = scanner.max_tokens();
     if let Some(capacity) = mid_input_token_capacity(input_len, line_count, most) {
         reserve_tokens(
@@ -334,6 +336,14 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
                 let capacity_before = tokens.capacity();
                 if tokens.len() == tokens.capacity() {
                     let room = most.saturating_sub(tokens.len()).max(1);
+                    let step_chunk = if tokens.is_empty()
+                        || (initial_chunk == TOKEN_ARENA_SMALL_CHUNK
+                            && consumed / (tokens.len() + 1) > 80)
+                    {
+                        initial_chunk
+                    } else {
+                        chunk
+                    };
                     let additional = if let Some(capacity) = prefix_token_capacity(
                         tokens.len() + 1,
                         consumed,
@@ -344,9 +354,9 @@ fn read_lines<'a>(scanner: &mut Scanner<'a>) -> Result<Lines<'a>, Error> {
                     ) {
                         last_tokens = tokens.len() + 1;
                         last_consumed = consumed;
-                        estimated_growth(tokens.len(), capacity, chunk, most)
+                        estimated_growth(tokens.len(), capacity, step_chunk, most)
                     } else {
-                        arena_growth(tokens.len(), chunk).min(room)
+                        arena_growth(tokens.len(), step_chunk).min(room)
                     };
                     reserve_tokens(
                         &mut tokens,
@@ -451,11 +461,12 @@ impl<'a> EventSink<'a> {
     /// Say how many entries the root flow collection holds, before its start event.
     fn reserve_collection(&mut self, entries: usize) {
         match self {
+            Self::Streaming(composer) => composer.reserve_collection(entries),
             Self::Typed(builder) => builder.reserve_collection(entries),
             #[cfg(test)]
             Self::Consumer(consumer) => consumer.reserve_collection(entries),
             Self::Queue { root_entries, .. } => *root_entries = Some(entries),
-            Self::Events(_) | Self::Streaming(_) => {}
+            Self::Events(_) => {}
         }
     }
 
@@ -808,6 +819,60 @@ fn parse_events_with_compat<'a>(
     }
 }
 
+/// Compose a single document directly from the parser without allocating an event vector or
+/// single-element document `Vec`. A second document is an error at its start.
+pub(crate) fn parse_value(input: &str, limits: &Limits) -> Result<Value, Error> {
+    let mut scanner = Scanner::new(input, limits.clone())?;
+    let lines = read_lines(&mut scanner)?;
+    let flow_ends = flow_ends(&lines.tokens);
+    let mut parser = Parser {
+        lines: lines.lines,
+        token_arena: lines.tokens,
+        flow_ends,
+        sink: EventSink::Streaming(Box::new(StreamingComposer::new_single(
+            limits.clone(),
+            input.len(),
+        ))),
+        limits: limits.clone(),
+        input,
+        positions: lines.positions,
+        compat: false,
+        documents: 0,
+        emitted: 0,
+        single_document: true,
+        stop_at_second: false,
+        end: lines.stream_end.map_or(input.len(), Span::start),
+        scanner_error: lines.scanner_error,
+        truncated_last_line: lines.truncated_last_line,
+    };
+    parser.emit(Event::StreamStart {
+        span: lines.stream_start.unwrap_or_else(|| Span::empty(0)),
+    })?;
+    parser
+        .parse_stream()
+        .map_err(|error| error.with_location_from(&parser.positions, input))?;
+    parser.emit(Event::StreamEnd {
+        span: lines.stream_end.unwrap_or_else(|| Span::empty(input.len())),
+    })?;
+    let Parser {
+        lines: parser_lines,
+        token_arena,
+        flow_ends,
+        positions,
+        sink,
+        ..
+    } = parser;
+    drop(parser_lines);
+    drop(token_arena);
+    drop(flow_ends);
+    match sink {
+        EventSink::Streaming(composer) => composer
+            .finish_single()
+            .map_err(|error| error.with_location_from(&positions, input)),
+        _ => unreachable!("event sink kind changed during parsing"),
+    }
+}
+
 /// Compose values directly from the parser without retaining an event vector.
 /// With `single_document`, a second document is an error at its start.
 pub(crate) fn parse_documents(
@@ -848,8 +913,18 @@ pub(crate) fn parse_documents(
     parser.emit(Event::StreamEnd {
         span: lines.stream_end.unwrap_or_else(|| Span::empty(input.len())),
     })?;
-    let positions = parser.positions;
-    match parser.sink {
+    let Parser {
+        lines: parser_lines,
+        token_arena,
+        flow_ends,
+        positions,
+        sink,
+        ..
+    } = parser;
+    drop(parser_lines);
+    drop(token_arena);
+    drop(flow_ends);
+    match sink {
         EventSink::Streaming(composer) => composer
             .finish()
             .map_err(|error| error.with_location_from(&positions, input)),
@@ -1216,10 +1291,14 @@ impl<'a> Parser<'a> {
                     ErrorCode::InvalidBlockIndentation,
                     "a block entry is indented less than its parent",
                 ),
-                Some(TokenKind::PlainScalar | TokenKind::Scalar(_))
-                    if root_block
-                        && self.lines[index].indent > 0
-                        && previous_line_is_blank(self.input, span.start()) =>
+                Some(
+                    TokenKind::PlainScalar
+                    | TokenKind::SingleQuotedScalar
+                    | TokenKind::DoubleQuotedScalar
+                    | TokenKind::Scalar(_),
+                ) if root_block
+                    && self.lines[index].indent > 0
+                    && previous_line_is_blank(self.input, span.start()) =>
                 {
                     (
                         ErrorCode::MissingMappingColon,

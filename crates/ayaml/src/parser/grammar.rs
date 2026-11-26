@@ -206,12 +206,11 @@ impl<'a> Parser<'a> {
             // The overwhelmingly common block-sequence entry is one scalar.
             // Emit it inline so a wide sequence does not pay a continuation
             // stack push/pop and nested parser call for every item.
-            if let Some(token) = self.single_scalar(rest) {
-                let span = token.2;
+            if let Some((value, style, span)) = self.take_single_scalar(rest) {
                 let event = Event::Scalar {
-                    value: token.0.clone(),
+                    value,
                     raw: Cow::Borrowed(&self.input[span.start()..span.end()]),
-                    style: token.1,
+                    style,
                     tag: None,
                     anchor: None,
                     span,
@@ -237,20 +236,90 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// A one-token scalar entry that needs no property or nested-node work.
-    pub(super) fn single_scalar(&self, run: Run) -> Option<(Cow<'a, str>, ScalarStyle, Span)> {
+    /// Whether `run` is a single scalar token that needs no property or nested-node work.
+    #[inline]
+    pub(super) fn is_single_scalar(&self, run: Run) -> bool {
+        run.len() == 1
+            && matches!(
+                self.token(run, 0).kind,
+                TokenKind::PlainScalar
+                    | TokenKind::SingleQuotedScalar
+                    | TokenKind::DoubleQuotedScalar
+                    | TokenKind::Scalar(_)
+            )
+    }
+
+    /// Take a one-token scalar entry in a single arena lookup, moving owned escaped/block scalar
+    /// strings out of `token_arena` without cloning.
+    #[inline]
+    pub(super) fn take_single_scalar(
+        &mut self,
+        run: Run,
+    ) -> Option<(Cow<'a, str>, ScalarStyle, Span)> {
         if run.len() != 1 {
             return None;
         }
-        let token = self.token(run, 0);
-        match &token.kind {
+        let abs = self.lines[run.line].start + run.start;
+        let token = &mut self.token_arena[abs];
+        let span = token.span;
+        match &mut token.kind {
             TokenKind::PlainScalar => Some((
-                Cow::Borrowed(&self.input[token.span.start()..token.span.end()]),
+                Cow::Borrowed(&self.input[span.start()..span.end()]),
                 ScalarStyle::Plain,
-                token.span,
+                span,
             )),
-            TokenKind::Scalar(scalar) => Some((scalar.value.clone(), scalar.style, token.span)),
+            TokenKind::SingleQuotedScalar => Some((
+                Cow::Borrowed(&self.input[span.start() + 1..span.end() - 1]),
+                ScalarStyle::SingleQuoted,
+                span,
+            )),
+            TokenKind::DoubleQuotedScalar => Some((
+                Cow::Borrowed(&self.input[span.start() + 1..span.end() - 1]),
+                ScalarStyle::DoubleQuoted,
+                span,
+            )),
+            TokenKind::Scalar(scalar) => Some((
+                std::mem::replace(&mut scalar.value, Cow::Borrowed("")),
+                scalar.style,
+                span,
+            )),
             _ => None,
+        }
+    }
+
+    /// Move or borrow a scalar token's decoded value out of `token_arena`, avoiding a `String`
+    /// clone when consuming owned escaped or block scalars.
+    #[inline]
+    pub(super) fn take_scalar_token(
+        &mut self,
+        run: Run,
+        offset: usize,
+    ) -> (Cow<'a, str>, ScalarStyle, Span) {
+        let abs = self.lines[run.line].start + run.start + offset;
+        let token = &mut self.token_arena[abs];
+        let span = token.span;
+        match &mut token.kind {
+            TokenKind::PlainScalar => (
+                Cow::Borrowed(&self.input[span.start()..span.end()]),
+                ScalarStyle::Plain,
+                span,
+            ),
+            TokenKind::SingleQuotedScalar => (
+                Cow::Borrowed(&self.input[span.start() + 1..span.end() - 1]),
+                ScalarStyle::SingleQuoted,
+                span,
+            ),
+            TokenKind::DoubleQuotedScalar => (
+                Cow::Borrowed(&self.input[span.start() + 1..span.end() - 1]),
+                ScalarStyle::DoubleQuoted,
+                span,
+            ),
+            TokenKind::Scalar(scalar) => (
+                std::mem::replace(&mut scalar.value, Cow::Borrowed("")),
+                scalar.style,
+                span,
+            ),
+            _ => unreachable!("take_scalar_token called on non-scalar token"),
         }
     }
 
@@ -435,31 +504,31 @@ impl<'a> Parser<'a> {
             if matches!(self.token(tokens, 0).kind, TokenKind::Key) {
                 let key_rest = tokens.from(1);
                 let current_index = state.current_index;
-                if let Some(key) = self.single_scalar(key_rest)
+                if self.is_single_scalar(key_rest)
                     && current_index < self.lines.len()
                     && self.lines[current_index].indent == indent
                     && self.line_starts_with(current_index, |kind| matches!(kind, TokenKind::Value))
                 {
-                    let value = self.line_run(current_index).from(1);
-                    if let Some(value) = self.single_scalar(value) {
+                    let value_run = self.line_run(current_index).from(1);
+                    if self.is_single_scalar(value_run) {
+                        let (key_val, key_style, key_span) = self.take_scalar_token(key_rest, 0);
+                        let (val_val, val_style, value_span) = self.take_scalar_token(value_run, 0);
                         state.entries += 1;
                         self.limits
                             .check_collection_entries(state.entries)
-                            .map_err(|error| self.limit_at(key.2, error))?;
-                        let key_span = key.2;
+                            .map_err(|error| self.limit_at(key_span, error))?;
                         self.emit(Event::Scalar {
-                            value: key.0,
+                            value: key_val,
                             raw: Cow::Borrowed(&self.input[key_span.start()..key_span.end()]),
-                            style: key.1,
+                            style: key_style,
                             tag: None,
                             anchor: None,
                             span: key_span,
                         })?;
-                        let value_span = value.2;
                         self.emit(Event::Scalar {
-                            value: value.0,
+                            value: val_val,
                             raw: Cow::Borrowed(&self.input[value_span.start()..value_span.end()]),
-                            style: value.1,
+                            style: val_style,
                             tag: None,
                             anchor: None,
                             span: value_span,
@@ -533,49 +602,66 @@ impl<'a> Parser<'a> {
                 }));
             }
 
-            // Fast path for the overwhelmingly common implicit `plain_key: ...` entry:
-            // a single `PlainScalar` token is guaranteed single-line, and a byte distance <= 1024
-            // to `:` guarantees <= 1024 characters without querying `LineStarts::location`.
-            if tokens.len() >= 2
-                && matches!(self.token(tokens, 0).kind, TokenKind::PlainScalar)
-                && matches!(self.token(tokens, 1).kind, TokenKind::Value)
-            {
-                let key_span = self.token(tokens, 0).span;
-                let colon_start = self.token(tokens, 1).span.start();
-                if colon_start.saturating_sub(key_span.start()) <= 1024 {
-                    let key_slice = &self.input[key_span.start()..key_span.end()];
-                    self.emit(Event::Scalar {
-                        value: Cow::Borrowed(key_slice),
-                        raw: Cow::Borrowed(key_slice),
-                        style: ScalarStyle::Plain,
-                        tag: None,
-                        anchor: None,
-                        span: key_span,
-                    })?;
-                    if tokens.len() == 3
-                        && let Some(value) = self.single_scalar(tokens.from(2))
-                    {
-                        state.entries += 1;
-                        self.limits
-                            .check_collection_entries(state.entries)
-                            .map_err(|error| self.limit_at(key_span, error))?;
-                        let value_span = value.2;
+            // Fast path for the overwhelmingly common implicit single-line scalar key entry:
+            // `PlainScalar`, `SingleQuotedScalar`, and `DoubleQuotedScalar` are guaranteed
+            // single-line, and a byte distance <= 1024 to `:` guarantees <= 1024 characters
+            // without querying `LineStarts::location`.
+            if tokens.len() >= 2 && matches!(self.token(tokens, 1).kind, TokenKind::Value) {
+                let first = self.token(tokens, 0);
+                let key_span = first.span;
+                let key_parts = match first.kind {
+                    TokenKind::PlainScalar => Some((
+                        &self.input[key_span.start()..key_span.end()],
+                        ScalarStyle::Plain,
+                    )),
+                    TokenKind::SingleQuotedScalar => Some((
+                        &self.input[key_span.start() + 1..key_span.end() - 1],
+                        ScalarStyle::SingleQuoted,
+                    )),
+                    TokenKind::DoubleQuotedScalar => Some((
+                        &self.input[key_span.start() + 1..key_span.end() - 1],
+                        ScalarStyle::DoubleQuoted,
+                    )),
+                    _ => None,
+                };
+                if let Some((key_text, key_style)) = key_parts {
+                    let colon_start = self.token(tokens, 1).span.start();
+                    if colon_start.saturating_sub(key_span.start()) <= 1024 {
                         self.emit(Event::Scalar {
-                            value: value.0,
-                            raw: Cow::Borrowed(&self.input[value_span.start()..value_span.end()]),
-                            style: value.1,
+                            value: Cow::Borrowed(key_text),
+                            raw: Cow::Borrowed(&self.input[key_span.start()..key_span.end()]),
+                            style: key_style,
                             tag: None,
                             anchor: None,
-                            span: value_span,
+                            span: key_span,
                         })?;
-                        if self.sink.is_full() {
-                            let next_index = state.current_index;
-                            stack.push(Cont::MappingEntry(state));
-                            return Ok(Step::Return(next_index));
+                        let value_run = tokens.from(2);
+                        if let Some((val_value, val_style, value_span)) =
+                            self.take_single_scalar(value_run)
+                        {
+                            state.entries += 1;
+                            self.limits
+                                .check_collection_entries(state.entries)
+                                .map_err(|error| self.limit_at(key_span, error))?;
+                            self.emit(Event::Scalar {
+                                value: val_value,
+                                raw: Cow::Borrowed(
+                                    &self.input[value_span.start()..value_span.end()],
+                                ),
+                                style: val_style,
+                                tag: None,
+                                anchor: None,
+                                span: value_span,
+                            })?;
+                            if self.sink.is_full() {
+                                let next_index = state.current_index;
+                                stack.push(Cont::MappingEntry(state));
+                                return Ok(Step::Return(next_index));
+                            }
+                            continue;
                         }
-                        continue;
+                        return self.mapping_after_implicit_key(state, tokens, Some(1), stack);
                     }
-                    return self.mapping_after_implicit_key(state, tokens, Some(1), stack);
                 }
             }
 
@@ -832,9 +918,10 @@ impl<'a> Parser<'a> {
                 FlowLack::Node(ErrorCode::UnexpectedToken, "expected a node".to_owned()),
             ));
         }
-        let token = self.token(tokens, index);
+        let abs = self.lines[tokens.line].start + tokens.start + index;
+        let token = &mut self.token_arena[abs];
         let span = token.span;
-        match &token.kind {
+        match &mut token.kind {
             TokenKind::PlainScalar => {
                 let event = Event::Scalar {
                     value: Cow::Borrowed(&self.input[span.start()..span.end()]),
@@ -847,11 +934,37 @@ impl<'a> Parser<'a> {
                 self.emit(event)?;
                 Ok(Step::Return(index + 1))
             }
-            TokenKind::Scalar(scalar) => {
+            TokenKind::SingleQuotedScalar => {
                 let event = Event::Scalar {
-                    value: scalar.value.clone(),
+                    value: Cow::Borrowed(&self.input[span.start() + 1..span.end() - 1]),
                     raw: Cow::Borrowed(&self.input[span.start()..span.end()]),
-                    style: scalar.style,
+                    style: ScalarStyle::SingleQuoted,
+                    tag,
+                    anchor,
+                    span,
+                };
+                self.emit(event)?;
+                Ok(Step::Return(index + 1))
+            }
+            TokenKind::DoubleQuotedScalar => {
+                let event = Event::Scalar {
+                    value: Cow::Borrowed(&self.input[span.start() + 1..span.end() - 1]),
+                    raw: Cow::Borrowed(&self.input[span.start()..span.end()]),
+                    style: ScalarStyle::DoubleQuoted,
+                    tag,
+                    anchor,
+                    span,
+                };
+                self.emit(event)?;
+                Ok(Step::Return(index + 1))
+            }
+            TokenKind::Scalar(scalar) => {
+                let value = std::mem::replace(&mut scalar.value, Cow::Borrowed(""));
+                let style = scalar.style;
+                let event = Event::Scalar {
+                    value,
+                    raw: Cow::Borrowed(&self.input[span.start()..span.end()]),
+                    style,
                     tag,
                     anchor,
                     span,
