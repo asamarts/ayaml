@@ -290,10 +290,41 @@ pub(crate) fn needs_explicit_indent(text: &str) -> bool {
         .is_some_and(|line| line.starts_with([' ', '\t']))
 }
 
+#[cfg(test)]
 pub(crate) fn double_quoted(value: &str) -> String {
     let mut output = String::with_capacity(value.len() + 2);
     emit_double_quoted(value, &mut output);
     output
+}
+
+/// Character count of `double_quoted(value)` capped at `cap`, without allocating.
+pub(crate) fn double_quoted_char_len_capped(value: &str, cap: usize) -> usize {
+    let mut count = 2usize;
+    if count >= cap {
+        return count;
+    }
+    for ch in value.chars() {
+        let step = match ch {
+            '\\' | '"' | '\0' | '\x07' | '\x08' | '\t' | '\n' | '\x0b' | '\x0c' | '\r' | '\x1b'
+            | '\u{0085}' | '\u{2028}' | '\u{2029}' => 2,
+            ch if !is_printable(ch) || ch == '\u{feff}' => {
+                let code = ch as u32;
+                if code <= 0xFF {
+                    4
+                } else if code <= 0xFFFF {
+                    6
+                } else {
+                    10
+                }
+            }
+            _ => 1,
+        };
+        count = count.saturating_add(step);
+        if count >= cap {
+            return count;
+        }
+    }
+    count
 }
 
 /// Write a double-quoted scalar. Every character outside the printable set,
@@ -364,7 +395,10 @@ pub(crate) fn emit_double_quoted(value: &str, output: &mut String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{block_scalar_ok, double_quoted, plain_text_ok, single_quoted_ok};
+    use super::{
+        block_scalar_ok, double_quoted, double_quoted_char_len_capped, plain_text_ok,
+        single_quoted_ok,
+    };
 
     #[test]
     fn byte_table_scalar_predicates_and_double_quoting_handle_edge_cases() {
@@ -392,9 +426,15 @@ mod tests {
         assert!(!block_scalar_ok("line1\n\t"));
         assert!(!block_scalar_ok("line1\x7f\n"));
 
+        let complex = "a\"b\\c\n\t\x7f\u{0085}\u{2028}\u{2029}\u{feff}é\u{1f680}\u{10ffff}";
         assert_eq!(
             double_quoted("a\"b\\c\n\t\x7f\u{0085}\u{2028}\u{2029}\u{feff}é"),
             "\"a\\\"b\\\\c\\n\\t\\x7F\\N\\L\\P\\uFEFFé\""
         );
+        assert_eq!(
+            double_quoted_char_len_capped(complex, usize::MAX),
+            double_quoted(complex).chars().count()
+        );
+        assert!(double_quoted_char_len_capped(complex, 10) >= 10);
     }
 }

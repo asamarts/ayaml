@@ -432,14 +432,16 @@ fn build<'a>(
     suppress_entry_spans: bool,
 ) -> Result<SpannedTree<'a>, Error> {
     let mut builder = Builder {
-        input,
+        scan_cache: LineScanCache::new(input),
         documents: Vec::new(),
         stack: Vec::new(),
         root: None,
         after_block_scalar: AfterBlockScalar::NONE,
+        anchored_depth: 0,
         // A run of marks opens the input as one mark does.
         marked: input.trim_start_matches('\u{feff}').contains('\u{feff}'),
         suppress_entry_spans,
+        merged_missing_places: suppress_entry_spans.then(HashMap::new),
     };
     for event in events {
         builder.event(event?)?;
@@ -449,14 +451,123 @@ fn build<'a>(
     })
 }
 
-struct Builder<'a> {
+/// Memoized summary of a contiguous run of blank and comment lines starting at line boundary
+/// `from` and ending at the first content line `next_content` (or `input.len()`).
+#[derive(Clone, Copy)]
+struct BlankRunSummary {
+    from: usize,
+    next_content: usize,
+    next_is_value_indicator: bool,
+    next_content_indent: usize,
+    /// True when any blank line has leading spaces or any blank/comment line is tab-indented,
+    /// which prevents any preceding block scalar from safely ignoring the run.
+    blocks_any_scalar: bool,
+    has_blank_before_comment: bool,
+    max_comment_indent: Option<usize>,
+    #[cfg(test)]
+    lines_scanned: usize,
+}
+
+impl BlankRunSummary {
+    fn block_scalar_ignores(self, scalar: AfterBlockScalar) -> bool {
+        if self.from == self.next_content {
+            return true;
+        }
+        let Some((indent, keep)) = scalar.known() else {
+            return false;
+        };
+        if self.blocks_any_scalar {
+            return false;
+        }
+        if keep && self.has_blank_before_comment {
+            return false;
+        }
+        self.max_comment_indent.is_none_or(|col| col < indent)
+    }
+}
+
+/// Linear-time line and trailing-blank scanner with single-entry memoization so deeply nested
+/// block closings sharing the same `content_end` or trailing blank/comment run scan each byte
+/// at most once.
+struct LineScanCache<'a> {
     input: &'a str,
+    last_entry_end: Option<(usize, Option<usize>)>,
+    last_blank_run: Option<BlankRunSummary>,
+    #[cfg(test)]
+    blank_run_lines_scanned: usize,
+}
+
+impl<'a> LineScanCache<'a> {
+    const fn new(input: &'a str) -> Self {
+        Self {
+            input,
+            last_entry_end: None,
+            last_blank_run: None,
+            #[cfg(test)]
+            blank_run_lines_scanned: 0,
+        }
+    }
+
+    fn entry_end(&mut self, content_end: usize) -> Option<usize> {
+        if let Some((cached_at, cached)) = self.last_entry_end
+            && cached_at == content_end
+        {
+            return cached;
+        }
+        let result = compute_entry_end(self.input, content_end);
+        // Preserve the unwinding frontier: backward lookbacks must not evict a newer offset.
+        if self
+            .last_entry_end
+            .is_none_or(|(cached_at, _)| content_end >= cached_at)
+        {
+            self.last_entry_end = Some((content_end, result));
+        }
+        result
+    }
+
+    fn blank_run(&mut self, from: usize) -> BlankRunSummary {
+        let from = from.min(self.input.len());
+        if let Some(cached) = self.last_blank_run
+            && cached.from == from
+        {
+            return cached;
+        }
+        let summary = scan_blank_run(self.input, from);
+        #[cfg(test)]
+        {
+            self.blank_run_lines_scanned += summary.lines_scanned;
+        }
+        if self.last_blank_run.is_none_or(|cached| from >= cached.from) {
+            self.last_blank_run = Some(summary);
+        }
+        summary
+    }
+
+    fn value_indicator_follows(&mut self, from: usize) -> bool {
+        if let Some(cached) = self.last_blank_run
+            && from >= cached.from
+            && from <= cached.next_content
+        {
+            return cached.next_is_value_indicator;
+        }
+        self.blank_run(from).next_is_value_indicator
+    }
+
+    fn block_scalar_ignores_after(&mut self, from: usize, scalar: AfterBlockScalar) -> bool {
+        self.blank_run(from).block_scalar_ignores(scalar)
+    }
+}
+
+struct Builder<'a> {
+    scan_cache: LineScanCache<'a>,
     documents: Vec<SpannedNode<'a>>,
     stack: Vec<Frame<'a>>,
     root: Option<SpannedNode<'a>>,
     /// The last scalar or alias that the source writes was a block scalar. One takes the blank
     /// and more indented lines after it as its own, until other content ends it.
     after_block_scalar: AfterBlockScalar,
+    /// Number of open collection frames on `stack` that define an anchor of their own.
+    anchored_depth: usize,
     /// The input holds a byte-order mark past the marks that open it. The compatibility reader
     /// counts one at a line's start toward that line's indentation, and takes one after a line
     /// break for a comment's or a blank line's start, unless it opens the input. So what such
@@ -466,6 +577,10 @@ struct Builder<'a> {
     /// Suppress all `entry_span`s conservatively (for example, when merge-key expansion replays
     /// entries whose source spans point into anchored source mappings).
     suppress_entry_spans: bool,
+    /// When `suppress_entry_spans` is active (merge-key expansion), memoizes originating
+    /// `missing_value_place` results by `(key_start, key_end)` so sibling and ancestor merge
+    /// replays reuse the exact originating span in O(1) without rescanning blank runs.
+    merged_missing_places: Option<HashMap<(usize, usize), Option<usize>>>,
 }
 
 struct Frame<'a> {
@@ -507,6 +622,9 @@ enum FrameKind<'a> {
         /// so a sequence's frame isn't as large.
         key: Option<Box<PendingKey<'a>>>,
         keys: KeyTracker,
+        /// Cached starting column of this block mapping, computed lazily on the first empty-value
+        /// entry instead of rescanning from line start on every entry.
+        column: Option<usize>,
         /// A key here has no value of its own to compare: an alias, or a collection that holds
         /// one. It may be any other key of the mapping again, so a lookup would have to guess.
         guess: bool,
@@ -530,7 +648,12 @@ impl<'a> Builder<'a> {
     fn event(&mut self, event: Event<'a>) -> Result<(), Error> {
         match event {
             Event::StreamStart { .. } | Event::StreamEnd { .. } | Event::Directive { .. } => {}
-            Event::DocumentStart { .. } => self.root = None,
+            Event::DocumentStart { .. } => {
+                self.root = None;
+                if let Some(cache) = self.merged_missing_places.as_mut() {
+                    cache.clear();
+                }
+            }
             Event::DocumentEnd { .. } => {
                 if let Some(root) = self.root.take() {
                     self.documents.push(root);
@@ -546,7 +669,8 @@ impl<'a> Builder<'a> {
             } => {
                 let before = self.after_block_scalar;
                 // A scalar with no text isn't written, so it ends no block scalar before it.
-                if !span.is_empty() {
+                // Skip scanning block-scalar raw headers when entry spans are suppressed or marked.
+                if !self.suppress_entry_spans && !self.marked && !span.is_empty() {
                     self.after_block_scalar =
                         if matches!(style, ScalarStyle::Literal | ScalarStyle::Folded) {
                             AfterBlockScalar::from_raw(&raw)
@@ -595,10 +719,14 @@ impl<'a> Builder<'a> {
                 ..
             } => {
                 let in_key = self.in_key_position();
+                let anchored = anchor.is_some();
+                if anchored {
+                    self.anchored_depth += 1;
+                }
                 self.stack.push(Frame {
                     open: span,
                     style,
-                    anchored: anchor.is_some(),
+                    anchored,
                     after_block_scalar: self.after_block_scalar,
                     in_key,
                     kind: FrameKind::Sequence {
@@ -615,6 +743,10 @@ impl<'a> Builder<'a> {
                 ..
             } => {
                 let in_key = self.in_key_position();
+                let anchored = anchor.is_some();
+                if anchored {
+                    self.anchored_depth += 1;
+                }
                 let keys = if in_key {
                     KeyTracker::Resolved(Box::new(Mapping::new()))
                 } else {
@@ -623,13 +755,14 @@ impl<'a> Builder<'a> {
                 self.stack.push(Frame {
                     open: span,
                     style,
-                    anchored: anchor.is_some(),
+                    anchored,
                     after_block_scalar: self.after_block_scalar,
                     in_key,
                     kind: FrameKind::Mapping {
                         entries: Vec::new(),
                         key: None,
                         keys,
+                        column: None,
                         guess: false,
                     },
                 });
@@ -647,6 +780,9 @@ impl<'a> Builder<'a> {
                 "unexpected sequence end",
             ));
         };
+        if frame.anchored {
+            self.anchored_depth -= 1;
+        }
         let FrameKind::Sequence {
             mut items,
             resolved,
@@ -690,6 +826,9 @@ impl<'a> Builder<'a> {
                 "unexpected mapping end",
             ));
         };
+        if frame.anchored {
+            self.anchored_depth -= 1;
+        }
         let FrameKind::Mapping {
             mut entries,
             keys,
@@ -716,7 +855,7 @@ impl<'a> Builder<'a> {
             && !self.marked
             && !self.suppress_entry_spans
             && !frame.anchored
-            && !self.stack.iter().any(|outer| outer.anchored)
+            && self.anchored_depth == 0
             && entries.len() >= 2
             && !entries[0].ambiguous
             && entries[0].value.entry_span.is_none()
@@ -724,19 +863,23 @@ impl<'a> Builder<'a> {
             && !entries[0].value.anchored
         {
             entries[0].value.entry_span =
-                compact_first_entry_span(self.input, &entries[0], &entries[1]);
+                compact_first_entry_span(self.scan_cache.input, &entries[0], &entries[1]);
         }
         // A pair in a flow sequence, as in `[a: b]`, is a mapping with no braces. Its
         // end event stands at the token after it, past blanks and a comment, where a
         // mapping with braces has its `}`. The pair ends where what it writes does.
         let braced = self
+            .scan_cache
             .input
             .get(span.start()..)
             .is_some_and(|text| text.starts_with('}'));
         let end = match entries.last() {
-            Some(last) if flow && !braced => {
-                pair_end(self.input, frame.open.start(), last, span.start())
-            }
+            Some(last) if flow && !braced => pair_end(
+                self.scan_cache.input,
+                frame.open.start(),
+                last,
+                span.start(),
+            ),
             _ => span.end(),
         };
         let node = SpannedNode {
@@ -774,8 +917,7 @@ impl<'a> Builder<'a> {
         // An alias to a collection reads the entries inside it, so removing one of them changes
         // what the alias stands for.
         let marked = self.marked;
-        let aliased =
-            marked || self.suppress_entry_spans || self.stack.iter().any(|frame| frame.anchored);
+        let aliased = marked || self.suppress_entry_spans || self.anchored_depth > 0;
         let Some(frame) = self.stack.last_mut() else {
             self.root = Some(node);
             return;
@@ -790,7 +932,7 @@ impl<'a> Builder<'a> {
                     }
                 }
                 node.entry_span = block_entry_span(
-                    self.input,
+                    &mut self.scan_cache,
                     frame.style,
                     Lead::Item,
                     node.span.start(),
@@ -804,6 +946,7 @@ impl<'a> Builder<'a> {
                 entries,
                 key,
                 keys,
+                column,
                 guess,
             } => {
                 let Some(waiting) = key.take() else {
@@ -823,19 +966,48 @@ impl<'a> Builder<'a> {
                 key_node.entry_span = None;
                 // In an input with a byte-order mark past its start, what a line's indentation
                 // is depends on the reader, so the value stays where the parser places it.
+                // Under merge-key expansion (`merged_missing_places.is_some()`), memoize each
+                // originating `(key_start, key_end)` placement once so sibling and ancestor merge
+                // replays reuse the originating span in O(1) without rescanning blank runs.
                 if node.is_missing_value()
                     && !marked
                     && let Some(key_end) = key_node.content_end
-                    && let Some(at) =
-                        missing_value_place(self.input, frame.open.start(), key_end, frame.style)
                 {
-                    // The parser places a value that isn't there at the next token. It stands
-                    // after its key's `:`, where a value would be written.
-                    node.span = Span::empty(at);
-                    node.content_end = Some(at);
+                    let place = if let Some(cache) = self.merged_missing_places.as_mut() {
+                        let key_id = (key_node.span.start(), key_end);
+                        if let Some(&cached) = cache.get(&key_id) {
+                            cached
+                        } else if key_end >= frame.open.start() {
+                            let computed = missing_value_place(
+                                &mut self.scan_cache,
+                                frame.open.start(),
+                                column,
+                                key_end,
+                                frame.style,
+                            );
+                            cache.insert(key_id, computed);
+                            computed
+                        } else {
+                            None
+                        }
+                    } else {
+                        missing_value_place(
+                            &mut self.scan_cache,
+                            frame.open.start(),
+                            column,
+                            key_end,
+                            frame.style,
+                        )
+                    };
+                    if let Some(at) = place {
+                        // The parser places a value that isn't there at the next token. It stands
+                        // after its key's `:`, where a value would be written.
+                        node.span = Span::empty(at);
+                        node.content_end = Some(at);
+                    }
                 }
                 let span = block_entry_span(
-                    self.input,
+                    &mut self.scan_cache,
                     frame.style,
                     Lead::Key {
                         end: key_node.content_end,
@@ -1037,7 +1209,7 @@ fn compact_first_entry_span(
     if colon <= key_end || input.get(first..colon)?.contains(['\n', '\r']) {
         return None;
     }
-    let end = entry_end(input, content_end)?;
+    let end = compute_entry_end(input, content_end)?;
     let next_first = next_entry.key.span.start();
     let next_key_end = next_entry.key.content_end?;
     let next_line = line_start(input, next_first);
@@ -1062,7 +1234,13 @@ fn compact_first_entry_span(
         {
             return None;
         }
-        if value_indicator_follows(input, end) {
+        // `between` is purely whitespace and `next_before` is purely spaces, so the first
+        // non-blank line after `end` is guaranteed to begin at `next_first`.
+        if input
+            .get(next_first..)
+            .and_then(|rest| rest.strip_prefix(':'))
+            .is_some_and(|after| after.is_empty() || after.starts_with([' ', '\t', '\n', '\r']))
+        {
             return None;
         }
     }
@@ -1070,7 +1248,7 @@ fn compact_first_entry_span(
 }
 
 fn block_entry_span(
-    input: &str,
+    cache: &mut LineScanCache<'_>,
     style: crate::event::CollectionStyle,
     lead: Lead,
     first: usize,
@@ -1081,6 +1259,7 @@ fn block_entry_span(
     if style == crate::event::CollectionStyle::Flow || anchored {
         return None;
     }
+    let input = cache.input;
     let content_end = content_end?;
     let mut start = line_start(input, first);
     // The byte-order marks that open the input are no part of the first entry.
@@ -1104,96 +1283,138 @@ fn block_entry_span(
     if !begins_its_line {
         return None;
     }
-    let end = entry_end(input, content_end)?;
+    let end = cache.entry_end(content_end)?;
     // A line that begins with `:` gives a value to the key before it. With this entry gone,
     // that could be an explicit key from before the entry.
-    if value_indicator_follows(input, end) {
+    if cache.value_indicator_follows(end) {
         return None;
     }
     // A block scalar that is the last thing written before this entry ends where the entry
     // begins. With the entry gone it could absorb blank or comment lines that follow unless
     // content follows or every intervening blank/comment line is outside the scalar.
-    if after_block_scalar.is_some() && !block_scalar_ignores_after(input, end, after_block_scalar) {
+    if after_block_scalar.is_some() && !cache.block_scalar_ignores_after(end, after_block_scalar) {
         return None;
     }
     (end > start).then(|| Span::new(start, end))
 }
 
-/// Whether the preceding block scalar ignores all blank and comment lines starting at `from`
-/// until the next content line (or EOF).
-fn block_scalar_ignores_after(input: &str, from: usize, scalar: AfterBlockScalar) -> bool {
-    if content_follows(input, from) {
-        return true;
-    }
-    let Some((indent, keep)) = scalar.known() else {
-        return false;
-    };
-    let mut cursor = input.get(from..).unwrap_or_default();
+/// Scan a contiguous run of blank and comment lines beginning at line boundary `from` in a single
+/// pass, summarizing all properties needed by `value_indicator_follows`,
+/// `block_scalar_ignores_after`, and block-mode `missing_value_place`.
+fn scan_blank_run(input: &str, from: usize) -> BlankRunSummary {
+    let from = from.min(input.len());
+    let mut offset = from;
+    let mut blocks_any_scalar = false;
+    let mut has_blank_before_comment = false;
     let mut seen_comment = false;
-    while !cursor.is_empty() {
-        let (line, next) = split_first_line(cursor);
+    let mut max_comment_indent: Option<usize> = None;
+    #[cfg(test)]
+    let mut lines_scanned = 0usize;
+
+    while offset < input.len() {
+        #[cfg(test)]
+        {
+            lines_scanned += 1;
+        }
+        let rest = &input[offset..];
+        let (line, next_rest) = split_first_line(rest);
         let spaces = line.len() - line.trim_start_matches(' ').len();
         let after = &line[spaces..];
         if after.is_empty() {
-            if spaces > 0 || (keep && !seen_comment) {
-                return false;
+            if spaces > 0 {
+                blocks_any_scalar = true;
+            }
+            if !seen_comment {
+                has_blank_before_comment = true;
             }
         } else if after.starts_with('\t') {
             let trimmed = after.trim_start_matches([' ', '\t']);
             if trimmed.is_empty() || trimmed.starts_with('#') {
-                return false;
+                blocks_any_scalar = true;
+            } else {
+                let next_is_value_indicator = trimmed
+                    .strip_prefix(':')
+                    .is_some_and(|tail| tail.is_empty() || tail.starts_with([' ', '\t']));
+                return BlankRunSummary {
+                    from,
+                    next_content: offset,
+                    next_is_value_indicator,
+                    next_content_indent: spaces,
+                    blocks_any_scalar,
+                    has_blank_before_comment,
+                    max_comment_indent,
+                    #[cfg(test)]
+                    lines_scanned,
+                };
             }
-            return true;
         } else if after.starts_with('#') {
-            if spaces >= indent {
-                return false;
-            }
             seen_comment = true;
+            max_comment_indent = Some(max_comment_indent.map_or(spaces, |prev| prev.max(spaces)));
         } else {
-            return true;
+            let next_is_value_indicator = after
+                .strip_prefix(':')
+                .is_some_and(|tail| tail.is_empty() || tail.starts_with([' ', '\t']));
+            return BlankRunSummary {
+                from,
+                next_content: offset,
+                next_is_value_indicator,
+                next_content_indent: spaces,
+                blocks_any_scalar,
+                has_blank_before_comment,
+                max_comment_indent,
+                #[cfg(test)]
+                lines_scanned,
+            };
         }
-        cursor = next;
+        offset = input.len() - next_rest.len();
     }
-    true
-}
 
-/// Whether the input ends at `from`, or the line there holds more than blanks or a comment.
-fn content_follows(input: &str, from: usize) -> bool {
-    let rest = input.get(from..).unwrap_or_default();
-    let line = rest.split(['\n', '\r']).next().unwrap_or(rest);
-    let content = line.trim_start_matches([' ', '\t']);
-    rest.is_empty() || !(content.is_empty() || content.starts_with('#'))
-}
-
-/// Whether the first line from `from` on that holds more than blanks or a comment begins with a
-/// `:` indicator.
-fn value_indicator_follows(input: &str, from: usize) -> bool {
-    let rest = input.get(from..).unwrap_or_default();
-    for line in rest.split(['\n', '\r']) {
-        let content = line.trim_start_matches([' ', '\t']);
-        if content.is_empty() || content.starts_with('#') {
-            continue;
-        }
-        return content
-            .strip_prefix(':')
-            .is_some_and(|after| after.is_empty() || after.starts_with([' ', '\t']));
+    BlankRunSummary {
+        from,
+        next_content: input.len(),
+        next_is_value_indicator: false,
+        next_content_indent: 0,
+        blocks_any_scalar,
+        has_blank_before_comment,
+        max_comment_indent,
+        #[cfg(test)]
+        lines_scanned,
     }
-    false
 }
 
 /// Where an entry whose last character ends at `content_end` ends: after its line break, or
 /// `None` when more than a comment follows it on that line.
-fn entry_end(input: &str, content_end: usize) -> Option<usize> {
+fn compute_entry_end(input: &str, content_end: usize) -> Option<usize> {
     let (before, rest) = input.split_at_checked(content_end)?;
     // A block scalar's text runs through its last line break.
     if before.ends_with(['\n', '\r']) {
         return Some(content_end);
     }
-    let line = rest.split(['\n', '\r']).next().unwrap_or(rest);
-    let after = line.trim_start_matches([' ', '\t']);
-    // A comment needs a blank before its `#`.
-    let comment = after.starts_with('#') && after.len() < line.len();
-    (after.is_empty() || comment).then(|| line_end(input, content_end))
+    let bytes = rest.as_bytes();
+    let mut pos = 0;
+    while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t') {
+        pos += 1;
+    }
+    let saw_blank = pos > 0;
+    if pos < bytes.len() {
+        // A comment needs a blank before its `#`.
+        if bytes[pos] == b'#' && saw_blank {
+            pos += 1;
+            while pos < bytes.len() && !matches!(bytes[pos], b'\n' | b'\r') {
+                pos += 1;
+            }
+        } else if !matches!(bytes[pos], b'\n' | b'\r') {
+            return None;
+        }
+    }
+    if pos < bytes.len() {
+        if bytes[pos] == b'\r' && bytes.get(pos + 1) == Some(&b'\n') {
+            pos += 2;
+        } else {
+            pos += 1;
+        }
+    }
+    Some(content_end + pos)
 }
 
 /// Where a value that the source doesn't write stands, when the source shows that it wrote
@@ -1204,37 +1425,102 @@ fn entry_end(input: &str, content_end: usize) -> Option<usize> {
 /// show for it. The mapping's column is the one to compare with, and not the key's: a tag or an
 /// anchor before a key puts the key itself further right.
 fn missing_value_place(
-    input: &str,
+    cache: &mut LineScanCache<'_>,
     mapping_start: usize,
+    cached_column: &mut Option<usize>,
     key_end: usize,
     style: crate::event::CollectionStyle,
 ) -> Option<usize> {
+    let input = cache.input;
     let at = after_key(input, key_end);
     if at == key_end {
         return None;
     }
-    let flow = style == crate::event::CollectionStyle::Flow;
-    // The column counts characters, and a byte-order mark that opens the input is none.
-    let key_column = input
-        .get(line_start(input, mapping_start)..mapping_start)?
-        .chars()
-        .filter(|ch| *ch != '\u{feff}')
-        .count();
-    for (number, line) in input.get(at..)?.split(['\n', '\r']).enumerate() {
-        let content = line.trim_start_matches(' ');
-        let blank = content.trim_start_matches('\t').is_empty();
-        // A comment needs a blank before its `#`, which a line's start is.
-        if blank || content.starts_with('#') || content.trim_start_matches('\t').starts_with('#') {
-            continue;
+    let bytes = input.as_bytes();
+    if style == crate::event::CollectionStyle::Flow {
+        // Flow mappings inspect only immediate bytes after `:`, skipping inline blanks/comments
+        // without scanning to the end of a long single-line flow collection, and reuse the
+        // memoized blank-run scanner across multi-line blank/comment runs.
+        let mut pos = at;
+        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t') {
+            pos += 1;
         }
-        let ends_the_entry = if flow {
-            content.starts_with([',', '}', ']'])
-        } else {
-            number > 0 && line.len() - content.len() <= key_column
-        };
-        return ends_the_entry.then_some(at);
+        if pos > at && pos < bytes.len() && bytes[pos] == b'#' {
+            pos += 1;
+            while pos < bytes.len() && !matches!(bytes[pos], b'\n' | b'\r') {
+                pos += 1;
+            }
+        }
+        if pos >= bytes.len() {
+            return Some(at);
+        }
+        match bytes[pos] {
+            b',' | b'}' | b']' => return Some(at),
+            b'\n' | b'\r' => {
+                if bytes[pos] == b'\r' && bytes.get(pos + 1) == Some(&b'\n') {
+                    pos += 2;
+                } else {
+                    pos += 1;
+                }
+                let run = cache.blank_run(pos);
+                if run.next_content >= input.len() {
+                    return Some(at);
+                }
+                let next_bytes = input.as_bytes();
+                let mut cur = run.next_content;
+                while cur < next_bytes.len() && matches!(next_bytes[cur], b' ' | b'\t') {
+                    cur += 1;
+                }
+                return next_bytes
+                    .get(cur)
+                    .is_some_and(|b| matches!(b, b',' | b'}' | b']'))
+                    .then_some(at);
+            }
+            _ => return None,
+        }
     }
-    Some(at)
+
+    // Block mapping: inspect the remainder of the key's line, then consult the memoized blank-run
+    // scanner for any following blank/comment lines.
+    let mut pos = at;
+    while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t') {
+        pos += 1;
+    }
+    if pos > at && pos < bytes.len() && bytes[pos] == b'#' {
+        pos += 1;
+        while pos < bytes.len() && !matches!(bytes[pos], b'\n' | b'\r') {
+            pos += 1;
+        }
+    }
+    if pos >= bytes.len() {
+        return Some(at);
+    }
+    if !matches!(bytes[pos], b'\n' | b'\r') {
+        return None;
+    }
+    if bytes[pos] == b'\r' && bytes.get(pos + 1) == Some(&b'\n') {
+        pos += 2;
+    } else {
+        pos += 1;
+    }
+
+    // The column counts characters, and a byte-order mark that opens the input is none.
+    let key_column = if let Some(col) = *cached_column {
+        col
+    } else {
+        let col = input
+            .get(line_start(input, mapping_start)..mapping_start)?
+            .chars()
+            .filter(|ch| *ch != '\u{feff}')
+            .count();
+        *cached_column = Some(col);
+        col
+    };
+    let run = cache.blank_run(pos);
+    if run.next_content >= input.len() {
+        return Some(at);
+    }
+    (run.next_content_indent <= key_column).then_some(at)
 }
 
 /// The offset after the `:` that follows a key on the key's line, or the key's end when none
@@ -1262,22 +1548,6 @@ fn line_start(input: &str, index: usize) -> usize {
         i -= 1;
     }
     i
-}
-
-fn line_end(input: &str, index: usize) -> usize {
-    let bytes = input.as_bytes();
-    let mut end = index;
-    while end < bytes.len() && !matches!(bytes[end], b'\n' | b'\r') {
-        end += 1;
-    }
-    if end < bytes.len() {
-        if bytes[end] == b'\r' && bytes.get(end + 1) == Some(&b'\n') {
-            end += 2;
-        } else {
-            end += 1;
-        }
-    }
-    end
 }
 
 #[cfg(test)]
@@ -1343,5 +1613,144 @@ mod tests {
         }
         nested.push('\n');
         assert!(SpannedTree::parse(&nested).is_ok());
+    }
+
+    #[test]
+    fn spanned_tree_line_scans_stay_linear_deterministically() {
+        use std::fmt::Write as _;
+
+        fn build_and_count(input: &str, merge_keys: bool) -> (SpannedTree<'_>, usize) {
+            let options = ParseOptions::new().with_merge_keys(merge_keys);
+            let events = crate::parse_events_with(input, &options).expect("events");
+            let mut builder = Builder {
+                scan_cache: LineScanCache::new(input),
+                documents: Vec::new(),
+                stack: Vec::new(),
+                root: None,
+                after_block_scalar: AfterBlockScalar::NONE,
+                anchored_depth: 0,
+                marked: input.trim_start_matches('\u{feff}').contains('\u{feff}'),
+                suppress_entry_spans: merge_keys,
+                merged_missing_places: merge_keys.then(HashMap::new),
+            };
+            for event in events {
+                builder.event(event.expect("event")).expect("build");
+            }
+            let scanned = builder.scan_cache.blank_run_lines_scanned;
+            (
+                SpannedTree {
+                    documents: builder.documents,
+                },
+                scanned,
+            )
+        }
+
+        // 1. Dense single-line empty-value flow mapping scans zero blank-run lines.
+        let mut flow = String::from("{");
+        for i in 0..2_000 {
+            if i > 0 {
+                flow.push(',');
+            }
+            let _ = write!(flow, "k{i}:");
+        }
+        flow.push_str("}\n");
+        let (_, scanned) = build_and_count(&flow, false);
+        assert_eq!(scanned, 0, "single-line flow map must scan 0 blank lines");
+
+        // 2. 80-deep block mapping followed by 1,000 blank/comment lines scans each line at most once.
+        let mut block = String::from("hdr: |\n  keep\n");
+        for level in 0..80 {
+            for _ in 0..level {
+                block.push_str("  ");
+            }
+            let _ = writeln!(block, "k{level}:");
+        }
+        for _ in 0..80 {
+            block.push_str("  ");
+        }
+        block.push_str("leaf:\n");
+        for i in 0..1_000 {
+            if i % 2 == 0 {
+                block.push('\n');
+            } else {
+                block.push_str("# comment\n");
+            }
+        }
+        block.push_str("tail: 1\n");
+        let (_, scanned) = build_and_count(&block, false);
+        assert!(
+            scanned <= 1_200,
+            "80-deep block + 1,000 trailing blanks scanned {scanned} lines (expected linear)"
+        );
+
+        // 3. 40-deep nested compact mappings + 1,000 trailing blanks do not evict blank-run cache.
+        let mut compact = String::new();
+        for level in 0..40 {
+            let pad = "    ".repeat(level);
+            let _ = writeln!(compact, "{pad}- a{level}: 1\n\n{pad}  b{level}:");
+        }
+        let leaf_pad = "    ".repeat(40);
+        let _ = writeln!(compact, "{leaf_pad}end: 1");
+        for i in 0..1_000 {
+            if i % 2 == 0 {
+                compact.push('\n');
+            } else {
+                compact.push_str("# trailing\n");
+            }
+        }
+        compact.push_str("- after: 2\n");
+        let (_, scanned) = build_and_count(&compact, false);
+        assert!(
+            scanned <= 1_300,
+            "40-deep compact + 1,000 trailing blanks scanned {scanned} lines (expected linear)"
+        );
+
+        // 4. Ancestor + sibling merge replays over 1,000 blanks scan the blank run once and
+        //    preserve the exact originating missing-value span.
+        let mut anc = String::new();
+        for level in 0..40 {
+            let pad = "  ".repeat(level);
+            let _ = writeln!(anc, "{pad}m{level}:");
+        }
+        let base_pad = "  ".repeat(40);
+        let _ = writeln!(anc, "{base_pad}base: &b");
+        let _ = writeln!(anc, "{base_pad}  k0:");
+        for _ in 0..1_000 {
+            anc.push('\n');
+        }
+        let _ = writeln!(anc, "{base_pad}  k1: 1");
+        for level in (0..40).rev() {
+            let pad = "  ".repeat(level + 1);
+            let _ = writeln!(anc, "{pad}<<: *b");
+            let _ = writeln!(anc, "{pad}x{level}:");
+        }
+        for i in 0..40 {
+            let _ = writeln!(anc, "s{i}: {{ <<: *b }}");
+        }
+        let (tree, scanned) = build_and_count(&anc, true);
+        assert!(
+            scanned <= 1_200,
+            "ancestor + sibling merge replays scanned {scanned} lines (expected linear)"
+        );
+        let mut base_path: Vec<PathSegment> = (0..40)
+            .map(|l| PathSegment::Key(Value::from(format!("m{l}"))))
+            .collect();
+        base_path.push(PathSegment::Key(Value::from("base")));
+        base_path.push(PathSegment::Key(Value::from("k0")));
+        let base_k0 = tree.span_at(&base_path).expect("base k0");
+        let outer_k0 = tree
+            .span_at(&[
+                PathSegment::Key(Value::from("m0")),
+                PathSegment::Key(Value::from("k0")),
+            ])
+            .expect("outer merged k0");
+        let sibling_k0 = tree
+            .span_at(&[
+                PathSegment::Key(Value::from("s0")),
+                PathSegment::Key(Value::from("k0")),
+            ])
+            .expect("sibling merged k0");
+        assert_eq!(outer_k0, base_k0);
+        assert_eq!(sibling_k0, base_k0);
     }
 }

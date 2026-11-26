@@ -329,7 +329,7 @@ fn node_key_value(
     node: &EventNode<'_>,
     remaining_depth: usize,
     in_alias: bool,
-    key_budget: &mut AliasBudget,
+    budget: &mut AliasBudget,
     input_len: usize,
     limits: &Limits,
 ) -> Result<Option<Value>, Error> {
@@ -342,7 +342,7 @@ fn node_key_value(
                 if let Some(tag) = tag {
                     cost = cost.saturating_add(tag.text_len());
                 }
-                key_budget
+                budget
                     .charge_bytes(limits, input_len, cost)
                     .map_err(|e| e.with_span(node.span))?;
             }
@@ -357,14 +357,18 @@ fn node_key_value(
                 if let Some(tag) = tag {
                     cost = cost.saturating_add(tag.text_len());
                 }
-                key_budget
+                budget
                     .charge_bytes(limits, input_len, cost)
                     .map_err(|e| e.with_span(node.span))?;
             }
-            let mut out = Vec::with_capacity(items.len());
+            let mut out = if in_alias {
+                Vec::new()
+            } else {
+                Vec::with_capacity(items.len())
+            };
             for item in items {
                 let Some(val) =
-                    node_key_value(item, next_depth, in_alias, key_budget, input_len, limits)?
+                    node_key_value(item, next_depth, in_alias, budget, input_len, limits)?
                 else {
                     return Ok(None);
                 };
@@ -384,19 +388,21 @@ fn node_key_value(
                 if let Some(tag) = tag {
                     cost = cost.saturating_add(tag.text_len());
                 }
-                key_budget
+                budget
                     .charge_bytes(limits, input_len, cost)
                     .map_err(|e| e.with_span(node.span))?;
             }
-            let mut mapping = crate::Mapping::with_capacity(entries.len());
+            let mut mapping = if in_alias {
+                crate::Mapping::new()
+            } else {
+                crate::Mapping::with_capacity(entries.len())
+            };
             for (k, v, _) in entries {
-                let Some(kv) =
-                    node_key_value(k, next_depth, in_alias, key_budget, input_len, limits)?
+                let Some(kv) = node_key_value(k, next_depth, in_alias, budget, input_len, limits)?
                 else {
                     return Ok(None);
                 };
-                let Some(vv) =
-                    node_key_value(v, next_depth, in_alias, key_budget, input_len, limits)?
+                let Some(vv) = node_key_value(v, next_depth, in_alias, budget, input_len, limits)?
                 else {
                     return Ok(None);
                 };
@@ -411,10 +417,10 @@ fn node_key_value(
             AliasBinding::Resolved { node: target, .. } => {
                 // Aliases are acyclic (checked at binding time) and add no collection nesting
                 // depth; charge the alias budget before expanding to prevent alias-bomb keys.
-                key_budget
+                budget
                     .charge(limits, input_len, limits.node_cost_bytes)
                     .map_err(|e| e.with_span(node.span))?;
-                node_key_value(target, remaining_depth, true, key_budget, input_len, limits)
+                node_key_value(target, remaining_depth, true, budget, input_len, limits)
             }
             AliasBinding::Cyclic | AliasBinding::Unknown => Ok(None),
         },
@@ -832,17 +838,9 @@ fn apply_event_merge<'a>(
     limits: &Limits,
     budget: &mut AliasBudget,
 ) -> Result<(), Error> {
-    let mut key_budget = *budget;
     let mut seen: HashSet<Value> = HashSet::with_capacity(entries.len());
     for (k, _, _) in entries.iter() {
-        if let Some(val) = node_key_value(
-            k,
-            limits.max_depth,
-            false,
-            &mut key_budget,
-            input_len,
-            limits,
-        )? {
+        if let Some(val) = node_key_value(k, limits.max_depth, false, budget, input_len, limits)? {
             seen.insert(val);
         }
     }
@@ -873,7 +871,7 @@ fn apply_event_merge<'a>(
                 size,
                 height,
                 current_depth,
-                &mut key_budget,
+                budget,
                 input_len,
                 limits,
             )
@@ -925,7 +923,7 @@ fn apply_event_merge<'a>(
                     size,
                     height,
                     current_depth,
-                    &mut key_budget,
+                    budget,
                     input_len,
                     limits,
                 )?;
@@ -989,20 +987,13 @@ fn merge_entries<'a>(
     size: &mut usize,
     height: &mut usize,
     current_depth: usize,
-    key_budget: &mut AliasBudget,
+    budget: &mut AliasBudget,
     input_len: usize,
     limits: &Limits,
 ) -> Result<(), Error> {
     let mut inline_seen = (!from_alias).then(|| HashSet::with_capacity(src_entries.len()));
     for (src_key, src_val, src_strip) in src_entries {
-        let key_val = node_key_value(
-            src_key,
-            limits.max_depth,
-            false,
-            key_budget,
-            input_len,
-            limits,
-        )?;
+        let key_val = node_key_value(src_key, limits.max_depth, false, budget, input_len, limits)?;
         if let Some(ref mut local) = inline_seen
             && let Some(ref kv) = key_val
             && !local.insert(kv.clone())

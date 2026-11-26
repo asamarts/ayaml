@@ -341,3 +341,334 @@ fn frontmatter_enforces_limits_and_alias_bombs_boundedly() {
         );
     });
 }
+
+/// Dense empty-value flow mappings and deeply nested block closings followed by long blank/comment
+/// runs parse in linear time in `SpannedTree::parse` without quadratic rescanning (AY-169).
+#[test]
+fn spanned_tree_empty_flow_entries_and_trailing_blanks_stay_linear() {
+    in_child!(|| {
+        use ayaml::PathSegment;
+        use std::fmt::Write as _;
+        use std::time::{Duration, Instant};
+
+        // 1. Single-line dense empty-value flow mapping (`{k0:,k1:,...,kN:}`).
+        let entries = if cfg!(debug_assertions) {
+            8_000_usize
+        } else {
+            40_000_usize
+        };
+        let mut flow = String::with_capacity(entries * 9 + 4);
+        flow.push('{');
+        for i in 0..entries {
+            if i > 0 {
+                flow.push(',');
+            }
+            let _ = write!(flow, "k{i}:");
+        }
+        flow.push_str("}\n");
+
+        let started = Instant::now();
+        let tree = SpannedTree::parse(&flow).expect("dense empty-value flow mapping parses");
+        let elapsed = started.elapsed();
+        let first_span = tree
+            .span_at(&[PathSegment::Key(Value::from("k0"))])
+            .expect("first key span");
+        assert!(first_span.is_empty());
+        assert_eq!(flow.as_bytes()[first_span.start() - 1], b':');
+        let last_key = format!("k{}", entries - 1);
+        let last_span = tree
+            .span_at(&[PathSegment::Key(Value::from(last_key))])
+            .expect("last key span");
+        assert!(last_span.is_empty());
+        assert_eq!(flow.as_bytes()[last_span.start() - 1], b':');
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "dense flow mapping ({entries} entries) took {elapsed:?}"
+        );
+
+        // 2. Deeply nested block mapping after a block scalar followed by 100k blank/comment lines.
+        let depth = 100_usize;
+        let trailing_lines = if cfg!(debug_assertions) {
+            25_000_usize
+        } else {
+            100_000_usize
+        };
+        let mut block = String::from("hdr: |\n  keep\n");
+        for level in 0..depth {
+            for _ in 0..level {
+                block.push_str("  ");
+            }
+            let _ = writeln!(block, "k{level}:");
+        }
+        for _ in 0..depth {
+            block.push_str("  ");
+        }
+        block.push_str("leaf:\n");
+        for i in 0..trailing_lines {
+            if i % 2 == 0 {
+                block.push('\n');
+            } else {
+                block.push_str("# comment\n");
+            }
+        }
+        block.push_str("tail: 1\n");
+
+        let started = Instant::now();
+        let tree = SpannedTree::parse(&block).expect("deep block with trailing blank run parses");
+        let elapsed = started.elapsed();
+        let mut leaf_path = Vec::with_capacity(depth + 1);
+        for level in 0..depth {
+            leaf_path.push(PathSegment::Key(Value::from(format!("k{level}"))));
+        }
+        leaf_path.push(PathSegment::Key(Value::from("leaf")));
+        let leaf_span = tree.span_at(&leaf_path).expect("leaf span");
+        assert!(leaf_span.is_empty());
+        assert_eq!(block.as_bytes()[leaf_span.start() - 1], b':');
+        assert_eq!(
+            tree.scalar_text_at(&[PathSegment::Key(Value::from("tail"))]),
+            Some("1")
+        );
+        assert!(
+            tree.entry_span_at(&[PathSegment::Key(Value::from("k0"))])
+                .is_some(),
+            "k0 after clip block scalar followed by content must keep its entry_span"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "deep block + {trailing_lines} trailing blank/comment lines took {elapsed:?}"
+        );
+
+        // 3. Nested compact mappings (`- a: 1\n\n  b: ...`) followed by long trailing blanks must
+        //    not evict the blank-run cache on each closing level.
+        let compact_depth = 50_usize;
+        let mut compact = String::new();
+        for level in 0..compact_depth {
+            let pad = "    ".repeat(level);
+            let _ = writeln!(compact, "{pad}- a{level}: 1\n\n{pad}  b{level}:");
+        }
+        let leaf_pad = "    ".repeat(compact_depth);
+        let _ = writeln!(compact, "{leaf_pad}end: 1");
+        for i in 0..trailing_lines {
+            if i % 2 == 0 {
+                compact.push('\n');
+            } else {
+                compact.push_str("# trailing\n");
+            }
+        }
+        compact.push_str("- after: 2\n");
+        let started = Instant::now();
+        let compact_tree = SpannedTree::parse(&compact).expect("nested compact mappings parse");
+        let elapsed = started.elapsed();
+        assert!(
+            compact_tree
+                .entry_span_at(&[PathSegment::Index(0), PathSegment::Key(Value::from("a0")),])
+                .is_some(),
+            "compact first entry span must remain exact"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "nested compact mappings + {trailing_lines} trailing blanks took {elapsed:?}"
+        );
+
+        assert_merge_replay_spanned_tree_stays_linear();
+    });
+}
+
+fn assert_merge_replay_spanned_tree_stays_linear() {
+    use ayaml::PathSegment;
+    use std::fmt::Write as _;
+    use std::time::{Duration, Instant};
+
+    // 4. `SpannedTree::parse_with(..., merge_keys(true))` replaying an anchored missing-value
+    //    entry followed by many blank lines across many sibling flow/block merge mappings
+    //    must stay linear without rescanning the source blank run per replay.
+    let merge_blanks = if cfg!(debug_assertions) {
+        10_000_usize
+    } else {
+        50_000_usize
+    };
+    let merge_replays = if cfg!(debug_assertions) {
+        500_usize
+    } else {
+        2_000_usize
+    };
+    let mut merge_yaml = String::from("base: &base\n  k0:\n");
+    for _ in 0..merge_blanks {
+        merge_yaml.push('\n');
+    }
+    merge_yaml.push_str("  k1: 1\n");
+    for i in 0..merge_replays {
+        if i % 2 == 0 {
+            let _ = writeln!(merge_yaml, "m{i}: {{ <<: *base }}");
+        } else {
+            let _ = writeln!(merge_yaml, "m{i}:\n  <<: *base\n  x:");
+        }
+    }
+    let started = Instant::now();
+    let merge_tree =
+        SpannedTree::parse_with(&merge_yaml, &ParseOptions::new().with_merge_keys(true))
+            .expect("merge replay spanned tree parses");
+    let elapsed = started.elapsed();
+    assert!(
+        merge_tree
+            .lookup(&[
+                PathSegment::Key(Value::from("m0")),
+                PathSegment::Key(Value::from("k1")),
+            ])
+            .is_some()
+    );
+    // Replayed sibling missing-value entry keeps the exact originating source span.
+    let base_k0_span = merge_tree
+        .span_at(&[
+            PathSegment::Key(Value::from("base")),
+            PathSegment::Key(Value::from("k0")),
+        ])
+        .expect("base k0 span");
+    let m0_k0_span = merge_tree
+        .span_at(&[
+            PathSegment::Key(Value::from("m0")),
+            PathSegment::Key(Value::from("k0")),
+        ])
+        .expect("m0 merged k0 span");
+    assert_eq!(m0_k0_span, base_k0_span);
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "merge-key replay ({merge_replays}x over {merge_blanks} blanks) took {elapsed:?}"
+    );
+
+    // 5. Ancestor merge replays + replayed `|-` empty-value block scalar with many blank lines
+    //    must stay linear without rescanning blank runs or `AfterBlockScalar::from_raw`.
+    let ancestor_depth = 80_usize;
+    let mut ancestor_yaml = String::new();
+    for level in 0..ancestor_depth {
+        let pad = "  ".repeat(level);
+        let _ = writeln!(ancestor_yaml, "{pad}m{level}:");
+    }
+    let base_pad = "  ".repeat(ancestor_depth);
+    let _ = writeln!(ancestor_yaml, "{base_pad}base: &anc");
+    let _ = writeln!(ancestor_yaml, "{base_pad}  k0:");
+    for _ in 0..merge_blanks {
+        ancestor_yaml.push('\n');
+    }
+    let _ = writeln!(ancestor_yaml, "{base_pad}  k1: |-");
+    for _ in 0..merge_blanks {
+        ancestor_yaml.push('\n');
+    }
+    let _ = writeln!(ancestor_yaml, "{base_pad}  k2: 1");
+    for level in (0..ancestor_depth).rev() {
+        let pad = "  ".repeat(level + 1);
+        let _ = writeln!(ancestor_yaml, "{pad}<<: *anc");
+        let _ = writeln!(ancestor_yaml, "{pad}x{level}:");
+    }
+    let started = Instant::now();
+    let ancestor_tree =
+        SpannedTree::parse_with(&ancestor_yaml, &ParseOptions::new().with_merge_keys(true))
+            .expect("ancestor merge replay parses");
+    let elapsed = started.elapsed();
+    let outer_k0 = ancestor_tree
+        .span_at(&[
+            PathSegment::Key(Value::from("m0")),
+            PathSegment::Key(Value::from("k0")),
+        ])
+        .expect("outer merged k0 span");
+    assert!(outer_k0.is_empty());
+    assert_eq!(ancestor_yaml.as_bytes()[outer_k0.start() - 1], b':');
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "ancestor merge replay + |- blank scalar ({ancestor_depth} deep) took {elapsed:?}"
+    );
+}
+
+/// `ValueWriter::emit_flow` stops immediately after hitting `max_output_bytes` or an `io::Write`
+/// failure without formatting or allocating remaining sequence/mapping entries (AY-169).
+#[test]
+fn flow_emitter_stops_immediately_on_limit_or_writer_error() {
+    in_child!(|| {
+        use ayaml::{EmitOptions, LimitExceeded};
+        use std::io::Write;
+        use std::time::{Duration, Instant};
+
+        struct CountingFailWriter {
+            writes: usize,
+            fail_after_bytes: usize,
+            written: usize,
+        }
+
+        impl Write for CountingFailWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.writes += 1;
+                if self.written + buf.len() > self.fail_after_bytes {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "simulated writer failure",
+                    ));
+                }
+                self.written += buf.len();
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let count = if cfg!(debug_assertions) {
+            10_000_usize
+        } else {
+            40_000_usize
+        };
+        // Strings containing quotes/control characters force double-quoted escaping if visited.
+        let payload = "line1\n\"quoted\"\t\\slash\\".repeat(4);
+        let seq = Value::Sequence((0..count).map(|_| Value::String(payload.clone())).collect());
+        let mut map = ayaml::Mapping::with_capacity(count);
+        for i in 0..count {
+            map.insert(
+                Value::String(format!("k{i}")),
+                Value::String(payload.clone()),
+            );
+        }
+        let map_val = Value::Mapping(map);
+
+        // 1. Tight `max_output_bytes` must fail immediately on both flow sequence and flow mapping.
+        let tight = EmitOptions::flow().with_limits(Limits::default().with_max_output_bytes(64));
+        for (label, value) in [("flow_seq", &seq), ("flow_map", &map_val)] {
+            let started = Instant::now();
+            let err = ayaml::to_string_value_with(value, &tight)
+                .expect_err("tight max_output_bytes must reject large flow collection");
+            assert_eq!(err.kind(), ErrorKind::Limit, "{label}: {err:?}");
+            assert_eq!(
+                err.limit().map(LimitExceeded::kind),
+                Some(LimitKind::OutputBytes),
+                "{label}: {err:?}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{label} took {:?} after hitting max_output_bytes",
+                started.elapsed()
+            );
+        }
+
+        // 2. Failing `io::Write` must stop after the very first failing write flush (never retry).
+        let flow_opts = EmitOptions::flow();
+        for (label, value) in [("flow_seq_io", &seq), ("flow_map_io", &map_val)] {
+            let mut writer = CountingFailWriter {
+                writes: 0,
+                fail_after_bytes: 0,
+                written: 0,
+            };
+            let started = Instant::now();
+            let err = ayaml::to_writer_value_with(&mut writer, value, &flow_opts)
+                .expect_err("failing writer must abort flow emission");
+            assert_eq!(err.kind(), ErrorKind::Io, "{label}: {err:?}");
+            assert_eq!(
+                writer.writes, 1,
+                "{label}: writer must not be invoked again after first I/O error"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{label} took {:?} after first I/O failure",
+                started.elapsed()
+            );
+        }
+    });
+}

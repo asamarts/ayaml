@@ -19,12 +19,12 @@ use crate::value::Value;
 mod scalars;
 mod tags;
 
-use self::scalars::plain_is_block_safe;
 pub(crate) use self::scalars::{
-    block_scalar_ok, can_fold, double_quoted, emit_double_quoted, expand_folded, is_printable,
+    block_scalar_ok, can_fold, emit_double_quoted, expand_folded, is_printable,
     looks_like_leading_zero_numeral, needs_explicit_indent, plain_is_safe, plain_text_ok,
     single_quoted_ok,
 };
+use self::scalars::{double_quoted_char_len_capped, plain_is_block_safe};
 pub(crate) use self::tags::{RedefinedHandles, TagDirectives};
 
 /// Emitter presentation options.
@@ -944,6 +944,12 @@ impl<'a, W: Write> Output<'a, W> {
     }
 
     #[inline]
+    pub(crate) fn check_additional(&self, bytes: usize) -> Result<(), Error> {
+        let total = self.written.saturating_add(bytes);
+        self.limits.check_output_bytes(total).map_err(Error::from)
+    }
+
+    #[inline]
     pub(crate) fn push_str(&mut self, value: &str) -> Result<(), Error> {
         let total = self.written.saturating_add(value.len());
         self.limits.check_output_bytes(total).map_err(Error::from)?;
@@ -1043,6 +1049,12 @@ struct ValueWriter<'a, 'w, 's, W: Write> {
     in_key: bool,
     /// The document's `%TAG` directives, which [`TagDirectives::scan`] found.
     directives: TagDirectives,
+    #[cfg(test)]
+    flow_loop_steps: usize,
+    #[cfg(test)]
+    block_scalar_lines: usize,
+    #[cfg(test)]
+    quoted_chunks: usize,
 }
 
 impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
@@ -1064,6 +1076,12 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
             in_flow: false,
             in_key: false,
             directives,
+            #[cfg(test)]
+            flow_loop_steps: 0,
+            #[cfg(test)]
+            block_scalar_lines: 0,
+            #[cfg(test)]
+            quoted_chunks: 0,
         }
     }
 
@@ -1160,6 +1178,9 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
     /// refused before the document's first line, by the scan for the tags that need a
     /// directive.
     fn push_tag(&mut self, tagged: &crate::tag::TaggedValue) -> bool {
+        if self.error.is_some() {
+            return false;
+        }
         if matches!(tagged.value, Value::Tagged(_)) {
             self.fail(nested_tag_error());
             return false;
@@ -1170,7 +1191,7 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
         {
             Ok(token) => {
                 self.push_str(&token);
-                true
+                self.error.is_none()
             }
             Err(error) => {
                 self.fail(error);
@@ -1233,12 +1254,22 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
     }
 
     /// How many characters a string key takes as [`ValueWriter::emit_key`] writes it, in the
-    /// current flow context. Per-path styles don't apply to a key, but the scalar style option does.
+    /// current flow context, capped at `MAX_IMPLICIT_KEY_CHARS + 1` so long keys never allocate.
     fn key_width(&self, text: &str) -> usize {
+        const CAP: usize = MAX_IMPLICIT_KEY_CHARS + 1;
         match self.string_form(text, self.options.scalar_style) {
-            StringForm::Plain => text.chars().count(),
-            StringForm::SingleQuoted => text.chars().count() + text.matches('\'').count() + 2,
-            StringForm::DoubleQuoted => double_quoted(text).chars().count(),
+            StringForm::Plain => text.chars().take(CAP).count(),
+            StringForm::SingleQuoted => {
+                let mut count = 2usize;
+                for ch in text.chars() {
+                    count += 1 + usize::from(ch == '\'');
+                    if count >= CAP {
+                        return count;
+                    }
+                }
+                count
+            }
+            StringForm::DoubleQuoted => double_quoted_char_len_capped(text, CAP),
         }
     }
 
@@ -1296,6 +1327,9 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
             }
             if index > 0 || !inline_first {
                 self.indent(indent);
+                if self.error.is_some() {
+                    break;
+                }
             }
             if self.needs_explicit_key(key) {
                 self.push_str("? ");
@@ -1306,6 +1340,9 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
             } else {
                 self.emit_key(key);
                 self.push(':');
+            }
+            if self.error.is_some() {
+                break;
             }
             self.push_key(key);
             if self.force_flow()
@@ -1355,6 +1392,9 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
                 self.indent(indent);
             }
             self.push('-');
+            if self.error.is_some() {
+                break;
+            }
             self.push_index(index);
             if self.force_flow()
                 && matches!(
@@ -1390,6 +1430,9 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
     }
 
     fn emit_node(&mut self, value: &Value, indent: usize) {
+        if self.error.is_some() {
+            return;
+        }
         match value {
             Value::Mapping(mapping) if !mapping.is_empty() => self.emit_mapping(mapping, indent),
             Value::Sequence(sequence) if !sequence.is_empty() => {
@@ -1482,6 +1525,9 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
         reason = "the indentation indicator is a single digit in 1..=9"
     )]
     fn emit_block_scalar(&mut self, text: &str, content_indent: usize, root: bool) {
+        if self.error.is_some() {
+            return;
+        }
         // A root node's indentation is -1 and an indicator is one digit, so keep a root
         // scalar's content at most eight columns in.
         let content_indent = if root {
@@ -1531,7 +1577,16 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
             Chomping::Keep => self.push('+'),
         }
         self.push('\n');
+        if self.error.is_some() {
+            return;
+        }
         let body = if folded {
+            // `expand_folded` only inserts line breaks, so `body.len()` is a lower bound on the
+            // bytes that will be written; reject before allocating if it already exceeds limits.
+            if let Err(err) = self.output.check_additional(body.len()) {
+                self.fail(err);
+                return;
+            }
             folded_body = expand_folded(body);
             folded_body.as_str()
         } else {
@@ -1539,10 +1594,24 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
         };
         if body.is_empty() {
             for _ in 0..trailing {
+                if self.error.is_some() {
+                    break;
+                }
+                #[cfg(test)]
+                {
+                    self.block_scalar_lines += 1;
+                }
                 self.push('\n');
             }
         } else {
             for line in body.split('\n') {
+                if self.error.is_some() {
+                    break;
+                }
+                #[cfg(test)]
+                {
+                    self.block_scalar_lines += 1;
+                }
                 if !line.is_empty() {
                     self.indent(content_indent);
                     self.push_str(line);
@@ -1550,6 +1619,13 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
                 self.push('\n');
             }
             for _ in 1..trailing {
+                if self.error.is_some() {
+                    break;
+                }
+                #[cfg(test)]
+                {
+                    self.block_scalar_lines += 1;
+                }
                 self.push('\n');
             }
         }
@@ -1584,8 +1660,18 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
                 let in_flow = std::mem::replace(&mut self.in_flow, true);
                 self.push('[');
                 for (index, item) in sequence.iter().enumerate() {
+                    if self.error.is_some() {
+                        break;
+                    }
+                    #[cfg(test)]
+                    {
+                        self.flow_loop_steps += 1;
+                    }
                     if index > 0 {
                         self.push_str(", ");
+                        if self.error.is_some() {
+                            break;
+                        }
                     }
                     self.push_index(index);
                     self.emit_flow(item);
@@ -1602,8 +1688,18 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
                 let in_flow = std::mem::replace(&mut self.in_flow, true);
                 self.push('{');
                 for (index, (key, value)) in mapping.iter().enumerate() {
+                    if self.error.is_some() {
+                        break;
+                    }
+                    #[cfg(test)]
+                    {
+                        self.flow_loop_steps += 1;
+                    }
                     if index > 0 {
                         self.push_str(", ");
+                        if self.error.is_some() {
+                            break;
+                        }
                     }
                     // libyaml writes non-empty collection keys and long
                     // keys in the explicit form; so do we.
@@ -1612,11 +1708,17 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
                         self.push_str("? ");
                     }
                     self.emit_key(key);
+                    if self.error.is_some() {
+                        break;
+                    }
                     // A tagged null already ends with a space.
                     if explicit && !matches!(key, Value::Tagged(tagged) if tagged.value.is_null()) {
                         self.push(' ');
                     }
                     self.push_str(": ");
+                    if self.error.is_some() {
+                        break;
+                    }
                     self.push_key(key);
                     self.emit_flow(value);
                     self.pop_path();
@@ -1666,6 +1768,13 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
             StringForm::SingleQuoted => {
                 self.push('\'');
                 for (index, part) in value.split('\'').enumerate() {
+                    if self.error.is_some() {
+                        break;
+                    }
+                    #[cfg(test)]
+                    {
+                        self.quoted_chunks += 1;
+                    }
                     if index > 0 {
                         self.push_str("''");
                     }
@@ -1673,10 +1782,109 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
                 }
                 self.push('\'');
             }
-            StringForm::DoubleQuoted => self.push_str(&double_quoted(value)),
+            StringForm::DoubleQuoted => self.emit_double_quoted_streaming(value),
             StringForm::Plain => self.push_str(value),
         }
     }
+
+    /// Stream a double-quoted scalar directly through `self.output` without allocating an
+    /// intermediate escaped `String`, stopping immediately when `self.error` is set.
+    fn emit_double_quoted_streaming(&mut self, value: &str) {
+        self.push('"');
+        let bytes = value.as_bytes();
+        let mut run_start = 0;
+        let mut index = 0;
+        let mut hex_buf = [0_u8; 10];
+        while index < bytes.len() {
+            if self.error.is_some() {
+                return;
+            }
+            let byte = bytes[index];
+            if (0x20..=0x7e).contains(&byte) && byte != b'"' && byte != b'\\' {
+                index += 1;
+                continue;
+            }
+            if index > run_start {
+                #[cfg(test)]
+                {
+                    self.quoted_chunks += 1;
+                }
+                self.push_str(&value[run_start..index]);
+                if self.error.is_some() {
+                    return;
+                }
+            }
+            #[cfg(test)]
+            {
+                self.quoted_chunks += 1;
+            }
+            if byte < 0x80 {
+                let esc = match byte {
+                    b'\\' => "\\\\",
+                    b'"' => "\\\"",
+                    b'\0' => "\\0",
+                    0x07 => "\\a",
+                    0x08 => "\\b",
+                    b'\t' => "\\t",
+                    b'\n' => "\\n",
+                    0x0b => "\\v",
+                    0x0c => "\\f",
+                    b'\r' => "\\r",
+                    0x1b => "\\e",
+                    _ => format_hex_escape(u32::from(byte), 2, b'x', &mut hex_buf),
+                };
+                self.push_str(esc);
+                index += 1;
+                run_start = index;
+            } else {
+                let Some(ch) = value[index..].chars().next() else {
+                    break;
+                };
+                let char_len = ch.len_utf8();
+                match ch {
+                    '\u{0085}' => self.push_str("\\N"),
+                    '\u{2028}' => self.push_str("\\L"),
+                    '\u{2029}' => self.push_str("\\P"),
+                    ch if !is_printable(ch) || ch == '\u{feff}' => {
+                        let code = ch as u32;
+                        let esc = if code <= 0xFF {
+                            format_hex_escape(code, 2, b'x', &mut hex_buf)
+                        } else if code <= 0xFFFF {
+                            format_hex_escape(code, 4, b'u', &mut hex_buf)
+                        } else {
+                            format_hex_escape(code, 8, b'U', &mut hex_buf)
+                        };
+                        self.push_str(esc);
+                    }
+                    _ => self.push_str(&value[index..index + char_len]),
+                }
+                index += char_len;
+                run_start = index;
+            }
+        }
+        if self.error.is_some() {
+            return;
+        }
+        if run_start < bytes.len() {
+            #[cfg(test)]
+            {
+                self.quoted_chunks += 1;
+            }
+            self.push_str(&value[run_start..]);
+        }
+        self.push('"');
+    }
+}
+
+fn format_hex_escape(code: u32, digits: usize, prefix: u8, buf: &mut [u8; 10]) -> &str {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    buf[0] = b'\\';
+    buf[1] = prefix;
+    for i in 0..digits {
+        let shift = (digits - 1 - i) * 4;
+        buf[2 + i] = HEX[((code >> shift) & 0xf) as usize];
+    }
+    std::str::from_utf8(&buf[..2 + digits]).unwrap_or("")
 }
 
 /// How the value writer writes a string scalar.
@@ -1739,51 +1947,6 @@ mod tests {
 }
 
 #[cfg(test)]
-mod tag_form_tests {
-    use super::RedefinedHandles;
-    use super::tags::{TagForm, needs_directive};
-    use crate::tag::Tag;
-
-    /// `needs_directive` is `TagForm::of` without the token, so the two agree on every tag.
-    #[test]
-    fn needs_directive_agrees_with_the_tag_form() {
-        let tags = [
-            Tag::local("x"),
-            Tag::local("a b"),
-            Tag::local(""),
-            Tag::new("!", "x"),
-            Tag::new("!e-", "x"),
-            Tag::new("tag:yaml.org,2002:", "str"),
-            Tag::new("tag:yaml.org,2002:", ""),
-            Tag::new("tag:yaml.org,2002:", "a b"),
-            Tag::new("tag:x:", "y"),
-            Tag::new("tag:x:", "50%25"),
-            Tag::new("tag:x:", "50%"),
-            Tag::new("tag:x:", "50%2"),
-            Tag::new("tag:x:", "50%zz"),
-            Tag::new("tag:x:", "a b"),
-            Tag::new("tag:x:", "é"),
-            Tag::new("tag:x:", "[a],b"),
-            Tag::new("", "foobar"),
-            Tag::new("", "tag:x:y"),
-            Tag::new("", "1abc:x"),
-            Tag::new("", "a+b-c.d:x"),
-            Tag::new("", "a_b:x"),
-            Tag::new("foo", "bar"),
-            Tag::new("x", "y"),
-            Tag::new("x", ""),
-            Tag::new("", "x"),
-            Tag::new("", ""),
-        ];
-        for tag in tags {
-            let form = TagForm::of(&tag, RedefinedHandles::default());
-            let directive = !matches!(form, Ok(TagForm::Token(_)));
-            assert_eq!(needs_directive(&tag), directive, "{tag:?}: {form:?}");
-        }
-    }
-}
-
-#[cfg(test)]
 mod value_tests {
     use crate::value::Value;
 
@@ -1800,69 +1963,18 @@ mod value_tests {
 }
 
 #[cfg(test)]
-mod collection_tests {
-    #[test]
-    fn mapping_sequences_are_indentless_and_sequence_mappings_are_compact() {
-        let value = crate::parse_value("traces:\n  - a\n  - b\nitems:\n  - k: v\n").unwrap();
-        let text = crate::to_string_value(&value).expect("emit");
-        assert_eq!(text, "traces:\n- a\n- b\nitems:\n- k: v\n");
-        assert_eq!(crate::parse_value(&text).unwrap(), value);
-    }
-
-    #[test]
-    fn block_scalars_need_no_flow_quoting_and_control_escapes_are_named() {
-        assert_eq!(crate::to_string("a, b").unwrap(), "a, b\n");
-        assert_eq!(crate::to_string("a[b").unwrap(), "a[b\n");
-        assert_eq!(crate::to_string("\u{1b}[41m").unwrap(), "\"\\e[41m\"\n");
-    }
-
-    #[test]
-    fn nested_and_tagged_collections_round_trip() {
-        for input in [
-            "key:\n  - a\n  - b\n",
-            "key: !Tag\n  - a\n  - b\n",
-            "key: !Tag\n  a: b\n",
-            "1: one\n2:\n  nested: true\n",
-            "empty: {}\nitems: []\n",
-            "? [a, b]\n: value\n",
-        ] {
-            let value = crate::parse_value(input).expect("parse");
-            let text = crate::to_string_value(&value).expect("emit");
-            let decoded = crate::parse_value(&text).expect("reparse");
-            assert_eq!(decoded, value, "input={input:?} output={text:?}");
-        }
-    }
-}
-
-#[cfg(test)]
-mod writer_tests {
-    use crate::value::Value;
-    use crate::{Limits, ParseOptions};
-
-    #[test]
-    fn document_writer_streams_parseable_output() {
-        let values = vec![
-            crate::parse_value("a: 1\n").expect("first"),
-            crate::parse_value("b: 2\n").expect("second"),
-        ];
-        let mut output = Vec::new();
-        crate::to_writer_documents(&mut output, &values).expect("write");
-        let options = ParseOptions::new().with_limits(Limits::new().with_max_documents(2));
-        let decoded =
-            crate::parse_documents_with(std::str::from_utf8(&output).expect("utf8"), &options)
-                .expect("reparse");
-        assert_eq!(decoded.len(), 2);
-        assert_eq!(decoded[1]["b"], Value::from(2_u64));
-    }
-}
-
-#[cfg(test)]
 mod builder_tests;
+#[cfg(test)]
+mod collection_tests;
 #[cfg(test)]
 mod indent_tests;
 #[cfg(test)]
 mod options_tests;
 #[cfg(test)]
+mod tag_form_tests;
+#[cfg(test)]
 mod tagged_block_scalar_tests;
 #[cfg(test)]
 mod value_block_scalar_tests;
+#[cfg(test)]
+mod writer_tests;

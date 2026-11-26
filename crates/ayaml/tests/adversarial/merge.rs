@@ -222,3 +222,113 @@ fn opt_in_merge_keys_blocks_alias_bomb_keys_and_nested_anchor_amplification() {
         assert!(events.len() > 100_000);
     });
 }
+
+/// Repeated sibling mappings with alias keys beside `<<: {}` must charge `node_key_value`
+/// against a stream-cumulative `AliasBudget` so sibling mappings cannot reset alias expansion
+/// or dereference budgets back to zero (AY-169).
+#[test]
+fn opt_in_merge_keys_enforces_cumulative_alias_budget_across_sibling_mappings() {
+    in_child!(|| {
+        use std::fmt::Write as _;
+
+        // `*a1` expands to 100 scalars + 11 sequence nodes (~31.3 KiB per key inspection, ~91 KiB
+        // total including value composition), which fits comfortably inside one mapping under a
+        // 128 KiB expansion budget, whereas repeating it across 20 sibling merge mappings
+        // (~626 KiB) must exceed the cumulative expansion budget.
+        let header = "a0: &a0 [1,1,1,1,1,1,1,1,1,1]\n\
+                      a1: &a1 [*a0,*a0,*a0,*a0,*a0,*a0,*a0,*a0,*a0,*a0]\n";
+        let exp_opts = ParseOptions::new()
+            .with_limits(Limits::default().with_max_alias_expansion_bytes(128 * 1024))
+            .with_merge_keys(true);
+
+        // Positive control: a single sibling mapping stays well under the expansion budget.
+        let single_yaml = format!("{header}m0: {{ ? *a1 : 1, <<: {{}} }}\n");
+        let events: Vec<_> = ayaml::parse_events_with(&single_yaml, &exp_opts)
+            .expect("single mapping events stream")
+            .collect::<Result<_, _>>()
+            .expect("single mapping must fit expansion budget");
+        assert!(!events.is_empty());
+        assert!(ayaml::SpannedTree::parse_with(&single_yaml, &exp_opts).is_ok());
+        assert!(ayaml::parse_value_with(&single_yaml, &exp_opts).is_ok());
+        assert!(ayaml::from_str_with::<Value>(&single_yaml, &exp_opts).is_ok());
+
+        // Cumulative check: 20 sibling mappings must trip `LimitKind::AliasExpansion`.
+        let mut yaml = String::from(header);
+        for i in 0..20 {
+            let _ = writeln!(yaml, "m{i}: {{ ? *a1 : 1, <<: {{}} }}");
+        }
+        for (label, err) in [
+            (
+                "parse_events_with",
+                ayaml::parse_events_with(&yaml, &exp_opts)
+                    .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                    .expect_err("cumulative alias expansion events"),
+            ),
+            (
+                "SpannedTree::parse_with",
+                ayaml::SpannedTree::parse_with(&yaml, &exp_opts)
+                    .expect_err("cumulative alias expansion spanned"),
+            ),
+            (
+                "parse_value_with",
+                ayaml::parse_value_with(&yaml, &exp_opts)
+                    .expect_err("cumulative alias expansion value"),
+            ),
+            (
+                "from_str_with",
+                ayaml::from_str_with::<Value>(&yaml, &exp_opts)
+                    .expect_err("cumulative alias expansion typed"),
+            ),
+        ] {
+            assert_eq!(err.kind(), ErrorKind::Limit, "{label}: {err:?}");
+            assert_eq!(
+                err.limit().map(LimitExceeded::kind),
+                Some(LimitKind::AliasExpansion),
+                "{label}: {err:?}"
+            );
+        }
+
+        // Also enforce cumulative `max_alias_dereferences` across sibling mappings with simple
+        // scalar alias keys (`? *k : 1` beside `<<: {}`).
+        let deref_opts = ParseOptions::new()
+            .with_limits(Limits::default().with_max_alias_dereferences(20))
+            .with_merge_keys(true);
+
+        // Positive control: 10 sibling mappings (10 derefs <= 20) succeed.
+        let mut ok_deref = String::from("k: &k key\n");
+        for i in 0..10 {
+            let _ = writeln!(ok_deref, "m{i}: {{ ? *k : 1, <<: {{}} }}");
+        }
+        assert!(
+            ayaml::parse_events_with(&ok_deref, &deref_opts)
+                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                .is_ok()
+        );
+        assert!(ayaml::SpannedTree::parse_with(&ok_deref, &deref_opts).is_ok());
+
+        let mut deref_yaml = String::from("k: &k key\n");
+        for i in 0..40 {
+            let _ = writeln!(deref_yaml, "m{i}: {{ ? *k : 1, <<: {{}} }}");
+        }
+        for (label, err) in [
+            (
+                "parse_events_with",
+                ayaml::parse_events_with(&deref_yaml, &deref_opts)
+                    .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                    .expect_err("cumulative alias derefs events"),
+            ),
+            (
+                "SpannedTree::parse_with",
+                ayaml::SpannedTree::parse_with(&deref_yaml, &deref_opts)
+                    .expect_err("cumulative alias derefs spanned"),
+            ),
+        ] {
+            assert_eq!(err.kind(), ErrorKind::Limit, "{label}: {err:?}");
+            assert_eq!(
+                err.limit().map(LimitExceeded::kind),
+                Some(LimitKind::AliasDereferences),
+                "{label}: {err:?}"
+            );
+        }
+    });
+}
