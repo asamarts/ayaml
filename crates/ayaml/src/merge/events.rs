@@ -304,8 +304,12 @@ fn is_merge_key(node: &EventNode<'_>) -> bool {
     }
 }
 
-fn is_core_collection_tag(tag: &Tag, expected_suffix: &str) -> bool {
-    tag.is_core() && tag.suffix() == expected_suffix
+/// Whether a collection drops this tag: matches `composer::apply_tag` and
+/// `typed::collection_drops` so `!!map`, `!!seq`, `!!set`, `!!omap`, `!!pairs`, and core scalar
+/// tags on collections behave identically between `ParseOptions::with_merge_keys(true)` and
+/// `Value::apply_merge_keys()`.
+fn is_dropped_core_collection_tag(tag: &Tag) -> bool {
+    tag.is_core_collection() || tag.is_core_scalar()
 }
 
 fn wrap_collection_tag(tag: Option<&Tag>, value: Value) -> Value {
@@ -315,14 +319,6 @@ fn wrap_collection_tag(tag: Option<&Tag>, value: Value) -> Value {
         }
         _ => value,
     }
-}
-
-fn is_dropped_core_collection_tag(tag: &Tag) -> bool {
-    tag.is_core()
-        && matches!(
-            tag.suffix(),
-            "null" | "bool" | "int" | "float" | "str" | "seq" | "map"
-        )
 }
 
 fn node_key_value(
@@ -853,7 +849,7 @@ fn apply_event_merge<'a>(
             ..
         } => {
             if let Some(tag) = tag
-                && !is_core_collection_tag(tag, "map")
+                && !is_dropped_core_collection_tag(tag)
             {
                 return Err(Error::coded(
                     ErrorKind::Composition,
@@ -878,7 +874,7 @@ fn apply_event_merge<'a>(
         }
         EventNodeKind::Sequence { tag, items, .. } => {
             if let Some(tag) = tag
-                && !is_core_collection_tag(tag, "seq")
+                && !is_dropped_core_collection_tag(tag)
             {
                 return Err(Error::coded(
                     ErrorKind::Composition,
@@ -905,7 +901,7 @@ fn apply_event_merge<'a>(
                     .with_span(item_span));
                 };
                 if let Some(tag) = item_tag
-                    && !is_core_collection_tag(tag, "map")
+                    && !is_dropped_core_collection_tag(tag)
                 {
                     return Err(Error::coded(
                         ErrorKind::Composition,

@@ -470,10 +470,17 @@ fn compat_classifies_by_structured_data_not_hostile_key_names() {
 #[cfg(feature = "libyaml-compat")]
 #[test]
 fn compat_keeps_locations_on_depth_and_document_errors() {
+    use ayaml::{ErrorCode, LimitKind, Limits};
+
     let deep = format!("{}a\n", "- ".repeat(129));
     let error = ayaml::compat::from_str::<Value>(&deep).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Serde);
+    assert_eq!(error.code(), ErrorCode::DepthLimit);
     assert_eq!(error.message(), "recursion limit exceeded");
+    let depth_limit = error.limit().expect("compat depth error must keep limit");
+    assert_eq!(depth_limit.kind(), LimitKind::Depth);
+    assert_eq!(depth_limit.limit(), 128);
+    assert_eq!(depth_limit.observed(), 129);
     assert_eq!(
         error
             .location()
@@ -481,15 +488,60 @@ fn compat_keeps_locations_on_depth_and_document_errors() {
         Some((1, 257))
     );
 
+    // Also verify `compat::from_str_seed_with` and `compat::deserialize_any_with` preserve
+    // `LimitExceeded` metadata on `DepthLimit`.
+    let depth_opts =
+        ayaml::compat::ParseOptions::new().with_limits(Limits::new().with_max_depth(2));
+    let seed_err = ayaml::compat::from_str_seed_with(
+        "[[[1]]]\n",
+        &depth_opts,
+        std::marker::PhantomData::<Value>,
+    )
+    .unwrap_err();
+    assert_eq!(seed_err.kind(), ErrorKind::Serde);
+    assert_eq!(seed_err.code(), ErrorCode::DepthLimit);
+    assert_eq!(seed_err.message(), "recursion limit exceeded");
+    let seed_limit = seed_err.limit().expect("seed depth error must keep limit");
+    assert_eq!(seed_limit.kind(), LimitKind::Depth);
+    assert_eq!(seed_limit.limit(), 2);
+    assert_eq!(seed_limit.observed(), 3);
+
+    let any_err =
+        ayaml::compat::deserialize_any_with("[[[1]]]\n", &depth_opts, serde::de::IgnoredAny)
+            .unwrap_err();
+    assert_eq!(any_err.code(), ErrorCode::DepthLimit);
+    assert_eq!(
+        any_err.limit().map(ayaml::LimitExceeded::kind),
+        Some(LimitKind::Depth)
+    );
+
+    // Trailing documents without hitting `max_documents` keep `TrailingDocuments` and `limit() == None`.
     let error = ayaml::compat::from_str::<Value>("a: 1\n---\nb: 2\n").unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Parser);
+    assert_eq!(error.code(), ErrorCode::TrailingDocuments);
     assert_eq!(error.message(), "more than one document in stream");
+    assert_eq!(error.limit(), None);
     assert_eq!(
         error
             .location()
             .map(|location| (location.line(), location.column())),
         Some((2, 1))
     );
+
+    // Exceeding `max_documents` preserves `DocumentCountLimit` and `LimitExceeded`.
+    let doc_opts =
+        ayaml::compat::ParseOptions::new().with_limits(Limits::new().with_max_documents(1));
+    let doc_err =
+        ayaml::compat::from_str_with::<Value>("a: 1\n---\nb: 2\n", &doc_opts).unwrap_err();
+    assert_eq!(doc_err.kind(), ErrorKind::Parser);
+    assert_eq!(doc_err.code(), ErrorCode::DocumentCountLimit);
+    assert_eq!(doc_err.message(), "more than one document in stream");
+    let doc_limit = doc_err
+        .limit()
+        .expect("compat document-count error must keep limit");
+    assert_eq!(doc_limit.kind(), LimitKind::Documents);
+    assert_eq!(doc_limit.limit(), 1);
+    assert_eq!(doc_limit.observed(), 2);
 }
 
 #[cfg(feature = "libyaml-compat")]

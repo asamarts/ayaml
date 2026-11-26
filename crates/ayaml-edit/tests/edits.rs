@@ -262,6 +262,213 @@ fn conservative_refusals_reject_anchors_aliases_tags_block_scalars_and_multi_doc
     );
 }
 
+#[test]
+fn batch_verification_handles_pareto_mixed_ops_large_batches_limits_and_masked_errors() {
+    use ayaml::{Limits, ParseOptions};
+    use ayaml_edit::{EditOptions, apply_batch_with, replace_scalar_with};
+    use std::error::Error as _;
+    use std::fmt::Write as _;
+
+    // 1. Pareto-distinct DP case: two paths reach the same alignment point with
+    //    `(removals=1, replaces=2)` vs `(removals=2, replaces=0)`, followed by two scalar
+    //    replacements. The old single-tuple lexicographic DP discarded `(2, 0)` and falsely
+    //    returned `VerificationFailed`; exact Pareto tracking accepts.
+    let pareto_doc = "\
+items:
+  - A
+  - X
+  - B
+  - Y
+  - C
+  - old1
+  - old2
+";
+    let edited = apply_batch(
+        pareto_doc,
+        &[
+            EditOp::RemoveEntry {
+                path: vec![key("items"), index(1)],
+            },
+            EditOp::RemoveEntry {
+                path: vec![key("items"), index(3)],
+            },
+            EditOp::ReplaceScalar {
+                path: vec![key("items"), index(5)],
+                value: Value::from("new1"),
+            },
+            EditOp::ReplaceScalar {
+                path: vec![key("items"), index(6)],
+                value: Value::from("new2"),
+            },
+        ],
+    )
+    .expect("Pareto-incomparable mixed remove/replace batch must verify");
+    assert_eq!(
+        edited.output(),
+        "items:\n  - A\n  - B\n  - C\n  - new1\n  - new2\n"
+    );
+
+    // 2. Large-batch path where removals and scalar replacements are mixed in every order
+    //    (remove-before-replace, replace-before-remove, and repeated-scalar adjacent replaces).
+    if !cfg!(miri) {
+        let mut big = String::new();
+        for i in 0..1_200 {
+            let _ = writeln!(big, "k{i:04}: v{i}");
+        }
+        let mut big_ops = Vec::new();
+        big_ops.push(EditOp::RemoveEntry {
+            path: vec![key("k0000")],
+        });
+        big_ops.push(EditOp::ReplaceScalar {
+            path: vec![key("k0001")],
+            value: Value::from("replaced_after_remove"),
+        });
+        big_ops.push(EditOp::ReplaceScalar {
+            path: vec![key("k0002")],
+            value: Value::from("replaced_before_tail_remove"),
+        });
+        for i in 970..1_190 {
+            big_ops.push(EditOp::RemoveEntry {
+                path: vec![key(&format!("k{i:04}"))],
+            });
+        }
+        let big_edited =
+            apply_batch(&big, &big_ops).expect("large mixed replace/remove batch must verify");
+        let reparsed = parse_value(big_edited.output()).expect("reparsed large batch");
+        assert!(reparsed.as_mapping().unwrap().get("k0000").is_none());
+        assert_eq!(reparsed["k0001"], Value::from("replaced_after_remove"));
+        assert_eq!(
+            reparsed["k0002"],
+            Value::from("replaced_before_tail_remove")
+        );
+        assert_eq!(reparsed["k1199"], Value::from("v1199"));
+        assert!(reparsed.as_mapping().unwrap().get("k0970").is_none());
+        assert_eq!(reparsed.as_mapping().unwrap().len(), 979);
+
+        // Adjacent repeated-scalar sequence replacements before a large removed tail.
+        let mut rep_seq = String::from("items:\n  - false\n  - false\n  - true\n  - true\n");
+        for i in 0..500 {
+            let _ = writeln!(rep_seq, "  - item{i}");
+        }
+        let mut seq_ops = vec![
+            EditOp::ReplaceScalar {
+                path: vec![key("items"), index(0)],
+                value: Value::from(true),
+            },
+            EditOp::ReplaceScalar {
+                path: vec![key("items"), index(1)],
+                value: Value::from(true),
+            },
+        ];
+        for i in 300..500 {
+            seq_ops.push(EditOp::RemoveEntry {
+                path: vec![key("items"), index(i)],
+            });
+        }
+        let seq_edited = apply_batch(&rep_seq, &seq_ops)
+            .expect("repeated-scalar replaces + large tail removal must verify");
+        let seq_parsed = parse_value(seq_edited.output()).expect("reparsed seq");
+        assert_eq!(seq_parsed["items"][0], Value::from(true));
+        assert_eq!(seq_parsed["items"][1], Value::from(true));
+        assert_eq!(seq_parsed["items"].as_sequence().unwrap().len(), 304);
+    }
+
+    // 3. Pre-allocation `max_input_bytes` enforcement rejects both a single oversized replacement
+    //    (even when escaped characters push it over the limit) and a multi-op batch whose
+    //    combined output exceeds `max_input_bytes`.
+    let small_input = "a: x\nb: y\n";
+    let tight_opts = EditOptions::new().with_parse_options(
+        ParseOptions::new().with_limits(Limits::new().with_max_input_bytes(32)),
+    );
+    let limit_err = replace_scalar_with(
+        small_input,
+        &[key("a")],
+        &Value::from("0123456789abcdefghijklmnopqrstuvwxyz"),
+        &tight_opts,
+    )
+    .expect_err("oversized replacement must fail max_input_bytes");
+    assert_eq!(limit_err.kind(), EditErrorKind::VerificationFailed);
+    let masked_limit = limit_err.masked();
+    assert_eq!(masked_limit.kind(), EditErrorKind::VerificationFailed);
+    assert_eq!(
+        masked_limit
+            .source_error()
+            .and_then(|err| err.limit())
+            .map(ayaml::LimitExceeded::kind),
+        Some(ayaml::LimitKind::InputBytes)
+    );
+    assert!(masked_limit.source().is_none());
+    assert!(!masked_limit.to_string().contains("0123456789"));
+
+    // Short string with heavy escaping (`\n` -> `\\n`) that fits raw `text.len() <= 32` but
+    // exceeds `max_input_bytes = 32` once formatted.
+    let escaped_err = replace_scalar_with(
+        small_input,
+        &[key("a")],
+        &Value::from("\n".repeat(20)),
+        &tight_opts,
+    )
+    .expect_err("escaped replacement exceeding max_input_bytes must fail fast");
+    assert_eq!(escaped_err.kind(), EditErrorKind::VerificationFailed);
+    assert_eq!(
+        escaped_err
+            .masked()
+            .source_error()
+            .and_then(|err| err.limit())
+            .map(ayaml::LimitExceeded::kind),
+        Some(ayaml::LimitKind::InputBytes)
+    );
+
+    // Multi-op batch where each individual replacement fits `max_input_bytes`, but their combined
+    // spliced output exceeds `max_input_bytes` (caught before `String::with_capacity`).
+    let batch_limit_err = apply_batch_with(
+        small_input,
+        &[
+            EditOp::ReplaceScalar {
+                path: vec![key("a")],
+                value: Value::from("aaaaaaaaaaaaaaa"),
+            },
+            EditOp::ReplaceScalar {
+                path: vec![key("b")],
+                value: Value::from("bbbbbbbbbbbbbbb"),
+            },
+        ],
+        &tight_opts,
+    )
+    .expect_err("combined multi-op batch exceeding max_input_bytes must fail before allocation");
+    assert_eq!(batch_limit_err.kind(), EditErrorKind::VerificationFailed);
+    let batch_limit = batch_limit_err
+        .masked()
+        .source_error()
+        .and_then(|err| err.limit())
+        .expect("limit metadata on batch max_input_bytes failure");
+    assert_eq!(batch_limit.kind(), ayaml::LimitKind::InputBytes);
+    assert_eq!(batch_limit.limit(), 32);
+    assert_eq!(batch_limit.observed(), 38);
+
+    // 4. `EditError::masked()` redacts secret keys/values from Parse errors and exposes no
+    //    unmasked `std::error::Error::source`.
+    let secret_dup = "super_secret_key: hunter2\nsuper_secret_key: other_secret\n";
+    let parse_err =
+        apply_batch_with(secret_dup, &[], &EditOptions::new()).expect_err("duplicate key parse");
+    assert_eq!(parse_err.kind(), EditErrorKind::Parse);
+    assert!(parse_err.to_string().contains("super_secret_key"));
+    let masked = parse_err.masked();
+    assert_eq!(masked.kind(), EditErrorKind::Parse);
+    assert!(masked.source().is_none());
+    assert!(masked.source_error().is_some());
+    let masked_display = masked.to_string();
+    let masked_debug = format!("{masked:?}");
+    assert!(
+        !masked_display.contains("super_secret_key") && !masked_display.contains("hunter2"),
+        "masked Display leaked document text: {masked_display}"
+    );
+    assert!(
+        !masked_debug.contains("super_secret_key") && !masked_debug.contains("hunter2"),
+        "masked Debug leaked document text: {masked_debug}"
+    );
+}
+
 fn proptest_config() -> ProptestConfig {
     let default_cases = if cfg!(miri) { 2 } else { 128 };
     let cases = std::env::var("PROPTEST_CASES")

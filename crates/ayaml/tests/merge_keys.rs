@@ -444,6 +444,92 @@ fn merge_keys_preserves_lexical_scoping_tags_inline_validation_and_stream_parity
     assert_eq!(val.as_mapping().expect("map").len(), 3);
 }
 
+#[test]
+fn core_collection_tags_and_complex_keys_match_between_event_and_value_merges() {
+    let cases = [
+        // `!!set` mapping operand.
+        "base: &s !!set\n  a: ~\n  b: ~\nout:\n  <<: *s\n  b: override\n  c: 1\n",
+        // `!!omap` and `!!pairs` sequence-of-mappings operands.
+        "o: &o !!omap\n  - a: 1\n  - b: 2\n  - a: 99\nout:\n  <<: *o\n  c: 3\n",
+        "p: &p !!pairs\n  - x: 10\n  - y: 20\nout:\n  <<: *p\n  x: 1\n",
+        // `!!set` inside a sequence operand.
+        "s1: &s1 !!set { a: ~ }\ns2: &s2 !!map { a: 2, b: 3 }\nout:\n  <<: !!seq [*s1, *s2]\n",
+        // Verbatim core collection tag `!<tag:yaml.org,2002:set>` and `%TAG` shorthand.
+        "s: &s !<tag:yaml.org,2002:set> { a: ~, b: ~ }\nout:\n  <<: *s\n  c: 1\n",
+        "%TAG !y! tag:yaml.org,2002:\n---\ns: &s !y!set { a: ~ }\nout:\n  <<: *s\n  b: 2\n",
+        // Core scalar tag on a collection is dropped identically in composer and event merge.
+        "m: &m !!int { a: 1 }\nout:\n  <<: *m\n  b: 2\n",
+        // Core collection tags on complex mapping keys deduplicate identically.
+        "base: &b\n  ? !!set { a: ~ }\n  : from_base\n  ? !!omap [ { k: 1 } ]\n  : omap_base\nout:\n  <<: *b\n  ? { a: ~ }\n  : from_out\n  ? [ { k: 1 } ]\n  : omap_out\n",
+        // Complex mapping key containing its own `<<:` merge key.
+        "kbase: &kb\n  a: 1\n  b: 2\nout:\n  ? { <<: *kb, b: 20 }\n  : val\n  <<:\n    ? { a: 1, b: 20 }\n    : overridden_by_own_merged_key\n    ? { a: 1, b: 2 }\n    : kept_from_merge\n",
+        // Nested sequence inside a complex mapping key containing a merge mapping.
+        "kbase: &kb { x: 1 }\nout:\n  ? [ { <<: *kb, y: 2 } ]\n  : nested_seq_key\n",
+        // Custom-tagged complex mapping key whose inner mapping uses `<<:`.
+        "kbase: &kb { x: 1 }\nout:\n  ? !Custom { <<: *kb, y: 2 }\n  : tagged_complex_key\n",
+    ];
+
+    for input in cases {
+        let via_events = ayaml::parse_value_with(input, &MERGE)
+            .unwrap_or_else(|e| panic!("event merge failed on {input:?}: {e}"));
+        let mut via_value = ayaml::parse_value(input)
+            .unwrap_or_else(|e| panic!("plain parse failed on {input:?}: {e}"));
+        via_value
+            .apply_merge_keys()
+            .unwrap_or_else(|e| panic!("value merge failed on {input:?}: {e}"));
+        assert_eq!(via_events, via_value, "parity mismatch for {input:?}");
+
+        // Typed decoding and `SpannedTree::parse_with` also accept core collection tags cleanly.
+        let via_typed: Value = ayaml::from_str_with(input, &MERGE)
+            .unwrap_or_else(|e| panic!("typed merge failed on {input:?}: {e}"));
+        assert_eq!(via_typed, via_events, "typed mismatch for {input:?}");
+        assert!(
+            SpannedTree::parse_with(input, &MERGE).is_ok(),
+            "SpannedTree::parse_with failed on {input:?}"
+        );
+    }
+
+    // Merging inside complex keys that makes two keys in the same mapping equal must fail with
+    // `ErrorCode::DuplicateKey` in BOTH event-layer and `Value`-layer merge paths.
+    let dup_complex_key = "\
+kbase: &kb { a: 1 }
+out:
+  ? { <<: *kb, b: 2 }
+  : first
+  ? { a: 1, b: 2 }
+  : second
+";
+    let ev_err = ayaml::parse_value_with(dup_complex_key, &MERGE)
+        .expect_err("event merge must reject colliding merged complex keys");
+    assert_eq!(ev_err.kind(), ErrorKind::DuplicateKey);
+    assert_eq!(ev_err.code(), ErrorCode::DuplicateKey);
+
+    let mut val_dup = ayaml::parse_value(dup_complex_key).expect("plain parse before merge");
+    let val_err = val_dup
+        .apply_merge_keys()
+        .expect_err("value merge must reject colliding merged complex keys");
+    assert_eq!(val_err.kind(), ErrorKind::DuplicateKey);
+    assert_eq!(val_err.code(), ErrorCode::DuplicateKey);
+
+    // Custom, local, and non-core global tags on merge operands are rejected identically in both.
+    for bad in [
+        "out:\n  <<: !custom { a: 1 }\n",
+        "out:\n  <<: !set { a: ~ }\n",
+        "out:\n  <<: !!timestamp { a: 1 }\n",
+        "out:\n  <<: !!binary { a: 1 }\n",
+        "out:\n  <<: !!merge { a: 1 }\n",
+        "out:\n  <<: !!unknown_custom { a: 1 }\n",
+        "out:\n  <<: !custom [ { a: 1 } ]\n",
+        "out:\n  <<: [ !custom { a: 1 } ]\n",
+    ] {
+        let ev_err = ayaml::parse_value_with(bad, &MERGE).expect_err(bad);
+        assert_eq!(ev_err.code(), ErrorCode::InvalidMergeOperand, "{bad}");
+        let mut val = ayaml::parse_value(bad).expect("parse before value merge");
+        let val_err = val.apply_merge_keys().expect_err(bad);
+        assert_eq!(val_err.code(), ErrorCode::InvalidMergeOperand, "{bad}");
+    }
+}
+
 fn proptest_config() -> ProptestConfig {
     let default_cases = if cfg!(miri) { 2 } else { 128 };
     let cases = std::env::var("PROPTEST_CASES")
