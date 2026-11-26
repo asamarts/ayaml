@@ -431,13 +431,21 @@ struct AllocSample {
     total_allocated_bytes: usize,
 }
 
+/// Non-inlined measurement boundary targeted by `cargo xtask profile --tool callgrind|dhat`
+/// when profiling a single `memcount` fixture/mode so fixture generation, SHA-256 verification,
+/// and pre-measurement setup parses stay strictly outside the profiled region.
+#[inline(never)]
+fn __ayaml_memcount_measure<T>(op: impl FnOnce() -> T) -> T {
+    black_box(op())
+}
+
 fn measure_op<T>(grows_in_place: bool, op: impl FnOnce() -> T) -> AllocSample {
     GROWS_IN_PLACE.store(grows_in_place, Ordering::Relaxed);
     let live_before = LIVE.load(Ordering::Relaxed);
     let allocs_before = ALLOCATIONS.load(Ordering::Relaxed);
     let bytes_before = ALLOCATED_BYTES.load(Ordering::Relaxed);
     reset_peak();
-    let result = op();
+    let result = __ayaml_memcount_measure(op);
     let sample = AllocSample {
         peak_bytes: PEAK.load(Ordering::Relaxed).saturating_sub(live_before),
         live_bytes: LIVE.load(Ordering::Relaxed).saturating_sub(live_before),
