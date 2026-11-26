@@ -464,26 +464,28 @@ impl<'de> Stream<'de> {
         if self.fault.is_some() || self.events.front().is_none() {
             self.ready()?;
         }
-        // A scalar with no anchor is most of what is read. The builder would make this node of
-        // it and no more, so it is made here, from the event where it waits.
-        if let Some(Event::Scalar {
+        // A scalar with no anchor is most of what is read. Pop it by value so an owned decoded
+        // string moves straight into the `Node` without cloning.
+        if matches!(
+            self.events.front(),
+            Some(Event::Scalar { anchor: None, .. })
+        ) && let Some(Event::Scalar {
             value,
             raw,
             style,
             tag,
             anchor: None,
             span,
-        }) = self.events.front()
+        }) = self.events.pop()
         {
             let node = plain_scalar(
                 value,
-                raw,
-                *style,
+                &raw,
+                style,
                 tag.as_ref(),
-                *span,
+                span,
                 self.builder.options.drop_global_tags,
             );
-            self.events.discard();
             return match node {
                 Ok(node) => {
                     self.builder.root = Some(node);
@@ -511,18 +513,17 @@ impl<'de> Stream<'de> {
         self.builder.root.take().ok_or_else(unreadable)
     }
 
-    /// Read the node that waits as the builder's root, and drop it.
+    /// Read the node that waits as the builder's root, and drop it. Passing the node by value
+    /// allows owned decoded strings to move into visitors via `visit_string` without copying.
     #[inline]
     fn read_built<R>(
         &mut self,
         read: impl FnOnce(NodeDeserializer<'de, '_>) -> Result<R, Error>,
     ) -> Result<R, Error> {
-        let result = match &self.builder.root {
-            Some(node) => read(NodeDeserializer::new(node)),
+        match self.builder.root.take() {
+            Some(node) => read(NodeDeserializer::from_owned(node)),
             None => Err(unreadable()),
-        };
-        self.builder.root = None;
-        result
+        }
     }
 
     /// The span of the next node, if it is a collection that is read entry by entry.

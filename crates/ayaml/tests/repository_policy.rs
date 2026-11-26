@@ -631,20 +631,18 @@ const MAP_LINES: &[(&str, usize)] = &[
         "map: IndexMap::with_capacity_and_hasher(capacity, GlobalHasher),",
         1,
     ),
+    (
+        "let mut map = IndexMap::with_capacity_and_hasher(min_cap, GlobalHasher);",
+        1,
+    ),
     ("indexmap::map::Entry::Vacant(entry) => {", 2),
-    (
-        "indexmap::map::Entry::Occupied(entry) => Err(crate::value::key_text(entry.key())),",
-        1,
-    ),
+    ("indexmap::map::Entry::Occupied(entry) => {", 1),
     ("indexmap::map::Entry::Occupied(_) => Ok(false),", 1),
-    ("inner: indexmap::map::Entry<'a, Value, Value>,", 1),
-    (
-        "if let indexmap::map::Entry::Occupied(entry) = &mut self.inner {",
-        1,
-    ),
-    ("inner: indexmap::map::Iter<'a, Value, Value>,", 1),
-    ("inner: indexmap::map::IterMut<'a, Value, Value>,", 1),
-    ("inner: indexmap::map::IntoIter<Value, Value>,", 1),
+    ("entry: indexmap::map::Entry<'a, Value, Value>,", 1),
+    ("if let indexmap::map::Entry::Occupied(entry) = entry {", 1),
+    ("Large(indexmap::map::Iter<'a, Value, Value>),", 1),
+    ("Large(indexmap::map::IterMut<'a, Value, Value>),", 1),
+    ("Large(indexmap::map::IntoIter<Value, Value>),", 1),
 ];
 
 /// The lines of a source file that name the map's crate, or a name that the file imports from

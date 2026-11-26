@@ -28,6 +28,20 @@ fn scalar(input: &str) -> (String, ScalarStyle, String) {
         let raw = input[token.span.start()..token.span.end()].to_owned();
         match token.kind {
             TokenKind::PlainScalar => return (raw.clone(), ScalarStyle::Plain, raw),
+            TokenKind::SingleQuotedScalar => {
+                return (
+                    input[token.span.start() + 1..token.span.end() - 1].to_owned(),
+                    ScalarStyle::SingleQuoted,
+                    raw,
+                );
+            }
+            TokenKind::DoubleQuotedScalar => {
+                return (
+                    input[token.span.start() + 1..token.span.end() - 1].to_owned(),
+                    ScalarStyle::DoubleQuoted,
+                    raw,
+                );
+            }
             TokenKind::Scalar(scalar) => return (scalar.value.into_owned(), scalar.style, raw),
             _ => {}
         }
@@ -608,12 +622,25 @@ fn quoted_scalars_borrow_without_escapes_and_decode_escapes_and_breaks() {
     let mut scanner = Scanner::new(input, Limits::default()).expect("scanner");
     let mut scalars = Vec::new();
     while let Some(token) = scanner.next_token().expect("token") {
-        if let TokenKind::Scalar(scalar) = token.kind {
-            scalars.push((
-                scalar.style,
-                matches!(scalar.value, std::borrow::Cow::Borrowed(_)),
-                scalar.value.into_owned(),
-            ));
+        match token.kind {
+            TokenKind::SingleQuotedScalar => scalars.push((
+                ScalarStyle::SingleQuoted,
+                true,
+                input[token.span.start() + 1..token.span.end() - 1].to_owned(),
+            )),
+            TokenKind::DoubleQuotedScalar => scalars.push((
+                ScalarStyle::DoubleQuoted,
+                true,
+                input[token.span.start() + 1..token.span.end() - 1].to_owned(),
+            )),
+            TokenKind::Scalar(scalar) => {
+                scalars.push((
+                    scalar.style,
+                    matches!(scalar.value, std::borrow::Cow::Borrowed(_)),
+                    scalar.value.into_owned(),
+                ));
+            }
+            _ => {}
         }
     }
     assert_eq!(

@@ -24,8 +24,8 @@ pub struct Number(Repr);
 /// value that fits them, so derived equality is exact.
 ///
 /// Wide integers are stored as two `u64` limbs rather than a `u128`. A
-/// `u128` field would align `Number` to 16 bytes and round `Value` up to 80
-/// bytes; the limbs keep the alignment at 8, which keeps `Value` at 72 bytes.
+/// `u128` field would align `Number` to 16 bytes and round `Value` up to 48
+/// bytes; the limbs keep the alignment at 8, which keeps `Value` at 32 bytes.
 #[derive(Clone, Copy)]
 enum Repr {
     PosInt(u64),
@@ -542,10 +542,11 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn wide_integer_storage_keeps_value_compact() {
-        // The two-limb representation keeps Number at 24 bytes and
-        // Value at 72.
+        // The two-limb representation keeps Number at 24 bytes, Mapping at 24
+        // bytes, and Value at 32 bytes.
         assert_eq!(size_of::<Number>(), 24);
-        assert_eq!(size_of::<crate::Value>(), 72);
+        assert_eq!(size_of::<crate::Mapping>(), 24);
+        assert_eq!(size_of::<crate::Value>(), 32);
     }
 
     #[test]

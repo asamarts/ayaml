@@ -76,8 +76,23 @@ pub(super) fn with_span(error: Error, span: Span) -> Error {
     }
 }
 
+enum NodeRef<'src, 'a> {
+    Borrowed(&'a Node<'src>),
+    Owned(Node<'src>),
+}
+
+impl<'src> NodeRef<'src, '_> {
+    #[inline]
+    fn as_ref(&self) -> &Node<'src> {
+        match self {
+            Self::Borrowed(node) => node,
+            Self::Owned(node) => node,
+        }
+    }
+}
+
 pub(super) struct NodeDeserializer<'src, 'a, M = BorrowedMode> {
-    node: &'a Node<'src>,
+    node: NodeRef<'src, 'a>,
     mode: PhantomData<M>,
 }
 
@@ -86,7 +101,7 @@ macro_rules! int_targets {
     ($($method:ident)*) => {
         $(
             fn $method<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-                let node = untagged(self.node);
+                let node = untagged(self.node.as_ref());
                 if matches!(node.text, Text::DroppedTag) {
                     return deserialize_dropped_tag_int::<M, V>(node, visitor);
                 }
@@ -132,7 +147,7 @@ macro_rules! plain_targets {
     ($($method:ident)*) => {
         $(
             fn $method<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-                NodeDeserializer::<M>::with_mode(untagged(self.node)).deserialize_any(visitor)
+                NodeDeserializer::<M>::with_mode(untagged(self.node.as_ref())).deserialize_any(visitor)
             }
         )*
     };
@@ -141,16 +156,23 @@ macro_rules! plain_targets {
 impl<'src, 'a> NodeDeserializer<'src, 'a, BorrowedMode> {
     pub(super) fn new(node: &'a Node<'src>) -> Self {
         Self {
-            node,
+            node: NodeRef::Borrowed(node),
+            mode: PhantomData,
+        }
+    }
+
+    pub(super) fn from_owned(node: Node<'src>) -> Self {
+        Self {
+            node: NodeRef::Owned(node),
             mode: PhantomData,
         }
     }
 }
 
-impl<'src, 'a> NodeDeserializer<'src, 'a, OwnedMode> {
-    pub(super) fn owned(node: &'a Node<'src>) -> Self {
+impl<'src> NodeDeserializer<'src, '_, OwnedMode> {
+    pub(super) fn owned_from_owned(node: Node<'src>) -> Self {
         Self {
-            node,
+            node: NodeRef::Owned(node),
             mode: PhantomData,
         }
     }
@@ -159,6 +181,13 @@ impl<'src, 'a> NodeDeserializer<'src, 'a, OwnedMode> {
 impl<'src, 'a, M> NodeDeserializer<'src, 'a, M> {
     fn with_mode(node: &'a Node<'src>) -> Self {
         Self {
+            node: NodeRef::Borrowed(node),
+            mode: PhantomData,
+        }
+    }
+
+    fn from_ref(node: NodeRef<'src, 'a>) -> Self {
+        Self {
             node,
             mode: PhantomData,
         }
@@ -166,8 +195,8 @@ impl<'src, 'a, M> NodeDeserializer<'src, 'a, M> {
 
     /// The node to read. Aliases form no cycles: an anchor is defined only
     /// once its node is complete, so an alias cannot reach itself.
-    fn target(&self) -> &'a Node<'src> {
-        resolve(self.node)
+    fn target(&self) -> &Node<'src> {
+        resolve(self.node.as_ref())
     }
 }
 
@@ -175,6 +204,18 @@ impl<'src, 'de, M: StrMode<'src, 'de>> Deserializer<'de> for NodeDeserializer<'s
     type Error = Error;
 
     fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        if let NodeRef::Owned(Node {
+            kind: NodeKind::String(text),
+            span,
+            ..
+        }) = self.node
+        {
+            let result = match text {
+                Cow::Borrowed(value) => M::visit_src_str(visitor, value),
+                Cow::Owned(value) => visitor.visit_string(value),
+            };
+            return result.map_err(|error| with_span(error, span));
+        }
         let node = self.target();
         let span = node.span;
         let result = match &node.kind {
@@ -255,6 +296,18 @@ impl<'src, 'de, M: StrMode<'src, 'de>> Deserializer<'de> for NodeDeserializer<'s
     }
 
     fn deserialize_string<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        if let NodeRef::Owned(Node {
+            kind: NodeKind::String(text),
+            span,
+            ..
+        }) = self.node
+        {
+            let result = match text {
+                Cow::Borrowed(value) => M::visit_src_str(visitor, value),
+                Cow::Owned(value) => visitor.visit_string(value),
+            };
+            return result.map_err(|error| with_span(error, span));
+        }
         let node = self.target();
         let span = node.span;
         let result = match &node.kind {
@@ -279,6 +332,18 @@ impl<'src, 'de, M: StrMode<'src, 'de>> Deserializer<'de> for NodeDeserializer<'s
     }
 
     fn deserialize_bytes<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        if let NodeRef::Owned(Node {
+            kind: NodeKind::String(text),
+            span,
+            ..
+        }) = self.node
+        {
+            let result = match text {
+                Cow::Borrowed(value) => M::visit_src_bytes(visitor, value.as_bytes()),
+                Cow::Owned(value) => visitor.visit_byte_buf(value.into_bytes()),
+            };
+            return result.map_err(|error| with_span(error, span));
+        }
         let node = self.target();
         let span = node.span;
         let result = match &node.kind {
@@ -303,7 +368,7 @@ impl<'src, 'de, M: StrMode<'src, 'de>> Deserializer<'de> for NodeDeserializer<'s
     }
 
     fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        let node = untagged(self.node);
+        let node = untagged(self.node.as_ref());
         let span = node.span;
         if is_empty_scalar(node) {
             return visitor
@@ -325,18 +390,18 @@ impl<'src, 'de, M: StrMode<'src, 'de>> Deserializer<'de> for NodeDeserializer<'s
         if name == SPANNED_TOKEN && fields == SPANNED_FIELDS {
             // Preserve the outer node's full span (e.g. alias use-site span or full collection
             // span) before resolving aliases.
-            let span = self.node.full_span();
+            let span = self.node.as_ref().full_span();
             let _guard = crate::span::TrustedSpanGuard::enter(span);
             return visitor
                 .visit_map(SpannedMapAccess::<M> {
-                    node: self.node,
+                    node: Some(self.node),
                     span,
                     state: 0,
                     mode: PhantomData,
                 })
                 .map_err(|error| with_span(error, span));
         }
-        let node = untagged(self.node);
+        let node = untagged(self.node.as_ref());
         let span = node.span;
         if is_empty_scalar(node) {
             return visitor
@@ -356,7 +421,7 @@ impl<'src, 'de, M: StrMode<'src, 'de>> Deserializer<'de> for NodeDeserializer<'s
     }
 
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        let node = untagged(self.node);
+        let node = untagged(self.node.as_ref());
         let span = node.span;
         if is_empty_scalar(node) {
             return visitor
@@ -457,7 +522,7 @@ impl<'src, 'de, M: StrMode<'src, 'de>> Deserializer<'de> for NodeDeserializer<'s
     /// 1.0 and a radix integer such as `0x1F` is rejected. Quoted scalars are
     /// strings and are not parsed this way.
     fn deserialize_f64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        let node = untagged(self.node);
+        let node = untagged(self.node.as_ref());
         if let NodeKind::Number(number) = &node.kind
             && number.is_f64()
         {
@@ -523,7 +588,7 @@ impl<'src, 'de, M: StrMode<'src, 'de>> Deserializer<'de> for NodeDeserializer<'s
         _length: usize,
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        NodeDeserializer::<M>::with_mode(untagged(self.node)).deserialize_any(visitor)
+        NodeDeserializer::<M>::with_mode(untagged(self.node.as_ref())).deserialize_any(visitor)
     }
 
     fn deserialize_tuple_struct<V: Visitor<'de>>(
@@ -536,7 +601,7 @@ impl<'src, 'de, M: StrMode<'src, 'de>> Deserializer<'de> for NodeDeserializer<'s
     }
 
     fn deserialize_bool<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        let node = untagged(self.node);
+        let node = untagged(self.node.as_ref());
         if matches!(node.text, Text::DroppedTag) {
             return deserialize_dropped_tag_bool::<M, V>(node, visitor);
         }
@@ -859,7 +924,7 @@ pub(super) fn inside_key(error: Error, key: &Node<'_>) -> Error {
 
 /// Synthetic [`MapAccess`] supplying `(start, end, value)` to [`crate::Spanned`].
 struct SpannedMapAccess<'src, 'a, M> {
-    node: &'a Node<'src>,
+    node: Option<NodeRef<'src, 'a>>,
     span: Span,
     state: u8,
     mode: PhantomData<M>,
@@ -895,11 +960,102 @@ impl<'src, 'de, M: StrMode<'src, 'de>> MapAccess<'de> for SpannedMapAccess<'src,
             1 => seed.deserialize(serde::de::value::U64Deserializer::<Error>::new(
                 self.span.end() as u64,
             )),
-            2 => seed.deserialize(NodeDeserializer::<M>::with_mode(self.node)),
+            2 => {
+                let Some(node) = self.node.take() else {
+                    return Err(Error::new(
+                        ErrorKind::Serde,
+                        "Spanned<T> deserializer state exhausted",
+                    ));
+                };
+                seed.deserialize(NodeDeserializer::<M>::from_ref(node))
+            }
             _ => Err(Error::new(
                 ErrorKind::Serde,
                 "Spanned<T> deserializer state exhausted",
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::marker::PhantomData;
+
+    use serde::de::{Deserialize, Deserializer, Visitor};
+
+    use crate::{Deserializer as YamlDeserializer, Spanned, from_str};
+
+    struct OwnedBytes(Vec<u8>);
+
+    impl<'de> Deserialize<'de> for OwnedBytes {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct BytesVisitor;
+            impl Visitor<'_> for BytesVisitor {
+                type Value = OwnedBytes;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("owned byte buffer")
+                }
+                fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
+                    Ok(OwnedBytes(v))
+                }
+            }
+            deserializer.deserialize_byte_buf(BytesVisitor)
+        }
+    }
+
+    #[test]
+    fn owned_node_moves_escaped_strings_through_spanned_option_and_owned_mode() {
+        // Exceed the 4 KiB threshold so the streaming reader builds and moves owned Nodes via
+        // `NodeDeserializer::from_owned` (`BorrowedMode`), and exercise `owned_from_owned`
+        // (`OwnedMode`) via `Deserializer::next_seed`.
+        let mut input = String::from("spanned: \"hello\\nworld\"\noptional: \"opt\\tval\"\n");
+        for idx in 0..220 {
+            use std::fmt::Write as _;
+            let _ = writeln!(input, "pad{idx}: \"line-{idx}\\nend\"");
+        }
+        assert!(input.len() > 4096);
+
+        let map: BTreeMap<String, Option<Spanned<String>>> =
+            from_str(&input).expect("streamed owned decode");
+        let spanned = map
+            .get("spanned")
+            .and_then(Option::as_ref)
+            .expect("spanned entry");
+        assert_eq!(spanned.get_ref(), "hello\nworld");
+        let optional = map
+            .get("optional")
+            .and_then(Option::as_ref)
+            .expect("optional entry");
+        assert_eq!(optional.get_ref(), "opt\tval");
+        let last = map
+            .get("pad219")
+            .and_then(Option::as_ref)
+            .expect("pad219 entry");
+        assert_eq!(last.get_ref(), "line-219\nend");
+
+        // Exercise single-root owned string move through `Option<Spanned<String>>` and `visit_byte_buf`.
+        let long_root = format!("\"{}\\n\"", "x".repeat(5_000));
+        let root: Option<Spanned<String>> = from_str(&long_root).expect("root spanned string");
+        assert_eq!(root.expect("some").into_inner().len(), 5_001);
+        let bytes: OwnedBytes = from_str(&long_root).expect("root owned byte_buf");
+        assert_eq!(bytes.0.len(), 5_001);
+
+        // Exercise `NodeDeserializer::owned_from_owned` (`OwnedMode`) through `Deserializer::next_seed`.
+        let mut de = YamlDeserializer::from_str(&long_root).expect("deserializer");
+        let owned_spanned = de
+            .next_seed(PhantomData::<Option<Spanned<String>>>)
+            .transpose()
+            .expect("owned spanned")
+            .expect("one doc");
+        assert_eq!(owned_spanned.expect("some").into_inner().len(), 5_001);
+
+        let mut de = YamlDeserializer::from_str(&long_root).expect("deserializer");
+        let owned_bytes = de
+            .next_seed(PhantomData::<OwnedBytes>)
+            .transpose()
+            .expect("owned bytes")
+            .expect("one doc");
+        assert_eq!(owned_bytes.0.len(), 5_001);
     }
 }

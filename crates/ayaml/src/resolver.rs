@@ -4,6 +4,8 @@
 //! module resolves one scalar to a `Value`, and the event keeps the rest of
 //! its metadata.
 
+use std::borrow::Cow;
+
 use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::ScalarStyle;
 use crate::number::Number;
@@ -16,25 +18,38 @@ pub(crate) fn resolve_scalar(
     style: ScalarStyle,
     tag: Option<&Tag>,
 ) -> Result<Value, Error> {
+    resolve_scalar_cow(Cow::Borrowed(text), style, tag)
+}
+
+/// Resolve a scalar under the active parsing profile, moving an owned decoded string directly
+/// into `Value::String` without an extra copy.
+pub(crate) fn resolve_scalar_cow(
+    text: Cow<'_, str>,
+    style: ScalarStyle,
+    tag: Option<&Tag>,
+) -> Result<Value, Error> {
     if let Some(tag) = tag {
         if tag.is_core() {
-            return resolve_explicit_core(text, tag.suffix(), tag);
+            return resolve_explicit_core_cow(text, tag.suffix(), tag);
         }
         // A custom tag keeps its payload resolved as if untagged:
         // `!Flag true` holds a bool. The non-specific
         // tag `!` makes a scalar a string (YAML 1.2.2 section 6.9.1).
         let payload = if tag.is_non_specific() {
-            Value::String(text.to_owned())
+            Value::String(text.into_owned())
         } else {
-            resolve_scalar(text, style, None)?
+            resolve_scalar_cow(text, style, None)?
         };
         return Ok(Value::from(TaggedValue::new(tag.clone(), payload)));
     }
 
     if style != ScalarStyle::Plain {
-        return Ok(Value::String(text.to_owned()));
+        return Ok(Value::String(text.into_owned()));
     }
-    Ok(resolve_plain(text).unwrap_or_else(|| Value::String(text.to_owned())))
+    if let Some(value) = resolve_plain(&text) {
+        return Ok(value);
+    }
+    Ok(Value::String(text.into_owned()))
 }
 
 /// Whether an untagged plain scalar with this text resolves to a string.
@@ -46,7 +61,7 @@ pub(crate) fn plain_resolves_to_string(text: &str) -> bool {
 /// Resolve untagged plain text to a null, bool or number, or `None` when it
 /// is a string. Integers are exact up to 128 bits. A wider decimal
 /// integer is a float, and a wider `0x`/`0o`/`0b` integer is a string.
-fn resolve_plain(text: &str) -> Option<Value> {
+pub(crate) fn resolve_plain(text: &str) -> Option<Value> {
     match text.as_bytes().first().copied() {
         None => Some(Value::Null),
         Some(b'~') => (text.len() == 1).then_some(Value::Null),
@@ -62,27 +77,31 @@ fn resolve_plain(text: &str) -> Option<Value> {
     }
 }
 
+pub(crate) fn resolve_explicit_core(text: &str, suffix: &str, tag: &Tag) -> Result<Value, Error> {
+    resolve_explicit_core_cow(Cow::Borrowed(text), suffix, tag)
+}
+
 #[allow(
     clippy::match_same_arms,
     reason = "the arms stay separate to document each representation or state"
 )]
-pub(crate) fn resolve_explicit_core(text: &str, suffix: &str, tag: &Tag) -> Result<Value, Error> {
+fn resolve_explicit_core_cow(text: Cow<'_, str>, suffix: &str, tag: &Tag) -> Result<Value, Error> {
     match suffix {
-        "str" => Ok(Value::String(text.to_owned())),
-        "int" => parse_int_with(text, true)
+        "str" => Ok(Value::String(text.into_owned())),
+        "int" => parse_int_with(&text, true)
             .map(Value::Number)
             .ok_or_else(|| resolution_error(ErrorCode::InvalidIntScalar, "invalid !!int scalar")),
         // The core schema reads `!!float 01` as 1.0. Untagged, `01` stays a
         // string.
-        "float" => parse_float_with(text, true)
+        "float" => parse_float_with(&text, true)
             .map(Value::Number)
             .ok_or_else(|| {
                 resolution_error(ErrorCode::InvalidFloatScalar, "invalid !!float scalar")
             }),
-        "bool" => parse_bool(text)
+        "bool" => parse_bool(&text)
             .map(Value::Bool)
             .ok_or_else(|| resolution_error(ErrorCode::InvalidBoolScalar, "invalid !!bool scalar")),
-        "null" if is_null(text) => Ok(Value::Null),
+        "null" if is_null(&text) => Ok(Value::Null),
         "null" => Err(resolution_error(
             ErrorCode::InvalidNullScalar,
             "invalid !!null scalar",
@@ -90,7 +109,7 @@ pub(crate) fn resolve_explicit_core(text: &str, suffix: &str, tag: &Tag) -> Resu
         // A core name this schema doesn't define is left for the application, like a custom tag.
         _ => Ok(Value::from(TaggedValue::new(
             tag.clone(),
-            Value::String(text.to_owned()),
+            Value::String(text.into_owned()),
         ))),
     }
 }
