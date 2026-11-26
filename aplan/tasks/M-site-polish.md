@@ -2,7 +2,7 @@
 id: M-site-polish
 title: Polish website copy, add visual benchmark charts, and publish Correctness page before 1.0
 phase: 9
-status: todo
+status: done
 blocked_by:
 - AY-166
 - AY-167
@@ -11,6 +11,17 @@ tags:
 - milestone
 - docs
 - site
+evidence:
+- kind: commit
+  ref: 670fdeb
+- kind: commit
+  ref: d6a216a
+- kind: commit
+  ref: 2517bc1
+- kind: test
+  ref: docs_book_and_reference_pages_are_complete_and_doctested_in_ci
+- kind: url
+  ref: https://asamarts.github.io/ayaml/docs/correctness/
 ---
 
 ## Why
@@ -23,5 +34,5 @@ verification stack.
 
 ## Acceptance criteria
 
-- [ ] `AY-166`, `AY-167`, and `AY-168` are closed with green site builds, link checks, doctests, and policy checks
-- [ ] `https://asamarts.github.io/ayaml/` deploys cleanly from `main` with all three improvements live
+- [x] `AY-166`, `AY-167`, and `AY-168` are closed with green site builds, link checks, doctests, and policy checks
+- [x] `https://asamarts.github.io/ayaml/` deploys cleanly from `main` with all three improvements live
