@@ -201,6 +201,7 @@ budget formula.
   - [Migrating from YAML 1.1](https://asamarts.github.io/ayaml/docs/migration/)
 - [API reference and caveats](https://asamarts.github.io/ayaml/docs/api-reference/) ([docs.rs/ayaml](https://docs.rs/ayaml), [docs.rs/ayaml-edit](https://docs.rs/ayaml-edit))
 - [Error codes and masked errors](https://asamarts.github.io/ayaml/docs/error-codes/)
+- [Correctness and verification](https://asamarts.github.io/ayaml/docs/correctness/)
 - [Security and untrusted input](https://asamarts.github.io/ayaml/docs/security/)
 - [Stability and versioning](https://asamarts.github.io/ayaml/docs/stability/)
 - [Compatibility profile](https://asamarts.github.io/ayaml/docs/compatibility/)

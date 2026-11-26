@@ -67,6 +67,7 @@ assert_eq!(ayaml::from_str::<Service>(&rendered)?, service);
 | Complete public API map, feature flags, and caveats | [API reference and caveats](api-reference.md) |
 | Stable `ErrorCode` catalog and masked error output | [Error codes](error-codes.md) |
 | Threat model, untrusted input, resource limits, and error text | [Security and untrusted input](security.md) |
+| Testing, fuzzing, Miri, Kani proofs, mutation testing, and release checks | [Correctness and verification](correctness.md) |
 | Stable, `#[non_exhaustive]`, deprecated, and unstable API surfaces | [Stability and versioning](stability.md) |
 | Detailed resource limit ceilings, accounting rules, and memory bounds | [Resource limits](limits.md) |
 | Benchmark results and comparison tables | [Benchmarks](https://asamarts.github.io/ayaml/benchmarks/) |

@@ -11,6 +11,7 @@ function isItemActive(href: string): boolean {
   if (href === `${BASE}/docs/`) {
     return (
       currentPath.startsWith(`${BASE}/docs/`) &&
+      !currentPath.startsWith(`${BASE}/docs/correctness/`) &&
       !currentPath.startsWith(`${BASE}/docs/migrating-from/`) &&
       !currentPath.startsWith(`${BASE}/docs/migration/`) &&
       !currentPath.startsWith(`${BASE}/docs/cookbook/`) &&
@@ -91,11 +92,11 @@ function isItemActive(href: string): boolean {
   .site-nav {
     display: flex;
     align-items: center;
-    gap: 18px;
+    gap: 16px;
     height: var(--nav-h);
     padding-inline: var(--gutter);
     font-family: var(--font-body);
-    font-size: 0.92rem;
+    font-size: 0.9rem;
     line-height: 1;
   }
   .brand {
@@ -118,7 +119,7 @@ function isItemActive(href: string): boolean {
   .nav-links {
     display: flex;
     align-items: stretch;
-    gap: 18px;
+    gap: 15px;
     height: 100%;
     min-width: 0;
     margin: 0;
@@ -185,7 +186,7 @@ function isItemActive(href: string): boolean {
     background: var(--wash);
     color: var(--ink);
   }
-  @media (max-width: 1080px) {
+  @media (max-width: 1180px) {
     .nav-version {
       display: none;
     }
@@ -193,15 +194,21 @@ function isItemActive(href: string): boolean {
       gap: 12px;
     }
     .nav-links {
-      gap: 14px;
+      gap: 13px;
     }
   }
-  @media (max-width: 640px) {
+  @media (max-width: 960px) {
     .site-nav {
       gap: 10px;
     }
     .nav-links {
-      gap: 12px;
+      gap: 11px;
+      font-size: 0.86rem;
+    }
+  }
+  @media (max-width: 820px) {
+    .nav-links {
+      padding-inline-end: 16px;
       mask-image: linear-gradient(to right, #000 88%, transparent);
       -webkit-mask-image: linear-gradient(to right, #000 88%, transparent);
     }
