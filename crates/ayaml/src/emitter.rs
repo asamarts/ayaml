@@ -24,7 +24,9 @@ pub(crate) use self::scalars::{
     looks_like_leading_zero_numeral, needs_explicit_indent, plain_is_safe, plain_text_ok,
     single_quoted_ok,
 };
-use self::scalars::{double_quoted_char_len_capped, plain_is_block_safe};
+use self::scalars::{
+    double_quoted_char_len_capped, plain_is_block_safe, single_quoted_char_len_capped,
+};
 pub(crate) use self::tags::{RedefinedHandles, TagDirectives};
 
 /// Emitter presentation options.
@@ -1248,8 +1250,24 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
     fn needs_explicit_key(&self, key: &Value) -> bool {
         match key {
             Value::Sequence(_) | Value::Mapping(_) | Value::Tagged(_) => true,
-            Value::String(text) => self.key_width(text) > MAX_IMPLICIT_KEY_CHARS,
+            Value::String(text) => self.key_exceeds_implicit_limit(text),
             _ => false,
+        }
+    }
+
+    fn key_exceeds_implicit_limit(&self, text: &str) -> bool {
+        const CAP: usize = MAX_IMPLICIT_KEY_CHARS + 1;
+        match self.string_form(text, self.options.scalar_style) {
+            StringForm::Plain => {
+                text.len() > MAX_IMPLICIT_KEY_CHARS
+                    && text.chars().take(CAP).count() > MAX_IMPLICIT_KEY_CHARS
+            }
+            StringForm::SingleQuoted => {
+                single_quoted_char_len_capped(text, CAP) > MAX_IMPLICIT_KEY_CHARS
+            }
+            StringForm::DoubleQuoted => {
+                double_quoted_char_len_capped(text, CAP) > MAX_IMPLICIT_KEY_CHARS
+            }
         }
     }
 
@@ -1259,16 +1277,7 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
         const CAP: usize = MAX_IMPLICIT_KEY_CHARS + 1;
         match self.string_form(text, self.options.scalar_style) {
             StringForm::Plain => text.chars().take(CAP).count(),
-            StringForm::SingleQuoted => {
-                let mut count = 2usize;
-                for ch in text.chars() {
-                    count += 1 + usize::from(ch == '\'');
-                    if count >= CAP {
-                        return count;
-                    }
-                }
-                count
-            }
+            StringForm::SingleQuoted => single_quoted_char_len_capped(text, CAP),
             StringForm::DoubleQuoted => double_quoted_char_len_capped(text, CAP),
         }
     }
@@ -1327,9 +1336,6 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
             }
             if index > 0 || !inline_first {
                 self.indent(indent);
-                if self.error.is_some() {
-                    break;
-                }
             }
             if self.needs_explicit_key(key) {
                 self.push_str("? ");
@@ -1340,9 +1346,6 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
             } else {
                 self.emit_key(key);
                 self.push(':');
-            }
-            if self.error.is_some() {
-                break;
             }
             self.push_key(key);
             if self.force_flow()
@@ -1392,9 +1395,6 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
                 self.indent(indent);
             }
             self.push('-');
-            if self.error.is_some() {
-                break;
-            }
             self.push_index(index);
             if self.force_flow()
                 && matches!(
@@ -1430,9 +1430,6 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
     }
 
     fn emit_node(&mut self, value: &Value, indent: usize) {
-        if self.error.is_some() {
-            return;
-        }
         match value {
             Value::Mapping(mapping) if !mapping.is_empty() => self.emit_mapping(mapping, indent),
             Value::Sequence(sequence) if !sequence.is_empty() => {
@@ -1765,30 +1762,34 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
 
     fn emit_string(&mut self, value: &str) {
         match self.string_form(value, self.scalar_style()) {
-            StringForm::SingleQuoted => {
-                self.push('\'');
-                for (index, part) in value.split('\'').enumerate() {
-                    if self.error.is_some() {
-                        break;
-                    }
-                    #[cfg(test)]
-                    {
-                        self.quoted_chunks += 1;
-                    }
-                    if index > 0 {
-                        self.push_str("''");
-                    }
-                    self.push_str(part);
-                }
-                self.push('\'');
-            }
-            StringForm::DoubleQuoted => self.emit_double_quoted_streaming(value),
             StringForm::Plain => self.push_str(value),
+            StringForm::SingleQuoted => self.emit_single_quoted_streaming(value),
+            StringForm::DoubleQuoted => self.emit_double_quoted_streaming(value),
         }
+    }
+
+    #[inline(never)]
+    fn emit_single_quoted_streaming(&mut self, value: &str) {
+        self.push('\'');
+        for (index, part) in value.split('\'').enumerate() {
+            if self.error.is_some() {
+                break;
+            }
+            #[cfg(test)]
+            {
+                self.quoted_chunks += 1;
+            }
+            if index > 0 {
+                self.push_str("''");
+            }
+            self.push_str(part);
+        }
+        self.push('\'');
     }
 
     /// Stream a double-quoted scalar directly through `self.output` without allocating an
     /// intermediate escaped `String`, stopping immediately when `self.error` is set.
+    #[inline(never)]
     fn emit_double_quoted_streaming(&mut self, value: &str) {
         self.push('"');
         let bytes = value.as_bytes();

@@ -247,7 +247,7 @@ fn opt_in_merge_keys_enforces_cumulative_alias_budget_across_sibling_mappings() 
             .expect("single mapping events stream")
             .collect::<Result<_, _>>()
             .expect("single mapping must fit expansion budget");
-        assert!(!events.is_empty());
+        assert_ne!(events.len(), 0);
         assert!(ayaml::SpannedTree::parse_with(&single_yaml, &exp_opts).is_ok());
         assert!(ayaml::parse_value_with(&single_yaml, &exp_opts).is_ok());
         assert!(ayaml::from_str_with::<Value>(&single_yaml, &exp_opts).is_ok());

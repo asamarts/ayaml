@@ -298,6 +298,7 @@ pub(crate) fn double_quoted(value: &str) -> String {
 }
 
 /// Character count of `double_quoted(value)` capped at `cap`, without allocating.
+#[inline(never)]
 pub(crate) fn double_quoted_char_len_capped(value: &str, cap: usize) -> usize {
     let mut count = 2usize;
     if count >= cap {
@@ -320,6 +321,22 @@ pub(crate) fn double_quoted_char_len_capped(value: &str, cap: usize) -> usize {
             _ => 1,
         };
         count = count.saturating_add(step);
+        if count >= cap {
+            return count;
+        }
+    }
+    count
+}
+
+/// Character count of a single-quoted scalar capped at `cap`, without allocating.
+#[inline(never)]
+pub(crate) fn single_quoted_char_len_capped(value: &str, cap: usize) -> usize {
+    let mut count = 2usize;
+    if count >= cap {
+        return count;
+    }
+    for ch in value.chars() {
+        count = count.saturating_add(1 + usize::from(ch == '\''));
         if count >= cap {
             return count;
         }
