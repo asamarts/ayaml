@@ -273,9 +273,11 @@ A limit failure returns `ErrorKind::Limit` and a specific `ErrorCode`
 There are three exceptions. A configured `max_depth` above `MAX_DEPTH_CAP`, or a
 `node_cost_bytes` of 0, is `ErrorKind::Limit` with no structured value or span,
 because no input went over a limit. In compat mode, the readers that build values report the way a libyaml-based
-reader does. A depth failure is `ErrorKind::Serde`, with the message `recursion limit
-exceeded` and the span of the collection that went over. Going over `max_documents`
-is `ErrorKind::Parser`, with the message `more than one document in stream` and the
+reader does while still preserving `Error::code()` and `Error::limit()`. A depth failure is
+`ErrorKind::Serde` (`ErrorCode::DepthLimit`), with the message `recursion limit
+exceeded`, the structured `LimitKind::Depth` value, and the span of the collection that went over.
+Going over `max_documents` is `ErrorKind::Parser` (`ErrorCode::DocumentCountLimit`), with the
+message `more than one document in stream`, the structured `LimitKind::Documents` value, and the
 span of the second document's start. The compatibility event readers don't map these:
 `compat::parse_events`, `compat::parse_events_with`, and `compat::parse_events_eager_with`
 report `ErrorKind::Limit` with the value and the span.

@@ -41,8 +41,10 @@ impl Value {
     /// # Errors
     ///
     /// Returns [`ErrorKind::Composition`] when a merge key operand cannot be
-    /// merged, or [`ErrorKind::Limit`] when collection nesting depth or merged
-    /// collection entries exceed the default limits.
+    /// merged, [`ErrorKind::DuplicateKey`] when expanding merges inside complex
+    /// mapping keys makes two keys in the same mapping equal, or
+    /// [`ErrorKind::Limit`] when collection nesting depth or merged collection
+    /// entries exceed the default limits.
     pub fn apply_merge_keys(&mut self) -> Result<(), Error> {
         self.apply_merge_keys_with_limits(&Limits::default())
     }
@@ -57,15 +59,22 @@ impl Value {
     /// # Errors
     ///
     /// Returns [`ErrorKind::Limit`] when `limits` is invalid or when collection
-    /// depth or merged entry counts exceed `limits`, or
-    /// [`ErrorKind::Composition`] when a merge operand cannot be merged.
+    /// depth or merged entry counts exceed `limits`, [`ErrorKind::DuplicateKey`]
+    /// when expanding merges inside complex mapping keys makes two keys in the
+    /// same mapping equal, or [`ErrorKind::Composition`] when a merge operand
+    /// cannot be merged.
     pub fn apply_merge_keys_with_limits(&mut self, limits: &Limits) -> Result<(), Error> {
         limits.validate()?;
-        apply_value(self, 0, limits)
+        apply_value(self, 0, limits, false)
     }
 }
 
-fn apply_value(mut value: &mut Value, depth: usize, limits: &Limits) -> Result<(), Error> {
+fn apply_value(
+    mut value: &mut Value,
+    depth: usize,
+    limits: &Limits,
+    key_depth_checked: bool,
+) -> Result<(), Error> {
     loop {
         match value {
             Value::Tagged(tagged) => {
@@ -75,24 +84,117 @@ fn apply_value(mut value: &mut Value, depth: usize, limits: &Limits) -> Result<(
                 let next_depth = depth.saturating_add(1);
                 limits.check_depth(next_depth)?;
                 for item in sequence {
-                    apply_value(item, next_depth, limits)?;
+                    apply_value(item, next_depth, limits, key_depth_checked)?;
                 }
                 return Ok(());
             }
-            Value::Mapping(mapping) => return apply_mapping(mapping, depth, limits),
+            Value::Mapping(mapping) => {
+                return apply_mapping(mapping, depth, limits, key_depth_checked);
+            }
             Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => return Ok(()),
         }
     }
 }
 
-fn apply_mapping(mapping: &mut Mapping, depth: usize, limits: &Limits) -> Result<(), Error> {
+fn is_complex_key(key: &Value) -> bool {
+    matches!(
+        key,
+        Value::Mapping(_) | Value::Sequence(_) | Value::Tagged(_)
+    )
+}
+
+/// Validate `limits.max_depth` read-only inside a complex mapping key and report whether any
+/// nested mapping inside it contains a `"<<"` merge key that requires rebuilding the parent map.
+fn check_key_depth_and_has_merge(
+    mut value: &Value,
+    depth: usize,
+    limits: &Limits,
+) -> Result<bool, Error> {
+    loop {
+        match value {
+            Value::Tagged(tagged) => {
+                value = &tagged.value;
+            }
+            Value::Sequence(sequence) => {
+                let next_depth = depth.saturating_add(1);
+                limits.check_depth(next_depth)?;
+                let mut has_merge = false;
+                for item in sequence {
+                    has_merge |= check_key_depth_and_has_merge(item, next_depth, limits)?;
+                }
+                return Ok(has_merge);
+            }
+            Value::Mapping(mapping) => {
+                let next_depth = depth.saturating_add(1);
+                limits.check_depth(next_depth)?;
+                let mut has_merge = false;
+                for (k, v) in mapping {
+                    if matches!(k, Value::String(text) if text == "<<") {
+                        has_merge = true;
+                    }
+                    has_merge |= check_key_depth_and_has_merge(k, next_depth, limits)?;
+                    has_merge |= check_key_depth_and_has_merge(v, next_depth, limits)?;
+                }
+                return Ok(has_merge);
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => return Ok(false),
+        }
+    }
+}
+
+fn apply_mapping(
+    mapping: &mut Mapping,
+    depth: usize,
+    limits: &Limits,
+    key_depth_checked: bool,
+) -> Result<(), Error> {
     let next_depth = depth.saturating_add(1);
     limits.check_depth(next_depth)?;
-    for (_, value) in mapping.iter_mut() {
-        apply_value(value, next_depth, limits)?;
-    }
 
-    let Some(merge_operand) = mapping.shift_remove("<<") else {
+    let rebuild_for_complex_merges = if key_depth_checked {
+        // Depth for every complex key inside this subtree was already verified by an enclosing
+        // `check_key_depth_and_has_merge` pass, keeping deep complex-key chains strictly O(N).
+        mapping.keys().any(is_complex_key)
+    } else {
+        let mut has_merge = false;
+        for key in mapping.keys() {
+            if is_complex_key(key) {
+                has_merge |= check_key_depth_and_has_merge(key, next_depth, limits)?;
+            }
+        }
+        has_merge
+    };
+
+    let merge_operand = if rebuild_for_complex_merges {
+        let old = std::mem::take(mapping);
+        let mut rebuilt = Mapping::with_capacity(old.len());
+        let mut operand = None;
+        for (mut key, mut value) in old {
+            if matches!(&key, Value::String(text) if text == "<<") {
+                apply_value(&mut value, next_depth, limits, key_depth_checked)?;
+                operand = Some(value);
+                continue;
+            }
+            apply_value(&mut key, next_depth, limits, true)?;
+            apply_value(&mut value, next_depth, limits, key_depth_checked)?;
+            if let Err(duplicate) = rebuilt.insert_new(key, value) {
+                return Err(Error::coded(
+                    ErrorKind::DuplicateKey,
+                    ErrorCode::DuplicateKey,
+                    format!("duplicate mapping key: {duplicate}"),
+                ));
+            }
+        }
+        *mapping = rebuilt;
+        operand
+    } else {
+        for (_, value) in mapping.iter_mut() {
+            apply_value(value, next_depth, limits, key_depth_checked)?;
+        }
+        mapping.shift_remove("<<")
+    };
+
+    let Some(merge_operand) = merge_operand else {
         return Ok(());
     };
     merge_operand_into(merge_operand, mapping, limits)
@@ -367,5 +469,55 @@ mod tests {
         }
         assert_eq!(current["m"]["x"].as_u64(), Some(1));
         assert_eq!(current["m"]["y"].as_u64(), Some(2));
+    }
+
+    #[test]
+    fn apply_merge_keys_recurses_into_complex_keys_and_enforces_depth_and_duplicates() {
+        let mut value = crate::parse_value("b: &b {x: 1}\nout:\n  ? { <<: *b, y: 2 }\n  : ok\n")
+            .expect("parse");
+        value.apply_merge_keys().expect("merge inside complex key");
+        let mut expected_key = Mapping::new();
+        expected_key.insert(Value::from("y"), Value::from(2_u64));
+        expected_key.insert(Value::from("x"), Value::from(1_u64));
+        assert_eq!(
+            value["out"]
+                .as_mapping()
+                .unwrap()
+                .get(Value::Mapping(expected_key)),
+            Some(&Value::from("ok"))
+        );
+
+        // Complex key nesting counts toward `max_depth`, and failing the limit leaves the
+        // mapping intact (non-destructive check before taking/rebuilding the mapping).
+        let mut key_value = Value::from(1_u64);
+        for _ in 0..4 {
+            let mut inner = Mapping::new();
+            inner.insert(key_value, Value::from(0_u64));
+            key_value = Value::Mapping(inner);
+        }
+        let mut over_limit = key_value.clone();
+        let err = over_limit
+            .apply_merge_keys_with_limits(&Limits::default().with_max_depth(3))
+            .expect_err("deep complex key must exceed max_depth");
+        assert_eq!(err.kind(), ErrorKind::Limit);
+        assert_eq!(err.code(), ErrorCode::DepthLimit);
+        assert_eq!(
+            err.limit().map(crate::LimitExceeded::kind),
+            Some(LimitKind::Depth)
+        );
+        assert_eq!(over_limit, key_value);
+        key_value
+            .apply_merge_keys_with_limits(&Limits::default().with_max_depth(4))
+            .expect("depth 4 fits inclusive limit");
+        assert_ne!(key_value.as_mapping().unwrap().len(), 0);
+
+        // Expanding a complex key to match an existing key returns DuplicateKey.
+        let mut dup = crate::parse_value(
+            "b: &b {x: 1}\nout:\n  ? { <<: *b }\n  : first\n  ? { x: 1 }\n  : second\n",
+        )
+        .expect("parse");
+        let err = dup.apply_merge_keys().expect_err("colliding complex keys");
+        assert_eq!(err.kind(), ErrorKind::DuplicateKey);
+        assert_eq!(err.code(), ErrorCode::DuplicateKey);
     }
 }

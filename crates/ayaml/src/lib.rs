@@ -308,6 +308,16 @@ pub mod compat {
         }
     }
 
+    fn preserve_span_and_location(mut mapped: Error, original: &Error) -> Error {
+        if let Some(span) = original.span() {
+            mapped = mapped.with_span(span);
+        }
+        if let Some(location) = original.location() {
+            mapped = mapped.with_location(location);
+        }
+        mapped
+    }
+
     /// Translate ayaml diagnostics into the strings expected by
     /// libyaml-compatible consumers. Each branch is a documented compatibility
     /// deviation keyed by the parser's structured failure, never by the text of
@@ -319,36 +329,19 @@ pub mod compat {
                 ErrorCode::ReservedIndicator,
                 "found character that cannot start any token",
             );
-            return if let Some(span) = error.span() {
-                let mapped = mapped.with_span(span);
-                if let Some(location) = error.location() {
-                    mapped.with_location(location)
-                } else {
-                    mapped
-                }
-            } else {
-                mapped
-            };
+            return preserve_span_and_location(mapped, &error);
         }
-        if error
+        if let Some(limit) = error
             .limit()
-            .is_some_and(|limit| limit.kind() == LimitKind::Depth)
+            .filter(|limit| limit.kind() == LimitKind::Depth)
         {
             let mapped = Error::coded(
                 ErrorKind::Serde,
                 ErrorCode::DepthLimit,
                 "recursion limit exceeded",
-            );
-            return if let Some(span) = error.span() {
-                let mapped = mapped.with_span(span);
-                if let Some(location) = error.location() {
-                    mapped.with_location(location)
-                } else {
-                    mapped
-                }
-            } else {
-                mapped
-            };
+            )
+            .with_limit(limit);
+            return preserve_span_and_location(mapped, &error);
         }
         if error.code() == ErrorCode::UnexpectedMappingValue {
             let mapped = Error::coded(
@@ -356,37 +349,22 @@ pub mod compat {
                 ErrorCode::UnexpectedMappingValue,
                 "mapping values are not allowed in this context",
             );
-            return if let Some(span) = error.span() {
-                let mapped = mapped.with_span(span);
-                if let Some(location) = error.location() {
-                    mapped.with_location(location)
-                } else {
-                    mapped
-                }
-            } else {
-                mapped
-            };
+            return preserve_span_and_location(mapped, &error);
         }
         if error.code() == ErrorCode::TrailingDocuments
             || error
                 .limit()
                 .is_some_and(|limit| limit.kind() == LimitKind::Documents)
         {
-            let mapped = Error::coded(
+            let mut mapped = Error::coded(
                 ErrorKind::Parser,
                 error.code(),
                 "more than one document in stream",
             );
-            return if let Some(span) = error.span() {
-                let mapped = mapped.with_span(span);
-                if let Some(location) = error.location() {
-                    mapped.with_location(location)
-                } else {
-                    mapped
-                }
-            } else {
-                mapped
-            };
+            if let Some(limit) = error.limit() {
+                mapped = mapped.with_limit(limit);
+            }
+            return preserve_span_and_location(mapped, &error);
         }
         error
     }

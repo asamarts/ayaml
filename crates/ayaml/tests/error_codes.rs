@@ -985,7 +985,7 @@ fn emitter_and_io_error_codes_are_pinned() {
 #[cfg(feature = "libyaml-compat")]
 #[test]
 fn compat_error_codes_are_preserved_across_kind_remappings() {
-    // Depth limit remaps ErrorKind to Serde in compat while keeping DepthLimit code.
+    // Depth limit remaps ErrorKind to Serde in compat while keeping DepthLimit code and limit metadata.
     let depth_opts =
         ayaml::compat::ParseOptions::new().with_limits(Limits::new().with_max_depth(1));
     let depth = ayaml::compat::from_str_with::<Value>("[[1]]", &depth_opts).unwrap_err();
@@ -994,6 +994,10 @@ fn compat_error_codes_are_preserved_across_kind_remappings() {
         ErrorKind::Serde,
         ErrorCode::DepthLimit,
         "yaml.depth-limit",
+    );
+    assert_eq!(
+        depth.limit().map(ayaml::LimitExceeded::kind),
+        Some(LimitKind::Depth)
     );
 
     // Trailing documents keep TrailingDocuments code.
@@ -1004,8 +1008,9 @@ fn compat_error_codes_are_preserved_across_kind_remappings() {
         ErrorCode::TrailingDocuments,
         "yaml.trailing-documents",
     );
+    assert!(trailing.limit().is_none());
 
-    // Document count limit remaps ErrorKind to Parser while keeping DocumentCountLimit code.
+    // Document count limit remaps ErrorKind to Parser while keeping DocumentCountLimit code and limit metadata.
     let doc_opts =
         ayaml::compat::ParseOptions::new().with_limits(Limits::new().with_max_documents(1));
     let doc_limit = ayaml::compat::from_str_with::<Value>("1\n---\n2\n", &doc_opts).unwrap_err();
@@ -1014,6 +1019,10 @@ fn compat_error_codes_are_preserved_across_kind_remappings() {
         ErrorKind::Parser,
         ErrorCode::DocumentCountLimit,
         "yaml.document-count-limit",
+    );
+    assert_eq!(
+        doc_limit.limit().map(ayaml::LimitExceeded::kind),
+        Some(LimitKind::Documents)
     );
 
     // Reserved indicator after BOM remaps wording while keeping ReservedIndicator code.

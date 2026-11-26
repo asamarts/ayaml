@@ -1030,12 +1030,12 @@ fn compat_typed_readers_honor_every_single_document_limit() {
                         assert_eq!(error.kind(), ErrorKind::Serde, "{name}: {error}");
                     } else {
                         assert_eq!(error.kind(), ErrorKind::Limit, "{name}: {error}");
-                        assert_eq!(
-                            error.limit().map(ayaml::LimitExceeded::kind),
-                            Some(case.kind),
-                            "{name}: {error}"
-                        );
                     }
+                    assert_eq!(
+                        error.limit().map(ayaml::LimitExceeded::kind),
+                        Some(case.kind),
+                        "{name}: {error}"
+                    );
                 }
             }
         }
@@ -1181,6 +1181,13 @@ fn raising_max_depth_keeps_earlier_parser_error_before_later_scanner_error() {
             let lo_merge = lo_opts.clone().with_merge_keys(true);
             let hi_merge = hi_opts.clone().with_merge_keys(true);
 
+            #[cfg_attr(
+                not(feature = "libyaml-compat"),
+                allow(
+                    unused_mut,
+                    reason = "compat entries are pushed only when libyaml-compat is enabled"
+                )
+            )]
             let mut results: Vec<(&str, Error, Error)> = vec![
                 (
                     "parse_value_with",

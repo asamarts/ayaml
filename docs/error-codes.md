@@ -146,8 +146,9 @@ failed.
 ## Resource limits
 
 All limit-exceeded errors also attach a structured `LimitExceeded` value accessible through
-`Error::limit()` (except where `libyaml-compat` remaps `DepthLimit` or `DocumentCountLimit`). See
-[`docs/limits.md`](limits.md) for defaults and accounting rules.
+`Error::limit()` (including where `libyaml-compat` remaps `DepthLimit` to `ErrorKind::Serde` or
+`DocumentCountLimit` to `ErrorKind::Parser`). See [`docs/limits.md`](limits.md) for defaults and
+accounting rules.
 
 | Variant | Code | Usual `ErrorKind` | Meaning |
 | --- | --- | --- | --- |

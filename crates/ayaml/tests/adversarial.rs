@@ -1146,12 +1146,17 @@ fn assert_depth_error(shape: &str, name: &str, result: Result<(), ayaml::Error>)
     assert_depth_error_kind(name, &result.expect_err(name));
 }
 
-/// Compat's readers that build values report the depth limit as a libyaml-based reader does.
+/// Compat's readers that build values report the depth limit with libyaml-compat wording while
+/// preserving `LimitExceeded` metadata.
 fn assert_depth_error_kind(name: &str, error: &ayaml::Error) {
     if name.starts_with("compat") {
         assert_eq!(error.kind(), ErrorKind::Serde, "{name}: {error}");
         assert_eq!(error.message(), "recursion limit exceeded", "{name}");
-        assert_eq!(error.limit(), None, "{name}");
+        assert_eq!(
+            error.limit().map(LimitExceeded::kind),
+            Some(LimitKind::Depth),
+            "{name}"
+        );
     } else {
         assert_eq!(error.kind(), ErrorKind::Limit, "{name}: {error}");
         assert!(error.to_string().contains("depth"), "{name}: {error}");

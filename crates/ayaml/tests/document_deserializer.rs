@@ -3,9 +3,11 @@
 
 use std::fmt;
 
+#[cfg(feature = "libyaml-compat")]
+use ayaml::Value;
 use ayaml::{
     DocumentDeserializer, Error, ErrorCode, ErrorKind, LimitKind, Limits, MAX_DEPTH_CAP,
-    ParseOptions, Value,
+    ParseOptions,
 };
 use serde::Deserialize;
 use serde::de::{self, DeserializeSeed, Deserializer, EnumAccess, MapAccess, SeqAccess, Visitor};
@@ -605,16 +607,32 @@ fn document_deserializer_enforces_limits_and_compat_options() {
         let dropped = Value::deserialize(de_drop).expect("dropped value");
         assert_eq!(dropped["ts"], Value::from("2026-01-01"));
 
-        // Compat remaps depth limits to ErrorKind::Serde while keeping ErrorCode::DepthLimit,
-        // and remaps trailing documents to libyaml's message.
+        // Compat remaps depth limits to ErrorKind::Serde while keeping ErrorCode::DepthLimit and
+        // LimitExceeded metadata, and remaps trailing/count document errors to libyaml's message.
         let shallow_limits = Limits::new().with_max_depth(1);
         let err = DocumentDeserializer::from_str_compat_with_limits("a: [1]\n", &shallow_limits)
             .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::Serde);
         assert_eq!(err.code(), ErrorCode::DepthLimit);
+        assert_eq!(
+            err.limit().map(ayaml::LimitExceeded::kind),
+            Some(LimitKind::Depth)
+        );
 
         let err = DocumentDeserializer::from_str_compat("a: 1\n---\nb: 2\n").unwrap_err();
         assert_eq!(err.code(), ErrorCode::TrailingDocuments);
+        assert_eq!(err.limit(), None);
         assert!(err.to_string().contains("more than one document in stream"));
+
+        let one_doc =
+            ayaml::compat::ParseOptions::new().with_limits(Limits::new().with_max_documents(1));
+        let err =
+            DocumentDeserializer::from_str_compat_with("a: 1\n---\nb: 2\n", &one_doc).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Parser);
+        assert_eq!(err.code(), ErrorCode::DocumentCountLimit);
+        assert_eq!(
+            err.limit().map(ayaml::LimitExceeded::kind),
+            Some(LimitKind::Documents)
+        );
     }
 }

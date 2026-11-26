@@ -93,11 +93,37 @@ fn compat_reports_limits_as_the_docs_say() {
     assert!(error.limit().is_some() && error.span().is_some(), "{error}");
     let error = ayaml::compat::from_str::<ayaml::Value>(&deep).unwrap_err();
     assert_eq!(error.kind(), ayaml::ErrorKind::Serde, "{error}");
-    assert!(error.limit().is_none() && error.span().is_some(), "{error}");
+    assert_eq!(
+        error.limit().map(ayaml::LimitExceeded::kind),
+        Some(ayaml::LimitKind::Depth),
+        "{error}"
+    );
+    assert!(error.span().is_some(), "{error}");
+    // Single-document reader with default max_documents=10_000 stops at document 2 with
+    // `TrailingDocuments` (no `LimitExceeded`).
     let many = "---\na\n".repeat(10_001);
     let error = ayaml::compat::from_str::<ayaml::Value>(&many).unwrap_err();
     assert_eq!(error.kind(), ayaml::ErrorKind::Parser, "{error}");
+    assert_eq!(error.code(), ayaml::ErrorCode::TrailingDocuments, "{error}");
     assert!(error.limit().is_none() && error.span().is_some(), "{error}");
+    // Exceeding `max_documents` remaps the kind to `Parser` while preserving `DocumentCountLimit`
+    // and `LimitKind::Documents`.
+    let one_doc =
+        ayaml::compat::ParseOptions::new().with_limits(ayaml::Limits::new().with_max_documents(1));
+    let error =
+        ayaml::compat::from_str_with::<ayaml::Value>("---\na\n---\nb\n", &one_doc).unwrap_err();
+    assert_eq!(error.kind(), ayaml::ErrorKind::Parser, "{error}");
+    assert_eq!(
+        error.code(),
+        ayaml::ErrorCode::DocumentCountLimit,
+        "{error}"
+    );
+    assert_eq!(
+        error.limit().map(ayaml::LimitExceeded::kind),
+        Some(ayaml::LimitKind::Documents),
+        "{error}"
+    );
+    assert!(error.span().is_some(), "{error}");
 }
 
 /// In a flow collection, compat mode keeps a `:` in an anchor or alias name, as default mode
