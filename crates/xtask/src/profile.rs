@@ -1023,15 +1023,19 @@ fn summarize_dhat_frames(frames: &[&str]) -> String {
         if !is_interesting {
             continue;
         }
-        if chosen.len() < 2 {
-            chosen.push(f);
-            has_ayaml |= is_ayaml;
-        } else if chosen.len() == 2 {
-            // Reserve the third slot for an `ayaml::` caller when the first two are container internals.
-            if has_ayaml || is_ayaml {
+        match chosen.len().cmp(&2) {
+            std::cmp::Ordering::Less => {
                 chosen.push(f);
-                break;
+                has_ayaml |= is_ayaml;
             }
+            std::cmp::Ordering::Equal => {
+                // Reserve the third slot for an `ayaml::` caller when the first two are container internals.
+                if has_ayaml || is_ayaml {
+                    chosen.push(f);
+                    break;
+                }
+            }
+            std::cmp::Ordering::Greater => break,
         }
     }
     // If we found 2 container frames and no `ayaml::` frame above them, fill the 3rd slot with
