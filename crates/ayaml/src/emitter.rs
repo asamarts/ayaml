@@ -1256,8 +1256,13 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
     }
 
     fn key_exceeds_implicit_limit(&self, text: &str) -> bool {
+        let form = self.string_form(text, self.options.scalar_style);
+        Self::string_key_exceeds_limit(text, form)
+    }
+
+    fn string_key_exceeds_limit(text: &str, form: StringForm) -> bool {
         const CAP: usize = MAX_IMPLICIT_KEY_CHARS + 1;
-        match self.string_form(text, self.options.scalar_style) {
+        match form {
             StringForm::Plain => {
                 text.len() > MAX_IMPLICIT_KEY_CHARS
                     && text.chars().take(CAP).count() > MAX_IMPLICIT_KEY_CHARS
@@ -1337,7 +1342,19 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
             if index > 0 || !inline_first {
                 self.indent(indent);
             }
-            if self.needs_explicit_key(key) {
+            if let Value::String(text) = key {
+                let form = self.string_form(text, self.options.scalar_style);
+                if Self::string_key_exceeds_limit(text, form) {
+                    self.push_str("? ");
+                    self.emit_string_with_form(text, form);
+                    self.push('\n');
+                    self.indent(indent);
+                    self.push(':');
+                } else {
+                    self.emit_string_with_form(text, form);
+                    self.push(':');
+                }
+            } else if self.needs_explicit_key(key) {
                 self.push_str("? ");
                 self.emit_key(key);
                 self.push('\n');
@@ -1630,6 +1647,7 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
 
     /// Write a node on the current line: a scalar, or a collection in flow
     /// style.
+    #[inline]
     fn emit_flow(&mut self, value: &Value) {
         match value {
             Value::Null => self.push_str("null"),
@@ -1650,95 +1668,104 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
                     self.leave();
                 }
             }
-            Value::Sequence(sequence) => {
-                if !self.enter() {
-                    return;
-                }
-                let in_flow = std::mem::replace(&mut self.in_flow, true);
-                self.push('[');
-                for (index, item) in sequence.iter().enumerate() {
-                    if self.error.is_some() {
-                        break;
-                    }
-                    #[cfg(test)]
-                    {
-                        self.flow_loop_steps += 1;
-                    }
-                    if index > 0 {
-                        self.push_str(", ");
-                        if self.error.is_some() {
-                            break;
-                        }
-                    }
-                    self.push_index(index);
-                    self.emit_flow(item);
-                    self.pop_path();
-                }
-                self.push(']');
-                self.in_flow = in_flow;
-                self.leave();
+            Value::Sequence(sequence) => self.emit_flow_sequence(sequence),
+            Value::Mapping(mapping) => self.emit_flow_mapping(mapping),
+            Value::Tagged(tagged) => self.emit_flow_tagged(tagged),
+        }
+    }
+
+    #[inline(never)]
+    fn emit_flow_sequence(&mut self, sequence: &[Value]) {
+        if !self.enter() {
+            return;
+        }
+        let in_flow = std::mem::replace(&mut self.in_flow, true);
+        self.push('[');
+        for (index, item) in sequence.iter().enumerate() {
+            if self.error.is_some() {
+                break;
             }
-            Value::Mapping(mapping) => {
-                if !self.enter() {
-                    return;
-                }
-                let in_flow = std::mem::replace(&mut self.in_flow, true);
-                self.push('{');
-                for (index, (key, value)) in mapping.iter().enumerate() {
-                    if self.error.is_some() {
-                        break;
-                    }
-                    #[cfg(test)]
-                    {
-                        self.flow_loop_steps += 1;
-                    }
-                    if index > 0 {
-                        self.push_str(", ");
-                        if self.error.is_some() {
-                            break;
-                        }
-                    }
-                    // libyaml writes non-empty collection keys and long
-                    // keys in the explicit form; so do we.
-                    let explicit = Self::needs_block_value(key) || self.flow_key_is_long(key);
-                    if explicit {
-                        self.push_str("? ");
-                    }
-                    self.emit_key(key);
-                    if self.error.is_some() {
-                        break;
-                    }
-                    // A tagged null already ends with a space.
-                    if explicit && !matches!(key, Value::Tagged(tagged) if tagged.value.is_null()) {
-                        self.push(' ');
-                    }
-                    self.push_str(": ");
-                    if self.error.is_some() {
-                        break;
-                    }
-                    self.push_key(key);
-                    self.emit_flow(value);
-                    self.pop_path();
-                }
-                self.push('}');
-                self.in_flow = in_flow;
-                self.leave();
+            #[cfg(test)]
+            {
+                self.flow_loop_steps += 1;
             }
-            Value::Tagged(tagged) => {
-                if !self.push_tag(tagged) {
-                    return;
-                }
-                if tagged.value.is_null() {
-                    // `[!t ]`: libyaml needs a space between a tag and a
-                    // flow indicator.
-                    if self.in_flow {
-                        self.push(' ');
-                    }
-                } else {
-                    self.push(' ');
-                    self.emit_flow(&tagged.value);
+            if index > 0 {
+                self.push_str(", ");
+                if self.error.is_some() {
+                    break;
                 }
             }
+            self.push_index(index);
+            self.emit_flow(item);
+            self.pop_path();
+        }
+        self.push(']');
+        self.in_flow = in_flow;
+        self.leave();
+    }
+
+    #[inline(never)]
+    fn emit_flow_mapping(&mut self, mapping: &crate::mapping::Mapping) {
+        if !self.enter() {
+            return;
+        }
+        let in_flow = std::mem::replace(&mut self.in_flow, true);
+        self.push('{');
+        for (index, (key, value)) in mapping.iter().enumerate() {
+            if self.error.is_some() {
+                break;
+            }
+            #[cfg(test)]
+            {
+                self.flow_loop_steps += 1;
+            }
+            if index > 0 {
+                self.push_str(", ");
+                if self.error.is_some() {
+                    break;
+                }
+            }
+            // libyaml writes non-empty collection keys and long
+            // keys in the explicit form; so do we.
+            let explicit = Self::needs_block_value(key) || self.flow_key_is_long(key);
+            if explicit {
+                self.push_str("? ");
+            }
+            self.emit_key(key);
+            if self.error.is_some() {
+                break;
+            }
+            // A tagged null already ends with a space.
+            if explicit && !matches!(key, Value::Tagged(tagged) if tagged.value.is_null()) {
+                self.push(' ');
+            }
+            self.push_str(": ");
+            if self.error.is_some() {
+                break;
+            }
+            self.push_key(key);
+            self.emit_flow(value);
+            self.pop_path();
+        }
+        self.push('}');
+        self.in_flow = in_flow;
+        self.leave();
+    }
+
+    #[inline(never)]
+    fn emit_flow_tagged(&mut self, tagged: &crate::tag::TaggedValue) {
+        if !self.push_tag(tagged) {
+            return;
+        }
+        if tagged.value.is_null() {
+            // `[!t ]`: libyaml needs a space between a tag and a
+            // flow indicator.
+            if self.in_flow {
+                self.push(' ');
+            }
+        } else {
+            self.push(' ');
+            self.emit_flow(&tagged.value);
         }
     }
 
@@ -1761,7 +1788,13 @@ impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
     }
 
     fn emit_string(&mut self, value: &str) {
-        match self.string_form(value, self.scalar_style()) {
+        let form = self.string_form(value, self.scalar_style());
+        self.emit_string_with_form(value, form);
+    }
+
+    #[inline]
+    fn emit_string_with_form(&mut self, value: &str, form: StringForm) {
+        match form {
             StringForm::Plain => self.push_str(value),
             StringForm::SingleQuoted => self.emit_single_quoted_streaming(value),
             StringForm::DoubleQuoted => self.emit_double_quoted_streaming(value),
@@ -1948,22 +1981,6 @@ mod tests {
 }
 
 #[cfg(test)]
-mod value_tests {
-    use crate::value::Value;
-
-    #[test]
-    fn existing_tagged_values_round_trip_through_the_value_emitter() {
-        for input in ["!Custom text\n", "!Unit\n", "!Tag [a, b]\n"] {
-            let value = crate::parse_value(input).expect("parse");
-            let text = crate::to_string_value(&value).expect("emit");
-            let decoded = crate::parse_value(&text).expect("reparse");
-            assert_eq!(decoded, value, "input={input:?} output={text:?}");
-            assert!(matches!(decoded, Value::Tagged(_)));
-        }
-    }
-}
-
-#[cfg(test)]
 mod builder_tests;
 #[cfg(test)]
 mod collection_tests;
@@ -1977,5 +1994,7 @@ mod tag_form_tests;
 mod tagged_block_scalar_tests;
 #[cfg(test)]
 mod value_block_scalar_tests;
+#[cfg(test)]
+mod value_tests;
 #[cfg(test)]
 mod writer_tests;
