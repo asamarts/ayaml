@@ -73,7 +73,10 @@ cargo xtask fixtures --json                       # print deterministic JSON man
 cargo xtask speed --out-dir target/xtask          # run Criterion and export speed.jsonl
 cargo xtask speed --quick --filter frontmatter    # fast filtered smoke run
 cargo xtask memory --suite baseline               # counting-allocator JSONL probe
-cargo xtask det --base-rev HEAD~1                 # steady-state Valgrind Callgrind check
+cargo xtask det --suite pr --base HEAD~1          # steady-state Callgrind over ayaml-bench
+cargo xtask det --suite pr --anchor main          # check cumulative drift against an anchor ref
+cargo xtask profile --tool callgrind --bench structural/parse_value/depth-64
+cargo xtask profile --tool dhat --fixture openapi-spec --mode parse_value
 cargo xtask scale --out-dir target/xtask          # 10x linear time & memory verification
 cargo xtask compare --baseline DIR_A --current DIR_B
 cargo xtask gate                                  # run allocation & baseline gates
@@ -104,7 +107,7 @@ Machine hostnames and local filesystem paths are omitted.
 
 ## Steady-state Callgrind instruction and cycle gating
 
-`tools/check_instructions.py` (invoked directly or via `cargo xtask det`) runs
+`tools/check_instructions.py` (invoked directly or via `cargo xtask det --legacy-probe`) runs
 `tools/instruction-probe.rs` under Valgrind Callgrind with
 `--cache-sim=yes --branch-sim=yes`. Each `(operation, workload)` cell executes
 a warmup iteration (`K1 = 1`) followed by `N` steady-state iterations (`4` for
@@ -124,6 +127,26 @@ entry to `tools/instruction-rises.tsv` in the same pull request explaining why.
 CI runs the allocation budgets and steady-state Callgrind comparison on every
 pull request; it does not gate wall-clock Criterion timings because shared
 hosted runners exhibit run-to-run timing noise.
+
+For local bottleneck investigation and long-horizon regression checks directly
+against `crates/ayaml-bench`, `cargo xtask` also provides two Valgrind-backed
+commands:
+
+- **`cargo xtask det --suite pr|full [--base REV] [--anchor REV]`:** compiles
+  the standard Criterion `ayaml-bench` benchmarks against a lightweight counting
+  Criterion shim so Valgrind Callgrind collects only inside steady-state
+  iterations (`--collect-atstart=no --toggle-collect=*__ayaml_det_measure*`),
+  excluding fixture generation and warmup. Passing `--anchor REV` checks
+  cumulative drift against a pinned baseline ref that shares benchmark IDs with
+  the suite, in addition to `--base` (`callgrind.jsonl` records schema-v1 base
+  deltas while stdout/stderr report both base and anchor gate results). Use
+  `--legacy-probe` to invoke `tools/check_instructions.py` directly.
+- **`cargo xtask profile --tool callgrind|dhat`:** attributes CPU instructions,
+  simulated cache misses, and branch mispredictions per function via
+  `callgrind_annotate` (with optional `--inclusive` and `--base REV` diffs) or
+  attributes peak heap (`at-t-gmax`), allocation counts, and total allocated
+  bytes per call site via Valgrind DHAT (`--fixture ID --mode MODE` or
+  `--bench ID`), excluding fixture generation and setup parses.
 
 ## Time, memory, and allocation architecture
 

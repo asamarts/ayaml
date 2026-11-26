@@ -22,17 +22,21 @@ tools/ci-local.sh docs-lint      # markdownlint, link/coverage checks, site buil
 
 The workspace defines a `cargo xtask` alias (`crates/xtask`) that drives all
 deterministic fixtures, Criterion timings, counting-allocator memory probes,
-Callgrind instruction/cycle diffs, and 10x linear scaling checks:
+Callgrind instruction/cycle diffs, Callgrind and DHAT hotspot profiling, and
+10x linear scaling checks:
 
 ```sh
-cargo xtask fixtures --verify                     # verify pinned SHA-256 fixture digests
-cargo xtask speed --out-dir target/xtask          # export Criterion speed.jsonl
-cargo xtask memory --suite full --out-dir target/xtask # export counting-allocator memory.jsonl
-cargo xtask det --base-rev HEAD~1                 # steady-state Callgrind Ir + EstCycles diff
-cargo xtask scale --out-dir target/xtask          # verify 10x O(n) time & memory scaling
+cargo xtask fixtures --verify                          # verify pinned SHA-256 fixture digests
+cargo xtask speed --out-dir target/xtask               # export Criterion speed.jsonl
+cargo xtask memory --suite baseline --out-dir target/xtask # export counting-allocator memory.jsonl
+cargo xtask det --suite pr --base HEAD~1               # steady-state Callgrind over ayaml-bench
+cargo xtask det --suite pr --base HEAD~1 --anchor main # compare against base and long-horizon anchor
+cargo xtask profile --tool callgrind --bench layers/parse_value/openapi-spec --inclusive
+cargo xtask profile --tool dhat --fixture scale-map-100kb --mode parse_value
+cargo xtask scale --out-dir target/xtask               # verify 10x O(n) time & memory scaling
 cargo xtask compare --baseline DIR_A --current DIR_B
-cargo xtask gate                                  # run CI allocation & baseline gates
-cargo xtask report --dir target/xtask             # render Markdown summary tables
+cargo xtask gate                                       # run CI allocation & baseline gates
+cargo xtask report --dir target/xtask                  # render Markdown summary tables
 ```
 
 See [Benchmark methodology](benchmarks.md) for schema details and hardware

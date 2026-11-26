@@ -183,6 +183,7 @@ pub(crate) fn format_callgrind_diff(
          | workload | operation | base Ir | cur Ir | Ir delta | base EstCycles | cur EstCycles | EstCycles delta |\n\
          | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n",
     );
+    let mut matched = 0_usize;
     for cur in current {
         let Some(base) = base_map.get(&cur.key()) else {
             continue;
@@ -193,6 +194,7 @@ pub(crate) fn format_callgrind_diff(
                 cur.workload, cur.operation, base.fixture_sha256, cur.fixture_sha256
             ));
         }
+        matched += 1;
         let _ = writeln!(
             out,
             "| {} | {} | {} | {} | {} | {} | {} | {} |",
@@ -204,6 +206,12 @@ pub(crate) fn format_callgrind_diff(
             base.head_estimated_cycles,
             cur.head_estimated_cycles,
             pct_u64(base.head_estimated_cycles, cur.head_estimated_cycles),
+        );
+    }
+    if matched == 0 && !baseline.is_empty() && !current.is_empty() {
+        out.push_str(
+            "\n> Note: zero matching `(workload, operation)` rows between baseline and current \
+             `callgrind.jsonl` (for example, comparing `--legacy-probe` against Criterion-shimmed `det`).\n",
         );
     }
     out.push('\n');
