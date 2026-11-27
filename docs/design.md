@@ -66,8 +66,8 @@ second scanner with different rules for values, Serde, or emission.
   isn't published, has any: the counting allocator behind the allocation budgets.
 - The parser does not depend on a third-party YAML parser, native library, or
   FFI bridge.
-- Parser, composer, typed builder, and event writer state machines keep
-  explicit stacks where input can control nesting.
+- Parser, composer, typed builder, value writer, and event writer state machines
+  keep explicit stacks where input can control nesting.
 - Every limit check uses checked or saturating arithmetic and fails closed.
 - Alias expansion is charged before allocation, including on borrowed typed
   paths and the document cursor.

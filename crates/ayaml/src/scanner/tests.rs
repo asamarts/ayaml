@@ -890,3 +890,192 @@ proptest! {
         prop_assert_eq!(fast, full, "input={:?}", input);
     }
 }
+
+#[test]
+fn incremental_scalar_limit_rejects_quoted_block_and_plain_scalars_with_exact_boundaries() {
+    use crate::error::ErrorCode;
+    use crate::limits::LimitKind;
+
+    let scan_err = |input: &str, limits: &Limits| -> crate::Error {
+        let mut scanner = Scanner::new(input, limits).expect("scanner");
+        loop {
+            match scanner.next_token(limits) {
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("expected error for {input:?} under {limits:?}"),
+                Err(err) => return *err,
+            }
+        }
+    };
+
+    let scan_ok = |input: &str, limits: &Limits| {
+        let mut scanner = Scanner::new(input, limits).expect("scanner");
+        while scanner.next_token(limits).expect(input).is_some() {}
+    };
+
+    // 1. Double-quoted `\L` expansion followed by trailing spaces before a folded line break:
+    //    10 `\L`s (20 raw -> 30 decoded) + 5 spaces (temporarily 35 decoded) + `\n` + `"` =
+    //    28 raw bytes, 31 final decoded bytes (spaces trimmed and replaced by one space).
+    //    Incremental enforcement must not false-reject at 31 or 32, and must reject at 30.
+    let expanded_with_spaces = format!("\"{}     \n\"\n", "\\L".repeat(10));
+    let (decoded, _, _) = scalar(&expanded_with_spaces);
+    assert_eq!(decoded.len(), 31);
+    scan_ok(
+        &expanded_with_spaces,
+        &Limits::default().with_max_scalar_bytes(31),
+    );
+    scan_ok(
+        &expanded_with_spaces,
+        &Limits::default().with_max_scalar_bytes(32),
+    );
+    let err = scan_err(
+        &expanded_with_spaces,
+        &Limits::default().with_max_scalar_bytes(30),
+    );
+    assert_eq!(err.code(), ErrorCode::ScalarSizeLimit);
+    assert_eq!(
+        err.limit().map(crate::LimitExceeded::kind),
+        Some(LimitKind::ScalarBytes)
+    );
+    assert_eq!(err.span().map(crate::Span::start), Some(0));
+
+    // Escaped trailing space (`\ `) is protected and never trimmed before `\n`:
+    // 3 `\L`s (9 bytes) + `\ ` (1 byte) + ` ` (1 byte) = 11 decoded bytes, 11 raw bytes.
+    let protected_space = "\"\\L\\L\\L\\ \n\"\n";
+    let (decoded, _, _) = scalar(protected_space);
+    assert_eq!(decoded.len(), 11);
+    scan_ok(
+        protected_space,
+        &Limits::default().with_max_scalar_bytes(11),
+    );
+    let err = scan_err(
+        protected_space,
+        &Limits::default().with_max_scalar_bytes(10),
+    );
+    assert_eq!(err.code(), ErrorCode::ScalarSizeLimit);
+
+    // 2. Single-quoted with `''` escapes and blank-line runs.
+    let sq_escaped = "'abc''def'\n"; // 10 raw bytes, 7 decoded bytes.
+    scan_ok(sq_escaped, &Limits::default().with_max_scalar_bytes(10));
+    let err = scan_err(sq_escaped, &Limits::default().with_max_scalar_bytes(9));
+    assert_eq!(err.code(), ErrorCode::ScalarSizeLimit);
+
+    let sq_blanks = format!("'a{}  b'\n", "\n".repeat(4_096));
+    let err = scan_err(&sq_blanks, &Limits::default().with_max_scalar_bytes(64));
+    assert_eq!(err.code(), ErrorCode::ScalarSizeLimit);
+    assert_eq!(err.span().map(crate::Span::start), Some(0));
+
+    // 3. Block scalars: oversized header comment, blank line spaces, content lines, and
+    //    leading-blank indentation check (guards removal of duplicate `line_end` scan).
+    let huge_header = format!("k: | # {}\n  a\n", "c".repeat(256));
+    let err = scan_err(&huge_header, &Limits::default().with_max_scalar_bytes(32));
+    assert_eq!(err.code(), ErrorCode::ScalarSizeLimit);
+    assert_eq!(err.span().map(crate::Span::start), Some(3));
+
+    let blank_spaces = format!("k: |\n  a\n{}\n  b\n", " ".repeat(256));
+    let err = scan_err(&blank_spaces, &Limits::default().with_max_scalar_bytes(32));
+    assert_eq!(err.code(), ErrorCode::ScalarSizeLimit);
+    assert_eq!(err.span().map(crate::Span::start), Some(3));
+
+    let explicit_blank_spaces = format!("k: |2\n{}\n  a\n", " ".repeat(256));
+    let err = scan_err(
+        &explicit_blank_spaces,
+        &Limits::default().with_max_scalar_bytes(32),
+    );
+    assert_eq!(err.code(), ErrorCode::ScalarSizeLimit);
+    assert_eq!(err.span().map(crate::Span::start), Some(3));
+
+    let bad_leading = "k: |\n   \n  a\n";
+    let err = scan_err(bad_leading, &Limits::default());
+    assert_eq!(err.code(), ErrorCode::InvalidBlockScalarIndentation);
+
+    // 4. Plain scalars: trailing whitespace is trimmed (not false-rejected), while multiline
+    //    continuations enforce `max_scalar_bytes` incrementally.
+    let padded_plain = format!("a{}\n", " ".repeat(64));
+    scan_ok(&padded_plain, &Limits::default().with_max_scalar_bytes(1));
+    let multiline_plain = "abc\n  def\n"; // 9 raw bytes (`abc\n  def`), 7 decoded (`abc def`).
+    scan_ok(multiline_plain, &Limits::default().with_max_scalar_bytes(9));
+    let err = scan_err(multiline_plain, &Limits::default().with_max_scalar_bytes(8));
+    assert_eq!(err.code(), ErrorCode::ScalarSizeLimit);
+
+    // 5. Simultaneous `max_events` and `max_scalar_bytes` breach on the same scalar preserves
+    //    `Scanner::make` precedence (`LimitKind::Events` wins over `LimitKind::ScalarBytes`).
+    let both = Limits::default()
+        .with_max_events(0)
+        .with_max_scalar_bytes(4);
+    for input in [
+        "'aaaa''bbbb'\n",
+        "\"\\L\\L\\L\\L\"\n",
+        "|\n  abcdef\n",
+        "aaaa\n  bbbb\n",
+    ] {
+        let err = scan_err(input, &both);
+        assert_eq!(err.code(), ErrorCode::EventCountLimit, "{input:?}");
+        assert_eq!(
+            err.limit().map(crate::LimitExceeded::kind),
+            Some(LimitKind::Events),
+            "{input:?}"
+        );
+    }
+}
+
+#[test]
+fn incremental_scalar_limit_edge_cases_cover_zero_folded_escaped_break_and_plain_blanks() {
+    use crate::ErrorCode;
+
+    let scan_ok = |input: &str, limits: &Limits| {
+        let mut scanner = Scanner::new(input, limits).expect("scanner init");
+        while scanner
+            .next_token(limits)
+            .unwrap_or_else(|err| panic!("unexpected error on {input:?}: {err}"))
+            .is_some()
+        {}
+    };
+    let scan_err = |input: &str, limits: &Limits| -> Box<crate::Error> {
+        let mut scanner = Scanner::new(input, limits).expect("scanner init");
+        loop {
+            match scanner.next_token(limits) {
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("expected scalar limit error on {input:?}"),
+                Err(err) => return err,
+            }
+        }
+    };
+
+    // 1. `max_scalar_bytes = 0` rejects any non-empty scalar immediately.
+    let zero = Limits::default().with_max_scalar_bytes(0);
+    for input in ["\"\"\n", "''\n", "a\n", "|\n  a\n", ">\n  a\n"] {
+        let err = scan_err(input, &zero);
+        assert_eq!(err.code(), ErrorCode::ScalarSizeLimit, "{input:?}");
+    }
+
+    // 2. Folded block scalar `>` exact raw-byte boundary (`>\n  ab\n  cd\n` = 12 raw bytes).
+    let folded = ">\n  ab\n  cd\n";
+    let (decoded, _, _) = scalar(folded);
+    assert_eq!(decoded, "ab cd\n");
+    scan_ok(folded, &Limits::default().with_max_scalar_bytes(12));
+    let err = scan_err(folded, &Limits::default().with_max_scalar_bytes(11));
+    assert_eq!(err.code(), ErrorCode::ScalarSizeLimit);
+
+    // 3. Double-quoted `\L` + trailing spaces + escaped line break `\\\n`: trailing spaces before
+    //    `\` are NOT trimmed (escaped break keeps preceding spaces), while `\L` expands 2 -> 3.
+    let escaped_break = "\"\\L\\L\\L   \\\n  x\"\n";
+    let (decoded, _, _) = scalar(escaped_break);
+    assert_eq!(decoded.len(), 13); // 9 (`\L`*3) + 3 spaces + 1 (`x`)
+    let raw_len = escaped_break.len() - 1; // excluding trailing '\n'
+    let exact = decoded.len().max(raw_len);
+    scan_ok(
+        escaped_break,
+        &Limits::default().with_max_scalar_bytes(exact),
+    );
+    let err = scan_err(
+        escaped_break,
+        &Limits::default().with_max_scalar_bytes(exact - 1),
+    );
+    assert_eq!(err.code(), ErrorCode::ScalarSizeLimit);
+
+    // 4. Multiline plain scalar with a huge blank-line run stops incrementally before allocating.
+    let plain_blanks = format!("a{}  b\n", "\n".repeat(4_096));
+    let err = scan_err(&plain_blanks, &Limits::default().with_max_scalar_bytes(64));
+    assert_eq!(err.code(), ErrorCode::ScalarSizeLimit);
+    assert_eq!(err.span().map(crate::Span::start), Some(0));
+}

@@ -1,4 +1,9 @@
+#[cfg(test)]
 use std::fmt::Write as _;
+use std::io::Write;
+
+use super::Output;
+use crate::error::Error;
 
 /// YAML's printable character set (production 1, `c-printable`).
 #[inline]
@@ -264,6 +269,7 @@ pub(crate) fn can_fold(body: &str) -> bool {
         .all(|line| !line.starts_with(' ') && !line.ends_with(' '))
 }
 
+#[cfg(test)]
 pub(crate) fn expand_folded(body: &str) -> String {
     let mut output = String::with_capacity(body.len().saturating_add(8));
     let mut chars = body.chars().peekable();
@@ -278,6 +284,253 @@ pub(crate) fn expand_folded(body: &str) -> String {
         }
     }
     output
+}
+
+/// Stream a folded block scalar's non-empty `body` directly to `output` without allocating an
+/// intermediate expanded `String`, emitting each logical line and expanding every maximal run of
+/// `k` line feeds into `k + 1` line feeds (matching `expand_folded`).
+pub(crate) fn write_folded_body<W: Write>(
+    body: &str,
+    content_indent: usize,
+    output: &mut Output<'_, W>,
+    #[cfg(test)] mut lines_written: Option<&mut usize>,
+) -> Result<(), Error> {
+    let mut rest = body;
+    loop {
+        if let Some(nl) = rest.find('\n') {
+            let line = &rest[..nl];
+            #[cfg(test)]
+            if let Some(count) = lines_written.as_deref_mut() {
+                *count += 1;
+            }
+            if !line.is_empty() {
+                output.spaces(content_indent)?;
+                output.push_str(line)?;
+            }
+            output.push_str("\n")?;
+
+            let after_first = &rest[nl + 1..];
+            let extra_nls = after_first.bytes().take_while(|&b| b == b'\n').count();
+            for _ in 0..=extra_nls {
+                #[cfg(test)]
+                if let Some(count) = lines_written.as_deref_mut() {
+                    *count += 1;
+                }
+                output.push_str("\n")?;
+            }
+            rest = &after_first[extra_nls..];
+        } else {
+            #[cfg(test)]
+            if let Some(count) = lines_written.as_deref_mut() {
+                *count += 1;
+            }
+            if !rest.is_empty() {
+                output.spaces(content_indent)?;
+                output.push_str(rest)?;
+            }
+            output.push_str("\n")?;
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Stream a single-quoted scalar directly through `output` without allocating an intermediate
+/// escaped `String`.
+#[inline(never)]
+pub(crate) fn write_single_quoted<W: Write>(
+    value: &str,
+    output: &mut Output<'_, W>,
+    #[cfg(test)] mut chunks: Option<&mut usize>,
+) -> Result<(), Error> {
+    output.push_str("'")?;
+    for (index, part) in value.split('\'').enumerate() {
+        #[cfg(test)]
+        if let Some(count) = chunks.as_deref_mut() {
+            *count += 1;
+        }
+        if index > 0 {
+            output.push_str("''")?;
+        }
+        output.push_str(part)?;
+    }
+    output.push_str("'")
+}
+
+/// Stream a double-quoted scalar directly through `output` without allocating an intermediate
+/// escaped `String`, using libyaml's escape choices so the output always fits on one line.
+/// Short escapes and adjacent text are coalesced into a 32-byte stack buffer to minimize
+/// per-escape output calls while still checking `max_output_bytes` incrementally.
+#[inline(never)]
+pub(crate) fn write_double_quoted<W: Write>(
+    value: &str,
+    output: &mut Output<'_, W>,
+    #[cfg(test)] mut chunks: Option<&mut usize>,
+) -> Result<(), Error> {
+    const BUF_CAP: usize = 32;
+    let mut buf = [0_u8; BUF_CAP];
+    let mut buf_len = 1_usize;
+    buf[0] = b'"';
+
+    let flush_buf = |buf: &[u8; BUF_CAP],
+                     buf_len: &mut usize,
+                     output: &mut Output<'_, W>,
+                     #[cfg(test)] chunks: &mut Option<&mut usize>|
+     -> Result<(), Error> {
+        if *buf_len > 0 {
+            #[cfg(test)]
+            if let Some(count) = chunks.as_deref_mut() {
+                *count += 1;
+            }
+            let text = std::str::from_utf8(&buf[..*buf_len]).unwrap_or("");
+            output.push_str(text)?;
+            *buf_len = 0;
+        }
+        Ok(())
+    };
+
+    let bytes = value.as_bytes();
+    let mut run_start = 0;
+    let mut index = 0;
+    let mut hex_buf = [0_u8; 10];
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if (0x20..=0x7e).contains(&byte) && byte != b'"' && byte != b'\\' {
+            index += 1;
+            continue;
+        }
+        if index > run_start {
+            let run = &value[run_start..index];
+            if buf_len + run.len() <= BUF_CAP {
+                buf[buf_len..buf_len + run.len()].copy_from_slice(run.as_bytes());
+                buf_len += run.len();
+            } else {
+                flush_buf(
+                    &buf,
+                    &mut buf_len,
+                    output,
+                    #[cfg(test)]
+                    &mut chunks,
+                )?;
+                #[cfg(test)]
+                if let Some(count) = chunks.as_deref_mut() {
+                    *count += 1;
+                }
+                output.push_str(run)?;
+            }
+        }
+        let piece: &str = if byte < 0x80 {
+            index += 1;
+            run_start = index;
+            match byte {
+                b'\\' => "\\\\",
+                b'"' => "\\\"",
+                b'\0' => "\\0",
+                0x07 => "\\a",
+                0x08 => "\\b",
+                b'\t' => "\\t",
+                b'\n' => "\\n",
+                0x0b => "\\v",
+                0x0c => "\\f",
+                b'\r' => "\\r",
+                0x1b => "\\e",
+                _ => format_hex_escape(u32::from(byte), 2, b'x', &mut hex_buf),
+            }
+        } else {
+            let Some(ch) = value[index..].chars().next() else {
+                break;
+            };
+            let char_len = ch.len_utf8();
+            let slice = &value[index..index + char_len];
+            index += char_len;
+            run_start = index;
+            match ch {
+                '\u{0085}' => "\\N",
+                '\u{2028}' => "\\L",
+                '\u{2029}' => "\\P",
+                ch if !is_printable(ch) || ch == '\u{feff}' => {
+                    let code = ch as u32;
+                    if code <= 0xFF {
+                        format_hex_escape(code, 2, b'x', &mut hex_buf)
+                    } else if code <= 0xFFFF {
+                        format_hex_escape(code, 4, b'u', &mut hex_buf)
+                    } else {
+                        format_hex_escape(code, 8, b'U', &mut hex_buf)
+                    }
+                }
+                _ => slice,
+            }
+        };
+        if buf_len + piece.len() > BUF_CAP {
+            flush_buf(
+                &buf,
+                &mut buf_len,
+                output,
+                #[cfg(test)]
+                &mut chunks,
+            )?;
+        }
+        buf[buf_len..buf_len + piece.len()].copy_from_slice(piece.as_bytes());
+        buf_len += piece.len();
+    }
+    if run_start < bytes.len() {
+        let tail = &value[run_start..];
+        if buf_len + tail.len() < BUF_CAP {
+            buf[buf_len..buf_len + tail.len()].copy_from_slice(tail.as_bytes());
+            buf_len += tail.len();
+            buf[buf_len] = b'"';
+            buf_len += 1;
+            return flush_buf(
+                &buf,
+                &mut buf_len,
+                output,
+                #[cfg(test)]
+                &mut chunks,
+            );
+        }
+        flush_buf(
+            &buf,
+            &mut buf_len,
+            output,
+            #[cfg(test)]
+            &mut chunks,
+        )?;
+        #[cfg(test)]
+        if let Some(count) = chunks.as_deref_mut() {
+            *count += 1;
+        }
+        output.push_str(tail)?;
+        return output.push_str("\"");
+    }
+    if buf_len + 1 > BUF_CAP {
+        flush_buf(
+            &buf,
+            &mut buf_len,
+            output,
+            #[cfg(test)]
+            &mut chunks,
+        )?;
+    }
+    buf[buf_len] = b'"';
+    buf_len += 1;
+    flush_buf(
+        &buf,
+        &mut buf_len,
+        output,
+        #[cfg(test)]
+        &mut chunks,
+    )
+}
+
+fn format_hex_escape(code: u32, digits: usize, prefix: u8, buf: &mut [u8; 10]) -> &str {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    buf[0] = b'\\';
+    buf[1] = prefix;
+    for i in 0..digits {
+        let shift = (digits - 1 - i) * 4;
+        buf[2 + i] = HEX[((code >> shift) & 0xf) as usize];
+    }
+    std::str::from_utf8(&buf[..2 + digits]).unwrap_or("")
 }
 
 /// Whether a block scalar needs an explicit indentation indicator. It does
@@ -347,6 +600,7 @@ pub(crate) fn single_quoted_char_len_capped(value: &str, cap: usize) -> usize {
 /// Write a double-quoted scalar. Every character outside the printable set,
 /// every line break, and the byte order mark are escaped, using libyaml's
 /// escape choices, so the output always fits on one line.
+#[cfg(test)]
 pub(crate) fn emit_double_quoted(value: &str, output: &mut String) {
     output.push('"');
     let bytes = value.as_bytes();
@@ -463,5 +717,117 @@ mod tests {
         assert_eq!(single_quoted_char_len_capped("", usize::MAX), 2);
         assert_eq!(single_quoted_char_len_capped("'", usize::MAX), 4);
         assert!(single_quoted_char_len_capped(sq, 8) >= 8);
+    }
+
+    #[test]
+    fn streaming_folded_body_matches_expand_folded_byte_for_byte() {
+        use super::{expand_folded, write_folded_body};
+        use crate::emitter::Output;
+        use crate::limits::Limits;
+
+        let limits = Limits::default();
+        for body in [
+            "",
+            "single",
+            "a\nb",
+            "a\n\nb",
+            "a\n\n\nb",
+            "a\nb\nc",
+            "a\n\nb\n\n\nc",
+            "a\n",
+            "\na",
+            "\n\n",
+            "café\n日本語\n\n🚀",
+        ] {
+            for indent in [0_usize, 2, 4] {
+                let mut expected = String::new();
+                for line in expand_folded(body).split('\n') {
+                    if !line.is_empty() {
+                        expected.extend(std::iter::repeat_n(' ', indent));
+                        expected.push_str(line);
+                    }
+                    expected.push('\n');
+                }
+                let mut buf = Vec::new();
+                let mut out = Output::direct(&mut buf, &limits);
+                let mut line_count = 0;
+                write_folded_body(body, indent, &mut out, Some(&mut line_count))
+                    .expect("write folded");
+                out.finish().expect("finish");
+                assert_eq!(
+                    String::from_utf8(buf).expect("utf8"),
+                    expected,
+                    "body={body:?}, indent={indent}"
+                );
+                assert_eq!(
+                    line_count,
+                    expand_folded(body).split('\n').count(),
+                    "line count for body={body:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_double_quoted_handles_buffer_boundaries_and_exact_limits() {
+        use super::{double_quoted, write_double_quoted};
+        use crate::emitter::Output;
+        use crate::limits::Limits;
+        use crate::{ErrorKind, LimitKind};
+
+        // Exercise 32-byte stack coalescing buffer flush boundaries: ASCII lengths 30..=34,
+        // 4-byte UTF-8 char straddling offset 30..34, 6-byte `\uXXXX` and 10-byte `\UXXXXXXXX`
+        // escapes right at the 32-byte boundary, and mixed escapes.
+        let samples = [
+            "a".repeat(29),
+            "a".repeat(30),
+            "a".repeat(31),
+            "a".repeat(32),
+            "a".repeat(33),
+            format!("{}🚀tail", "a".repeat(29)),
+            format!("{}🚀tail", "a".repeat(30)),
+            format!("{}🚀tail", "a".repeat(31)),
+            format!("{}\u{feff}x", "a".repeat(27)),
+            format!("{}\u{feff}x", "a".repeat(28)),
+            format!("{}\u{10ffff}x", "a".repeat(22)),
+            format!("{}\u{10ffff}x", "a".repeat(24)),
+            "a\"b\\c\n\r\t\x00\x07\x08\x0b\x0c\x1b\x7f\u{0085}\u{00a0}\u{2028}\u{2029}é🚀"
+                .repeat(3),
+        ];
+
+        let unlimited = Limits::default();
+        for sample in &samples {
+            let expected = double_quoted(sample);
+            let mut buf = Vec::new();
+            let mut out = Output::direct(&mut buf, &unlimited);
+            write_double_quoted(sample, &mut out, None).expect("unlimited double quoted");
+            out.finish().expect("finish");
+            assert_eq!(
+                String::from_utf8(buf).expect("utf8"),
+                expected,
+                "sample={sample:?}"
+            );
+
+            // Exact boundary: `max_output_bytes == expected.len()` succeeds, `expected.len() - 1`
+            // fails with `LimitKind::OutputBytes` even across internal buffer flushes.
+            let exact = Limits::default().with_max_output_bytes(expected.len());
+            let mut exact_buf = Vec::new();
+            let mut exact_out = Output::direct(&mut exact_buf, &exact);
+            write_double_quoted(sample, &mut exact_out, None).expect("exact limit");
+            exact_out.finish().expect("exact finish");
+            assert_eq!(exact_buf, expected.as_bytes());
+
+            let short = Limits::default().with_max_output_bytes(expected.len() - 1);
+            let mut short_buf = Vec::new();
+            let mut short_out = Output::direct(&mut short_buf, &short);
+            let err = write_double_quoted(sample, &mut short_out, None)
+                .and_then(|()| short_out.finish())
+                .expect_err("one byte short");
+            assert_eq!(err.kind(), ErrorKind::Limit);
+            assert_eq!(
+                err.limit().map(crate::LimitExceeded::kind),
+                Some(LimitKind::OutputBytes)
+            );
+        }
     }
 }

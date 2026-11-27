@@ -101,6 +101,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stack, borrowed `SpannedKey` small/large duplicate tracking, and zero-allocation string key
   lookups — reducing `SpannedTree` peak heap by 58% to 70%, allocations by 77% to 82%, and
   instruction counts by 14% to 23% across domain workloads with zero public API changes.
+- Enforced `max_scalar_bytes` incrementally in single-quoted, double-quoted, block, and multiline
+  plain scalar scanning and removed the duplicate leading-blank `line_end` scan (`AY-176`);
+  streamed folded block scalars, inline quoted scalars, tags, and `%TAG` directive lines directly
+  through `Output` across both `ValueWriter` and `EventWriter` (bounding directive validation and
+  key-width checks by caller `max_output_bytes` without intermediate full-scalar allocations);
+  converted `ValueWriter` and `TagDirectives::scan` to explicit two-tier inline-plus-heap stacks
+  eliminating native recursion and cutting Callgrind `emit` instructions by 1.3% to 13.1% and
+  `serialize` instructions by 0.5% to 5.9% across all steady-state workloads.
 
 ## [0.2.3] — 2026-11-21
 

@@ -18,11 +18,11 @@ pub const MAX_DEPTH: usize = 128;
 /// The largest `max_depth` an entry point accepts. A larger configured value
 /// is an error.
 ///
-/// Parsing, composing, and the event writer keep their own stacks, but
-/// Serde deserialization, [`from_value`](crate::from_value),
-/// [`to_value`](crate::to_value), [`to_string`](crate::to_string),
-/// [`Value::apply_merge_keys`](crate::Value::apply_merge_keys), and dropping
-/// a [`Value`](crate::Value) recurse once per nesting level. At this depth
+/// Parsing, composing, the value writer, and the event writer keep their own
+/// stacks, but Serde deserialization, [`from_value`](crate::from_value),
+/// [`to_value`](crate::to_value), [`to_string`](crate::to_string) (via
+/// `to_value`), [`Value::apply_merge_keys`](crate::Value::apply_merge_keys),
+/// and dropping a [`Value`](crate::Value) recurse once per nesting level. At this depth
 /// they fit a 2 MiB thread, the default for spawned and test threads, in
 /// debug and release builds. The tightest paths measured, `from_value`,
 /// `to_value`, and `to_string` over nested flow mappings with tags in a debug
