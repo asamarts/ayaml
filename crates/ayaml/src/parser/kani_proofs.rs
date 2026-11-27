@@ -1,5 +1,5 @@
 use super::{
-    TOKEN_ARENA_AHEAD, arena_growth, estimated_growth, mid_input_token_capacity,
+    TOKEN_ARENA_AHEAD, arena_growth, compact_shift, estimated_growth, mid_input_token_capacity,
     prefix_token_capacity,
 };
 
@@ -114,5 +114,28 @@ fn verify_token_arena_growth_helpers_never_overflow() {
         assert!(line_count > 0);
         assert!(cap <= most);
         assert!(cap <= input_len / 10);
+    }
+}
+
+#[kani::proof]
+fn verify_compact_shift_never_underflows_live_lines() {
+    let dead_prefix: usize = kani::any();
+    let tokens_len: usize = kani::any();
+    let has_live: bool = kani::any();
+    let live_start: usize = kani::any();
+    let live_end: usize = kani::any();
+
+    kani::assume(live_start <= live_end);
+    kani::assume(live_end <= tokens_len);
+
+    let first_live = has_live.then_some(live_start);
+    let cut = compact_shift(dead_prefix, tokens_len, first_live);
+
+    assert!(cut <= dead_prefix);
+    assert!(cut <= tokens_len);
+    if has_live {
+        assert!(cut <= live_start);
+        assert!(live_start - cut <= live_end - cut);
+        assert!(live_end - cut <= tokens_len - cut);
     }
 }

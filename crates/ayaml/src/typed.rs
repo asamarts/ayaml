@@ -12,7 +12,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -27,6 +27,7 @@ use crate::composer::Anchors;
 use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::{Anchor, Event, ScalarStyle};
 use crate::limits::{AliasBudget, Limits};
+use crate::mapping::GlobalHasher;
 use crate::number::Number;
 use crate::parser;
 use crate::resolver::{resolve_explicit_core, resolve_plain};
@@ -41,7 +42,7 @@ mod stream;
 
 pub use doc_de::DocumentDeserializer;
 
-use key_text::{SeenNodeIndices, SeenNodeKeys, node_key_text, scalar_key_text};
+use key_text::{SeenNodeIndices, SeenNodeKeys, SeenScalarKeys, node_key_text, scalar_key_text};
 use node_de::{NodeDeserializer, check_consumed, inside_key, with_span};
 
 #[derive(Debug)]
@@ -126,8 +127,10 @@ impl PartialEq for NodeKind<'_> {
             (Self::Sequence(left), Self::Sequence(right)) => left == right,
             (Self::Mapping(left), Self::Mapping(right)) => {
                 left.len() == right.len() && {
-                    let right: HashSet<_> = right.iter().collect();
-                    left.iter().all(|entry| right.contains(entry))
+                    let mut right_set =
+                        HashSet::with_capacity_and_hasher(right.len(), GlobalHasher);
+                    right_set.extend(right.iter());
+                    left.iter().all(|entry| right_set.contains(entry))
                 }
             }
             (Self::Tagged(left_tag, left), Self::Tagged(right_tag, right)) => {
@@ -179,9 +182,7 @@ impl Node<'_> {
         if cached != 0 {
             return cached;
         }
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        resolve(self).kind.hash(&mut hasher);
-        let hash = hasher.finish().max(1);
+        let hash = GlobalHasher.hash_one(&resolve(self).kind).max(1);
         self.hash.store(hash, Ordering::Relaxed);
         hash
     }
@@ -479,6 +480,7 @@ struct Built<'de> {
 /// A scalar key already seen in an open mapping, compared by its text alone so `1` and `"1"` are
 /// one key to a target whose key type would keep only one of them. Non-scalar (collection) keys
 /// are indexed separately by their cached node hash without cloning.
+#[cfg(test)]
 type SeenKey<'de> = Cow<'de, str>;
 
 /// An open collection. The builder keeps these on an explicit stack, so
@@ -502,7 +504,7 @@ enum Frame<'de> {
         anchor: Option<Anchor<'de>>,
         span: Span,
         entries: Vec<(Node<'de>, Node<'de>)>,
-        seen: HashSet<SeenKey<'de>>,
+        seen: SeenScalarKeys<'de>,
         /// Non-scalar keys indexed by cached node hash, referring into `entries` without cloning.
         seen_nodes: Option<Box<SeenNodeIndices>>,
         key: Option<Node<'de>>,
@@ -784,7 +786,7 @@ impl<'de> Builder<'de> {
                     anchor,
                     span,
                     entries: Vec::with_capacity(capacity),
-                    seen: HashSet::new(),
+                    seen: SeenScalarKeys::new(),
                     seen_nodes: None,
                     key: None,
                     size: self.limits.node_cost_bytes,

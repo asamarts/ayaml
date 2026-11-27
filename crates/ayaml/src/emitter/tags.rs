@@ -115,7 +115,7 @@ pub(crate) struct TagDirectives {
     /// The handles added so far, kept apart so that a document that adds none allocates nothing.
     added: Option<Box<AddedHandles>>,
     /// Named handles that the document's own directives declare.
-    declared: std::collections::HashSet<String>,
+    declared: std::collections::HashSet<String, crate::mapping::GlobalHasher>,
 }
 
 #[derive(Debug, Default)]

@@ -550,4 +550,29 @@ mod tests {
         assert!(match_delimiter_line("...x\nbody\n", false, Some(2)).is_none());
         assert!(match_delimiter_line("---#comment\n", true, Some(2)).is_none());
     }
+
+    #[test]
+    fn bare_cr_crlf_and_closing_delimiter_limits_stay_bounded() {
+        use super::{FrontmatterDelimiter, next_line_len_bounded};
+
+        assert_eq!(next_line_len_bounded("a: 1\rbody", 10), Some(5));
+        assert_eq!(next_line_len_bounded("a: 1\r\nbody", 10), Some(6));
+        assert_eq!(next_line_len_bounded("a: 1\r\nbody", 5), None);
+
+        let cr_open = match_delimiter_line("---\ra: 1\r", true, Some(10)).expect("cr open");
+        assert_eq!(cr_open.kind, FrontmatterDelimiter::DocumentStart);
+        assert_eq!(cr_open.next_offset, 4);
+        assert!(cr_open.has_newline);
+        assert!(!cr_open.exceeded_limit);
+
+        let cr_close = match_delimiter_line("...\rbody", false, Some(10)).expect("cr close");
+        assert_eq!(cr_close.kind, FrontmatterDelimiter::DocumentEnd);
+        assert_eq!(cr_close.next_offset, 4);
+        assert!(!cr_close.exceeded_limit);
+
+        let over_close =
+            match_delimiter_line("--- #long comment\n", false, Some(8)).expect("over close");
+        assert!(over_close.exceeded_limit);
+        assert!("--- #long comment\n".is_char_boundary(over_close.next_offset));
+    }
 }

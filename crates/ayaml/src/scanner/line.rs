@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use crate::limits::GlobalHasher;
+
 use crate::error::{Error, ErrorCode, ErrorKind};
 
 /// The block structure that owns a node, as far as the context-free scanner
@@ -114,7 +116,7 @@ pub(super) fn line_shape(text: &str, names: NameRules<'_, '_>) -> LineShape {
 #[derive(Clone, Copy)]
 pub(super) struct NameRules<'s, 'a> {
     pub(super) compat: bool,
-    pub(super) colon_anchors: Option<&'s HashMap<&'a str, usize>>,
+    pub(super) colon_anchors: Option<&'s HashMap<&'a str, usize, GlobalHasher>>,
     /// The text the names are part of, so a name's place in it says which anchors come before it.
     pub(super) input: &'a str,
 }

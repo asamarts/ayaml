@@ -279,6 +279,37 @@ fn split_frontmatter_rejects_four_hyphens_even_under_tiny_input_limit() {
     );
 }
 
+#[test]
+fn over_limit_multibyte_utf8_delimiter_comments_never_panic() {
+    // Opening delimiter comment with 2-byte (`é`) and 4-byte (`🦀`) UTF-8 sequences where
+    // `max_input_bytes` lands on interior continuation bytes.
+    for (doc, limits) in [
+        ("--- #é\na: 1\n---\nbody\n", &[5_usize, 6][..]),
+        ("--- #🦀\na: 1\n---\nbody\n", &[5, 6, 7][..]),
+        ("---\na: 1\n--- #🦀\nbody\n", &[14, 15, 16][..]),
+    ] {
+        for &max_bytes in limits {
+            let opts =
+                ParseOptions::new().with_limits(Limits::new().with_max_input_bytes(max_bytes));
+            let split_err = ayaml::split_frontmatter_with(doc, &opts)
+                .expect_err("over-limit utf8 comment split");
+            assert_eq!(split_err.kind(), ErrorKind::Limit, "max={max_bytes}");
+            assert_eq!(
+                split_err.limit().map(ayaml::LimitExceeded::kind),
+                Some(LimitKind::InputBytes)
+            );
+            assert!(split_err.location().is_some());
+            if let Some(span) = split_err.span() {
+                assert!(doc.is_char_boundary(span.start()));
+                assert!(doc.is_char_boundary(span.end()));
+            }
+            let parse_err = ayaml::parse_frontmatter_value_with(doc, &opts)
+                .expect_err("over-limit utf8 comment parse");
+            assert_eq!(parse_err.kind(), ErrorKind::Limit, "max={max_bytes}");
+        }
+    }
+}
+
 proptest! {
     #![proptest_config(proptest_config())]
 

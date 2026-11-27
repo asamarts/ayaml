@@ -414,7 +414,7 @@ pub(crate) fn emit_double_quoted(value: &str, output: &mut String) {
 mod tests {
     use super::{
         block_scalar_ok, double_quoted, double_quoted_char_len_capped, plain_text_ok,
-        single_quoted_ok,
+        single_quoted_char_len_capped, single_quoted_ok,
     };
 
     #[test]
@@ -453,5 +453,15 @@ mod tests {
             double_quoted(complex).chars().count()
         );
         assert!(double_quoted_char_len_capped(complex, 10) >= 10);
+
+        let sq = "it's a 'quoted' café 🚀 string";
+        let expected_sq_len = format!("'{}'", sq.replace('\'', "''")).chars().count();
+        assert_eq!(
+            single_quoted_char_len_capped(sq, usize::MAX),
+            expected_sq_len
+        );
+        assert_eq!(single_quoted_char_len_capped("", usize::MAX), 2);
+        assert_eq!(single_quoted_char_len_capped("'", usize::MAX), 4);
+        assert!(single_quoted_char_len_capped(sq, 8) >= 8);
     }
 }

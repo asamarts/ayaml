@@ -1418,8 +1418,8 @@ fn lines_lowered(text: &str, lines: usize) -> String {
 
 /// A reader of one document takes one of three paths by the input's length: at most 4 KiB, at
 /// most 8 KiB, and above. With two problems in a document, each path reports the one that comes
-/// first, after any that the scanner finds, as `parse_value` does. Comment lines before the
-/// document move the place of the problem and change nothing else, in the message either.
+/// first in document order, as `parse_value` does. Comment lines before the document move the
+/// place of the problem and change nothing else, in the message either.
 #[test]
 fn a_typed_reader_reports_the_first_problem_at_every_input_size() {
     use ayaml::ErrorKind;
@@ -1428,9 +1428,11 @@ fn a_typed_reader_reports_the_first_problem_at_every_input_size() {
     let cases = [
         // A duplicate key, then a sequence that never closes, which the parser finds.
         ("a: 1\na: 2\nb: [\n", ErrorKind::DuplicateKey),
-        // A duplicate key, then a quote that never closes. The scanner reads the whole input
-        // before anything is parsed, so what it finds comes first.
-        ("a: 1\na: 2\nb: \"x\n", ErrorKind::Scanner),
+        // A duplicate key, then a quote that never closes. Single-pass line streaming reports
+        // the earlier duplicate key on line 2 before scanning line 3.
+        ("a: 1\na: 2\nb: \"x\n", ErrorKind::DuplicateKey),
+        // A quote that never closes before a later duplicate key reports the scanner error first.
+        ("a: \"x\na: 2\n", ErrorKind::Scanner),
         // An alias to no anchor, then a mapping that never closes.
         ("a: *nowhere\nb: {\n", ErrorKind::Composition),
         // A tag that its scalar can't take, then a duplicate key: both the builder's.
@@ -1792,4 +1794,168 @@ fn compat_global_tags_drop_handles_typed_targets_and_keeps_local_tags() {
     // `%TAG` mapping to a local `!` prefix stays local.
     let local_handle = "%TAG !e! !\n---\na: !e!custom 1\n";
     assert!(ayaml::compat::from_str_with::<Json>(local_handle, &DROP).is_err());
+}
+
+/// Compat `&a::\n|\n x\n` survives across `LineWindow` batch boundaries (`126..=128` prefix
+/// lines), and trailing `?` anchor names terminate cleanly before Unicode line breaks (`\u{2028}`,
+/// `\u{2029}`) and in flow context (`[&a?\u{85}]`).
+#[cfg(feature = "libyaml-compat")]
+#[test]
+fn compat_anchor_block_scalar_and_unicode_question_names_across_batches() {
+    use std::fmt::Write as _;
+
+    for prefix_lines in [126_usize, 127, 128] {
+        let mut input = String::new();
+        for i in 0..prefix_lines {
+            let _ = writeln!(input, "k{i}: {i}");
+        }
+        input.push_str("&a::\n|\n x\n");
+        let value: ayaml::Value = ayaml::compat::from_str(&input).expect("compat from_str");
+        assert_eq!(
+            value[":"].as_str(),
+            Some("x\n"),
+            "prefix_lines={prefix_lines}"
+        );
+        let events: Vec<_> =
+            ayaml::compat::parse_events_with(&input, &ayaml::compat::ParseOptions::new())
+                .expect("compat events")
+                .collect::<Result<_, _>>()
+                .expect("compat events ok");
+        assert!(events.len() > prefix_lines * 2);
+    }
+
+    for input in ["&a?\u{85} 1\n", "&a?\u{2028} 1\n", "&a?\u{2029} 1\n"] {
+        assert_eq!(
+            ayaml::compat::from_str::<ayaml::Value>(input).expect(input),
+            ayaml::parse_value(input).expect(input),
+            "compat outside-flow ? before NEL/LS/PS should match default mode for {input:?}"
+        );
+    }
+    assert!(
+        ayaml::compat::from_str::<ayaml::Value>("[&a?\u{85}]\n").is_err(),
+        "compat inside flow stops anchor at ? before NEL"
+    );
+}
+
+/// End-to-end integration coverage for `SeenScalarKeys` promotion (`<= 8` inline -> `HashSet`),
+/// `> 4 KiB` reordered complex-key duplicates, composer small-vs-large duplicate diagnostics and
+/// spilled-collection aliases, and 18-digit decimal integer boundaries.
+#[test]
+fn seen_scalar_keys_promotion_spilled_aliases_and_int_fast_path_boundaries() {
+    use std::collections::BTreeMap;
+    use std::fmt::Write as _;
+
+    let pad = "# padding to cross the 4 KiB streaming threshold\n".repeat(90);
+
+    // Duplicate scalar key detection across counts 1..=8 (inline), exact promotion at 9, and
+    // post-promotion duplicate of key 0 & key 8 plus numeric/string collision (`1` vs `"1"`).
+    let mut dup_after_promote = String::new();
+    for i in 0..10 {
+        let _ = writeln!(dup_after_promote, "k{i}: {i}");
+    }
+    dup_after_promote.push_str("k0: 99\n");
+    let dup_at_8 = "k0: 0\nk1: 1\nk2: 2\nk3: 3\nk4: 4\nk5: 5\nk6: 6\nk7: 7\nk7: 8\n";
+    let dup_num_str = "k0: 0\nk1: 1\nk2: 2\nk3: 3\nk4: 4\nk5: 5\nk6: 6\nk7: 7\n1: a\n\"1\": b\n";
+    let dup_complex = "? {a: 1, b: 2}\n: 1\n? {b: 2, a: 1}\n: 2\n";
+
+    for case in [
+        dup_at_8,
+        dup_after_promote.as_str(),
+        dup_num_str,
+        dup_complex,
+    ] {
+        for doc in [case.to_owned(), format!("{pad}{case}")] {
+            assert_eq!(
+                ayaml::from_str::<BTreeMap<String, ayaml::Value>>(&doc)
+                    .expect_err(&doc)
+                    .kind(),
+                ayaml::ErrorKind::DuplicateKey
+            );
+            assert_eq!(
+                ayaml::from_str_borrowed::<ayaml::Value>(&doc)
+                    .expect_err(&doc)
+                    .kind(),
+                ayaml::ErrorKind::DuplicateKey
+            );
+            let mut de = ayaml::Deserializer::from_str(&doc).expect("deserializer");
+            assert_eq!(
+                de.next::<ayaml::Value>().expect_err("de dup").kind(),
+                ayaml::ErrorKind::DuplicateKey
+            );
+            let doc_de_err = ayaml::DocumentDeserializer::from_str(&doc)
+                .and_then(<ayaml::Value as serde::Deserialize>::deserialize)
+                .expect_err("doc_de dup");
+            assert_eq!(doc_de_err.kind(), ayaml::ErrorKind::DuplicateKey);
+        }
+    }
+
+    // Composer small (<=8) vs large (>8) duplicate diagnostics (`0.0` vs `-0.0`, complex keys)
+    // and aliases across >64-item spilled sequences, >8-entry spilled mappings, and pending keys.
+    let mut big_float_dup = String::new();
+    for i in 0..10 {
+        let _ = writeln!(big_float_dup, "k{i}: {i}");
+    }
+    big_float_dup.push_str("0.0: 1\n-0.0: 2\n");
+    for input in ["0.0: 1\n-0.0: 2\n", big_float_dup.as_str()] {
+        let parse_err = ayaml::parse_value(input).expect_err(input);
+        assert_eq!(parse_err.kind(), ayaml::ErrorKind::DuplicateKey);
+        assert_eq!(
+            ayaml::parse_documents(input).expect_err(input).kind(),
+            ayaml::ErrorKind::DuplicateKey
+        );
+        assert_eq!(
+            ayaml::from_str::<ayaml::Value>(input)
+                .expect_err(input)
+                .kind(),
+            ayaml::ErrorKind::Serde
+        );
+    }
+
+    let mut spilled = String::from("seq: &s\n");
+    for i in 0..70 {
+        let _ = writeln!(spilled, "  - {i}");
+    }
+    spilled.push_str("map: &m\n");
+    for i in 0..12 {
+        let _ = writeln!(spilled, "  m{i}: {i}");
+    }
+    spilled.push_str("copy_s: *s\ncopy_m: *m\n? &pk [1, 2]\n: *pk\n");
+    let v = ayaml::parse_value(&spilled).expect("spilled parse_value");
+    let docs = ayaml::parse_documents(&spilled).expect("spilled parse_documents");
+    let typed: ayaml::Value = ayaml::from_str(&spilled).expect("spilled from_str");
+    assert_eq!(v, docs[0]);
+    assert_eq!(v, typed);
+    assert_eq!(v["copy_s"].as_sequence().map(Vec::len), Some(70));
+    assert_eq!(v["copy_m"].as_mapping().map(ayaml::Mapping::len), Some(12));
+
+    // 18-digit decimal fast-path boundaries & leading-zero fallbacks.
+    for (input, expected) in [
+        ("0", ayaml::Value::from(0_u64)),
+        ("-0", ayaml::Value::from(0_i64)),
+        ("+0", ayaml::Value::from(0_u64)),
+        (
+            "999999999999999999",
+            ayaml::Value::from(999_999_999_999_999_999_u64),
+        ),
+        (
+            "+999999999999999999",
+            ayaml::Value::from(999_999_999_999_999_999_u64),
+        ),
+        (
+            "-999999999999999999",
+            ayaml::Value::from(-999_999_999_999_999_999_i64),
+        ),
+        ("0123", ayaml::Value::from("0123")),
+        ("-0123", ayaml::Value::from("-0123")),
+        ("!!int 0123", ayaml::Value::from(123_u64)),
+        ("!!int -0123", ayaml::Value::from(-123_i64)),
+        ("!!int 0000000000000000012", ayaml::Value::from(12_u64)),
+    ] {
+        assert_eq!(ayaml::parse_value(input).expect(input), expected, "{input}");
+        assert_eq!(
+            ayaml::from_str::<ayaml::Value>(input).expect(input),
+            expected,
+            "{input}"
+        );
+    }
 }

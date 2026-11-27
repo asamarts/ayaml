@@ -1611,6 +1611,82 @@ mod tests {
         assert_eq!(a.masked().to_string(), "verification failed");
         assert!(a.masked().source().is_none());
     }
+
+    #[test]
+    fn format_inline_scalar_apply_edits_bounded_and_span_gap_verification() {
+        use super::{
+            EditOp, apply_edits_bounded, collect_canonical_events, format_inline_scalar,
+            verify_batch_events_with_spans,
+        };
+        use ayaml::{Limits, ParseOptions, PathSegment, Value};
+
+        let limits = Limits::default();
+        // Flow indicators and ambiguous strings are always quoted inline.
+        for tricky in ["a,b", "[x]", "{k}", "true", "null", "42", "a: b"] {
+            let formatted = format_inline_scalar(&Value::from(tricky), &limits).expect(tricky);
+            assert!(
+                formatted.starts_with('\'') || formatted.starts_with('"'),
+                "expected quoted inline scalar for {tricky:?}, got {formatted:?}"
+            );
+        }
+        // Oversized scalar fails against `max_output_bytes` (`Unsupported`) and `max_input_bytes`
+        // (`Verification` with `InputSizeLimit` source).
+        let tight_out = Limits::default().with_max_output_bytes(4);
+        assert_eq!(
+            format_inline_scalar(&Value::from("1234567890"), &tight_out)
+                .expect_err("tight output limit")
+                .kind(),
+            EditErrorKind::Unsupported
+        );
+        let tight_in = Limits::default().with_max_input_bytes(4);
+        assert_eq!(
+            format_inline_scalar(&Value::from("1234567890"), &tight_in)
+                .expect_err("tight input limit")
+                .kind(),
+            EditErrorKind::VerificationFailed
+        );
+
+        // `apply_edits_bounded` rejects inputs whose spliced output exceeds `max_input_bytes`
+        // before allocating the output string.
+        let edit = TextEdit {
+            span: Span::new(3, 4),
+            replacement: "1234567890".to_owned(),
+        };
+        let tiny_input = Limits::default().with_max_input_bytes(8);
+        let bounded_err = apply_edits_bounded("a: 1\n", &[edit], Some(&tiny_input))
+            .expect_err("exceeds max_input_bytes");
+        assert_eq!(bounded_err.kind(), EditErrorKind::VerificationFailed);
+
+        // `verify_batch_events_with_spans` anchors untouched spans across replace + remove gaps.
+        let before = "a: 1\nb: 2\nc: 3\n";
+        let after = "a: 10\nc: 3\n";
+        let opts = ParseOptions::new();
+        let before_ev = collect_canonical_events(before, &opts).expect("before");
+        let after_ev = collect_canonical_events(after, &opts).expect("after");
+        let edits = [
+            TextEdit {
+                span: Span::new(3, 4),
+                replacement: "10".to_owned(),
+            },
+            TextEdit {
+                span: Span::new(5, 10),
+                replacement: String::new(),
+            },
+        ];
+        let op0 = EditOp::ReplaceScalar {
+            path: vec![PathSegment::key("a")],
+            value: Value::from(10_u64),
+        };
+        let op1 = EditOp::RemoveEntry {
+            path: vec![PathSegment::key("b")],
+        };
+        assert!(verify_batch_events_with_spans(
+            &before_ev,
+            &after_ev,
+            &edits,
+            &[&op0, &op1],
+        ));
+    }
 }
 
 #[cfg(kani)]

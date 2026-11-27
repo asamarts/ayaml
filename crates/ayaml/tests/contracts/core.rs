@@ -962,3 +962,135 @@ fn a_mapping_s_methods_and_its_iterators_agree() {
     assert_eq!(owned.len(), 3);
     assert!(owned.iter().all(|(_, value)| value.is_null()));
 }
+
+/// `Deserializer` and `parse_events_with` stop at a completed empty Document 1 after >256
+/// directives before scanning a malformed or over-limit Document 2.
+#[test]
+fn deserializer_and_events_stop_at_empty_document_after_many_directives() {
+    use std::fmt::Write as _;
+
+    let mut header = String::new();
+    for i in 0..270 {
+        let _ = writeln!(header, "%TAG !t{i}! tag:example.com,2024:{i}/");
+    }
+
+    let bad_second = format!("{header}---\n---\n@\n");
+    let mut de = ayaml::Deserializer::from_str(&bad_second).expect("deserializer");
+    assert_eq!(de.next::<Value>().expect("doc 1 ok"), Some(Value::Null));
+    assert_eq!(
+        de.next::<Value>().expect_err("doc 2 scanner error").kind(),
+        ErrorKind::Scanner
+    );
+
+    let mut de_borrowed = ayaml::Deserializer::from_str(&bad_second).expect("borrowed de");
+    assert_eq!(
+        de_borrowed
+            .next_borrowed::<Option<&str>>()
+            .expect("doc 1 borrowed"),
+        Some(None)
+    );
+    assert_eq!(
+        de_borrowed
+            .next_borrowed::<Option<&str>>()
+            .expect_err("doc 2 borrowed scanner error")
+            .kind(),
+        ErrorKind::Scanner
+    );
+
+    // Public `parse_events_with` yields Document 1's `DocumentEnd` before failing on Document 2.
+    let mut saw_doc1_end = false;
+    let mut saw_err = None;
+    for item in ayaml::parse_events_with(&bad_second, &ayaml::ParseOptions::new()).expect("events")
+    {
+        match item {
+            Ok(Event::DocumentEnd { .. }) => saw_doc1_end = true,
+            Ok(_) => {}
+            Err(err) => {
+                saw_err = Some(err);
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_doc1_end,
+        "must yield Document 1 end before Document 2 error"
+    );
+    assert_eq!(saw_err.expect("doc 2 error").kind(), ErrorKind::Scanner);
+
+    let two_docs = format!("{header}---\n---\nb\n");
+    let opts = ayaml::ParseOptions::new().with_limits(Limits::default().with_max_documents(1));
+    let mut limited = ayaml::Deserializer::from_str_with(&two_docs, &opts).expect("limited de");
+    assert_eq!(
+        limited.next::<Value>().expect("doc 1 under limit"),
+        Some(Value::Null)
+    );
+    assert_eq!(
+        limited
+            .next::<Value>()
+            .expect_err("doc 2 exceeds max_documents")
+            .limit()
+            .map(ayaml::LimitExceeded::kind),
+        Some(LimitKind::Documents)
+    );
+}
+
+/// Public `Mapping` API preserves exact semantics, order-insensitive `Eq`/`Hash`, mutation
+/// methods, `shrink_to_fit`, and iterators across `SMALL_LIMIT` (`8 -> 9 -> 16`) promotion.
+#[test]
+fn mapping_public_api_small_to_large_promotion_shrink_and_iterators() {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let hash_of = |m: &Mapping| {
+        let mut h = DefaultHasher::new();
+        m.hash(&mut h);
+        h.finish()
+    };
+
+    let mut small = Mapping::new();
+    for i in 0..8_u64 {
+        assert_eq!(
+            small.insert(Value::from(format!("k{i}")), Value::from(i)),
+            None
+        );
+    }
+    assert_eq!(small.len(), 8);
+    assert_eq!(small.iter().count(), 8);
+    assert_eq!(small.iter_mut().count(), 8);
+
+    // Promote from small (8) to large (9..=16) and verify `entry`, `remove`, `shift_remove`, and
+    // `shrink_to_fit`.
+    let mut large = small.clone();
+    for i in 8..16_u64 {
+        let _ = large
+            .entry(Value::from(format!("k{i}")))
+            .or_insert(Value::from(i));
+    }
+    assert_eq!(large.len(), 16);
+    assert_eq!(large.iter().len(), 16);
+    assert_eq!(large.iter_mut().len(), 16);
+    assert_eq!(large.shift_remove("k15"), Some(Value::from(15_u64)));
+    assert_eq!(large.remove("k14"), Some(Value::from(14_u64)));
+    assert_eq!(large.len(), 14);
+    large.shrink_to_fit();
+    assert_eq!(large.len(), 14);
+
+    // Order-insensitive `Eq` and `Hash` between a `Small` (8-entry) map and a `Large` map that was
+    // promoted past 8 and shrunk back to 8 entries in reverse insertion order.
+    let mut promoted_then_shrunk = Mapping::new();
+    for i in (0..12_u64).rev() {
+        promoted_then_shrunk.insert(Value::from(format!("k{i}")), Value::from(i));
+    }
+    for i in 8..12_u64 {
+        assert!(
+            promoted_then_shrunk
+                .shift_remove(format!("k{i}").as_str())
+                .is_some()
+        );
+    }
+    promoted_then_shrunk.shrink_to_fit();
+    assert_eq!(small, promoted_then_shrunk);
+    assert_eq!(hash_of(&small), hash_of(&promoted_then_shrunk));
+    assert_eq!(small.clone().into_iter().count(), 8);
+    assert_eq!(promoted_then_shrunk.into_iter().count(), 8);
+}

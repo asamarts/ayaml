@@ -1346,7 +1346,7 @@ fn root_flow_collections_count_their_entries() {
         .iter()
         .enumerate()
         .find_map(|(i, token)| match token.kind {
-            TokenKind::FlowSequenceStart { end } => Some((i, end as usize)),
+            TokenKind::FlowSequenceStart { end } => Some((i, i + end as usize)),
             _ => None,
         })
         .expect("sequence start");
@@ -1356,7 +1356,7 @@ fn root_flow_collections_count_their_entries() {
         .iter()
         .enumerate()
         .find_map(|(i, token)| match token.kind {
-            TokenKind::FlowMappingStart { end } => Some((i, end as usize)),
+            TokenKind::FlowMappingStart { end } => Some((i, i + end as usize)),
             _ => None,
         })
         .expect("mapping start");
@@ -1574,12 +1574,10 @@ fn few_events_wait_for_a_reader_that_takes_them_one_at_a_time() {
     }
 }
 
-/// Loading a document chunk into `EventCursor` hands the vector over without copying it into a
-/// second buffer and gives back any unused capacity the parser over-reserved.
+/// `EventCursor` streams through a bounded `VecDeque` rather than buffering a whole document's
+/// events upfront, keeping queue length and capacity within the cursor batch watermark.
 #[test]
 fn event_cursor_queue_gives_back_unused_capacity() {
-    // Four tokens per entry, one scalar event per entry: the parser reserves for ~4/5 of the
-    // token count, far more than the events produced.
     let input = "- &a !t x\n".repeat(1_000);
     let mut cursor = super::EventCursor::new(&input, &Limits::default()).expect("cursor");
     assert!(matches!(
@@ -1590,11 +1588,410 @@ fn event_cursor_queue_gives_back_unused_capacity() {
         cursor.next_event().expect("doc start"),
         Some(Event::DocumentStart { .. })
     ));
-    // After shrinking, queue capacity fits the remaining ~1,003 events, not the ~3,216 reserved.
+    // After streaming through the bounded queue, capacity stays within the bounded batch window
+    // rather than buffering all ~1,003 events upfront.
+    let (len, cap) = cursor.queue_len_and_cap();
     assert!(
-        cursor.queue.capacity() <= cursor.queue.len() + 16,
-        "len={}, capacity={}",
-        cursor.queue.len(),
-        cursor.queue.capacity()
+        cap <= 2 * EventSink::CURSOR_QUEUE_ROOM && len <= EventSink::CURSOR_QUEUE_ROOM + 4,
+        "len={len}, capacity={cap}"
     );
+}
+
+/// Multi-line block documents stream through the bounded `LineWindow` so peak token storage stays
+/// O(batch) (<= 512 tokens / <= 16 KiB) regardless of document length.
+#[test]
+fn line_window_keeps_token_storage_bounded_on_large_block_documents() {
+    use std::fmt::Write as _;
+
+    let limits = Limits::for_max_input();
+    let entries = if cfg!(miri) { 140 } else { 20_000 };
+    let seq = "- item\n".repeat(entries);
+    let mut map = String::with_capacity(entries * 14);
+    let mut explicit = String::with_capacity(entries * 16);
+    for i in 0..entries {
+        let _ = writeln!(map, "k{i}: v{i}");
+        let _ = writeln!(explicit, "? k{i}\n: v{i}");
+    }
+    for (name, input) in [
+        ("block_seq", seq.as_str()),
+        ("block_map", map.as_str()),
+        ("block_explicit", explicit.as_str()),
+    ] {
+        let mut source = DocumentEvents::new(input, &limits, false).expect(name);
+        let mut count = 0_usize;
+        while source.next_event().expect(name).is_some() {
+            count += 1;
+        }
+        assert!(count > entries, "{name}: {count} events");
+        assert!(
+            source.peak_tokens() <= 512 && source.peak_tokens_cap() <= 512,
+            "{name}: peak_tokens={}, peak_cap={}",
+            source.peak_tokens(),
+            source.peak_tokens_cap(),
+        );
+    }
+}
+
+/// Line-relative flow partner links remain exact across repeated `LineWindow` compactions, and a
+/// large flow line's token buffer capacity is released once retired before subsequent block lines.
+#[test]
+fn line_window_compaction_preserves_flow_links_and_releases_large_flow_lines() {
+    use std::fmt::Write as _;
+
+    let limits = Limits::default();
+    let mixed_lines = if cfg!(miri) { 30 } else { 400 };
+    let mut mixed = String::new();
+    for i in 0..mixed_lines {
+        let _ = writeln!(mixed, "k{i}: [1, {{a: [2, 3], b: {i}}}, {i}]");
+    }
+    let collected = parse_document_events(&mixed, &limits, false).expect("mixed flow");
+    let (on_demand, _) = events_on_demand(&mixed, &limits, false).expect("on demand");
+    assert_eq!(collected, on_demand);
+
+    // A large flow line (> 1,024 tokens) followed by block lines drops the oversized token
+    // buffer capacity as soon as the flow line retires.
+    let flow_extra = if cfg!(miri) { 520 } else { 600 };
+    let tail_lines = if cfg!(miri) { 10 } else { 200 };
+    let mut flow_then_block = format!("big: [1{}]\n", ",1".repeat(flow_extra));
+    for i in 0..tail_lines {
+        let _ = writeln!(flow_then_block, "b{i}: {i}");
+    }
+    let mut source = DocumentEvents::new(&flow_then_block, &limits, false).expect("source");
+    let mut count = 0_usize;
+    while source.next_event().expect("event").is_some() {
+        count += 1;
+    }
+    assert!(count > flow_extra);
+    assert!(
+        source.peak_tokens_cap() > 1_024,
+        "large flow line should have grown past WINDOW_SHRINK_CAP: peak_cap={}",
+        source.peak_tokens_cap(),
+    );
+    assert!(
+        source.tokens() <= 512 && source.tokens_cap() <= 512,
+        "oversized flow token buffer capacity must shrink after retirement: tokens={}, cap={}",
+        source.tokens(),
+        source.tokens_cap(),
+    );
+}
+
+/// Compat indentation diagnostics preserve exact parent-line lookup after the indent-0 parent
+/// itself has been retired into `compat_parents` (more than one full batch earlier), including
+/// bare `---` lines and nested mappings/sequences.
+#[test]
+fn line_window_compat_parent_stack_survives_retirement() {
+    use std::fmt::Write as _;
+
+    let limits = Limits::default();
+    let line_count = if cfg!(miri) { 140 } else { 200 };
+
+    // Line 1 (`outer:`) is at indent 0, followed by `line_count` (> 128) indent-2 lines so line 1
+    // retires into `compat_parents` before the bad indent-1 line arrives.
+    let mut retired_map = String::from("outer:\n");
+    for i in 0..line_count {
+        let _ = writeln!(retired_map, "  k{i}: {i}");
+    }
+    retired_map.push_str(" bad: 1\n");
+    let err = parse_document_events(&retired_map, &limits, true).expect_err("retired map parent");
+    assert!(
+        err.message()
+            .contains("this line is indented differently from the mapping at line 1 column 1"),
+        "unexpected compat error: {err}"
+    );
+
+    // A bare `---` at indent 0 retires as an empty parent (`first_offset: None`) and must not be
+    // misreported as a mapping parent when an indented root is followed by a dedented line.
+    let mut retired_doc_start = String::from("---\n");
+    for i in 0..line_count {
+        let _ = writeln!(retired_doc_start, "  k{i}: {i}");
+    }
+    retired_doc_start.push_str(" bad: 1\n");
+    let doc_err = parse_document_events(&retired_doc_start, &limits, true)
+        .expect_err("retired bare --- parent");
+    assert!(
+        !doc_err.message().contains("mapping at line 1"),
+        "bare `---` must not report a mapping parent: {doc_err}"
+    );
+
+    // Line 1 (`-`) is at indent 0, followed by `line_count` (> 128) indent-2 mapping lines so the
+    // sequence opener retires into `compat_parents` before the bad indent-1 `- bad` line.
+    let mut retired_seq = String::from("-\n");
+    for i in 0..line_count {
+        let _ = writeln!(retired_seq, "  k{i}: {i}");
+    }
+    retired_seq.push_str(" - bad\n");
+    let seq_err =
+        parse_document_events(&retired_seq, &limits, true).expect_err("retired seq parent");
+    assert!(
+        seq_err
+            .message()
+            .contains("this line is indented differently from the sequence at line 1 column 1"),
+        "unexpected compat seq error: {seq_err}"
+    );
+}
+
+/// Same-line `--- <flow>` lines advance past `DocumentStart`; relative-distance flow partner links
+/// stay exact for nested flow collections and never drop trailing garbage inside flow mappings.
+#[test]
+fn document_start_same_line_flow_preserves_partner_links() {
+    let valid_cases = [
+        ("{a: [1], b: 2}\n", "--- {a: [1], b: 2}\n"),
+        ("{[1]: 2}\n", "--- {[1]: 2}\n"),
+        ("[[1]: 2]\n", "--- [[1]: 2]\n"),
+        ("[[1], a: 2]\n", "--- [[1], a: 2]\n"),
+        (
+            "[1, {a: [2, 3], b: 4}, 5]\n",
+            "--- [1, {a: [2, 3], b: 4}, 5]\n",
+        ),
+    ];
+    for (plain, with_doc_start) in valid_cases {
+        let expected = crate::parse_value(plain).expect(plain);
+        let actual = crate::parse_value(with_doc_start).expect(with_doc_start);
+        assert_eq!(actual, expected, "{with_doc_start:?}");
+        let events = crate::parse_events(with_doc_start)
+            .expect(with_doc_start)
+            .collect::<Result<Vec<_>, _>>()
+            .expect(with_doc_start);
+        assert!(events.len() >= 6, "{with_doc_start:?}");
+    }
+    for invalid in [
+        "--- {a: [1] x}\n",
+        "--- {a: [1] x, b: 2}\n",
+        "--- [1, [2] x]\n",
+    ] {
+        let err = crate::parse_value(invalid).expect_err(invalid);
+        assert_eq!(err.kind(), ErrorKind::Parser, "{invalid:?}: {err}");
+        let ev_err = crate::parse_events(invalid)
+            .expect(invalid)
+            .collect::<Result<Vec<_>, _>>()
+            .expect_err(invalid);
+        assert_eq!(ev_err.kind(), ErrorKind::Parser, "{invalid:?}: {ev_err}");
+    }
+}
+
+/// Medium-width lines (`150` and `450` tokens per line on `> 4 KiB` inputs) reuse the bounded
+/// `LineWindow` buffer at `<= 1,024` tokens instead of jumping to `TOKEN_ARENA_CHUNK` (`8,192`)
+/// and thrashing on every batch.
+#[test]
+fn line_window_medium_width_lines_stay_reusable_without_thrashing() {
+    use std::fmt::Write as _;
+
+    let limits = Limits::default();
+    for (label, items_per_line, lines) in [
+        ("150_tokens", 70_usize, if cfg!(miri) { 21 } else { 40 }),
+        ("450_tokens", 220_usize, if cfg!(miri) { 6 } else { 15 }),
+    ] {
+        let mut input = String::new();
+        for row in 0..lines {
+            let _ = write!(input, "r{row}: [0");
+            for col in 1..items_per_line {
+                let _ = write!(input, ",{col}");
+            }
+            input.push_str("]\n");
+        }
+        assert!(input.len() > 4096, "{label}: len={}", input.len());
+        let mut source = DocumentEvents::new(&input, &limits, false).expect(label);
+        while source.next_event().expect(label).is_some() {}
+        assert!(
+            source.peak_tokens_cap() <= 1_024,
+            "{label}: peak_tokens_cap={} exceeded reusable window cap 1024",
+            source.peak_tokens_cap(),
+        );
+    }
+}
+
+/// `EventCursor` stops at a completed empty document even after resuming from `State::Directives`,
+/// so a malformed or over-limit Document 2 never discards Document 1.
+#[test]
+fn event_cursor_stops_at_empty_document_after_many_directives() {
+    use std::fmt::Write as _;
+
+    let directive_count = if cfg!(miri) { 260 } else { 270 };
+    let mut header = String::new();
+    for i in 0..directive_count {
+        let _ = writeln!(header, "%TAG !t{i}! tag:example.com,2024:{i}/");
+    }
+
+    // Document 1 is empty (`---`), followed by Document 2 with a scanner error (`---\n@\n`).
+    let bad_second = format!("{header}---\n---\n@\n");
+    let mut cursor = super::EventCursor::new(&bad_second, &Limits::default()).expect("cursor");
+    let doc1 = cursor
+        .next_document()
+        .expect("document 1 must succeed before scanning document 2");
+    assert!(doc1.is_some(), "expected empty document 1");
+    let err = cursor
+        .next_document()
+        .expect_err("document 2 must fail with scanner error");
+    assert_eq!(err.kind(), ErrorKind::Scanner);
+
+    // With `max_documents: 1`, `Deserializer` must return Document 1 and fail only on Document 2.
+    let two_docs = format!("{header}---\n---\nb\n");
+    let options = crate::ParseOptions::new().with_limits(Limits {
+        max_documents: 1,
+        ..Limits::default()
+    });
+    let mut de = crate::Deserializer::from_str_with(&two_docs, &options).expect("deserializer");
+    let first: crate::Value = de
+        .next()
+        .expect("document 1 ok")
+        .expect("document 1 present");
+    assert_eq!(first, crate::Value::Null);
+    let second_err = de
+        .next::<crate::Value>()
+        .expect_err("document 2 must exceed max_documents");
+    assert_eq!(second_err.kind(), ErrorKind::Limit);
+}
+
+/// Compat `&a::\n|` block-scalar lookup survives across `LineWindow` batch boundaries and full
+/// line retirement.
+#[test]
+fn line_window_compat_anchor_check_survives_batch_boundary() {
+    use std::fmt::Write as _;
+
+    let limits = Limits::default();
+    let counts: &[usize] = if cfg!(miri) { &[128] } else { &[126, 127, 128] };
+    for &prefix_lines in counts {
+        let mut input = String::new();
+        for i in 0..prefix_lines {
+            let _ = writeln!(input, "k{i}: {i}");
+        }
+        input.push_str("&a::\n|\n x\n");
+        let events = parse_document_events(&input, &limits, true).expect("compat anchor");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::Scalar {
+                    value,
+                    style: crate::ScalarStyle::Literal,
+                    ..
+                } if value == "x\n"
+            )),
+            "prefix_lines={prefix_lines}: expected literal scalar 'x'"
+        );
+    }
+
+    // Also verify `LineWindow::line_had_anchor` directly once line 0 is flushed (`base_line == 1`).
+    let mut sample = String::from("&a::\n");
+    for i in 0..135 {
+        let _ = writeln!(sample, "k{i}: {i}");
+    }
+    let scanner = crate::scanner::Scanner::with_compat(&sample, &limits, true).expect("scanner");
+    let mut window = super::window::LineWindow::new(scanner, &sample, true);
+    assert!(window.ensure_line(0, &limits).expect("line 0"));
+    assert!(window.line_had_anchor(0));
+    window.retire_before(1);
+    assert!(window.ensure_line(130, &limits).expect("force flush"));
+    assert!(window.line_had_anchor(0));
+}
+
+/// Unit coverage for `compact_shift`, speculative `prefetch_error` deferral/surfacing, and
+/// exact 128-line batch-boundary `---` stopping before Document 2.
+#[test]
+fn line_window_compact_shift_prefetch_error_and_doc_start_boundary() {
+    use std::fmt::Write as _;
+
+    // `compact_shift` boundary cases.
+    assert_eq!(super::window::compact_shift(0, 0, None), 0);
+    assert_eq!(super::window::compact_shift(10, 5, None), 5);
+    assert_eq!(super::window::compact_shift(10, 20, Some(6)), 6);
+    assert_eq!(super::window::compact_shift(4, 20, Some(6)), 4);
+    assert_eq!(super::window::compact_shift(10, 5, Some(8)), 5);
+
+    // Speculative `prefetch_error`: line 2 has `@`, while lines 0..=1 succeed. Asking for line 0
+    // succeeds without surfacing line 2's scanner error until line 2 is actually demanded.
+    let limits = Limits::default();
+    let input = "a: 1\nb: 2\n@\n";
+    let scanner = crate::scanner::Scanner::new(input, &limits).expect("scanner");
+    let mut window = super::window::LineWindow::new(scanner, input, false);
+    assert!(window.ensure_line(0, &limits).expect("line 0 ok"));
+    assert!(window.ensure_line(1, &limits).expect("line 1 ok"));
+    let err = window
+        .ensure_line(2, &limits)
+        .expect_err("line 2 surfaces parked prefetch_error");
+    assert_eq!(err.kind(), ErrorKind::Scanner);
+
+    // Exact 128-line batch boundary: Document 1 ends at line 127 (`loaded_end == 128`), followed
+    // by `---\n@\n` (Document 2's `---` lands at `batch_lines == 0, loaded_end == 128`).
+    // `EventCursor` must yield Document 1 completely without failing on Document 2's `@`.
+    let mut boundary_docs = String::new();
+    for i in 0..128 {
+        let _ = writeln!(boundary_docs, "k{i}: {i}");
+    }
+    boundary_docs.push_str("---\n@\n");
+    let mut cursor = super::EventCursor::new(&boundary_docs, &limits).expect("cursor");
+    let doc1 = cursor
+        .next_document()
+        .expect("document 1 must complete before document 2 is scanned");
+    assert!(doc1.is_some());
+    let doc2_err = cursor
+        .next_document()
+        .expect_err("document 2 must report scanner error");
+    assert_eq!(doc2_err.kind(), ErrorKind::Scanner);
+}
+
+/// Unit coverage for truncated flow runs (`check_truncated_run_end`,
+/// `is_truncated_mapping_key_line`), deferred scanner limit errors after flow openers,
+/// `EventCursor::new_single_document`, and 4-byte UTF-8 1024-char implicit key boundaries.
+#[test]
+fn truncated_runs_deferred_scanner_limits_and_utf8_implicit_key_boundaries() {
+    use crate::error::ErrorCode;
+
+    let tight_scalar = Limits::default()
+        .with_max_scalar_bytes(5)
+        .with_max_events(6);
+    for input in ["[!!int 1234567890]", "{a: 1234567890}", "[? 1234567890]"] {
+        let mut de = DocumentEvents::new(input, &tight_scalar, false).expect("doc events");
+        let mut saw_err = None;
+        loop {
+            match de.next_event() {
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(err) => {
+                    saw_err = Some(err);
+                    break;
+                }
+            }
+        }
+        let err = saw_err.expect("limit error");
+        assert_eq!(err.kind(), ErrorKind::Limit, "{input}: {err}");
+        assert_eq!(err.code(), ErrorCode::ScalarSizeLimit, "{input}: {err}");
+    }
+
+    // Truncated mapping-key line before a later scanner error reports the earlier parser error.
+    let limits = Limits::default();
+    let err = parse_document_events("a: 1\n[ !a !b @ ]\n", &limits, false)
+        .expect_err("duplicate properties before @");
+    assert_eq!(err.kind(), ErrorKind::Parser);
+    let err = parse_document_events("[!!int @]", &limits, false)
+        .expect_err("reserved indicator after tag");
+    assert_eq!(err.code(), ErrorCode::ReservedIndicator);
+
+    // `EventCursor::new_single_document` stops on a second document before scanning its body.
+    let mut single =
+        super::EventCursor::new_single_document("[1]\n---\n@\n", &limits).expect("single cursor");
+    let mut err = None;
+    while let Some(item) = single.next_event().transpose() {
+        if let Err(e) = item {
+            err = Some(e);
+            break;
+        }
+    }
+    assert_eq!(
+        err.expect("trailing doc error").code(),
+        ErrorCode::TrailingDocuments
+    );
+
+    // Exact 4-byte UTF-8 implicit key boundary: 1,024 chars (4,096 bytes) fits; 1,025 chars
+    // (4,100 bytes) is rejected in both block and flow-sequence implicit mapping positions.
+    let ok_key = "🚀".repeat(1_024);
+    let too_long = "🚀".repeat(1_025);
+    assert!(parse_document_events(&format!("{ok_key}: 1\n"), &limits, false).is_ok());
+    assert!(parse_document_events(&format!("[{ok_key}: 1]\n"), &limits, false).is_ok());
+    assert_eq!(
+        parse_document_events(&format!("{too_long}: 1\n"), &limits, false)
+            .expect_err("1025-char block key")
+            .code(),
+        ErrorCode::InvalidImplicitKey
+    );
+    assert!(parse_document_events(&format!("[{too_long}: 1]\n"), &limits, false).is_err());
 }

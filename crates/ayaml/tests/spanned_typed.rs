@@ -299,6 +299,92 @@ explicit_null: null
     assert!(ayaml::from_str::<UntaggedSpoof>(spoof_yaml).is_err());
 }
 
+/// Above 4 KiB (streaming path), escaped strings move cleanly through `Option<Spanned<String>>`,
+/// `visit_byte_buf`, and `Deserializer::next_seed`, and `Option<Spanned<u32>>` preserves alias
+/// use-site spans across `from_str`, `DocumentDeserializer`, and `Deserializer::next_borrowed`.
+#[test]
+fn streamed_escaped_strings_and_optional_alias_spans_above_4kib() {
+    use std::marker::PhantomData;
+
+    #[derive(Debug, Deserialize)]
+    struct OptionalAliasDoc {
+        #[allow(dead_code, reason = "only `copy` is inspected for alias use-site span")]
+        base: Option<Spanned<u32>>,
+        copy: Option<Spanned<u32>>,
+    }
+
+    struct OwnedBytes(Vec<u8>);
+    impl<'de> Deserialize<'de> for OwnedBytes {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct BytesVisitor;
+            impl serde::de::Visitor<'_> for BytesVisitor {
+                type Value = OwnedBytes;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("byte buffer")
+                }
+                fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
+                    Ok(OwnedBytes(v))
+                }
+            }
+            deserializer.deserialize_byte_buf(BytesVisitor)
+        }
+    }
+
+    let mut input = String::from("spanned: \"hello\\nworld\"\noptional: \"opt\\tval\"\n");
+    for idx in 0..220 {
+        let _ = writeln!(input, "pad{idx}: \"line-{idx}\\nend\"");
+    }
+    assert!(input.len() > 4096);
+    let map: BTreeMap<String, Option<Spanned<String>>> =
+        ayaml::from_str(&input).expect("streamed map");
+    let spanned = map["spanned"].as_ref().expect("spanned");
+    assert_eq!(spanned.get_ref(), "hello\nworld");
+    assert_eq!(spanned.span().slice(&input), Some("\"hello\\nworld\""));
+
+    let long_root = format!("\"{}\\n\"", "x".repeat(5_000));
+    let root: Option<Spanned<String>> = ayaml::from_str(&long_root).expect("root spanned");
+    let root = root.expect("some");
+    assert_eq!(root.get_ref().len(), 5_001);
+    assert_eq!(root.span().slice(&long_root), Some(long_root.as_str()));
+    let bytes: OwnedBytes = ayaml::from_str(&long_root).expect("owned bytes");
+    assert_eq!(bytes.0.len(), 5_001);
+
+    let mut de = Deserializer::from_str(&long_root).expect("deserializer");
+    let seeded = de
+        .next_seed(PhantomData::<Option<Spanned<String>>>)
+        .expect("next_seed")
+        .expect("doc")
+        .expect("some");
+    assert_eq!(seeded.get_ref().len(), 5_001);
+
+    // >4 KiB padded `Option<Spanned<u32>>` alias use-site span across all typed entry points.
+    let padded_alias = format!(
+        "{}base: &b 42\ncopy: *b\n",
+        "# padding to cross 4 KiB threshold\n".repeat(130)
+    );
+    assert!(padded_alias.len() > 4096);
+    let doc_from_str: OptionalAliasDoc = ayaml::from_str(&padded_alias).expect("from_str");
+    assert_eq!(
+        doc_from_str.copy.unwrap().span().slice(&padded_alias),
+        Some("*b")
+    );
+    let doc_de = ayaml::DocumentDeserializer::from_str(&padded_alias).expect("doc_de");
+    let doc_via_doc_de = OptionalAliasDoc::deserialize(doc_de).expect("doc_de decode");
+    assert_eq!(
+        doc_via_doc_de.copy.unwrap().span().slice(&padded_alias),
+        Some("*b")
+    );
+    let mut de_stream = Deserializer::from_str(&padded_alias).expect("de_stream");
+    let doc_via_borrowed: OptionalAliasDoc = de_stream
+        .next_borrowed()
+        .expect("next_borrowed")
+        .expect("doc");
+    assert_eq!(
+        doc_via_borrowed.copy.unwrap().span().slice(&padded_alias),
+        Some("*b")
+    );
+}
+
 fn proptest_config() -> ProptestConfig {
     let default_cases = if cfg!(miri) { 2 } else { 128 };
     let cases = std::env::var("PROPTEST_CASES")

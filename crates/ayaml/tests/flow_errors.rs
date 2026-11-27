@@ -555,3 +555,85 @@ fn sequence_ends_by_default(input: &str, failure: At, opening: At) {
         assert_eq!(location(&error), failure, "{reader}, {input:?}");
     }
 }
+
+/// Flow fast paths (`flow_sequence_loop`, `flow_mapping_loop`), `QUEUE_ROOM = 16` yield
+/// boundaries, and Pattern 2 nested flow limits agree across all public readers.
+#[test]
+fn flow_fast_path_yield_boundaries_and_nested_limits_agree_across_readers() {
+    use std::fmt::Write as _;
+
+    // Malformed flow sequences/mappings crossing `QUEUE_ROOM = 16` (13/20 items, 7/12 pairs).
+    let mut bad_inputs = vec![
+        "{a: [1, 2], b: {c: 3} x}\n".to_owned(),
+        "{a: [1, 2] b: 3}\n".to_owned(),
+        "[1, 2, {a: 1]]\n".to_owned(),
+    ];
+    for count in [13_usize, 20] {
+        let mut seq = String::from("[0");
+        for i in 1..count {
+            let _ = write!(seq, ", {i}");
+        }
+        seq.push_str(", , 99]\n");
+        bad_inputs.push(seq);
+    }
+    for pairs in [7_usize, 12] {
+        let mut map = String::from("{k0: 0");
+        for i in 1..pairs {
+            let _ = write!(map, ", k{i}: {i}");
+        }
+        map.push_str(", , z: 1}\n");
+        bad_inputs.push(map);
+    }
+    for bad in &bad_inputs {
+        let val_err = ayaml::parse_value(bad).expect_err(bad);
+        assert_eq!(val_err.kind(), ayaml::ErrorKind::Parser, "{bad}");
+        assert_eq!(
+            ayaml::from_str::<Value>(bad).expect_err(bad).kind(),
+            ayaml::ErrorKind::Parser,
+            "{bad}"
+        );
+        assert!(ayaml::SpannedTree::parse(bad).is_err(), "{bad}");
+        assert!(
+            ayaml::parse_events(bad)
+                .expect(bad)
+                .collect::<Result<Vec<_>, _>>()
+                .is_err(),
+            "{bad}"
+        );
+    }
+
+    // Pattern 2 nested flow values enforce `max_depth` and `max_collection_entries` across all
+    // public readers.
+    let nested = "{a: [1, 2, 3], b: {c: [4, 5]}}\n";
+    let depth_opts = ayaml::ParseOptions::new().with_limits(ayaml::Limits::new().with_max_depth(2));
+    assert_eq!(
+        ayaml::parse_value_with(nested, &depth_opts)
+            .expect_err("depth limit")
+            .limit()
+            .map(ayaml::LimitExceeded::kind),
+        Some(ayaml::LimitKind::Depth)
+    );
+    assert_eq!(
+        ayaml::from_str_with::<Value>(nested, &depth_opts)
+            .expect_err("typed depth limit")
+            .limit()
+            .map(ayaml::LimitExceeded::kind),
+        Some(ayaml::LimitKind::Depth)
+    );
+    let entry_opts =
+        ayaml::ParseOptions::new().with_limits(ayaml::Limits::new().with_max_collection_entries(2));
+    assert_eq!(
+        ayaml::parse_value_with(nested, &entry_opts)
+            .expect_err("entry limit")
+            .limit()
+            .map(ayaml::LimitExceeded::kind),
+        Some(ayaml::LimitKind::CollectionEntries)
+    );
+    assert_eq!(
+        ayaml::from_str_with::<Value>(nested, &entry_opts)
+            .expect_err("typed entry limit")
+            .limit()
+            .map(ayaml::LimitExceeded::kind),
+        Some(ayaml::LimitKind::CollectionEntries)
+    );
+}

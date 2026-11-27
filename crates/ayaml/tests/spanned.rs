@@ -818,6 +818,69 @@ fn compact_first_mapping_key_and_alias_entries_have_exact_spans() {
         ),
         Some("k: *x\n    ")
     );
+    // Compact first entry followed by an intervening comment refuses `entry_span`.
+    assert_eq!(
+        entry(
+            "- a: 1\n  # comment about b\n  b: 2\n",
+            &[index(0), key("a")]
+        ),
+        None
+    );
+    // `SpannedTree::parse_with(..., merge_keys(true))` suppresses `entry_span` conservatively.
+    let merge_doc = "base: &b\n  k: 1\nout:\n  <<: *b\n  own: 2\n";
+    let merged_tree =
+        SpannedTree::parse_with(merge_doc, &ayaml::ParseOptions::new().with_merge_keys(true))
+            .expect("merged tree");
+    assert!(merged_tree.span_at(&[key("out"), key("k")]).is_some());
+    assert_eq!(merged_tree.entry_span_at(&[key("out"), key("own")]), None);
+}
+
+/// Complex-key lookup in `SpannedTree` handles unique, order-insensitive duplicate, ambiguous,
+/// and 48-deep nested complex keys in linear time.
+#[test]
+fn spanned_tree_complex_keys_unique_duplicate_ambiguous_and_deep() {
+    use std::fmt::Write as _;
+
+    let unique = "? {a: 1, b: [2, 3]}\n: hit\n";
+    let tree = SpannedTree::parse(unique).expect("unique complex key");
+    let expected_key = ayaml::parse_value("{b: [2, 3], a: 1}").expect("reordered key");
+    assert_eq!(
+        tree.scalar_text_at(&[PathSegment::Key(expected_key.clone())]),
+        Some("hit")
+    );
+
+    // Order-insensitive duplicate complex keys are rejected by `SpannedTree::parse` (via parser/
+    // lookup ambiguity).
+    let dup = "? {a: 1, b: [2, 3]}\n: first\n? {b: [2, 3], a: 1}\n: second\n";
+    let dup_tree = SpannedTree::parse(dup).expect("event tree parses");
+    assert!(
+        dup_tree.lookup(&[PathSegment::Key(expected_key)]).is_none(),
+        "duplicate complex keys must not resolve ambiguously"
+    );
+
+    // Ambiguous complex key containing an alias resolves safely without panicking.
+    let alias_key = "a: &a 1\n? [*a]\n: val\n";
+    let alias_tree = SpannedTree::parse(alias_key).expect("alias complex key");
+    assert!(
+        alias_tree
+            .lookup(&[PathSegment::Key(ayaml::parse_value("[1]").expect("k"))])
+            .is_none()
+    );
+
+    // 48-deep nested complex key parses and stays fast (linear time).
+    let mut deep = String::new();
+    for _ in 0..48 {
+        deep.push_str("{? ");
+    }
+    deep.push_str("leaf");
+    for _ in 0..48 {
+        deep.push_str(": 1}");
+    }
+    deep.push('\n');
+    let mut outer = String::new();
+    let _ = writeln!(outer, "k: {deep}");
+    let deep_tree = SpannedTree::parse(&outer).expect("48-deep complex key");
+    assert!(deep_tree.span_at(&[key("k")]).is_some());
 }
 
 #[test]

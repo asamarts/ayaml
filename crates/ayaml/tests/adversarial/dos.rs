@@ -670,5 +670,44 @@ fn flow_emitter_stops_immediately_on_limit_or_writer_error() {
                 started.elapsed()
             );
         }
+
+        // 3. Large literal, folded, single-quoted, and double-quoted scalars must fail immediately
+        //    under tight `max_output_bytes` and on the first `io::Write` failure.
+        let big_plain = format!("{}\n{}", "word ".repeat(8_000), "tail ".repeat(8_000));
+        let big_single = "it's ".repeat(16_000);
+        let big_double = "line\x01\"quote\"\\slash\t".repeat(8_000);
+        for (label, style, text) in [
+            ("literal", ayaml::ScalarStyle::Literal, &big_plain),
+            ("folded", ayaml::ScalarStyle::Folded, &big_plain),
+            ("single", ayaml::ScalarStyle::SingleQuoted, &big_single),
+            ("double", ayaml::ScalarStyle::DoubleQuoted, &big_double),
+        ] {
+            let val = Value::String(text.clone());
+            let tight_scalar = EmitOptions::new()
+                .with_scalar_style(Some(style))
+                .with_limits(Limits::default().with_max_output_bytes(64));
+            let err = ayaml::to_string_value_with(&val, &tight_scalar)
+                .expect_err("tight output limit must reject large scalar");
+            assert_eq!(err.kind(), ErrorKind::Limit, "{label}: {err:?}");
+            assert_eq!(
+                err.limit().map(LimitExceeded::kind),
+                Some(LimitKind::OutputBytes),
+                "{label}: {err:?}"
+            );
+
+            let io_opts = EmitOptions::new().with_scalar_style(Some(style));
+            let mut writer = CountingFailWriter {
+                writes: 0,
+                fail_after_bytes: 0,
+                written: 0,
+            };
+            let io_err = ayaml::to_writer_value_with(&mut writer, &val, &io_opts)
+                .expect_err("failing writer must abort scalar emission");
+            assert_eq!(io_err.kind(), ErrorKind::Io, "{label}: {io_err:?}");
+            assert_eq!(
+                writer.writes, 1,
+                "{label}: writer must not be retried after first I/O error"
+            );
+        }
     });
 }

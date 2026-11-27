@@ -77,7 +77,8 @@ fn rules(compat: bool) -> NameRules<'static, 'static> {
 fn a_line_ends_an_alias_name_as_the_scanner_does() {
     // The anchor `a:` is defined on the second line, after the first.
     let input = "*a:\n&a: 1\n*a:\n*b:";
-    let known = HashMap::from([("a:", 4)]);
+    let mut known = HashMap::with_hasher(crate::limits::GlobalHasher);
+    known.insert("a:", 4);
     let none = NameRules {
         compat: true,
         colon_anchors: None,
@@ -812,6 +813,63 @@ fn inline_non_printable_validation_rejects_every_forbidden_context() {
     // NEL U+0085 is printable everywhere in YAML 1.2.
     assert!(scan_err("plain\u{85}text").is_none());
     assert!(scan_err("a: 1 # comment\u{85}text\n").is_none());
+}
+
+#[test]
+fn compat_question_stops_name_handles_all_separators_and_unicode_breaks() {
+    use super::line::compat_question_stops_name;
+
+    // `?` stays inside the name before EOF, blanks, or flow indicators.
+    for keep in [
+        None,
+        Some(' '),
+        Some('\t'),
+        Some('\n'),
+        Some('\r'),
+        Some(','),
+        Some('['),
+        Some(']'),
+        Some('{'),
+        Some('}'),
+    ] {
+        assert!(!compat_question_stops_name(keep, false), "block {keep:?}");
+        assert!(!compat_question_stops_name(keep, true), "flow {keep:?}");
+    }
+    // Outside flow, Unicode line breaks (NEL/LS/PS) keep `?` in the name; inside flow they stop it.
+    for unicode_nl in [Some('\u{85}'), Some('\u{2028}'), Some('\u{2029}')] {
+        assert!(
+            !compat_question_stops_name(unicode_nl, false),
+            "block {unicode_nl:?}"
+        );
+        assert!(
+            compat_question_stops_name(unicode_nl, true),
+            "flow {unicode_nl:?}"
+        );
+    }
+    // Ordinary non-blank text after `?` stops the compat anchor/alias name in both modes.
+    assert!(compat_question_stops_name(Some('a'), false));
+    assert!(compat_question_stops_name(Some('a'), true));
+
+    // Verify `Scanner::with_compat` tokenizes trailing `?` anchors/aliases before Unicode line
+    // breaks and in flow context cleanly.
+    let limits = Limits::default();
+    for input in [
+        "&a?\n1\n",
+        "&a?\u{85}1\n",
+        "&a?\u{2028}1\n",
+        "&a?\u{2029}1\n",
+        "[&a? ]\n",
+        "[&a?\u{85}]\n",
+        "&? 1\n",
+        "*?\n",
+    ] {
+        let mut scanner = Scanner::with_compat(input, &limits, true).expect(input);
+        let mut count = 0_usize;
+        while scanner.next_token(&limits).expect(input).is_some() {
+            count += 1;
+        }
+        assert!(count >= 3, "{input:?}: count={count}");
+    }
 }
 
 const PLAIN_PIECES: &[&str] = &[

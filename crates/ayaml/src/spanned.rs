@@ -11,7 +11,7 @@ use crate::PathSegment;
 use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::{Event, ScalarStyle};
 use crate::limits::Limits;
-use crate::mapping::Mapping;
+use crate::mapping::{GlobalHasher, Mapping};
 use crate::options::ParseOptions;
 use crate::resolver::resolve_scalar;
 use crate::span::Span;
@@ -441,7 +441,7 @@ fn build<'a>(
         // A run of marks opens the input as one mark does.
         marked: input.trim_start_matches('\u{feff}').contains('\u{feff}'),
         suppress_entry_spans,
-        merged_missing_places: suppress_entry_spans.then(HashMap::new),
+        merged_missing_places: suppress_entry_spans.then(|| HashMap::with_hasher(GlobalHasher)),
     };
     for event in events {
         builder.event(event?)?;
@@ -580,7 +580,7 @@ struct Builder<'a> {
     /// When `suppress_entry_spans` is active (merge-key expansion), memoizes originating
     /// `missing_value_place` results by `(key_start, key_end)` so sibling and ancestor merge
     /// replays reuse the exact originating span in O(1) without rescanning blank runs.
-    merged_missing_places: Option<HashMap<(usize, usize), Option<usize>>>,
+    merged_missing_places: Option<HashMap<(usize, usize), Option<usize>, GlobalHasher>>,
 }
 
 struct Frame<'a> {
@@ -598,7 +598,7 @@ struct Frame<'a> {
 
 enum KeyTracker {
     /// Duplicate-key table for regular mappings or complex-key mappings that became unresolvable.
-    Seen(HashMap<Value, usize>),
+    Seen(HashMap<Value, usize, GlobalHasher>),
     /// Bottom-up resolved mapping for an `in_key` mapping whose entries are all unique and
     /// resolvable so far; entries align 1:1 with `FrameKind::Mapping::entries`.
     Resolved(Box<Mapping>),
@@ -750,7 +750,7 @@ impl<'a> Builder<'a> {
                 let keys = if in_key {
                     KeyTracker::Resolved(Box::new(Mapping::new()))
                 } else {
-                    KeyTracker::Seen(HashMap::new())
+                    KeyTracker::Seen(HashMap::with_hasher(GlobalHasher))
                 };
                 self.stack.push(Frame {
                     open: span,
@@ -1036,9 +1036,10 @@ impl<'a> Builder<'a> {
                                     entry.ambiguous = true;
                                 }
                                 ambiguous = true;
-                                if let KeyTracker::Resolved(existing) =
-                                    std::mem::replace(keys, KeyTracker::Seen(HashMap::new()))
-                                    && let KeyTracker::Seen(seen) = keys
+                                if let KeyTracker::Resolved(existing) = std::mem::replace(
+                                    keys,
+                                    KeyTracker::Seen(HashMap::with_hasher(GlobalHasher)),
+                                ) && let KeyTracker::Seen(seen) = keys
                                 {
                                     for (idx, (k, _)) in existing.into_iter().enumerate() {
                                         seen.insert(k, idx);
@@ -1046,9 +1047,10 @@ impl<'a> Builder<'a> {
                                 }
                             } else if !ambiguous && let Some(vv) = node_resolved {
                                 map.insert(kv, *vv);
-                            } else if let KeyTracker::Resolved(existing) =
-                                std::mem::replace(keys, KeyTracker::Seen(HashMap::new()))
-                                && let KeyTracker::Seen(seen) = keys
+                            } else if let KeyTracker::Resolved(existing) = std::mem::replace(
+                                keys,
+                                KeyTracker::Seen(HashMap::with_hasher(GlobalHasher)),
+                            ) && let KeyTracker::Seen(seen) = keys
                             {
                                 for (idx, (k, _)) in existing.into_iter().enumerate() {
                                     seen.insert(k, idx);
@@ -1057,7 +1059,7 @@ impl<'a> Builder<'a> {
                                 seen.entry(kv).or_insert(index);
                             }
                         } else {
-                            *keys = KeyTracker::Seen(HashMap::new());
+                            *keys = KeyTracker::Seen(HashMap::with_hasher(GlobalHasher));
                         }
                     }
                     KeyTracker::Seen(seen) => {
@@ -1631,7 +1633,7 @@ mod tests {
                 anchored_depth: 0,
                 marked: input.trim_start_matches('\u{feff}').contains('\u{feff}'),
                 suppress_entry_spans: merge_keys,
-                merged_missing_places: merge_keys.then(HashMap::new),
+                merged_missing_places: merge_keys.then(|| HashMap::with_hasher(GlobalHasher)),
             };
             for event in events {
                 builder.event(event.expect("event")).expect("build");
@@ -1752,5 +1754,44 @@ mod tests {
             .expect("sibling merged k0");
         assert_eq!(outer_k0, base_k0);
         assert_eq!(sibling_k0, base_k0);
+    }
+
+    #[test]
+    fn compact_first_entry_span_refuses_intervening_comments_and_merge_suppresses_entries() {
+        let with_comment = "- a: 1\n  # comment about b\n  b: 2\n";
+        let tree = SpannedTree::parse(with_comment).expect("tree");
+        assert_eq!(
+            tree.entry_span_at(&[PathSegment::Index(0), PathSegment::Key(Value::from("a"))]),
+            None,
+            "compact first entry followed by comment must not produce an entry_span"
+        );
+        let without_comment = "- a: 1\n  b: 2\n";
+        let clean_tree = SpannedTree::parse(without_comment).expect("clean tree");
+        assert_eq!(
+            clean_tree
+                .entry_span_at(&[PathSegment::Index(0), PathSegment::Key(Value::from("a"))])
+                .and_then(|s| s.slice(without_comment)),
+            Some("a: 1\n  ")
+        );
+
+        let merged = "base: &b\n  k: 1\nout:\n  <<: *b\n  own: 2\n";
+        let opts = ParseOptions::new().with_merge_keys(true);
+        let merged_tree = SpannedTree::parse_with(merged, &opts).expect("merged tree");
+        assert!(
+            merged_tree
+                .span_at(&[
+                    PathSegment::Key(Value::from("out")),
+                    PathSegment::Key(Value::from("k")),
+                ])
+                .is_some()
+        );
+        assert_eq!(
+            merged_tree.entry_span_at(&[
+                PathSegment::Key(Value::from("out")),
+                PathSegment::Key(Value::from("own")),
+            ]),
+            None,
+            "merge_keys=true must suppress entry_span conservatively"
+        );
     }
 }

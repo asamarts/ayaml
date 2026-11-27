@@ -54,7 +54,7 @@ pub(super) enum FlowLack {
     Node(ErrorCode, String),
 }
 
-/// A run of one logical line's tokens in the shared token arena.
+/// A run of one logical line's tokens in the active line window.
 /// Every token slice the grammar works on is one; a flow collection is
 /// always on one logical line.
 #[derive(Clone, Copy, Debug)]

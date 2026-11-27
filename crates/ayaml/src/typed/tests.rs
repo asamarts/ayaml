@@ -225,4 +225,13 @@ fn a_value_read_from_events_keeps_no_spare_room() {
     grown.shrink_to_fit();
     assert_eq!(grown.capacity(), 5);
     assert_eq!(grown.len(), 5);
+
+    // Invalid limits must fail with `InvalidLimits` before `InputBytes` even when input exceeds
+    // `max_input_bytes`.
+    let invalid = Limits::default()
+        .with_max_input_bytes(2)
+        .with_node_cost_bytes(0);
+    let err = stream::read("abcdef: 1\n", &invalid, options, PhantomData::<Value>)
+        .expect_err("invalid limits before input bytes");
+    assert_eq!(err.code(), ErrorCode::InvalidLimits);
 }

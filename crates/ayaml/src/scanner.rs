@@ -12,7 +12,7 @@ use std::fmt;
 
 use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::ScalarStyle;
-use crate::limits::Limits;
+use crate::limits::{GlobalHasher, Limits};
 use crate::position::{
     is_forbidden_control_byte, is_quoted_only_non_printable, line_start_of, location_at,
     starts_with_document_marker,
@@ -47,7 +47,7 @@ const BOM_FIRST_BYTE: u8 = 0xEF;
 const EMPTY_LINE_TAB: &str =
     "a tab cannot indent an empty line inside a scalar under a block collection";
 
-/// Sentinel partner index for an unmatched flow opener (`[` or `{`).
+/// Sentinel relative distance for an unmatched flow opener (`[` or `{`).
 pub(crate) const UNMATCHED_FLOW: u32 = u32::MAX;
 
 /// The token vocabulary the scanner currently produces.
@@ -141,8 +141,8 @@ impl fmt::Display for TokenKind<'_> {
 /// Active and pending `%TAG` handle tables, allocated lazily only when a document defines `%TAG`.
 #[derive(Debug, Default)]
 struct TagHandles {
-    active: HashMap<String, String>,
-    pending: HashMap<String, String>,
+    active: HashMap<String, String, GlobalHasher>,
+    pending: HashMap<String, String, GlobalHasher>,
 }
 
 /// An iterative scanner over a UTF-8 YAML input.
@@ -201,7 +201,7 @@ pub(crate) struct Scanner<'a> {
     /// In compat, the anchor names ending in `:` defined so far in this document, each with the
     /// offset of its first definition. An alias keeps such a colon only if an anchor before it has
     /// that exact name.
-    colon_anchors: Option<HashMap<&'a str, usize>>,
+    colon_anchors: Option<HashMap<&'a str, usize, GlobalHasher>>,
     /// Whether a document has started: a `---`, or any node token since the
     /// last `...`. A byte order mark may appear only outside a document or
     /// right before the next one.
@@ -1429,7 +1429,7 @@ impl<'a> Scanner<'a> {
                 .map_err(|error| self.limit_at(start, error))?;
             if self.compat_flow && name.ends_with(':') {
                 self.colon_anchors
-                    .get_or_insert_with(HashMap::new)
+                    .get_or_insert_with(|| HashMap::with_hasher(GlobalHasher))
                     .entry(&self.input[name_start..self.pos])
                     .or_insert(start);
             }
