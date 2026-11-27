@@ -225,23 +225,48 @@ impl<'a> Parser<'a> {
                 }
             };
             state.entries += 1;
-            let span = self.last_span(state.current_index as usize);
+            let entry_index = state.current_index as usize;
             self.limits
                 .check_collection_entries(state.entries as usize)
-                .map_err(|error| self.limit_at(span, error))?;
-            // The overwhelmingly common block-sequence entry is one scalar.
-            // Emit it inline so a wide sequence does not pay a continuation
-            // stack push/pop and nested parser call for every item.
-            if self.is_single_scalar(rest) {
-                self.emit_scalar_token(rest, 0, None, None)?;
-                state.current_index = fit_u32(next_index);
-                // A reader that takes the events one at a time gets its turn here, so that
-                // they don't all wait for it at once.
-                if self.sink.is_full() {
-                    stack.push(Cont::Sequence(state));
-                    return Ok(Step::Return(next_index));
+                .map_err(|error| {
+                    let span = self.last_span(entry_index);
+                    self.limit_at(span, error)
+                })?;
+            // The overwhelmingly common block-sequence entry is a single scalar or alias.
+            // Emit it inline so a wide sequence does not pay continuation stack push/pop
+            // and nested parser calls for every item.
+            if rest.len() == 1 {
+                let kind = &self.token(rest, 0).kind;
+                if matches!(
+                    kind,
+                    TokenKind::PlainScalar
+                        | TokenKind::SingleQuotedScalar
+                        | TokenKind::DoubleQuotedScalar
+                        | TokenKind::Scalar(_)
+                ) {
+                    self.emit_scalar_token(rest, 0, None, None)?;
+                    state.current_index = fit_u32(next_index);
+                    // A reader that takes the events one at a time gets its turn here, so that
+                    // they don't all wait for it at once.
+                    if self.sink.is_full() {
+                        stack.push(Cont::Sequence(state));
+                        return Ok(Step::Return(next_index));
+                    }
+                    continue;
                 }
-                continue;
+                if matches!(kind, TokenKind::Alias) {
+                    let span = self.token(rest, 0).span;
+                    self.emit(Event::Alias {
+                        anchor: Anchor::new(&self.input[span.start() + 1..span.end()]),
+                        span,
+                    })?;
+                    state.current_index = fit_u32(next_index);
+                    if self.sink.is_full() {
+                        stack.push(Cont::Sequence(state));
+                        return Ok(Step::Return(next_index));
+                    }
+                    continue;
+                }
             }
             let (indent, depth) = (state.indent as usize, state.depth as usize);
             stack.push(Cont::Sequence(state));
