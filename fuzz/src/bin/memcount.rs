@@ -481,7 +481,130 @@ fn format_jsonl_row(
     )
 }
 
+fn measure_tape_or_buf_mode(
+    fixture: &ayaml_fixtures::Fixture,
+    mode: &str,
+) -> Result<Option<AllocSample>, String> {
+    let input = &fixture.content;
+    let sample = match mode {
+        "tape" => measure_op(false, || {
+            if fixture.multi_document {
+                let docs = ayaml::parse_tape_documents(input).expect("parse_tape_documents");
+                black_box(docs.len())
+            } else {
+                let tape = ayaml::parse_tape(input).expect("parse_tape");
+                black_box(tape.root().kind() as usize)
+            }
+        }),
+        "tape_buf" => {
+            let mut buf = ayaml::ParserBuf::new();
+            if fixture.multi_document {
+                drop(black_box(
+                    buf.parse_tape_documents(input).expect("warmup tape_docs"),
+                ));
+                measure_op(false, || {
+                    let docs = buf.parse_tape_documents(input).expect("tape_buf docs");
+                    black_box(docs.len())
+                })
+            } else {
+                drop(black_box(buf.parse_tape(input).expect("warmup tape")));
+                measure_op(false, || {
+                    let tape = buf.parse_tape(input).expect("tape_buf");
+                    black_box(tape.root().kind() as usize)
+                })
+            }
+        }
+        "tape_buf_recycle" => {
+            let mut buf = ayaml::ParserBuf::new();
+            if fixture.multi_document {
+                let warm = buf.parse_tape_documents(input).expect("warmup tape_docs");
+                warm.recycle_into(&mut buf);
+                measure_op(false, || {
+                    let docs = buf
+                        .parse_tape_documents(input)
+                        .expect("tape_buf_recycle docs");
+                    let n = docs.len();
+                    docs.recycle_into(&mut buf);
+                    black_box(n)
+                })
+            } else {
+                let warm = buf.parse_tape(input).expect("warmup tape");
+                warm.recycle_into(&mut buf);
+                measure_op(false, || {
+                    let tape = buf.parse_tape(input).expect("tape_buf_recycle");
+                    let k = tape.root().kind() as usize;
+                    tape.recycle_into(&mut buf);
+                    black_box(k)
+                })
+            }
+        }
+        "parse_value_buf" => {
+            let mut buf = ayaml::ParserBuf::new();
+            if fixture.multi_document {
+                drop(black_box(buf.parse_documents(input).expect("warmup docs")));
+                measure_op(false, || {
+                    buf.parse_documents(input).expect("parse_value_buf docs")
+                })
+            } else {
+                drop(black_box(buf.parse_value(input).expect("warmup val")));
+                measure_op(false, || buf.parse_value(input).expect("parse_value_buf"))
+            }
+        }
+        "from_str_buf" => {
+            if fixture.multi_document {
+                return Err(format!(
+                    "from_str_buf requires single-document fixture (got {})",
+                    fixture.id
+                ));
+            }
+            let mut buf = ayaml::ParserBuf::new();
+            match fixture.id.as_str() {
+                "frontmatter-tiny" => {
+                    drop(black_box(
+                        buf.from_str::<FrontmatterBorrowed<'_>>(input)
+                            .expect("warmup frontmatter"),
+                    ));
+                    measure_op(false, || {
+                        buf.from_str::<FrontmatterBorrowed<'_>>(input)
+                            .expect("from_str_buf frontmatter")
+                    })
+                }
+                id if id.starts_with("boundary-") => {
+                    drop(black_box(
+                        buf.from_str::<BoundaryBorrowed<'_>>(input)
+                            .expect("warmup boundary"),
+                    ));
+                    measure_op(false, || {
+                        buf.from_str::<BoundaryBorrowed<'_>>(input)
+                            .expect("from_str_buf boundary")
+                    })
+                }
+                _ => {
+                    drop(black_box(
+                        buf.from_str::<ayaml::Value>(input).expect("warmup value"),
+                    ));
+                    measure_op(false, || {
+                        buf.from_str::<ayaml::Value>(input)
+                            .expect("from_str_buf value")
+                    })
+                }
+            }
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(sample))
+}
+
 fn measure_fixture_mode(fixture: &ayaml_fixtures::Fixture, mode: &str) -> Result<String, String> {
+    if let Some(sample) = measure_tape_or_buf_mode(fixture, mode)? {
+        return Ok(format_jsonl_row(
+            &fixture.id,
+            fixture.bytes,
+            &fixture.sha256,
+            mode,
+            sample,
+        ));
+    }
     let input = &fixture.content;
     let sample = match mode {
         "scan" => {
@@ -560,113 +683,6 @@ fn measure_fixture_mode(fixture: &ayaml_fixtures::Fixture, mode: &str) -> Result
         "spanned_tree" => measure_op(false, || {
             ayaml::SpannedTree::parse(input).expect("SpannedTree::parse")
         }),
-        "tape" => measure_op(false, || {
-            if fixture.multi_document {
-                let docs = ayaml::parse_tape_documents(input).expect("parse_tape_documents");
-                black_box(docs.len())
-            } else {
-                let tape = ayaml::parse_tape(input).expect("parse_tape");
-                black_box(tape.root().kind() as usize)
-            }
-        }),
-        "tape_buf" => {
-            let mut buf = ayaml::ParserBuf::new();
-            if fixture.multi_document {
-                drop(black_box(
-                    buf.parse_tape_documents(input).expect("warmup tape_docs"),
-                ));
-                measure_op(false, || {
-                    let docs = buf.parse_tape_documents(input).expect("tape_buf docs");
-                    black_box(docs.len())
-                })
-            } else {
-                drop(black_box(buf.parse_tape(input).expect("warmup tape")));
-                measure_op(false, || {
-                    let tape = buf.parse_tape(input).expect("tape_buf");
-                    black_box(tape.root().kind() as usize)
-                })
-            }
-        }
-        "tape_buf_recycle" => {
-            let mut buf = ayaml::ParserBuf::new();
-            if fixture.multi_document {
-                let warm = buf.parse_tape_documents(input).expect("warmup tape_docs");
-                warm.recycle_into(&mut buf);
-                measure_op(false, || {
-                    let docs = buf
-                        .parse_tape_documents(input)
-                        .expect("tape_buf_recycle docs");
-                    let n = docs.len();
-                    docs.recycle_into(&mut buf);
-                    black_box(n)
-                })
-            } else {
-                let warm = buf.parse_tape(input).expect("warmup tape");
-                warm.recycle_into(&mut buf);
-                measure_op(false, || {
-                    let tape = buf.parse_tape(input).expect("tape_buf_recycle");
-                    let k = tape.root().kind() as usize;
-                    tape.recycle_into(&mut buf);
-                    black_box(k)
-                })
-            }
-        }
-        "parse_value_buf" => {
-            let mut buf = ayaml::ParserBuf::new();
-            if fixture.multi_document {
-                drop(black_box(
-                    buf.parse_documents(input).expect("warmup docs"),
-                ));
-                measure_op(false, || {
-                    buf.parse_documents(input).expect("parse_value_buf docs")
-                })
-            } else {
-                drop(black_box(buf.parse_value(input).expect("warmup val")));
-                measure_op(false, || {
-                    buf.parse_value(input).expect("parse_value_buf")
-                })
-            }
-        }
-        "from_str_buf" => {
-            if fixture.multi_document {
-                return Err(format!(
-                    "from_str_buf requires single-document fixture (got {})",
-                    fixture.id
-                ));
-            }
-            let mut buf = ayaml::ParserBuf::new();
-            match fixture.id.as_str() {
-                "frontmatter-tiny" => {
-                    drop(black_box(
-                        buf.from_str::<FrontmatterBorrowed<'_>>(input)
-                            .expect("warmup frontmatter"),
-                    ));
-                    measure_op(false, || {
-                        buf.from_str::<FrontmatterBorrowed<'_>>(input)
-                            .expect("from_str_buf frontmatter")
-                    })
-                }
-                id if id.starts_with("boundary-") => {
-                    drop(black_box(
-                        buf.from_str::<BoundaryBorrowed<'_>>(input)
-                            .expect("warmup boundary"),
-                    ));
-                    measure_op(false, || {
-                        buf.from_str::<BoundaryBorrowed<'_>>(input)
-                            .expect("from_str_buf boundary")
-                    })
-                }
-                _ => {
-                    drop(black_box(
-                        buf.from_str::<ayaml::Value>(input).expect("warmup value"),
-                    ));
-                    measure_op(false, || {
-                        buf.from_str::<ayaml::Value>(input)
-                            .expect("from_str_buf value")
-                    })
-                }
-            }
-        }
         "emit_value" => {
             if fixture.multi_document {
                 let docs = ayaml::parse_documents(input).expect("parse_docs");
