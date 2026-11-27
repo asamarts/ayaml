@@ -220,7 +220,7 @@ fn allocation_budgets_cover_the_json_decode() {
 
 /// The gate checks each of its three budget files, and CI runs the gate with no argument and
 /// under no condition. What the gate does with the files is tested by running it, in the
-/// `AllocationGate` tests of `tools/test_ci_checks.py`; this pins what those can't see, the
+/// `AllocationGate` tests of `tools/test_perf_gates.py`; this pins what those can't see, the
 /// files it reads by default and the step that runs it.
 #[test]
 fn the_allocation_gate_checks_every_budget_file() {
@@ -531,6 +531,7 @@ fn every_place_that_repeats_the_version_agrees_with_the_workspace() {
         );
     }
     for (name, dep) in [
+        ("crates/ayaml-bench/Cargo.toml", "ayaml-edit = {"),
         ("crates/ayaml-bench/Cargo.toml", "ayaml-fixtures = {"),
         ("crates/ayaml-conformance/Cargo.toml", "ayaml-edit = {"),
         ("crates/xtask/Cargo.toml", "ayaml-fixtures = {"),

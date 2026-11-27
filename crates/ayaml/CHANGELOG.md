@@ -64,6 +64,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mapping.
 - `Deserializer::next` and `Deserializer::next_seed` now decode directly from spanned events
   without composing an intermediate owned `Value`.
+- Hardened benchmark tooling and CI performance gates (`AY-174`): added `memcount --jsonl --suite full`
+  covering all 40 catalog fixtures, aligned `site/src/data/benchmarks/fingerprint.json`'s
+  `fixture_manifest_sha256` with `ayaml_fixtures::manifest()`, extended `xtask` schemas and
+  `compare`/`gate`/`report` to preserve optional `implementation`/`rounds` fields and sanitized
+  published fingerprints without colliding across implementations, ratcheted
+  `tools/alloc-baseline.jsonl` (73 cases) and `tools/{alloc,typed-alloc,json-alloc}-corpus.tsv`
+  (40 budgets) with `>15%` downward-slack ratchet warnings in `tools/check_alloc_baseline.py`,
+  split `tools/instruction-rises.tsv` into separate `IR_PERCENT` and `CYCLES_PERCENT` columns
+  with a pinned release-baseline snapshot (`tools/instruction-baseline.jsonl`) guarding against
+  multi-PR cumulative creep, and expanded `instruction-probe.rs`, `ayaml-bench`, and `memcount`
+  coverage to `ayaml-edit`, `frontmatter`, `merge_keys`, `Spanned<T>`, `DocumentDeserializer`,
+  `from_reader`, `depth-64`, and `libyaml-compat`.
 
 ### Deprecated
 

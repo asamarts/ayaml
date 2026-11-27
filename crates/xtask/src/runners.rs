@@ -207,6 +207,7 @@ pub(crate) fn collect_criterion_records(
         };
         records.push(SpeedRecord {
             schema_version: SCHEMA_VERSION,
+            implementation: None,
             scenario,
             operation,
             bytes,
@@ -215,6 +216,7 @@ pub(crate) fn collect_criterion_records(
             mean_ns: (mean_ns * 1000.0).round() / 1000.0,
             stddev_ns: (stddev_ns * 1000.0).round() / 1000.0,
             throughput_mib_s: (throughput_mib_s * 1000.0).round() / 1000.0,
+            rounds: None,
         });
     }
     if records.is_empty() {
@@ -305,6 +307,11 @@ pub(crate) fn run_memory(
     fixture: Option<&str>,
     out_dir: &Path,
 ) -> Result<(), String> {
+    if fixture.is_none() && !matches!(suite, "baseline" | "full") {
+        return Err(format!(
+            "invalid --suite value {suite:?} (expected `baseline` or `full`)"
+        ));
+    }
     let output = run_memcount_jsonl(repo_root, suite, fixture)?;
     let mut rows = Vec::new();
     for line in output.lines().filter(|l| !l.trim().is_empty()) {
@@ -493,7 +500,9 @@ pub(crate) fn run_compare(
 ) -> Result<(), String> {
     let md = compare_dirs(baseline, current)?;
     if let Some(path) = out {
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("creating {}: {e}", parent.display()))?;
         }
@@ -589,7 +598,9 @@ pub(crate) fn run_gate(
 pub(crate) fn run_report(dir: &Path, title: &str, out: Option<&Path>) -> Result<(), String> {
     let md = render_report(dir, title)?;
     if let Some(path) = out {
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("creating {}: {e}", parent.display()))?;
         }

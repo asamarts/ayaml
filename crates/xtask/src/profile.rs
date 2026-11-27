@@ -302,6 +302,8 @@ fn capture_callgrind_target(
                 .args([
                     "--tool=callgrind",
                     "--cache-sim=yes",
+                    "--I1=32768,8,64",
+                    "--LL=8388608,16,64",
                     "--branch-sim=yes",
                     "--collect-atstart=no",
                     "--toggle-collect=*__ayaml_memcount_measure*",

@@ -1,4 +1,4 @@
-//! Steady-state Callgrind probe for `tools/check_instructions.py` (AY-139).
+//! Steady-state Callgrind probe for `tools/check_instructions.py` (AY-139, AY-174).
 //!
 //! Usage:
 //!   probe --dump-fixtures DIR
@@ -7,9 +7,13 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::hint::black_box;
+use std::io::Cursor;
 use std::path::Path;
 
-use ayaml::{ColumnEncoding, LineIndex, SpannedTree, Value};
+use ayaml::{
+    ColumnEncoding, DocumentDeserializer, LineIndex, ParseOptions, PathSegment, Spanned,
+    SpannedTree, Value,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -43,6 +47,22 @@ struct FrontmatterBorrowed<'a> {
     tags: Vec<&'a str>,
 }
 
+#[allow(
+    dead_code,
+    reason = "fields are populated by Serde during Spanned<T> Callgrind measurement"
+)]
+#[derive(Clone, Debug, Deserialize)]
+struct FrontmatterSpanned {
+    id: Spanned<String>,
+    title: Spanned<String>,
+    phase: Spanned<u32>,
+    status: Spanned<String>,
+    effort_days: Spanned<f64>,
+    blocked_by: Vec<Spanned<String>>,
+    paths: Vec<Spanned<String>>,
+    tags: Vec<Spanned<String>>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct BoundaryOwned {
     service: String,
@@ -60,17 +80,40 @@ struct BoundaryBorrowed<'a> {
     entries: BTreeMap<&'a str, Cow<'a, str>>,
 }
 
+#[allow(
+    dead_code,
+    reason = "fields are populated by Serde during Spanned<T> Callgrind measurement"
+)]
+#[derive(Clone, Debug, Deserialize)]
+struct BoundarySpanned {
+    service: Spanned<String>,
+    entries: BTreeMap<String, Spanned<String>>,
+}
+
 const PROBE_FIXTURES: &[&str] = &[
     "frontmatter-tiny",
     "boundary-4kb-below",
     "boundary-4kb-above",
     "ci-workflow",
+    "container-compose",
     "escape-routes",
     "unicode-multibyte",
+    "depth-64",
     "aliases-1000",
     "nested-keys",
     "typed-mismatch-late",
 ];
+
+fn wrap_frontmatter_doc(yaml: &str) -> String {
+    let mut doc = String::with_capacity(yaml.len() + 64);
+    doc.push_str("---\n");
+    doc.push_str(yaml);
+    if !yaml.ends_with('\n') {
+        doc.push('\n');
+    }
+    doc.push_str("---\n# Benchmark Body\n\nBody paragraph following YAML frontmatter.\n");
+    doc
+}
 
 fn walk(value: &Value) -> usize {
     match value {
@@ -237,6 +280,112 @@ fn main() {
                 let err = ayaml::from_str::<BTreeMap<String, u64>>(&input)
                     .expect_err("expected late typed decode error");
                 black_box(err);
+            }
+        }
+        "edit" => {
+            let (seg, repl) = match name {
+                "frontmatter-tiny" => (PathSegment::key("status"), Value::String("done".into())),
+                s if s.starts_with("boundary-") => (
+                    PathSegment::key("service"),
+                    Value::String("updated-svc".into()),
+                ),
+                other => panic!("unsupported workload for edit: {other}"),
+            };
+            let path_segs = [seg];
+            for _ in 0..iterations {
+                black_box(
+                    ayaml_edit::replace_scalar(&input, &path_segs, &repl).expect("ayaml-edit"),
+                );
+            }
+        }
+        "frontmatter" => {
+            let wrapped = wrap_frontmatter_doc(&input);
+            for _ in 0..iterations {
+                let parsed = ayaml::parse_frontmatter::<FrontmatterBorrowed<'_>>(&wrapped)
+                    .expect("parse_frontmatter")
+                    .expect("frontmatter block");
+                black_box(parsed);
+            }
+        }
+        "merge_keys" => {
+            let opts = ParseOptions::new().with_merge_keys(true);
+            for _ in 0..iterations {
+                black_box(ayaml::parse_value_with(&input, &opts).expect("merge_keys"));
+            }
+        }
+        "spanned_typed" => match name {
+            "frontmatter-tiny" => {
+                for _ in 0..iterations {
+                    black_box(
+                        ayaml::from_str::<FrontmatterSpanned>(&input).expect("frontmatter spanned"),
+                    );
+                }
+            }
+            s if s.starts_with("boundary-") => {
+                for _ in 0..iterations {
+                    black_box(
+                        ayaml::from_str::<BoundarySpanned>(&input).expect("boundary spanned"),
+                    );
+                }
+            }
+            _ => {
+                for _ in 0..iterations {
+                    black_box(
+                        ayaml::from_str::<BTreeMap<String, Spanned<Value>>>(&input)
+                            .expect("spanned map"),
+                    );
+                }
+            }
+        },
+        "doc_de" => match name {
+            "frontmatter-tiny" => {
+                for _ in 0..iterations {
+                    let de = DocumentDeserializer::from_str(&input).expect("doc_de");
+                    black_box(FrontmatterBorrowed::deserialize(de).expect("doc_de frontmatter"));
+                }
+            }
+            s if s.starts_with("boundary-") => {
+                for _ in 0..iterations {
+                    let de = DocumentDeserializer::from_str(&input).expect("doc_de");
+                    black_box(BoundaryBorrowed::deserialize(de).expect("doc_de boundary"));
+                }
+            }
+            _ => {
+                for _ in 0..iterations {
+                    let de = DocumentDeserializer::from_str(&input).expect("doc_de");
+                    black_box(Value::deserialize(de).expect("doc_de value"));
+                }
+            }
+        },
+        "from_reader" => match name {
+            "frontmatter-tiny" => {
+                for _ in 0..iterations {
+                    black_box(
+                        ayaml::from_reader::<_, FrontmatterOwned>(Cursor::new(input.as_bytes()))
+                            .expect("from_reader frontmatter"),
+                    );
+                }
+            }
+            s if s.starts_with("boundary-") => {
+                for _ in 0..iterations {
+                    black_box(
+                        ayaml::from_reader::<_, BoundaryOwned>(Cursor::new(input.as_bytes()))
+                            .expect("from_reader boundary"),
+                    );
+                }
+            }
+            _ => {
+                for _ in 0..iterations {
+                    black_box(
+                        ayaml::from_reader::<_, Value>(Cursor::new(input.as_bytes()))
+                            .expect("from_reader value"),
+                    );
+                }
+            }
+        },
+        "compat" => {
+            for _ in 0..iterations {
+                black_box(ayaml::compat::from_str::<Value>(&input).expect("libyaml-compat"));
             }
         }
         other => panic!("unknown operation {other}"),

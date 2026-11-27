@@ -16,9 +16,15 @@
 
 use std::borrow::Cow;
 use std::fmt::{self, Display};
+use std::marker::PhantomData;
 use std::time::Duration;
 
 pub use std::hint::black_box;
+
+pub mod measurement {
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct WallTime;
+}
 
 /// Non-inlined measurement boundary targeted by Callgrind `--toggle-collect=*__ayaml_det_measure*`
 /// and by DHAT stack frame scoping. Dropping `black_box(routine())` inside this boundary ensures
@@ -55,10 +61,14 @@ impl Default for Criterion {
 }
 
 impl Criterion {
-    pub fn benchmark_group<S: Into<String>>(&mut self, name: S) -> BenchmarkGroup<'_> {
+    pub fn benchmark_group<S: Into<String>>(
+        &mut self,
+        name: S,
+    ) -> BenchmarkGroup<'_, measurement::WallTime> {
         BenchmarkGroup {
             c: self,
             name: name.into(),
+            _m: PhantomData,
         }
     }
 
@@ -128,12 +138,13 @@ impl Criterion {
     }
 }
 
-pub struct BenchmarkGroup<'a> {
+pub struct BenchmarkGroup<'a, M = measurement::WallTime> {
     c: &'a mut Criterion,
     name: String,
+    _m: PhantomData<M>,
 }
 
-impl BenchmarkGroup<'_> {
+impl<M> BenchmarkGroup<'_, M> {
     pub fn throughput(&mut self, _: Throughput) -> &mut Self {
         self
     }

@@ -30,6 +30,9 @@ MAX_BYTES_PERCENT = 10.0
 MIN_BYTES_FLOOR = 512
 MAX_ALLOCS_PERCENT = 5.0
 MIN_ALLOCS_FLOOR = 4
+# Warn when actual peak bytes or allocations drop more than this percentage below baseline.
+SLACK_WARN_PERCENT = 15.0
+SLACK_METRICS = ("peak_bytes", "allocations")
 
 REQUIRED_INT_FIELDS = (
     "schema_version",
@@ -131,6 +134,33 @@ def compare_baselines(
     return violations
 
 
+def find_slack_warnings(
+    baseline: dict[tuple[str, str], dict[str, Any]],
+    current: dict[tuple[str, str], dict[str, Any]],
+    *,
+    slack_warn_pct: float = SLACK_WARN_PERCENT,
+) -> list[str]:
+    """Return ratchet warnings when actual peak bytes or allocations drop more than `slack_warn_pct`% below baseline."""
+    warnings: list[str] = []
+    for key in sorted(baseline):
+        base = baseline[key]
+        cur = current.get(key)
+        if cur is None or cur["fixture_sha256"] != base["fixture_sha256"]:
+            continue
+        scenario, operation = key
+        for metric in SLACK_METRICS:
+            bval = int(base[metric])
+            cval = int(cur[metric])
+            if bval > 0 and cval < bval:
+                drop_pct = (bval - cval) * 100.0 / bval
+                if drop_pct > slack_warn_pct:
+                    warnings.append(
+                        f"{scenario} [{operation}]: {metric} dropped {bval} -> {cval} "
+                        f"(-{drop_pct:.2f}%, >{slack_warn_pct:g}% below baseline; ratchet with --record)"
+                    )
+    return warnings
+
+
 def run_memcount_baseline(repo_root: Path = ROOT) -> str:
     cmd = [
         "cargo",
@@ -154,6 +184,12 @@ def run_memcount_baseline(repo_root: Path = ROOT) -> str:
     return proc.stdout
 
 
+def _validate_nonneg_finite(flag: str, value: float) -> str | None:
+    if not math.isfinite(value) or value < 0.0:
+        return f"invalid {flag} value {value!r}: must be a finite number >= 0.0"
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE)
@@ -161,11 +197,38 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--record", action="store_true")
     parser.add_argument("--max-bytes-pct", type=float, default=MAX_BYTES_PERCENT)
     parser.add_argument("--max-allocs-pct", type=float, default=MAX_ALLOCS_PERCENT)
+    parser.add_argument("--slack-warn-pct", type=float, default=SLACK_WARN_PERCENT)
+    parser.add_argument(
+        "--strict-slack",
+        action="store_true",
+        help="fail with exit code 1 if any row has >slack-warn-pct downward slack",
+    )
     args = parser.parse_args(argv)
 
+    for flag, val in (
+        ("--max-bytes-pct", args.max_bytes_pct),
+        ("--max-allocs-pct", args.max_allocs_pct),
+        ("--slack-warn-pct", args.slack_warn_pct),
+    ):
+        err = _validate_nonneg_finite(flag, val)
+        if err is not None:
+            print(err, file=sys.stderr)
+            return 2
+
     if args.record:
+        if args.current is not None or args.strict_slack:
+            print(
+                "--record cannot be combined with --current or --strict-slack",
+                file=sys.stderr,
+            )
+            return 2
         output = run_memcount_baseline()
-        rows = parse_jsonl(output, "memcount")
+        try:
+            rows = parse_jsonl(output, "memcount")
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        args.baseline.parent.mkdir(parents=True, exist_ok=True)
         args.baseline.write_text(output, encoding="utf-8")
         print(f"recorded {len(rows)} baseline allocation rows to {args.baseline}")
         return 0
@@ -173,20 +236,40 @@ def main(argv: list[str] | None = None) -> int:
     if not args.baseline.is_file():
         print(f"allocation baseline missing: {args.baseline}", file=sys.stderr)
         return 2
+    if args.current is not None and not args.current.is_file():
+        print(f"current allocation file missing: {args.current}", file=sys.stderr)
+        return 2
 
-    baseline_rows = parse_jsonl(args.baseline.read_text(encoding="utf-8"), str(args.baseline))
-    current_text = (
-        args.current.read_text(encoding="utf-8")
-        if args.current is not None
-        else run_memcount_baseline()
-    )
-    current_rows = parse_jsonl(current_text, str(args.current or "memcount"))
+    try:
+        baseline_rows = parse_jsonl(args.baseline.read_text(encoding="utf-8"), str(args.baseline))
+        current_text = (
+            args.current.read_text(encoding="utf-8")
+            if args.current is not None
+            else run_memcount_baseline()
+        )
+        current_rows = parse_jsonl(current_text, str(args.current or "memcount"))
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     violations = compare_baselines(
         baseline_rows,
         current_rows,
         max_bytes_pct=args.max_bytes_pct,
         max_allocs_pct=args.max_allocs_pct,
     )
+    slack_warnings = find_slack_warnings(
+        baseline_rows,
+        current_rows,
+        slack_warn_pct=args.slack_warn_pct,
+    )
+    if slack_warnings:
+        for w in slack_warnings:
+            print(f"WARN: {w}", file=sys.stderr)
+        print(
+            f"NOTE: {len(slack_warnings)} metric(s) dropped >{args.slack_warn_pct:g}% below baseline; "
+            "run 'python3 tools/check_alloc_baseline.py --record' to ratchet.",
+            file=sys.stderr,
+        )
     if violations:
         for v in violations:
             print(f"FAIL: {v}", file=sys.stderr)
@@ -194,6 +277,8 @@ def main(argv: list[str] | None = None) -> int:
             f"\n{len(violations)} allocation baseline violation(s) across {len(baseline_rows)} cases",
             file=sys.stderr,
         )
+        return 1
+    if args.strict_slack and slack_warnings:
         return 1
     print(f"checked {len(baseline_rows)} structured JSONL allocation baseline cases: OK")
     return 0

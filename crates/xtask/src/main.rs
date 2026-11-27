@@ -75,29 +75,33 @@ fn dispatch(args: &[String]) -> Result<(), String> {
     let root = repo_root()?;
     let default_out = root.join("target").join("xtask");
     match args.first().map(String::as_str) {
-        Some("fixtures") => {
-            let sub = &args[1..];
-            let as_json = has_flag(sub, "--json");
-            let verify = has_flag(sub, "--verify");
-            let out_dir = option_value(sub, "--out-dir").map(PathBuf::from);
-            run_fixtures(&root, as_json, verify, out_dir.as_deref())
-        }
-        Some("speed") => {
-            let sub = &args[1..];
-            let filter = option_value(sub, "--filter");
-            let quick = has_flag(sub, "--quick");
-            let out_dir =
-                option_value(sub, "--out-dir").map_or_else(|| default_out.clone(), PathBuf::from);
-            run_speed(&root, filter, quick, &out_dir)
-        }
-        Some("memory") => {
-            let sub = &args[1..];
-            let suite = option_value(sub, "--suite").unwrap_or("baseline");
-            let fixture = option_value(sub, "--fixture");
-            let out_dir =
-                option_value(sub, "--out-dir").map_or_else(|| default_out.clone(), PathBuf::from);
-            run_memory(&root, suite, fixture, &out_dir)
-        }
+        Some("fixtures") => match parse_fixtures_args(&args[1..])? {
+            SubCmd::Help => {
+                print!("{USAGE}");
+                Ok(())
+            }
+            SubCmd::Run((as_json, verify, out_dir)) => {
+                run_fixtures(&root, as_json, verify, out_dir.as_deref())
+            }
+        },
+        Some("speed") => match parse_speed_args(&args[1..], &default_out)? {
+            SubCmd::Help => {
+                print!("{USAGE}");
+                Ok(())
+            }
+            SubCmd::Run((filter, quick, out_dir)) => {
+                run_speed(&root, filter.as_deref(), quick, &out_dir)
+            }
+        },
+        Some("memory") => match parse_memory_args(&args[1..], &default_out)? {
+            SubCmd::Help => {
+                print!("{USAGE}");
+                Ok(())
+            }
+            SubCmd::Run((suite, fixture, out_dir)) => {
+                run_memory(&root, &suite, fixture.as_deref(), &out_dir)
+            }
+        },
         Some("det") => match parse_det_args(&args[1..], &default_out)? {
             DetCommand::Help => {
                 print!("{USAGE}");
@@ -113,67 +117,402 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             }
             ProfileCommand::Run(opts) => run_profile(&root, &opts),
         },
-        Some("scale") => {
-            let sub = &args[1..];
-            let samples: usize = parse_opt(sub, "--samples", 5)?;
-            let def = ScaleLimits::default();
-            let limits = ScaleLimits {
-                time: parse_opt(sub, "--max-time-ratio", def.time)?,
-                peak: parse_opt(sub, "--max-peak-ratio", def.peak)?,
-                allocs: parse_opt(sub, "--max-allocs-ratio", def.allocs)?,
-            };
-            let out_dir =
-                option_value(sub, "--out-dir").map_or_else(|| default_out.clone(), PathBuf::from);
-            run_scale(&root, samples, limits, &out_dir)
-        }
-        Some("compare") => {
-            let sub = &args[1..];
-            let baseline = option_value(sub, "--baseline")
-                .ok_or_else(|| "compare requires --baseline DIR".to_owned())?;
-            let current = option_value(sub, "--current")
-                .ok_or_else(|| "compare requires --current DIR".to_owned())?;
-            let out = option_value(sub, "--out").map(PathBuf::from);
-            run_compare(Path::new(baseline), Path::new(current), out.as_deref())
-        }
-        Some("gate") => {
-            let sub = &args[1..];
-            let baseline = option_value(sub, "--baseline").map(PathBuf::from);
-            let current = option_value(sub, "--current").map(PathBuf::from);
-            let base_rev = option_value(sub, "--base-rev");
-            let with_scale = has_flag(sub, "--scale");
-            let def = GateThresholds::default();
-            let thresholds = GateThresholds {
-                max_bytes_pct: parse_opt(sub, "--max-bytes-pct", def.max_bytes_pct)?,
-                min_bytes_floor: def.min_bytes_floor,
-                max_allocs_pct: parse_opt(sub, "--max-allocs-pct", def.max_allocs_pct)?,
-                min_allocs_floor: def.min_allocs_floor,
-                max_ir_pct: parse_opt(sub, "--max-ir-pct", def.max_ir_pct)?,
-                max_cycles_pct: parse_opt(sub, "--max-cycles-pct", def.max_cycles_pct)?,
-                max_speed_pct: parse_opt(sub, "--max-speed-pct", def.max_speed_pct)?,
-            };
-            run_gate(
+        Some("scale") => match parse_scale_args(&args[1..], &default_out)? {
+            SubCmd::Help => {
+                print!("{USAGE}");
+                Ok(())
+            }
+            SubCmd::Run((samples, limits, out_dir)) => run_scale(&root, samples, limits, &out_dir),
+        },
+        Some("compare") => match parse_compare_args(&args[1..])? {
+            SubCmd::Help => {
+                print!("{USAGE}");
+                Ok(())
+            }
+            SubCmd::Run((baseline, current, out)) => {
+                run_compare(&baseline, &current, out.as_deref())
+            }
+        },
+        Some("gate") => match parse_gate_args(&args[1..])? {
+            SubCmd::Help => {
+                print!("{USAGE}");
+                Ok(())
+            }
+            SubCmd::Run((baseline, current, base_rev, with_scale, thresholds)) => run_gate(
                 &root,
                 baseline.as_deref(),
                 current.as_deref(),
-                base_rev,
+                base_rev.as_deref(),
                 with_scale,
                 thresholds,
-            )
-        }
-        Some("report") => {
-            let sub = &args[1..];
-            let dir =
-                option_value(sub, "--dir").ok_or_else(|| "report requires --dir DIR".to_owned())?;
-            let title = option_value(sub, "--title").unwrap_or("ayaml Performance Report");
-            let out = option_value(sub, "--out").map(PathBuf::from);
-            run_report(Path::new(dir), title, out.as_deref())
-        }
+            ),
+        },
+        Some("report") => match parse_report_args(&args[1..])? {
+            SubCmd::Help => {
+                print!("{USAGE}");
+                Ok(())
+            }
+            SubCmd::Run((dir, title, out)) => run_report(&dir, &title, out.as_deref()),
+        },
         Some("help" | "-h" | "--help") | None => {
             print!("{USAGE}");
             Ok(())
         }
         Some(other) => Err(format!("unknown subcommand `{other}`\n\n{USAGE}")),
     }
+}
+
+#[derive(Debug, PartialEq)]
+enum SubCmd<T> {
+    Help,
+    Run(T),
+}
+
+fn split_flag(arg: &str) -> (&str, Option<&str>) {
+    match arg.split_once('=') {
+        Some((k, v)) if k.starts_with('-') => (k, Some(v)),
+        _ => (arg, None),
+    }
+}
+
+fn set_once<T>(slot: &mut Option<T>, flag: &str, value: T) -> Result<(), String> {
+    if slot.is_some() {
+        return Err(format!("duplicate flag `{flag}`"));
+    }
+    *slot = Some(value);
+    Ok(())
+}
+
+fn reject_inline(flag: &str, inline: Option<&str>) -> Result<(), String> {
+    if inline.is_some() {
+        return Err(format!("`{flag}` does not accept a value"));
+    }
+    Ok(())
+}
+
+fn parse_pos_finite_f64(flag: &str, raw: &str) -> Result<f64, String> {
+    let val = raw
+        .parse::<f64>()
+        .map_err(|e| format!("invalid {flag} value {raw:?}: {e}"))?;
+    if !val.is_finite() || val <= 0.0 {
+        return Err(format!(
+            "invalid {flag} value {raw:?}: must be a finite number > 0.0"
+        ));
+    }
+    Ok(val)
+}
+
+fn parse_fixtures_args(args: &[String]) -> Result<SubCmd<(bool, bool, Option<PathBuf>)>, String> {
+    let mut as_json = false;
+    let mut verify = false;
+    let mut out_dir: Option<PathBuf> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let (flag, inline) = split_flag(arg);
+        match flag {
+            "-h" | "--help" => return Ok(SubCmd::Help),
+            "--json" => {
+                reject_inline(flag, inline)?;
+                as_json = true;
+            }
+            "--verify" => {
+                reject_inline(flag, inline)?;
+                verify = true;
+            }
+            "--out-dir" => {
+                let val = PathBuf::from(next_flag_value(flag, inline, &mut iter)?);
+                set_once(&mut out_dir, flag, val)?;
+            }
+            other => return Err(format!("unknown `fixtures` argument `{other}`")),
+        }
+    }
+    Ok(SubCmd::Run((as_json, verify, out_dir)))
+}
+
+fn parse_speed_args(
+    args: &[String],
+    default_out: &Path,
+) -> Result<SubCmd<(Option<String>, bool, PathBuf)>, String> {
+    let mut filter: Option<String> = None;
+    let mut quick = false;
+    let mut out_dir: Option<PathBuf> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let (flag, inline) = split_flag(arg);
+        match flag {
+            "-h" | "--help" => return Ok(SubCmd::Help),
+            "--quick" => {
+                reject_inline(flag, inline)?;
+                quick = true;
+            }
+            "--filter" => {
+                let val = next_flag_value(flag, inline, &mut iter)?.to_owned();
+                set_once(&mut filter, flag, val)?;
+            }
+            "--out-dir" => {
+                let val = PathBuf::from(next_flag_value(flag, inline, &mut iter)?);
+                set_once(&mut out_dir, flag, val)?;
+            }
+            other => return Err(format!("unknown `speed` argument `{other}`")),
+        }
+    }
+    Ok(SubCmd::Run((
+        filter,
+        quick,
+        out_dir.unwrap_or_else(|| default_out.to_path_buf()),
+    )))
+}
+
+fn parse_memory_args(
+    args: &[String],
+    default_out: &Path,
+) -> Result<SubCmd<(String, Option<String>, PathBuf)>, String> {
+    let mut suite: Option<String> = None;
+    let mut fixture: Option<String> = None;
+    let mut out_dir: Option<PathBuf> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let (flag, inline) = split_flag(arg);
+        match flag {
+            "-h" | "--help" => return Ok(SubCmd::Help),
+            "--suite" => {
+                let raw = next_flag_value(flag, inline, &mut iter)?;
+                if !matches!(raw, "baseline" | "full") {
+                    return Err(format!(
+                        "invalid --suite value {raw:?} (expected `baseline` or `full`)"
+                    ));
+                }
+                set_once(&mut suite, flag, raw.to_owned())?;
+            }
+            "--fixture" => {
+                let val = next_flag_value(flag, inline, &mut iter)?.to_owned();
+                set_once(&mut fixture, flag, val)?;
+            }
+            "--out-dir" => {
+                let val = PathBuf::from(next_flag_value(flag, inline, &mut iter)?);
+                set_once(&mut out_dir, flag, val)?;
+            }
+            other => return Err(format!("unknown `memory` argument `{other}`")),
+        }
+    }
+    if suite.is_some() && fixture.is_some() {
+        return Err("`memory` accepts either `--suite` or `--fixture`, not both".to_owned());
+    }
+    Ok(SubCmd::Run((
+        suite.unwrap_or_else(|| "baseline".to_owned()),
+        fixture,
+        out_dir.unwrap_or_else(|| default_out.to_path_buf()),
+    )))
+}
+
+fn parse_scale_args(
+    args: &[String],
+    default_out: &Path,
+) -> Result<SubCmd<(usize, ScaleLimits, PathBuf)>, String> {
+    let def = ScaleLimits::default();
+    let mut samples: Option<usize> = None;
+    let mut time: Option<f64> = None;
+    let mut peak: Option<f64> = None;
+    let mut allocs: Option<f64> = None;
+    let mut out_dir: Option<PathBuf> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let (flag, inline) = split_flag(arg);
+        match flag {
+            "-h" | "--help" => return Ok(SubCmd::Help),
+            "--samples" => {
+                let raw = next_flag_value(flag, inline, &mut iter)?;
+                set_once(&mut samples, flag, parse_positive_usize(flag, raw)?)?;
+            }
+            "--max-time-ratio" => {
+                let raw = next_flag_value(flag, inline, &mut iter)?;
+                set_once(&mut time, flag, parse_pos_finite_f64(flag, raw)?)?;
+            }
+            "--max-peak-ratio" => {
+                let raw = next_flag_value(flag, inline, &mut iter)?;
+                set_once(&mut peak, flag, parse_pos_finite_f64(flag, raw)?)?;
+            }
+            "--max-allocs-ratio" => {
+                let raw = next_flag_value(flag, inline, &mut iter)?;
+                set_once(&mut allocs, flag, parse_pos_finite_f64(flag, raw)?)?;
+            }
+            "--out-dir" => {
+                let val = PathBuf::from(next_flag_value(flag, inline, &mut iter)?);
+                set_once(&mut out_dir, flag, val)?;
+            }
+            other => return Err(format!("unknown `scale` argument `{other}`")),
+        }
+    }
+    Ok(SubCmd::Run((
+        samples.unwrap_or(5),
+        ScaleLimits {
+            time: time.unwrap_or(def.time),
+            peak: peak.unwrap_or(def.peak),
+            allocs: allocs.unwrap_or(def.allocs),
+        },
+        out_dir.unwrap_or_else(|| default_out.to_path_buf()),
+    )))
+}
+
+fn parse_compare_args(
+    args: &[String],
+) -> Result<SubCmd<(PathBuf, PathBuf, Option<PathBuf>)>, String> {
+    let mut baseline: Option<PathBuf> = None;
+    let mut current: Option<PathBuf> = None;
+    let mut out: Option<PathBuf> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let (flag, inline) = split_flag(arg);
+        match flag {
+            "-h" | "--help" => return Ok(SubCmd::Help),
+            "--baseline" => {
+                let val = PathBuf::from(next_flag_value(flag, inline, &mut iter)?);
+                set_once(&mut baseline, flag, val)?;
+            }
+            "--current" => {
+                let val = PathBuf::from(next_flag_value(flag, inline, &mut iter)?);
+                set_once(&mut current, flag, val)?;
+            }
+            "--out" => {
+                let val = PathBuf::from(next_flag_value(flag, inline, &mut iter)?);
+                set_once(&mut out, flag, val)?;
+            }
+            other => return Err(format!("unknown `compare` argument `{other}`")),
+        }
+    }
+    let baseline = baseline.ok_or_else(|| "compare requires --baseline DIR".to_owned())?;
+    let current = current.ok_or_else(|| "compare requires --current DIR".to_owned())?;
+    Ok(SubCmd::Run((baseline, current, out)))
+}
+
+type GateArgs = (
+    Option<PathBuf>,
+    Option<PathBuf>,
+    Option<String>,
+    bool,
+    GateThresholds,
+);
+
+fn parse_gate_args(args: &[String]) -> Result<SubCmd<GateArgs>, String> {
+    let def = GateThresholds::default();
+    let mut baseline: Option<PathBuf> = None;
+    let mut current: Option<PathBuf> = None;
+    let mut base_rev: Option<String> = None;
+    let mut with_scale = false;
+    let mut max_bytes_pct: Option<f64> = None;
+    let mut max_allocs_pct: Option<f64> = None;
+    let mut max_ir_pct: Option<f64> = None;
+    let mut max_cycles_pct: Option<f64> = None;
+    let mut max_speed_pct: Option<f64> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let (flag, inline) = split_flag(arg);
+        match flag {
+            "-h" | "--help" => return Ok(SubCmd::Help),
+            "--scale" => {
+                reject_inline(flag, inline)?;
+                with_scale = true;
+            }
+            "--baseline" => {
+                let val = PathBuf::from(next_flag_value(flag, inline, &mut iter)?);
+                set_once(&mut baseline, flag, val)?;
+            }
+            "--current" => {
+                let val = PathBuf::from(next_flag_value(flag, inline, &mut iter)?);
+                set_once(&mut current, flag, val)?;
+            }
+            "--base-rev" => {
+                let val = next_flag_value(flag, inline, &mut iter)?.to_owned();
+                set_once(&mut base_rev, flag, val)?;
+            }
+            "--max-bytes-pct" => {
+                let raw = next_flag_value(flag, inline, &mut iter)?;
+                set_once(
+                    &mut max_bytes_pct,
+                    flag,
+                    parse_nonneg_finite_f64(flag, raw)?,
+                )?;
+            }
+            "--max-allocs-pct" => {
+                let raw = next_flag_value(flag, inline, &mut iter)?;
+                set_once(
+                    &mut max_allocs_pct,
+                    flag,
+                    parse_nonneg_finite_f64(flag, raw)?,
+                )?;
+            }
+            "--max-ir-pct" => {
+                let raw = next_flag_value(flag, inline, &mut iter)?;
+                set_once(&mut max_ir_pct, flag, parse_nonneg_finite_f64(flag, raw)?)?;
+            }
+            "--max-cycles-pct" => {
+                let raw = next_flag_value(flag, inline, &mut iter)?;
+                set_once(
+                    &mut max_cycles_pct,
+                    flag,
+                    parse_nonneg_finite_f64(flag, raw)?,
+                )?;
+            }
+            "--max-speed-pct" => {
+                let raw = next_flag_value(flag, inline, &mut iter)?;
+                set_once(
+                    &mut max_speed_pct,
+                    flag,
+                    parse_nonneg_finite_f64(flag, raw)?,
+                )?;
+            }
+            other => return Err(format!("unknown `gate` argument `{other}`")),
+        }
+    }
+    Ok(SubCmd::Run((
+        baseline,
+        current,
+        base_rev,
+        with_scale,
+        GateThresholds {
+            max_bytes_pct: max_bytes_pct.unwrap_or(def.max_bytes_pct),
+            min_bytes_floor: def.min_bytes_floor,
+            max_allocs_pct: max_allocs_pct.unwrap_or(def.max_allocs_pct),
+            min_allocs_floor: def.min_allocs_floor,
+            max_ir_pct: max_ir_pct.unwrap_or(def.max_ir_pct),
+            max_cycles_pct: max_cycles_pct.unwrap_or(def.max_cycles_pct),
+            max_speed_pct: max_speed_pct.unwrap_or(def.max_speed_pct),
+        },
+    )))
+}
+
+fn parse_report_args(
+    args: &[String],
+) -> Result<SubCmd<(PathBuf, String, Option<PathBuf>)>, String> {
+    let mut dir: Option<PathBuf> = None;
+    let mut title: Option<String> = None;
+    let mut out: Option<PathBuf> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let (flag, inline) = split_flag(arg);
+        match flag {
+            "-h" | "--help" => return Ok(SubCmd::Help),
+            "--dir" => {
+                let val = PathBuf::from(next_flag_value(flag, inline, &mut iter)?);
+                set_once(&mut dir, flag, val)?;
+            }
+            "--title" => {
+                let val = next_flag_value(flag, inline, &mut iter)?.to_owned();
+                set_once(&mut title, flag, val)?;
+            }
+            "--out" => {
+                let val = PathBuf::from(next_flag_value(flag, inline, &mut iter)?);
+                set_once(&mut out, flag, val)?;
+            }
+            other => return Err(format!("unknown `report` argument `{other}`")),
+        }
+    }
+    let dir = dir.ok_or_else(|| "report requires --dir DIR".to_owned())?;
+    Ok(SubCmd::Run((
+        dir,
+        title.unwrap_or_else(|| "ayaml Performance Report".to_owned()),
+        out,
+    )))
 }
 
 #[derive(Debug, PartialEq)]
@@ -203,6 +542,9 @@ fn next_flag_value<'a>(
     let Some(next) = iter.next() else {
         return Err(format!("missing value for `{flag}`"));
     };
+    if next.is_empty() {
+        return Err(format!("missing value for `{flag}`"));
+    }
     if next.starts_with("--") {
         return Err(format!(
             "missing value for `{flag}` (got flag `{next}` instead)"
@@ -274,42 +616,59 @@ fn parse_det_args(args: &[String], default_out: &Path) -> Result<DetCommand, Str
             }
             "--suite" => {
                 let raw = next_flag_value(flag, inline, &mut iter)?;
-                suite = Some(DetSuite::parse(raw)?);
+                set_once(&mut suite, flag, DetSuite::parse(raw)?)?;
             }
             "--filter" => {
-                filter = Some(next_flag_value(flag, inline, &mut iter)?.to_owned());
+                let val = next_flag_value(flag, inline, &mut iter)?.to_owned();
+                set_once(&mut filter, flag, val)?;
             }
             "--base" => {
-                base = Some(next_flag_value(flag, inline, &mut iter)?.to_owned());
+                let val = next_flag_value(flag, inline, &mut iter)?.to_owned();
+                set_once(&mut base, flag, val)?;
             }
             "--base-rev" => {
-                base_rev = Some(next_flag_value(flag, inline, &mut iter)?.to_owned());
+                let val = next_flag_value(flag, inline, &mut iter)?.to_owned();
+                set_once(&mut base_rev, flag, val)?;
             }
             "--anchor" => {
-                anchor_rev = Some(next_flag_value(flag, inline, &mut iter)?.to_owned());
+                let val = next_flag_value(flag, inline, &mut iter)?.to_owned();
+                set_once(&mut anchor_rev, flag, val)?;
             }
             "--max-ir-pct" => {
                 let raw = next_flag_value(flag, inline, &mut iter)?;
-                max_ir_pct = Some(parse_nonneg_finite_f64(flag, raw)?);
+                set_once(&mut max_ir_pct, flag, parse_nonneg_finite_f64(flag, raw)?)?;
             }
             "--max-cycles-pct" => {
                 let raw = next_flag_value(flag, inline, &mut iter)?;
-                max_cycles_pct = Some(parse_nonneg_finite_f64(flag, raw)?);
+                set_once(
+                    &mut max_cycles_pct,
+                    flag,
+                    parse_nonneg_finite_f64(flag, raw)?,
+                )?;
             }
             "--anchor-ir-pct" => {
                 let raw = next_flag_value(flag, inline, &mut iter)?;
-                anchor_ir_pct = Some(parse_nonneg_finite_f64(flag, raw)?);
+                set_once(
+                    &mut anchor_ir_pct,
+                    flag,
+                    parse_nonneg_finite_f64(flag, raw)?,
+                )?;
             }
             "--anchor-cycles-pct" => {
                 let raw = next_flag_value(flag, inline, &mut iter)?;
-                anchor_cycles_pct = Some(parse_nonneg_finite_f64(flag, raw)?);
+                set_once(
+                    &mut anchor_cycles_pct,
+                    flag,
+                    parse_nonneg_finite_f64(flag, raw)?,
+                )?;
             }
             "--jobs" => {
                 let raw = next_flag_value(flag, inline, &mut iter)?;
-                jobs = Some(parse_positive_usize(flag, raw)?);
+                set_once(&mut jobs, flag, parse_positive_usize(flag, raw)?)?;
             }
             "--out-dir" => {
-                out_dir = Some(PathBuf::from(next_flag_value(flag, inline, &mut iter)?));
+                let val = PathBuf::from(next_flag_value(flag, inline, &mut iter)?);
+                set_once(&mut out_dir, flag, val)?;
             }
             other => {
                 return Err(format!("unknown `det` argument `{other}`"));
@@ -393,33 +752,39 @@ fn parse_profile_args(args: &[String]) -> Result<ProfileCommand, String> {
             }
             "--tool" => {
                 let raw = next_flag_value(flag, inline, &mut iter)?;
-                tool = Some(ProfileTool::parse(raw)?);
+                set_once(&mut tool, flag, ProfileTool::parse(raw)?)?;
             }
             "--bench" => {
-                bench = Some(next_flag_value(flag, inline, &mut iter)?.to_owned());
+                let val = next_flag_value(flag, inline, &mut iter)?.to_owned();
+                set_once(&mut bench, flag, val)?;
             }
             "--fixture" => {
-                fixture = Some(next_flag_value(flag, inline, &mut iter)?.to_owned());
+                let val = next_flag_value(flag, inline, &mut iter)?.to_owned();
+                set_once(&mut fixture, flag, val)?;
             }
             "--mode" => {
-                mode = Some(next_flag_value(flag, inline, &mut iter)?.to_owned());
+                let val = next_flag_value(flag, inline, &mut iter)?.to_owned();
+                set_once(&mut mode, flag, val)?;
             }
             "--base" => {
-                base = Some(next_flag_value(flag, inline, &mut iter)?.to_owned());
+                let val = next_flag_value(flag, inline, &mut iter)?.to_owned();
+                set_once(&mut base, flag, val)?;
             }
             "--base-rev" => {
-                base_rev = Some(next_flag_value(flag, inline, &mut iter)?.to_owned());
+                let val = next_flag_value(flag, inline, &mut iter)?.to_owned();
+                set_once(&mut base_rev, flag, val)?;
             }
             "--top" => {
                 let raw = next_flag_value(flag, inline, &mut iter)?;
-                top = Some(parse_positive_usize(flag, raw)?);
+                set_once(&mut top, flag, parse_positive_usize(flag, raw)?)?;
             }
             "--iterations" => {
                 let raw = next_flag_value(flag, inline, &mut iter)?;
-                iterations = Some(parse_positive_usize(flag, raw)?);
+                set_once(&mut iterations, flag, parse_positive_usize(flag, raw)?)?;
             }
             "--out" => {
-                out = Some(PathBuf::from(next_flag_value(flag, inline, &mut iter)?));
+                let val = PathBuf::from(next_flag_value(flag, inline, &mut iter)?);
+                set_once(&mut out, flag, val)?;
             }
             other => {
                 return Err(format!("unknown `profile` argument `{other}`"));
@@ -473,27 +838,6 @@ fn parse_profile_args(args: &[String]) -> Result<ProfileCommand, String> {
     }))
 }
 
-fn has_flag(args: &[String], flag: &str) -> bool {
-    args.iter().any(|a| a == flag)
-}
-
-fn option_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    args.windows(2)
-        .find_map(|pair| (pair[0] == flag).then_some(pair[1].as_str()))
-}
-
-fn parse_opt<T: std::str::FromStr>(args: &[String], flag: &str, default: T) -> Result<T, String>
-where
-    T::Err: std::fmt::Display,
-{
-    match option_value(args, flag) {
-        None => Ok(default),
-        Some(raw) => raw
-            .parse::<T>()
-            .map_err(|e| format!("invalid {flag} value {raw:?}: {e}")),
-    }
-}
-
 fn repo_root() -> Result<PathBuf, String> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     manifest
@@ -540,21 +884,83 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             os: "linux".into(),
             arch: "x86_64".into(),
-            kernel: "Linux 6.12".into(),
+            kernel: Some("Linux 6.12".into()),
             cpu: "Generic x86_64".into(),
             cpu_count: 8,
             rustc: "rustc 1.88.0".into(),
             git_sha: "abcdef0123456789".into(),
+            uses_public_git_sha: false,
             fixture_manifest_sha256: SAMPLE_SHA.into(),
-            timestamp_unix: 1_795_000_000,
+            timestamp_unix: Some(1_795_000_000),
+            captured_date: None,
+            cpu_pin: None,
+            governor: None,
+            baseline_v023_git_sha: None,
+            speed_rows: None,
+            memory_rows: None,
         };
         let fp_json = fp.to_pretty_json().expect("serialize fp");
         assert!(!fp_json.contains("hostname"));
         assert_eq!(Fingerprint::parse_json(&fp_json).expect("parse fp"), fp);
         assert!(Fingerprint::parse_json(&fp_json.replace(SAMPLE_SHA, "bad")).is_err());
 
+        // Sanitized published fingerprint (no kernel/timestamp_unix, uses public_git_sha).
+        let sanitized_fp = format!(
+            "{{\n  \"schema_version\": 1,\n  \"os\": \"linux\",\n  \"arch\": \"x86_64\",\n  \
+             \"cpu\": \"Generic x86_64\",\n  \"cpu_count\": 8,\n  \"cpu_pin\": 2,\n  \
+             \"governor\": \"performance\",\n  \"rustc\": \"rustc 1.97.0\",\n  \
+             \"fixture_manifest_sha256\": \"{SAMPLE_SHA}\",\n  \
+             \"public_git_sha\": \"0123456789abcdef\",\n  \
+             \"captured_date\": \"2026-11-24\",\n  \"speed_rows\": 501,\n  \"memory_rows\": 523\n}}"
+        );
+        let parsed_sanitized = Fingerprint::parse_json(&sanitized_fp).expect("parse sanitized fp");
+        assert_eq!(parsed_sanitized.kernel, None);
+        assert_eq!(parsed_sanitized.timestamp_unix, None);
+        assert_eq!(parsed_sanitized.git_sha, "0123456789abcdef");
+        assert!(parsed_sanitized.uses_public_git_sha);
+        assert_eq!(
+            parsed_sanitized.captured_date.as_deref(),
+            Some("2026-11-24")
+        );
+        assert_eq!(parsed_sanitized.speed_rows, Some(501));
+        let sanitized_out = parsed_sanitized
+            .to_pretty_json()
+            .expect("reserialize sanitized");
+        assert!(sanitized_out.contains("\"public_git_sha\""));
+        assert!(!sanitized_out.contains("\"git_sha\""));
+        assert_eq!(
+            Fingerprint::parse_json(&sanitized_out).expect("reparse sanitized"),
+            parsed_sanitized
+        );
+        assert!(
+            Fingerprint::parse_json(
+                &sanitized_fp.replace("\"public_git_sha\": \"0123456789abcdef\",", "")
+            )
+            .is_err()
+        );
+        assert!(
+            Fingerprint::parse_json(&sanitized_fp.replace(
+                "\"public_git_sha\": \"0123456789abcdef\",",
+                "\"git_sha\": \"aaaaaaaa\", \"public_git_sha\": \"bbbbbbbb\",",
+            ))
+            .is_err()
+        );
+        assert!(
+            Fingerprint::parse_json(
+                &sanitized_fp.replace("\"speed_rows\": 501", "\"speed_rows\": 0")
+            )
+            .is_err()
+        );
+        assert!(
+            Fingerprint::parse_json(
+                &sanitized_fp.replace("\"memory_rows\": 523", "\"memory_rows\": 0")
+            )
+            .is_err()
+        );
+
         let speed = SpeedRecord {
             schema_version: SCHEMA_VERSION,
+            implementation: Some("ayaml".into()),
             scenario: "openapi-spec".into(),
             operation: "parse_value".into(),
             bytes: 173_342,
@@ -563,6 +969,7 @@ mod tests {
             mean_ns: 2_510_000.0,
             stddev_ns: 12_000.0,
             throughput_mib_s: 66.1,
+            rounds: Some(3),
         };
         let s_line = speed.to_json_line().expect("serialize speed");
         assert_eq!(
@@ -570,9 +977,13 @@ mod tests {
             speed
         );
         assert!(SpeedRecord::parse_json_line(&s_line.replace("2500000.0", "0.0")).is_err());
+        assert!(
+            SpeedRecord::parse_json_line(&s_line.replace("\"rounds\":3", "\"rounds\":0")).is_err()
+        );
 
         let mem = MemoryRecord {
             schema_version: SCHEMA_VERSION,
+            implementation: Some("ayaml".into()),
             scenario: "openapi-spec".into(),
             operation: "parse_value".into(),
             bytes: 173_342,
@@ -702,6 +1113,7 @@ mod tests {
     fn comparison_diffs_gating_and_report_rendering_work_and_detect_regressions() {
         let base_speed = vec![SpeedRecord {
             schema_version: SCHEMA_VERSION,
+            implementation: None,
             scenario: "openapi-spec".into(),
             operation: "parse_value".into(),
             bytes: 173_342,
@@ -710,6 +1122,7 @@ mod tests {
             mean_ns: 2_020_000.0,
             stddev_ns: 10_000.0,
             throughput_mib_s: 82.6,
+            rounds: None,
         }];
         let mut faster = base_speed.clone();
         faster[0].median_ns = 1_500_000.0;
@@ -733,6 +1146,7 @@ mod tests {
 
         let base_mem = vec![MemoryRecord {
             schema_version: SCHEMA_VERSION,
+            implementation: None,
             scenario: "openapi-spec".into(),
             operation: "parse_value".into(),
             bytes: 173_342,
@@ -1252,5 +1666,139 @@ Ir      Dr      Dw     I1mr D1mr D1mw ILmr DLmr DLmw Bc    Bcm Bi   Bim
             }
             ProfileCommand::Help => panic!("expected Run"),
         }
+    }
+
+    #[test]
+    fn published_site_benchmarks_parse_align_manifest_and_separate_implementations() {
+        let root = repo_root().expect("repo root");
+        let bench_dir = root.join("site/src/data/benchmarks");
+        let fp_text = fs::read_to_string(bench_dir.join("fingerprint.json")).expect("read fp");
+        let fp = Fingerprint::parse_json(&fp_text).expect("parse published fingerprint");
+        let manifest = ayaml_fixtures::manifest();
+        assert_eq!(
+            fp.fixture_manifest_sha256, manifest.manifest_sha256,
+            "site/src/data/benchmarks/fingerprint.json fixture_manifest_sha256 must match ayaml_fixtures::manifest()"
+        );
+
+        let diff = compare_dirs(&bench_dir, &bench_dir).expect("compare published benchmarks");
+        assert!(diff.contains("| implementation | scenario | operation |"));
+        assert!(diff.contains("| ayaml |"));
+        assert!(diff.contains("| rapidyaml |"));
+        assert!(diff.contains("| yaml-serde |"));
+
+        let report = render_report(&bench_dir, "Published Benchmarks")
+            .expect("render report for published benchmarks");
+        assert!(report.contains(&manifest.manifest_sha256));
+        assert!(report.contains("| implementation | scenario | operation |"));
+        assert!(report.contains("| rapidyaml |"));
+
+        run_gate(
+            &root,
+            Some(&bench_dir),
+            Some(&bench_dir),
+            None,
+            false,
+            GateThresholds::default(),
+        )
+        .expect("self-gate on published multi-impl benchmarks must pass");
+
+        // Multi-implementation rows with identical (scenario, operation) must stay distinct.
+        let mut peer_a = SpeedRecord {
+            schema_version: SCHEMA_VERSION,
+            implementation: Some("ayaml".into()),
+            scenario: "openapi-spec".into(),
+            operation: "value".into(),
+            bytes: 173_342,
+            fixture_sha256: SAMPLE_SHA.into(),
+            median_ns: 1_000_000.0,
+            mean_ns: 1_000_000.0,
+            stddev_ns: 1_000.0,
+            throughput_mib_s: 165.0,
+            rounds: Some(1),
+        };
+        let mut peer_b = peer_a.clone();
+        peer_b.implementation = Some("yaml-serde".into());
+        peer_b.median_ns = 3_000_000.0;
+        let base_multi = vec![peer_a.clone(), peer_b.clone()];
+        peer_a.median_ns = 1_000_000.0;
+        peer_b.median_ns = 4_000_000.0; // +33% slower on peer_b only
+        let cur_multi = vec![peer_a, peer_b];
+        let violations = evaluate_speed_gate(&base_multi, &cur_multi, GateThresholds::default());
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("yaml-serde/openapi-spec [value]"));
+
+        // Duplicate normalized keys (including None vs Some("ayaml")) are rejected on read.
+        let dup_dir = scratch("dup-keys");
+        let r_none = MemoryRecord {
+            schema_version: SCHEMA_VERSION,
+            implementation: None,
+            scenario: "openapi-spec".into(),
+            operation: "value".into(),
+            bytes: 100,
+            fixture_sha256: SAMPLE_SHA.into(),
+            peak_bytes: 1000,
+            live_bytes: 500,
+            allocations: 10,
+            total_allocated_bytes: 1200,
+            peak_to_input_ratio: 10.0,
+        };
+        let mut r_ayaml = r_none.clone();
+        r_ayaml.implementation = Some("ayaml".into());
+        let dup_mem = dup_dir.join("memory.jsonl");
+        fs::write(
+            &dup_mem,
+            format!(
+                "{}\n{}\n",
+                r_none.to_json_line().expect("r_none"),
+                r_ayaml.to_json_line().expect("r_ayaml")
+            ),
+        )
+        .expect("write dup mem");
+        let dup_err = crate::schema::read_memory_jsonl(&dup_mem).expect_err("reject duplicate key");
+        assert!(dup_err.contains("duplicate memory record key"));
+        drop(fs::remove_dir_all(&dup_dir));
+
+        // Strict subcommand CLI validation across memory/speed/scale/gate/compare/report/fixtures.
+        let out = PathBuf::from("target/xtask");
+        let sv = |xs: &[&str]| xs.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            super::parse_memory_args(&sv(&["--suite=full", "--out-dir=target/out"]), &out)
+                .expect("memory full"),
+            super::SubCmd::Run(("full".to_owned(), None, PathBuf::from("target/out")))
+        );
+        assert_eq!(
+            super::parse_memory_args(&sv(&["--help"]), &out).expect("memory help"),
+            super::SubCmd::Help
+        );
+        assert!(super::parse_memory_args(&sv(&["--suite="]), &out).is_err());
+        assert!(super::parse_memory_args(&sv(&["--suite"]), &out).is_err());
+        assert!(super::parse_memory_args(&sv(&["--sutie", "full"]), &out).is_err());
+        assert!(
+            super::parse_memory_args(&sv(&["--suite", "full", "--fixture", "x"]), &out).is_err()
+        );
+        assert!(
+            super::parse_memory_args(&sv(&["--suite", "baseline", "--suite", "full"]), &out)
+                .is_err()
+        );
+        assert!(super::parse_speed_args(&sv(&["--filter", "--quick"]), &out).is_err());
+        assert!(super::parse_speed_args(&sv(&["--out-dir", ""]), &out).is_err());
+        assert!(super::parse_det_args(&sv(&["--base", "a", "--base", "b"]), &out).is_err());
+        assert!(
+            super::parse_profile_args(&sv(&[
+                "--tool",
+                "callgrind",
+                "--bench",
+                "a",
+                "--bench",
+                "b"
+            ]))
+            .is_err()
+        );
+        assert!(super::parse_scale_args(&sv(&["--samples", "0"]), &out).is_err());
+        assert!(super::parse_scale_args(&sv(&["--max-time-ratio", "NaN"]), &out).is_err());
+        assert!(super::parse_gate_args(&sv(&["--max-ir-pct", "NaN"])).is_err());
+        assert!(super::parse_gate_args(&sv(&["--max-speed-pct", "-1.0"])).is_err());
+        assert!(super::parse_compare_args(&sv(&["--out-dir", "x"])).is_err());
+        assert!(super::parse_report_args(&sv(&["--dir", "a", "--dir", "b"])).is_err());
     }
 }

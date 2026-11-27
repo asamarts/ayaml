@@ -7,7 +7,7 @@
   "cpu_pin": 2,
   "governor": "performance",
   "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
-  "fixture_manifest_sha256": "2fe11ea22b2e089e01642ddd9455e164a8705037fbb2f60da1fe78f89e080c00",
+  "fixture_manifest_sha256": "2f523fd5ca6b3c0125b488a051ead2b2b2caae3ab5b43b6d84a546be994df71e",
   "public_git_sha": "47d2485631e97997da288190b0883772ce90dc32",
   "baseline_v023_git_sha": "79e1368e785064ca9dcad667be56f064c902e18c",
   "captured_date": "2026-11-24",

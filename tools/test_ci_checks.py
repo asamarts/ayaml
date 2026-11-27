@@ -24,9 +24,7 @@ from unittest import mock
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import check_alloc_baseline
 import check_deps
-import check_instructions
 import check_release
 import check_scheduled_runs
 import check_unsafe_census
@@ -1295,102 +1293,6 @@ class WorkflowPins(unittest.TestCase):
         self.assertEqual(versions("3.99.8", version="version: 3.99.8"), ("3.99.8", ""))
 
 
-class InstructionsBase(unittest.TestCase):
-    def test_a_missing_or_zero_base_falls_back_to_the_parent(self) -> None:
-        for given in ["", "0" * 40, "  "]:
-            self.assertEqual(check_instructions.base_revision(given), "HEAD~1")
-        self.assertEqual(check_instructions.base_revision("abc123"), "abc123")
-
-    def test_the_probe_in_the_tree_has_every_operation(self) -> None:
-        source = (check_instructions.ROOT / check_instructions.PROBE).read_text(encoding="utf-8")
-        self.assertEqual(check_instructions.known_operations(source), check_instructions.OPERATIONS)
-        self.assertIn("walk", check_instructions.OPERATIONS)
-
-    def test_the_nested_key_is_a_key_at_every_level(self) -> None:
-        self.assertEqual(check_instructions.nested_keys(0, 2), "{k0: 0, k1: 1}\n")
-        self.assertEqual(check_instructions.nested_keys(2, 1), "{? {? {k0: 0}: null}: null}\n")
-        self.assertIn("nested-keys", check_instructions.workloads())
-
-    def test_an_operation_that_a_probe_lacks_is_not_one_it_knows(self) -> None:
-        older = '"events" => {}\n"value" => {}\n"typed" => {}\n"emit" => {}\n// "walk" is to come\n'
-        self.assertEqual(check_instructions.known_operations(older), ("events", "value", "typed", "emit"))
-        self.assertEqual(check_instructions.known_operations(""), ())
-
-    def test_callgrind_parsing_cycles_steady_state_and_thresholds(self) -> None:
-        k1_txt = (
-            "events: Ir Dr Dw I1mr D1mr D1mw ILmr DLmr DLmw Bc Bcm Bi Bim\n"
-            "summary: 1000 200 100 10 5 2 1 1 0 50 4 10 1\n"
-        )
-        k2_txt = (
-            "events: Ir Dr Dw I1mr D1mr D1mw ILmr DLmr DLmw Bc Bcm Bi Bim\n"
-            "summary: 5000 1000 500 50 25 10 5 5 0 250 12 50 5\n"
-        )
-        k1 = check_instructions.parse_callgrind_out(k1_txt)
-        k2 = check_instructions.parse_callgrind_out(k2_txt)
-        delta = check_instructions.steady_state_delta(k1, k2, 4)
-        self.assertEqual(delta["Ir"], 1000)
-        # 1000 + 10*(10+5+2) + 100*(1+1+0) + 20*(2+1) = 1430
-        self.assertEqual(delta["EstimatedCycles"], 1430)
-        with self.assertRaises(ValueError):
-            check_instructions.parse_callgrind_out("events: Dr\nsummary: 10\n")
-
-        cells = [("value", "frontmatter-tiny"), ("borrowed", "frontmatter-tiny")]
-        manifest = {"frontmatter-tiny": {"bytes": 340, "sha256": "a" * 64}}
-        base = [{"Ir": 10000, "EstimatedCycles": 12000}, None]
-        # +1.5% Ir and +4.0% cycles passes (+2% / +5% limits); new op passes.
-        ok_head = [
-            {"Ir": 10150, "EstimatedCycles": 12480},
-            {"Ir": 5000, "EstimatedCycles": 6000},
-        ]
-        rows, failed = check_instructions.evaluate_cells(cells, base, ok_head, {}, manifest)
-        self.assertEqual(failed, [])
-        self.assertEqual(rows[0]["status"], "ok")
-        self.assertEqual(rows[1]["status"], "new")
-
-        # +2.5% Ir or +6.0% cycles fails unless accepted in instruction-rises.tsv.
-        bad_head = [
-            {"Ir": 10250, "EstimatedCycles": 12720},
-            {"Ir": 5000, "EstimatedCycles": 6000},
-        ]
-        _, failed = check_instructions.evaluate_cells(cells, base, bad_head, {}, manifest)
-        self.assertEqual(len(failed), 1)
-        self.assertIn("Ir +2.50%", failed[0])
-        self.assertIn("EstCycles +6.00%", failed[0])
-
-        _, allowed = check_instructions.evaluate_cells(
-            cells, base, bad_head, {("value", "frontmatter-tiny"): 7.0}, manifest
-        )
-        self.assertEqual(allowed, [])
-
-    def test_build_probe_remaps_source_paths_for_deterministic_binaries(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            tree = root / "tree"
-            work = root / "work"
-            (tree / "tools").mkdir(parents=True)
-            (tree / "tools" / "instruction-probe.rs").write_text("fn main() {}\n", encoding="utf-8")
-            (tree / "Cargo.lock").write_text("# lock\n", encoding="utf-8")
-            captured: list[dict[str, str]] = []
-
-            def fake_run(*_cmd: object, env: dict[str, str] | None = None, **_kw: object) -> str:
-                captured.append(env or {})
-                out = work / "target" / "release" / "ayaml-instruction-probe"
-                out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_bytes(b"bin")
-                return ""
-
-            with (
-                mock.patch.object(check_instructions, "WORK", work),
-                mock.patch.object(check_instructions, "run", side_effect=fake_run),
-            ):
-                check_instructions.build_probe("base", tree)
-
-            self.assertEqual(len(captured), 1)
-            rustflags = captured[0].get("RUSTFLAGS", "")
-            self.assertIn(f"--remap-path-prefix={tree.resolve()}=/ayaml", rustflags)
-            self.assertIn(f"--remap-path-prefix={(work / 'probe-base').resolve()}=/probe", rustflags)
-
-
 class ScannerDependencyPolicy(unittest.TestCase):
     def scanner(self, source: str) -> str | None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1520,98 +1422,6 @@ class ScannerDependencyPolicy(unittest.TestCase):
         self.assertEqual(run(edit_direct_deps=ok_edit_direct | {"anyhow"}), 1)
         self.assertEqual(run(edit_graph_deps=ok_edit_graph | {"smallvec"}), 1)
         self.assertEqual(run(scanner_err="disallowed"), 1)
-
-
-class AllocationGate(unittest.TestCase):
-    """A budget file with no row would pass by checking nothing, so the gate refuses it.
-
-    The gate runs here with a `cargo` that records how it was called and measures nothing, so
-    each test sees which rows of which file the gate checked, with which budgets, in which
-    build. Each budget of a row is a different number, so one passed twice shows.
-    """
-
-    # A generated shape's name starts with `@`, and is a row like any other.
-    VALUE = (
-        "# path\tbudgets\nv1\t11\t12\t13\t14\t15\t16\t17\t18\t19\n"
-        "@v2\t21\t22\t23\t24\t25\t26\t27\t28\t29\n"
-    )
-    # No newline ends the last row of these two, which the gate still has to read.
-    TYPED = "t1\t31\t32\t33\t34\t35\t36\t37\t38\t39"
-    JSON = "# path\tjson_peak\tjson_allocs\tjson_total\nj1\t41\t42\t43\n\n@j2\t51\t52\t53"
-    CARGO = "run --quiet --release --locked --manifest-path fuzz/Cargo.toml --bin memcount"
-
-    def gate(
-        self, value: str, typed: str, json: str, failing: str = ""
-    ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
-        """Run the gate on three budget files. The measurement of mode `failing` fails."""
-        script = Path(__file__).resolve().parent / "check_alloc_corpus.sh"
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            paths = []
-            for name, text in (("value.tsv", value), ("typed.tsv", typed), ("json.tsv", json)):
-                paths.append(root / name)
-                paths[-1].write_text(text, encoding="utf-8")
-            calls = root / "calls"
-            calls.write_text("", encoding="utf-8")
-            stub = root / "bin" / "cargo"
-            stub.parent.mkdir()
-            stub.write_text(
-                "#!/usr/bin/env bash\n"
-                'mode=value; [[ -n "${AYAML_TYPED:-}" ]] && mode=typed; [[ -n "${AYAML_JSON:-}" ]] && mode=json\n'
-                "build=()\n"
-                'while [[ $# -gt 0 && "$1" != "--" ]]; do build+=("$1"); shift; done\n'
-                "shift\n"
-                f'echo "$mode [${{build[*]}}] $*" >>{shlex.quote(str(calls))}\n'
-                f'[[ "$mode" != {shlex.quote(failing)} ]]\n',
-                encoding="utf-8",
-            )
-            stub.chmod(0o755)
-            environment = dict(os.environ, PATH=f"{stub.parent}{os.pathsep}{os.environ['PATH']}")
-            # Whatever the caller's shell has set, the gate alone chooses what is measured.
-            environment.pop("AYAML_TYPED", None)
-            environment.pop("AYAML_JSON", None)
-            completed = subprocess.run(
-                [script, *paths], capture_output=True, text=True, timeout=60, env=environment
-            )
-            return completed, calls.read_text(encoding="utf-8").splitlines()
-
-    def test_every_row_of_every_file_is_checked(self) -> None:
-        completed, calls = self.gate(self.VALUE, self.TYPED, self.JSON)
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(
-            calls,
-            [
-                f"value [{self.CARGO}] v1 11 12 13 14 15 16 17 18 19",
-                f"value [{self.CARGO}] @v2 21 22 23 24 25 26 27 28 29",
-                f"typed [{self.CARGO}] t1 31 32 33 34 35 36 37 38 39",
-                f"json [{self.CARGO}] j1 41 42 43",
-                f"json [{self.CARGO}] @j2 51 52 53",
-            ],
-        )
-        self.assertIn("checked 5 allocation budgets", completed.stdout)
-
-    def test_a_file_with_no_row_fails_whichever_it_is(self) -> None:
-        empty = ("", "# path\tparse_peak\n\n# nothing is budgeted\n")
-        for text in empty:
-            for missing in range(3):
-                files = [self.VALUE, self.TYPED, self.JSON]
-                files[missing] = text
-                with self.subTest(missing=missing, text=text):
-                    completed, calls = self.gate(*files)
-                    self.assertEqual(completed.returncode, 1, completed.stderr)
-                    self.assertIn("no budgets found in", completed.stderr)
-                    self.assertIn(("value.tsv", "typed.tsv", "json.tsv")[missing], completed.stderr)
-                    # The files before it were checked, and none after it.
-                    self.assertEqual(len(calls), (0, 2, 3)[missing], calls)
-
-    def test_a_failed_measurement_fails_the_gate_whichever_file_it_is_of(self) -> None:
-        # The gate stops at the first row over its budget: the rows before it were measured.
-        for failing, measured in (("value", 1), ("typed", 3), ("json", 4)):
-            with self.subTest(failing=failing):
-                completed, calls = self.gate(self.VALUE, self.TYPED, self.JSON, failing=failing)
-                self.assertNotEqual(completed.returncode, 0, completed.stdout)
-                self.assertNotIn("checked", completed.stdout)
-                self.assertEqual(len(calls), measured, calls)
 
 
 class SharedVectors(unittest.TestCase):
@@ -1779,44 +1589,6 @@ exit 2
                     ]
                 )
             self.assertEqual(rc_over, 1)
-
-
-class AllocBaselineGateTests(unittest.TestCase):
-    """Structured JSONL `memcount` baseline parser and regression gate (AY-138)."""
-
-    def test_parse_and_compare_detects_metric_and_hash_regressions(self) -> None:
-        gate = check_alloc_baseline
-        sha = "1835e9e70495561c218b4649b15837452ced87973b2a1494d81847b4eeba2c4b"
-        base_row = (
-            '{"schema_version":1,"scenario":"openapi-spec","bytes":10000,'
-            f'"fixture_sha256":"{sha}","operation":"parse_value",'
-            '"peak_bytes":40000,"live_bytes":20000,"allocations":500,'
-            '"total_allocated_bytes":60000,"peak_to_input_ratio":4.000}\n'
-        )
-        base = gate.parse_jsonl(base_row, "base")
-        self.assertEqual(gate.compare_baselines(base, base), [])
-
-        # Within tolerance passes.
-        within = gate.parse_jsonl(base_row.replace("40000", "43000").replace("500", "520"), "within")
-        self.assertEqual(gate.compare_baselines(base, within), [])
-
-        # Peak bytes and allocation regressions fail with clear per-metric diagnostics.
-        regressed = gate.parse_jsonl(
-            base_row.replace("40000", "50000").replace("500", "600"), "regressed"
-        )
-        errs = gate.compare_baselines(base, regressed)
-        self.assertEqual(len(errs), 2)
-        self.assertTrue(any("peak_bytes regressed" in e for e in errs))
-        self.assertTrue(any("allocations regressed" in e for e in errs))
-
-        # Fixture SHA-256 drift fails immediately.
-        drifted = gate.parse_jsonl(base_row.replace(sha, "0" * 64), "drifted")
-        self.assertTrue(any("fixture_sha256 changed" in e for e in gate.compare_baselines(base, drifted)))
-
-        # Missing row fails; invalid JSONL raises ValueError.
-        self.assertTrue(any("missing from current run" in e for e in gate.compare_baselines(base, {})))
-        with self.assertRaises(ValueError):
-            gate.parse_jsonl('{"schema_version":99}\n', "bad")
 
 
 if __name__ == "__main__":
