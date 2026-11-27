@@ -168,6 +168,38 @@ const DOUBLE_QUOTE_STOP: [bool; 256] = {
 };
 
 impl<'a> Scanner<'a> {
+    /// Fail immediately with `LimitKind::ScalarBytes` (or `LimitKind::Events` if this token
+    /// already exceeds `max_events`, matching [`Scanner::make`] precedence) when `observed`
+    /// exceeds `limits.max_scalar_bytes`.
+    #[inline]
+    fn check_scalar_bytes_incremental(
+        &self,
+        start: usize,
+        observed: usize,
+        limits: &Limits,
+    ) -> Result<(), Box<Error>> {
+        if observed > limits.max_scalar_bytes {
+            return Err(self.scalar_limit_error(start, observed, limits));
+        }
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    #[allow(
+        clippy::unnecessary_box_returns,
+        reason = "hot-path callers propagate Box<Error> to keep Result<_, Box<Error>> pointer-sized"
+    )]
+    fn scalar_limit_error(&self, start: usize, observed: usize, limits: &Limits) -> Box<Error> {
+        if let Err(events_limit) = limits.check_events(self.tokens + 1) {
+            return self.limit_at(start, events_limit);
+        }
+        let Err(limit) = limits.check_scalar_bytes(observed) else {
+            unreachable!("checked observed > max_scalar_bytes");
+        };
+        self.limit_at(start, limit)
+    }
+
     pub(super) fn scan_single_quoted(
         &mut self,
         limits: &Limits,
@@ -209,8 +241,13 @@ impl<'a> Scanner<'a> {
             }
         }
 
+        self.check_scalar_bytes_incremental(start, index - start, limits)?;
         let mut held = None;
-        let mut value = String::with_capacity((index - content_start).saturating_add(16));
+        let mut value = String::with_capacity(
+            (index - content_start)
+                .saturating_add(16)
+                .min(limits.max_scalar_bytes),
+        );
         value.push_str(&self.input[content_start..index]);
         self.pos = index;
         loop {
@@ -227,6 +264,7 @@ impl<'a> Scanner<'a> {
                 }
             }
             if i > run_start {
+                self.check_scalar_bytes_incremental(start, i - start, limits)?;
                 value.push_str(&self.input[run_start..i]);
                 self.pos = i;
             }
@@ -240,15 +278,18 @@ impl<'a> Scanner<'a> {
             match byte {
                 b'\'' => {
                     if bytes.get(self.pos + 1) == Some(&b'\'') {
-                        value.push('\'');
                         self.pos += 2;
+                        self.check_scalar_bytes_incremental(start, self.pos - start, limits)?;
+                        value.push('\'');
                     } else {
                         self.pos += 1;
                         break;
                     }
                 }
                 b'\n' | b'\r' => {
-                    self.scan_quoted_line_break(&mut value, '\'', start, &mut held, 0, false)?;
+                    self.scan_quoted_line_break(
+                        &mut value, '\'', start, &mut held, 0, false, limits,
+                    )?;
                 }
                 _ => return Err(self.non_printable_error_at(self.pos)),
             }
@@ -400,6 +441,10 @@ impl<'a> Scanner<'a> {
     /// Fold the line breaks at the current position into a quoted scalar's `value`, and check the
     /// next line's indentation. `held` holds the scalar's `quoted_indent` once a line break has
     /// asked for it, so a scalar that ends on its line never works it out.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "internal helper carries the active scalar's incremental scan state"
+    )]
     pub(super) fn scan_quoted_line_break(
         &mut self,
         value: &mut String,
@@ -408,12 +453,13 @@ impl<'a> Scanner<'a> {
         held: &mut Option<(usize, bool)>,
         protected_len: usize,
         escaped: bool,
+        limits: &Limits,
     ) -> Result<(), Box<Error>> {
         // White space before an escaped line break is content.
         while !escaped && value.len() > protected_len && value.ends_with([' ', '\t']) {
             value.pop();
         }
-        let mut breaks = 0;
+        let mut breaks = 0_usize;
         loop {
             let line_start = self.pos;
             while matches!(self.peek(), Some(' ' | '\t')) {
@@ -501,11 +547,24 @@ impl<'a> Scanner<'a> {
                 "quoted scalar continuation must be indented more than its parent",
             ));
         }
+        // Check raw byte progress before pushing folded line breaks so runs of blank lines cannot
+        // allocate past `max_scalar_bytes`.
+        self.check_scalar_bytes_incremental(start, self.pos - start, limits)?;
         // A folded break is a space; each empty line after it, or after an
         // escaped break, is a line feed (YAML 1.2.2 productions 112, 73).
         if breaks == 1 && !escaped {
             value.push(' ');
         } else {
+            let added = breaks.saturating_sub(1);
+            if value.len().saturating_add(added) > limits.max_scalar_bytes {
+                // `'\n'` is never trimmed by a later line break, so `value.len() + added` is
+                // permanently committed to the decoded scalar length.
+                self.check_scalar_bytes_incremental(
+                    start,
+                    value.len().saturating_add(added),
+                    limits,
+                )?;
+            }
             for _ in 1..breaks {
                 value.push('\n');
             }
@@ -552,8 +611,13 @@ impl<'a> Scanner<'a> {
             }
         }
 
+        self.check_scalar_bytes_incremental(start, index - start, limits)?;
         let mut held = None;
-        let mut value = String::with_capacity((index - content_start).saturating_add(16));
+        let mut value = String::with_capacity(
+            (index - content_start)
+                .saturating_add(16)
+                .min(limits.max_scalar_bytes),
+        );
         value.push_str(&self.input[content_start..index]);
         self.pos = index;
         let mut protected_len = 0;
@@ -571,7 +635,18 @@ impl<'a> Scanner<'a> {
                 }
             }
             if i > run_start {
-                value.push_str(&self.input[run_start..i]);
+                self.check_scalar_bytes_incremental(start, i - start, limits)?;
+                let run = &self.input[run_start..i];
+                if value.len().saturating_add(run.len()) > limits.max_scalar_bytes {
+                    let trimmed_run = run.trim_end_matches([' ', '\t']);
+                    let committed = if trimmed_run.is_empty() {
+                        value.trim_end_matches([' ', '\t']).len().max(protected_len)
+                    } else {
+                        value.len().saturating_add(trimmed_run.len())
+                    };
+                    self.check_scalar_bytes_incremental(start, committed, limits)?;
+                }
+                value.push_str(run);
                 self.pos = i;
             }
             let Some(&byte) = bytes.get(self.pos) else {
@@ -597,6 +672,7 @@ impl<'a> Scanner<'a> {
                             &mut held,
                             protected_len,
                             true,
+                            limits,
                         )?;
                         continue;
                     }
@@ -611,28 +687,27 @@ impl<'a> Scanner<'a> {
                         return Err(self.non_printable_error_at(self.pos));
                     }
                     self.pos += escape.len_utf8();
-                    let before = value.len();
-                    match escape {
-                        '0' => value.push('\0'),
-                        'a' => value.push('\u{0007}'),
-                        'b' => value.push('\u{0008}'),
-                        't' | '\t' => value.push('\t'),
-                        'n' => value.push('\n'),
-                        'v' => value.push('\u{000b}'),
-                        'f' => value.push('\u{000c}'),
-                        'r' => value.push('\r'),
-                        'e' => value.push('\u{001b}'),
-                        ' ' => value.push(' '),
-                        '"' => value.push('"'),
-                        '/' => value.push('/'),
-                        '\\' => value.push('\\'),
-                        'N' => value.push('\u{0085}'),
-                        '_' => value.push('\u{00a0}'),
-                        'L' => value.push('\u{2028}'),
-                        'P' => value.push('\u{2029}'),
-                        'x' => value.push(self.scan_hex_escape(2, escape_start)?),
-                        'u' => value.push(self.scan_hex_escape(4, escape_start)?),
-                        'U' => value.push(self.scan_hex_escape(8, escape_start)?),
+                    let decoded = match escape {
+                        '0' => '\0',
+                        'a' => '\u{0007}',
+                        'b' => '\u{0008}',
+                        't' | '\t' => '\t',
+                        'n' => '\n',
+                        'v' => '\u{000b}',
+                        'f' => '\u{000c}',
+                        'r' => '\r',
+                        'e' => '\u{001b}',
+                        ' ' => ' ',
+                        '"' => '"',
+                        '/' => '/',
+                        '\\' => '\\',
+                        'N' => '\u{0085}',
+                        '_' => '\u{00a0}',
+                        'L' => '\u{2028}',
+                        'P' => '\u{2029}',
+                        'x' => self.scan_hex_escape(2, escape_start)?,
+                        'u' => self.scan_hex_escape(4, escape_start)?,
+                        'U' => self.scan_hex_escape(8, escape_start)?,
                         other => {
                             return Err(self.error_at(
                                 escape_start,
@@ -640,8 +715,12 @@ impl<'a> Scanner<'a> {
                                 format!("unknown escape \\{other}"),
                             ));
                         }
-                    }
-                    if value.len() > before && value.ends_with([' ', '\t']) {
+                    };
+                    let observed =
+                        (self.pos - start).max(value.len().saturating_add(decoded.len_utf8()));
+                    self.check_scalar_bytes_incremental(start, observed, limits)?;
+                    value.push(decoded);
+                    if matches!(decoded, ' ' | '\t') {
                         protected_len = value.len();
                     }
                 }
@@ -653,6 +732,7 @@ impl<'a> Scanner<'a> {
                         &mut held,
                         protected_len,
                         false,
+                        limits,
                     )?;
                 }
                 _ => return Err(self.non_printable_error_at(self.pos)),
@@ -925,9 +1005,6 @@ impl<'a> Scanner<'a> {
                         "leading empty block-scalar lines are more indented than the content",
                     ));
                 }
-                let line_end = self.input[leading..]
-                    .find(['\n', '\r'])
-                    .map_or(self.input.len(), |offset| leading + offset);
                 leading = line_end;
                 if leading < self.input.len()
                     && let Some(ch) = self.input[leading..].chars().next()
@@ -939,6 +1016,9 @@ impl<'a> Scanner<'a> {
                 }
             }
         }
+
+        // Reject headers that already exceed `max_scalar_bytes` before allocating body storage.
+        self.check_scalar_bytes_incremental(start, content_start - start, limits)?;
 
         // The scalar's lines, each followed by its line break if it has one, built as they are
         // read. Holding each line in a string of its own cost dozens of times the input on short
@@ -964,6 +1044,8 @@ impl<'a> Scanner<'a> {
                 } else {
                     self.pos = after_spaces;
                 }
+                end = self.pos;
+                self.check_scalar_bytes_incremental(start, end - start, limits)?;
                 // Spaces past the indentation are content, on a leading line
                 // too when an indicator fixes the indentation.
                 let content_spaces =
@@ -984,7 +1066,6 @@ impl<'a> Scanner<'a> {
                 if content_spaces > 0 {
                     final_break = had_break;
                 }
-                end = self.pos;
                 continue;
             }
             if spaces < indent {
@@ -1075,17 +1156,21 @@ impl<'a> Scanner<'a> {
                     }
                 }
             }
+            let line_content_end = position;
             self.pos = position;
-            // A content line holds at least the character that made it one.
-            text.push_str(&self.input[text_start..self.pos]);
             let had_break = matches!(bytes.get(self.pos), Some(b'\n' | b'\r'));
             if had_break {
                 self.consume_line_break();
+            }
+            end = self.pos;
+            self.check_scalar_bytes_incremental(start, end - start, limits)?;
+            // A content line holds at least the character that made it one.
+            text.push_str(&self.input[text_start..line_content_end]);
+            if had_break {
                 text.push('\n');
             }
             final_break = had_break;
             seen_content = true;
-            end = self.pos;
         }
         self.pos = end;
         self.current_line_start = line_start_of(self.input.as_bytes(), self.pos);
@@ -1425,7 +1510,9 @@ impl<'a> Scanner<'a> {
             }
             self.pos = position;
             if let Some(value) = value.as_mut() {
-                value.push_str(&self.input[content_start..self.pos]);
+                let trimmed_end = self.trim_trailing_whitespace(content_start, self.pos);
+                self.check_scalar_bytes_incremental(start, trimmed_end - start, limits)?;
+                value.push_str(&self.input[content_start..trimmed_end]);
                 while value.ends_with([' ', '\t']) {
                     value.pop();
                 }
@@ -1461,12 +1548,16 @@ impl<'a> Scanner<'a> {
             let Some(breaks) = self.try_plain_continuation(continuation)? else {
                 break;
             };
+            self.check_scalar_bytes_incremental(start, self.pos - start, limits)?;
             if value.is_none() {
-                let mut first = String::with_capacity(first_end.saturating_sub(start) + 1);
-                first.push_str(&self.input[start..first_end]);
-                while first.ends_with([' ', '\t']) {
-                    first.pop();
-                }
+                let trimmed_first_end = self.trim_trailing_whitespace(start, first_end);
+                let mut first = String::with_capacity(
+                    trimmed_first_end
+                        .saturating_sub(start)
+                        .saturating_add(1)
+                        .min(limits.max_scalar_bytes),
+                );
+                first.push_str(&self.input[start..trimmed_first_end]);
                 value = Some(first);
             }
             let Some(value) = value.as_mut() else {
@@ -1573,7 +1664,7 @@ impl<'a> Scanner<'a> {
             scanner.line_has_block_prefix = saved_block_prefix;
             scanner.current_line_indent = saved_line_indent;
         };
-        let mut breaks = 0;
+        let mut breaks = 0_usize;
         // In a flow collection under a block collection, a line needs one more space than that
         // collection's column, and a tab doesn't count. Compat refuses only a tab left of that
         // column on a line that the scalar goes on to, as libyaml does, so `k: [a\n\tb]` is an

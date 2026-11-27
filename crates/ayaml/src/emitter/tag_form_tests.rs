@@ -1,8 +1,8 @@
 use super::RedefinedHandles;
-use super::tags::{TagForm, needs_directive};
+use super::tags::{TagFormRef, needs_directive};
 use crate::tag::Tag;
 
-/// `needs_directive` is `TagForm::of` without the token, so the two agree on every tag.
+/// `needs_directive` is `TagFormRef::of` without building a token, so the two agree on every tag.
 #[test]
 fn needs_directive_agrees_with_the_tag_form() {
     let tags = [
@@ -34,8 +34,8 @@ fn needs_directive_agrees_with_the_tag_form() {
         Tag::new("", ""),
     ];
     for tag in tags {
-        let form = TagForm::of(&tag, RedefinedHandles::default());
-        let directive = !matches!(form, Ok(TagForm::Token(_)));
+        let form = TagFormRef::of(&tag, RedefinedHandles::default());
+        let directive = matches!(form, Ok(TagFormRef::Directive { .. }) | Err(_));
         assert_eq!(needs_directive(&tag), directive, "{tag:?}: {form:?}");
     }
 }

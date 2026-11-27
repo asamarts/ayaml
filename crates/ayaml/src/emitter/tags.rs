@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 use std::fmt::Write as _;
+use std::io::Write;
 
+use super::{Output, STACK_MEDIUM, STACK_SMALL, TieredStack};
 use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::tag::{Tag, TaggedValue, is_uri_byte, verbatim_reads_back};
 use crate::value::Value;
@@ -14,54 +16,45 @@ pub(crate) struct RedefinedHandles {
     pub(crate) secondary: bool,
 }
 
-/// How a tag is written (D82).
-#[derive(Debug)]
-pub(crate) enum TagForm {
-    /// As it stands: `!`, a `!` or `!!` shorthand, or a verbatim tag.
-    Token(String),
-    /// As a shorthand under a `%TAG` directive that the writer adds to the document: the prefix
-    /// that the directive's handle stands for, and the suffix after the handle.
-    Directive { prefix: String, suffix: String },
+/// Borrowed classification of how a tag is written (D82), avoiding string allocations before
+/// output limits are checked.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum TagFormRef<'a> {
+    /// Non-specific `!`.
+    NonSpecific,
+    /// Primary `!` shorthand whose suffix is `rest` followed by `suffix` (both `%`-escaped).
+    Primary { rest: &'a str, suffix: &'a str },
+    /// Secondary `!!` shorthand whose suffix is `%`-escaped.
+    Secondary { suffix: &'a str },
+    /// Verbatim `!<handle + suffix>`.
+    Verbatim { handle: &'a str, suffix: &'a str },
+    /// Named `%TAG` handle shorthand whose directive maps to `prefix` and uses `suffix`.
+    Directive { prefix: &'a str, suffix: &'a str },
 }
 
-impl TagForm {
-    /// The form of `tag` in a document that redefines the handles in `redefined`.
-    ///
-    /// A local tag uses `!` and a core tag `!!`, unless the document redefines that handle. Any
-    /// other tag is written verbatim (`!<...>`) when that reads back as the same name: a verbatim
-    /// tag is read as written, so it can hold only URI characters, and only a `%` that starts an
-    /// escape, and only a local name or one with a URI scheme is a tag name there. Every other tag
-    /// gets a `%TAG` directive, whose prefix and shorthand suffix are read with their escapes
-    /// decoded, so they can hold any text. A tag of fewer than two characters that is neither local
-    /// nor written verbatim has no form: both parts of a directive's shorthand hold a character.
-    pub(crate) fn of(tag: &Tag, redefined: RedefinedHandles) -> Result<Self, Error> {
+impl<'a> TagFormRef<'a> {
+    /// Classify `tag` in a document that redefines the handles in `redefined` without allocating.
+    pub(crate) fn of(tag: &'a Tag, redefined: RedefinedHandles) -> Result<Self, Error> {
         let (handle, suffix) = (tag.handle(), tag.suffix());
         // The non-specific tag `!` is not a shorthand.
         if tag.is_non_specific() {
-            return Ok(Self::Token("!".to_owned()));
+            return Ok(Self::NonSpecific);
         }
         if let Some(rest) = handle.strip_prefix('!')
             && !redefined.primary
         {
-            let mut output = String::with_capacity(handle.len() + suffix.len());
-            output.push('!');
-            escape_tag(rest, &mut output);
-            escape_tag(suffix, &mut output);
-            return Ok(Self::Token(output));
+            return Ok(Self::Primary { rest, suffix });
         }
         if tag.is_core() && !suffix.is_empty() && !redefined.secondary {
-            let mut output = String::with_capacity(suffix.len() + 2);
-            output.push_str("!!");
-            escape_tag(suffix, &mut output);
-            return Ok(Self::Token(output));
+            return Ok(Self::Secondary { suffix });
         }
         if verbatim_reads_back(handle, suffix) {
-            return Ok(Self::Token(format!("!<{handle}{suffix}>")));
+            return Ok(Self::Verbatim { handle, suffix });
         }
         if !handle.is_empty() && !suffix.is_empty() {
             return Ok(Self::Directive {
-                prefix: handle.to_owned(),
-                suffix: suffix.to_owned(),
+                prefix: handle,
+                suffix,
             });
         }
         // A name kept whole: split it after its last `:`, `/` or `#`, or else before its last
@@ -73,8 +66,8 @@ impl TagForm {
                     .rfind([':', '/', '#'])
                     .map_or(last, |index| index + 1);
                 Ok(Self::Directive {
-                    prefix: name[..cut].to_owned(),
-                    suffix: name[cut..].to_owned(),
+                    prefix: &name[..cut],
+                    suffix: &name[cut..],
                 })
             }
             _ => Err(Error::coded(
@@ -87,7 +80,7 @@ impl TagForm {
 }
 
 /// Whether `tag` takes a `%TAG` directive, or has no form, in a document that redefines no handle:
-/// [`TagForm::of`] without building the token.
+/// [`TagFormRef::of`] without building the token.
 pub(super) fn needs_directive(tag: &Tag) -> bool {
     let (handle, suffix) = (tag.handle(), tag.suffix());
     !(handle.starts_with('!')
@@ -107,7 +100,69 @@ fn escape_tag(text: &str, output: &mut String) {
     }
 }
 
-/// The `%TAG` directives that the writer adds to one document, for the tags whose [`TagForm`] is a
+/// Exact byte (and char, since output is pure ASCII) length of `escape_tag(text)`.
+fn escaped_tag_len(text: &str) -> usize {
+    let mut len = 0usize;
+    for byte in text.bytes() {
+        len = len.saturating_add(if is_uri_byte(byte) { 1 } else { 3 });
+    }
+    len
+}
+
+/// Exact byte (and char) length of `escape_tag(text)`, capped at `cap`.
+fn escaped_tag_len_capped(text: &str, cap: usize) -> usize {
+    let mut len = 0usize;
+    for byte in text.bytes() {
+        len = len.saturating_add(if is_uri_byte(byte) { 1 } else { 3 });
+        if len >= cap {
+            return cap;
+        }
+    }
+    len
+}
+
+/// Stream %-escaped `text` directly to `output` without allocating an intermediate `String`.
+fn write_escaped_tag<W: Write>(text: &str, output: &mut Output<'_, W>) -> Result<(), Error> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let bytes = text.as_bytes();
+    let mut run_start = 0usize;
+    let mut index = 0usize;
+    let mut esc_buf = [b'%', 0, 0];
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if is_uri_byte(byte) {
+            index += 1;
+            continue;
+        }
+        if index > run_start {
+            output.push_str(&text[run_start..index])?;
+        }
+        esc_buf[1] = HEX[(byte >> 4) as usize];
+        esc_buf[2] = HEX[(byte & 0x0f) as usize];
+        let esc = std::str::from_utf8(&esc_buf).unwrap_or("");
+        output.push_str(esc)?;
+        index += 1;
+        run_start = index;
+    }
+    if run_start < bytes.len() {
+        output.push_str(&text[run_start..])?;
+    }
+    Ok(())
+}
+
+/// Exact byte length of one `%TAG <handle> <escaped_prefix>\n` directive line.
+fn directive_line_byte_len(handle: &str, prefix: &str) -> usize {
+    let prefix_len = match prefix.strip_prefix('!') {
+        Some(rest) => 1usize.saturating_add(escaped_tag_len(rest)),
+        None => escaped_tag_len(prefix),
+    };
+    // "%TAG " (5) + handle + " " (1) + prefix_len + "\n" (1)
+    7usize
+        .saturating_add(handle.len())
+        .saturating_add(prefix_len)
+}
+
+/// The `%TAG` directives that the writer adds to one document, for the tags whose form is a
 /// directive. Each handle is `!tN!`, numbered in order of first use, skipping any handle that the
 /// document declares itself.
 #[derive(Debug, Default)]
@@ -127,6 +182,16 @@ struct AddedHandles {
     /// The number of the next handle to try: one past the last one added, which may have skipped
     /// declared handles.
     next: usize,
+    /// Cumulative byte length of all `%TAG` lines in `handles`.
+    lines_bytes: usize,
+}
+
+enum ScanFrame<'v> {
+    Sequence(std::slice::Iter<'v, Value>),
+    Mapping {
+        iter: crate::mapping::Iter<'v>,
+        pending_value: Option<&'v Value>,
+    },
 }
 
 impl TagDirectives {
@@ -142,129 +207,427 @@ impl TagDirectives {
         self.added.is_none()
     }
 
-    /// The handle that stands for `prefix`, added if there is none yet.
-    pub(crate) fn handle_for(&mut self, prefix: &str) -> &str {
-        let added = self.added.get_or_insert_with(Box::default);
-        let index = if let Some(&index) = added.by_prefix.get(prefix) {
-            index
-        } else {
-            let handle = loop {
-                let handle = format!("!t{}!", added.next);
-                added.next += 1;
-                if !self.declared.contains(&handle) {
-                    break handle;
-                }
-            };
-            added.handles.push((handle, prefix.to_owned()));
-            added
-                .by_prefix
-                .insert(prefix.to_owned(), added.handles.len() - 1);
-            added.handles.len() - 1
-        };
-        &added.handles[index].0
+    /// Exact byte length of all added `%TAG` directive lines.
+    pub(crate) fn lines_byte_len(&self) -> usize {
+        self.added.as_ref().map_or(0, |added| added.lines_bytes)
     }
 
-    /// Write `tag` in its form, adding a directive for it if it needs one.
-    pub(crate) fn token(
+    /// The handle that stands for `prefix`, added if there is none yet, verifying that the
+    /// cumulative directive lines fit within `output`'s remaining `max_output_bytes` before
+    /// copying `prefix`.
+    fn handle_for_checked<W: Write>(
+        &mut self,
+        prefix: &str,
+        output: &Output<'_, W>,
+    ) -> Result<&str, Error> {
+        if let Some(index) = self
+            .added
+            .as_ref()
+            .and_then(|added| added.by_prefix.get(prefix).copied())
+        {
+            return Ok(self
+                .added
+                .as_ref()
+                .and_then(|added| added.handles.get(index))
+                .map_or("", |(handle, _)| handle.as_str()));
+        }
+        let existing_bytes = self.lines_byte_len();
+        let mut next = self.added.as_ref().map_or(0, |added| added.next);
+        let handle = loop {
+            let candidate = format!("!t{next}!");
+            next += 1;
+            if !self.declared.contains(&candidate) {
+                break candidate;
+            }
+        };
+        let line_len = directive_line_byte_len(&handle, prefix);
+        output.check_additional(existing_bytes.saturating_add(line_len))?;
+
+        let added = self.added.get_or_insert_with(Box::default);
+        added.next = next;
+        added.lines_bytes = added.lines_bytes.saturating_add(line_len);
+        added.handles.push((handle, prefix.to_owned()));
+        let index = added.handles.len() - 1;
+        added.by_prefix.insert(prefix.to_owned(), index);
+        Ok(&added.handles[index].0)
+    }
+
+    /// Stream `tag` directly to `output` in its form, adding a directive for it if it needs one.
+    pub(crate) fn write_tag<W: Write>(
         &mut self,
         tag: &Tag,
         redefined: RedefinedHandles,
-    ) -> Result<String, Error> {
-        Ok(match TagForm::of(tag, redefined)? {
-            TagForm::Token(token) => token,
-            TagForm::Directive { prefix, suffix } => {
-                let mut token = self.handle_for(&prefix).to_owned();
-                escape_tag(&suffix, &mut token);
-                token
+        output: &mut Output<'_, W>,
+    ) -> Result<(), Error> {
+        match TagFormRef::of(tag, redefined)? {
+            TagFormRef::NonSpecific => output.push_str("!"),
+            TagFormRef::Primary { rest, suffix } => {
+                output.push_str("!")?;
+                write_escaped_tag(rest, output)?;
+                write_escaped_tag(suffix, output)
             }
-        })
+            TagFormRef::Secondary { suffix } => {
+                output.push_str("!!")?;
+                write_escaped_tag(suffix, output)
+            }
+            TagFormRef::Verbatim { handle, suffix } => {
+                output.push_str("!<")?;
+                output.push_str(handle)?;
+                output.push_str(suffix)?;
+                output.push_str(">")
+            }
+            TagFormRef::Directive { prefix, suffix } => {
+                // `handle_for_checked` borrows `output` immutably and returns a handle slice tied
+                // to `self`, so copy the short `!tN!` handle (typically 4..24 bytes) before
+                // writing to `output`.
+                let handle = self.handle_for_checked(prefix, output)?.to_owned();
+                output.push_str(&handle)?;
+                write_escaped_tag(suffix, output)
+            }
+        }
     }
 
-    /// The directives' lines.
-    pub(crate) fn lines(&self) -> String {
-        let mut output = String::new();
+    /// Character length of `tag`'s written form capped at `cap`, without allocating the tag token,
+    /// while validating the tag and registering any required `%TAG` directive within `output`'s
+    /// remaining byte budget.
+    pub(crate) fn token_char_len_capped<W: Write>(
+        &mut self,
+        tag: &Tag,
+        redefined: RedefinedHandles,
+        cap: usize,
+        output: &Output<'_, W>,
+    ) -> Result<usize, Error> {
+        let len = match TagFormRef::of(tag, redefined)? {
+            TagFormRef::NonSpecific => 1,
+            TagFormRef::Primary { rest, suffix } => {
+                let first = 1usize.saturating_add(escaped_tag_len_capped(rest, cap));
+                if first >= cap {
+                    cap
+                } else {
+                    first.saturating_add(escaped_tag_len_capped(suffix, cap - first))
+                }
+            }
+            TagFormRef::Secondary { suffix } => {
+                2usize.saturating_add(escaped_tag_len_capped(suffix, cap.saturating_sub(2)))
+            }
+            TagFormRef::Verbatim { handle, suffix } => {
+                let mut total = 3usize;
+                for ch in handle.chars().chain(suffix.chars()) {
+                    let _ = ch;
+                    total = total.saturating_add(1);
+                    if total >= cap {
+                        return Ok(cap);
+                    }
+                }
+                total
+            }
+            TagFormRef::Directive { prefix, suffix } => {
+                let handle_len = self.handle_for_checked(prefix, output)?.len();
+                if handle_len >= cap {
+                    cap
+                } else {
+                    handle_len.saturating_add(escaped_tag_len_capped(suffix, cap - handle_len))
+                }
+            }
+        };
+        Ok(len.min(cap))
+    }
+
+    /// Stream the directives' lines directly to `output` without allocating an intermediate string.
+    pub(crate) fn write_lines<W: Write>(&self, output: &mut Output<'_, W>) -> Result<(), Error> {
         for (handle, prefix) in self.added.iter().flat_map(|added| &added.handles) {
-            output.push_str("%TAG ");
-            output.push_str(handle);
-            output.push(' ');
+            output.push_str("%TAG ")?;
+            output.push_str(handle)?;
+            output.push_str(" ")?;
             // A local prefix keeps its `!`; a global one may start with any other character,
             // escaped.
             match prefix.strip_prefix('!') {
                 Some(rest) => {
-                    output.push('!');
-                    escape_tag(rest, &mut output);
+                    output.push_str("!")?;
+                    write_escaped_tag(rest, output)?;
                 }
-                None => escape_tag(prefix, &mut output),
+                None => write_escaped_tag(prefix, output)?,
+            }
+            output.push_str("\n")?;
+        }
+        Ok(())
+    }
+
+    /// Append the directives' lines into a pre-budgeted `String` (used when splicing held document
+    /// headers in `event_emitter`).
+    pub(crate) fn push_lines_into(&self, output: &mut String) {
+        for (handle, prefix) in self.added.iter().flat_map(|added| &added.handles) {
+            output.push_str("%TAG ");
+            output.push_str(handle);
+            output.push(' ');
+            match prefix.strip_prefix('!') {
+                Some(rest) => {
+                    output.push('!');
+                    escape_tag(rest, output);
+                }
+                None => escape_tag(prefix, output),
             }
             output.push('\n');
         }
-        output
     }
 
     /// Add a directive for each tag in `value` that needs one, in the order the writer meets them,
     /// or fail at the first tag that can't be written, as the writer would: one with no form,
     /// and a tag of the core schema on a scalar that it doesn't take. The walk stops where the
-    /// writer does, at a collection past `max_depth` and at a tag on a tagged value, so its
-    /// recursion is no deeper than the writer's. It runs before a document's first line, so a
-    /// tag is refused before any of the document is written.
-    pub(super) fn scan(&mut self, value: &Value, max_depth: usize) -> Result<(), Error> {
-        if may_hold_a_tag(value)
-            && let Err(tagged) = self.scan_at(value, max_depth)
-        {
-            return match core_tag_refusal(&tagged.tag, &tagged.value) {
-                Some(refusal) => Err(refusal),
-                None => TagForm::of(&tagged.tag, RedefinedHandles::default()).map(|_| ()),
-            };
+    /// writer does, at a collection past `max_depth` and at a tag on a tagged value, using an
+    /// explicit O(depth) heap stack rather than native recursion. It runs before a document's
+    /// first line, so a tag is refused before any of the document is written.
+    pub(super) fn scan<W: Write>(
+        &mut self,
+        value: &Value,
+        max_depth: usize,
+        output: &Output<'_, W>,
+    ) -> Result<(), Error> {
+        if may_hold_a_tag(value) {
+            self.scan_iterative(value, max_depth, output)?;
         }
         Ok(())
     }
 
-    /// Add the directive that a tag needs, apart from the walk so that the walk's frame stays
-    /// small.
+    /// Add the directive that a tag needs, apart from the walk so that the walk's loop stays small.
     #[cold]
     #[inline(never)]
-    fn add<'v>(&mut self, tagged: &'v TaggedValue) -> Result<(), &'v TaggedValue> {
-        match self.token(&tagged.tag, RedefinedHandles::default()) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(tagged),
-        }
-    }
-
-    /// [`TagDirectives::scan`] with `depth_left` more collections to enter. Returns the tagged
-    /// value whose tag stopped it.
-    fn scan_at<'v>(&mut self, value: &'v Value, depth_left: usize) -> Result<(), &'v TaggedValue> {
-        match value {
-            Value::Tagged(tagged) => {
-                if matches!(tagged.value, Value::Tagged(_)) {
-                    return Ok(());
-                }
-                if tagged.tag.is_core() && core_tag_refusal(&tagged.tag, &tagged.value).is_some() {
-                    return Err(tagged);
-                }
-                if needs_directive(&tagged.tag) {
-                    self.add(tagged)?;
-                }
-                self.scan_at(&tagged.value, depth_left)
-            }
-            Value::Sequence(items) if depth_left > 0 => {
-                for item in items.iter().filter(|item| may_hold_a_tag(item)) {
-                    self.scan_at(item, depth_left - 1)?;
-                }
-                Ok(())
-            }
-            Value::Mapping(mapping) if depth_left > 0 => {
-                for (key, value) in mapping {
-                    for node in [key, value] {
-                        if may_hold_a_tag(node) {
-                            self.scan_at(node, depth_left - 1)?;
-                        }
-                    }
-                }
+    fn add_tag<W: Write>(
+        &mut self,
+        tagged: &TaggedValue,
+        output: &Output<'_, W>,
+    ) -> Result<(), Error> {
+        match TagFormRef::of(&tagged.tag, RedefinedHandles::default())? {
+            TagFormRef::Directive { prefix, .. } => {
+                self.handle_for_checked(prefix, output)?;
                 Ok(())
             }
             _ => Ok(()),
         }
     }
+
+    /// Iterative depth-first traversal matching the writer's tag order and `max_depth` cutoff,
+    /// using a tight small-stack fast path for typical depths (`<= STACK_SMALL`), promoting once
+    /// to a medium inline buffer up to `MAX_DEPTH_CAP`, and spilling to the heap beyond.
+    fn scan_iterative<W: Write>(
+        &mut self,
+        root: &Value,
+        max_depth: usize,
+        output: &Output<'_, W>,
+    ) -> Result<(), Error> {
+        let mut small = [const { None }; STACK_SMALL];
+        let mut len = 0_usize;
+        let mut current = root;
+        let mut depth_left = max_depth;
+        loop {
+            loop {
+                match current {
+                    Value::Tagged(tagged) => {
+                        if matches!(tagged.value, Value::Tagged(_)) {
+                            break;
+                        }
+                        if tagged.tag.is_core()
+                            && let Some(refusal) = core_tag_refusal(&tagged.tag, &tagged.value)
+                        {
+                            return Err(refusal);
+                        }
+                        if needs_directive(&tagged.tag) {
+                            self.add_tag(tagged, output)?;
+                        }
+                        current = &tagged.value;
+                    }
+                    Value::Sequence(items) if depth_left > 0 => {
+                        let mut iter = items.iter();
+                        if let Some(next) = iter.by_ref().find(|item| may_hold_a_tag(item)) {
+                            let frame = ScanFrame::Sequence(iter);
+                            current = next;
+                            depth_left -= 1;
+                            if len < STACK_SMALL {
+                                small[len] = Some(frame);
+                                len += 1;
+                                continue;
+                            }
+                            return self.scan_iterative_deep(
+                                current, depth_left, &mut small, len, frame, output,
+                            );
+                        }
+                        break;
+                    }
+                    Value::Mapping(mapping) if depth_left > 0 => {
+                        let mut iter = mapping.iter();
+                        let mut found = None;
+                        for (key, val) in iter.by_ref() {
+                            if may_hold_a_tag(key) {
+                                found = Some((key, may_hold_a_tag(val).then_some(val)));
+                                break;
+                            }
+                            if may_hold_a_tag(val) {
+                                found = Some((val, None));
+                                break;
+                            }
+                        }
+                        if let Some((next, pending_value)) = found {
+                            let frame = ScanFrame::Mapping {
+                                iter,
+                                pending_value,
+                            };
+                            current = next;
+                            depth_left -= 1;
+                            if len < STACK_SMALL {
+                                small[len] = Some(frame);
+                                len += 1;
+                                continue;
+                            }
+                            return self.scan_iterative_deep(
+                                current, depth_left, &mut small, len, frame, output,
+                            );
+                        }
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+            let mut next_node = None;
+            while len > 0 {
+                if let Some(frame) = small[len - 1].as_mut()
+                    && let Some(child) = advance_scan_frame(frame)
+                {
+                    next_node = Some(child);
+                    break;
+                }
+                len -= 1;
+                small[len] = None;
+                depth_left += 1;
+            }
+            let Some(next) = next_node else {
+                return Ok(());
+            };
+            current = next;
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn scan_iterative_deep<'v, W: Write>(
+        &mut self,
+        current: &'v Value,
+        depth_left: usize,
+        small: &mut [Option<ScanFrame<'v>>],
+        small_len: usize,
+        pending: ScanFrame<'v>,
+        output: &Output<'_, W>,
+    ) -> Result<(), Error> {
+        let mut medium = [const { None }; STACK_MEDIUM];
+        let mut stack = TieredStack::from_promoted(small, &mut medium, small_len, pending);
+        self.scan_loop(current, depth_left, &mut stack, output)
+    }
+
+    fn scan_loop<'v, W: Write>(
+        &mut self,
+        mut current: &'v Value,
+        mut depth_left: usize,
+        stack: &mut TieredStack<'_, '_, ScanFrame<'v>>,
+        output: &Output<'_, W>,
+    ) -> Result<(), Error> {
+        loop {
+            loop {
+                match current {
+                    Value::Tagged(tagged) => {
+                        if matches!(tagged.value, Value::Tagged(_)) {
+                            break;
+                        }
+                        if tagged.tag.is_core()
+                            && let Some(refusal) = core_tag_refusal(&tagged.tag, &tagged.value)
+                        {
+                            return Err(refusal);
+                        }
+                        if needs_directive(&tagged.tag) {
+                            self.add_tag(tagged, output)?;
+                        }
+                        current = &tagged.value;
+                    }
+                    Value::Sequence(items) if depth_left > 0 => {
+                        let mut iter = items.iter();
+                        if let Some(next) = iter.by_ref().find(|item| may_hold_a_tag(item)) {
+                            stack.push(ScanFrame::Sequence(iter));
+                            current = next;
+                            depth_left -= 1;
+                            continue;
+                        }
+                        break;
+                    }
+                    Value::Mapping(mapping) if depth_left > 0 => {
+                        let mut iter = mapping.iter();
+                        let mut found = None;
+                        for (key, val) in iter.by_ref() {
+                            if may_hold_a_tag(key) {
+                                found = Some((key, may_hold_a_tag(val).then_some(val)));
+                                break;
+                            }
+                            if may_hold_a_tag(val) {
+                                found = Some((val, None));
+                                break;
+                            }
+                        }
+                        if let Some((next, pending_value)) = found {
+                            stack.push(ScanFrame::Mapping {
+                                iter,
+                                pending_value,
+                            });
+                            current = next;
+                            depth_left -= 1;
+                            continue;
+                        }
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+            let Some(next) = next_scan_child(stack, &mut depth_left) else {
+                return Ok(());
+            };
+            current = next;
+        }
+    }
+}
+
+#[inline]
+fn advance_scan_frame<'v>(frame: &mut ScanFrame<'v>) -> Option<&'v Value> {
+    match frame {
+        ScanFrame::Sequence(iter) => iter.by_ref().find(|item| may_hold_a_tag(item)),
+        ScanFrame::Mapping {
+            iter,
+            pending_value,
+        } => {
+            if let Some(val) = pending_value.take() {
+                return Some(val);
+            }
+            for (key, val) in iter.by_ref() {
+                if may_hold_a_tag(key) {
+                    *pending_value = may_hold_a_tag(val).then_some(val);
+                    return Some(key);
+                }
+                if may_hold_a_tag(val) {
+                    return Some(val);
+                }
+            }
+            None
+        }
+    }
+}
+
+fn next_scan_child<'v>(
+    stack: &mut TieredStack<'_, '_, ScanFrame<'v>>,
+    depth_left: &mut usize,
+) -> Option<&'v Value> {
+    while let Some(frame) = stack.last_mut() {
+        if let Some(child) = advance_scan_frame(frame) {
+            return Some(child);
+        }
+        stack.pop();
+        *depth_left += 1;
+    }
+    None
 }
 
 /// Whether `value` is a tag or a collection, which the scan for directives looks into: every other

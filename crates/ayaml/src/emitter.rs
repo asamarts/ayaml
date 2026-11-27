@@ -18,16 +18,16 @@ use crate::value::Value;
 
 mod scalars;
 mod tags;
+mod value_writer;
 
 pub(crate) use self::scalars::{
-    block_scalar_ok, can_fold, emit_double_quoted, expand_folded, is_printable,
-    looks_like_leading_zero_numeral, needs_explicit_indent, plain_is_safe, plain_text_ok,
-    single_quoted_ok,
-};
-use self::scalars::{
-    double_quoted_char_len_capped, plain_is_block_safe, single_quoted_char_len_capped,
+    block_scalar_ok, can_fold, double_quoted_char_len_capped, is_printable,
+    looks_like_leading_zero_numeral, needs_explicit_indent, plain_text_ok,
+    single_quoted_char_len_capped, single_quoted_ok, write_double_quoted, write_folded_body,
+    write_single_quoted,
 };
 pub(crate) use self::tags::{RedefinedHandles, TagDirectives};
+use self::value_writer::ValueWriter;
 
 /// Emitter presentation options.
 #[allow(
@@ -588,13 +588,13 @@ fn write_document<W: Write>(
     later: bool,
 ) -> Result<(), Error> {
     let mut directives = TagDirectives::default();
-    directives.scan(value, limits.max_depth)?;
+    directives.scan(value, limits.max_depth, output)?;
     if !directives.is_empty() {
         // A directive can't follow a document that `...` didn't end.
         if later && !options.explicit_end {
             output.push_str("...\n")?;
         }
-        output.push_str(&directives.lines())?;
+        directives.write_lines(output)?;
         output.push_str("---\n")?;
     } else if later || options.explicit_start {
         output.push_str("---\n")?;
@@ -1017,6 +1017,139 @@ impl<'a, W: Write> Output<'a, W> {
     }
 }
 
+/// Number of inline frames kept on the fast-path stack (covers typical YAML depths with zero
+/// heap allocation and minimal stack initialization).
+pub(super) const STACK_SMALL: usize = 8;
+
+/// Number of additional inline frames allocated lazily in a single non-recursive cold frame
+/// when nesting exceeds [`STACK_SMALL`] (`STACK_SMALL + STACK_MEDIUM == MAX_DEPTH_CAP`), keeping
+/// heap allocations at zero up to `MAX_DEPTH_CAP` while spilling arbitrarily deeper trees onto
+/// the heap.
+pub(super) const STACK_MEDIUM: usize = 120;
+
+/// Two-tier inline-plus-heap LIFO stack with O(1) native stack usage at any depth.
+pub(super) struct TieredStack<'s, 'm, T> {
+    small: &'s mut [Option<T>],
+    medium: &'m mut [Option<T>],
+    inline_len: usize,
+    pending: Option<T>,
+    overflow: Vec<T>,
+}
+
+impl<'s, 'm, T> TieredStack<'s, 'm, T> {
+    #[inline]
+    pub(super) fn new(small: &'s mut [Option<T>], medium: &'m mut [Option<T>]) -> Self {
+        Self {
+            small,
+            medium,
+            inline_len: 0,
+            pending: None,
+            overflow: Vec::new(),
+        }
+    }
+
+    #[inline]
+    pub(super) fn from_promoted(
+        small: &'s mut [Option<T>],
+        medium: &'m mut [Option<T>],
+        small_len: usize,
+        pending: T,
+    ) -> Self {
+        medium[0] = Some(pending);
+        Self {
+            small,
+            medium,
+            inline_len: small_len + 1,
+            pending: None,
+            overflow: Vec::new(),
+        }
+    }
+
+    #[inline]
+    pub(super) fn push(&mut self, value: T) {
+        let small_cap = self.small.len();
+        if self.inline_len < small_cap {
+            self.small[self.inline_len] = Some(value);
+            self.inline_len += 1;
+            return;
+        }
+        let medium_cap = self.medium.len();
+        if medium_cap == 0 {
+            debug_assert!(self.pending.is_none());
+            self.pending = Some(value);
+            return;
+        }
+        let medium_idx = self.inline_len - small_cap;
+        if medium_idx < medium_cap {
+            self.medium[medium_idx] = Some(value);
+            self.inline_len += 1;
+        } else {
+            self.overflow.push(value);
+        }
+    }
+
+    #[inline]
+    pub(super) fn take_pending(&mut self) -> Option<T> {
+        self.pending.take()
+    }
+
+    #[inline]
+    pub(super) fn small_parts(&mut self) -> (&mut [Option<T>], usize) {
+        (self.small, self.inline_len)
+    }
+
+    #[inline]
+    pub(super) fn pop(&mut self) -> Option<T> {
+        if let Some(value) = self.overflow.pop() {
+            return Some(value);
+        }
+        if self.inline_len == 0 {
+            return None;
+        }
+        self.inline_len -= 1;
+        let small_cap = self.small.len();
+        if self.inline_len < small_cap {
+            self.small[self.inline_len].take()
+        } else {
+            self.medium[self.inline_len - small_cap].take()
+        }
+    }
+
+    #[inline]
+    pub(super) fn drop_top(&mut self) {
+        if self.overflow.pop().is_some() {
+            return;
+        }
+        if self.inline_len == 0 {
+            return;
+        }
+        self.inline_len -= 1;
+        let small_cap = self.small.len();
+        if self.inline_len < small_cap {
+            self.small[self.inline_len] = None;
+        } else {
+            self.medium[self.inline_len - small_cap] = None;
+        }
+    }
+
+    #[inline]
+    pub(super) fn last_mut(&mut self) -> Option<&mut T> {
+        if let Some(last) = self.overflow.last_mut() {
+            return Some(last);
+        }
+        if self.inline_len == 0 {
+            return None;
+        }
+        let idx = self.inline_len - 1;
+        let small_cap = self.small.len();
+        if idx < small_cap {
+            self.small[idx].as_mut()
+        } else {
+            self.medium[idx - small_cap].as_mut()
+        }
+    }
+}
+
 pub(crate) fn validate_options(options: &EmitterOptions) -> Result<(), Error> {
     if (2..=9).contains(&options.indent) {
         Ok(())
@@ -1027,906 +1160,6 @@ pub(crate) fn validate_options(options: &EmitterOptions) -> Result<(), Error> {
             format!("indent must be between 2 and 9, got {}", options.indent),
         ))
     }
-}
-
-fn nested_tag_error() -> Error {
-    Error::coded(
-        ErrorKind::Emitter,
-        ErrorCode::UnsupportedTag,
-        "YAML cannot write a tagged value whose payload is also tagged (for example a nested Serde enum)",
-    )
-}
-
-struct ValueWriter<'a, 'w, 's, W: Write> {
-    output: &'a mut Output<'w, W>,
-    options: EmitterOptions,
-    styles: Option<&'s EmitterStyles>,
-    path: Vec<PathSegment>,
-    limits: Limits,
-    depth: usize,
-    error: Option<Error>,
-    /// Inside a flow collection.
-    in_flow: bool,
-    /// Writing a mapping key: per-path styles do not apply.
-    in_key: bool,
-    /// The document's `%TAG` directives, which [`TagDirectives::scan`] found.
-    directives: TagDirectives,
-    #[cfg(test)]
-    flow_loop_steps: usize,
-    #[cfg(test)]
-    block_scalar_lines: usize,
-    #[cfg(test)]
-    quoted_chunks: usize,
-}
-
-impl<'a, 'w, 's, W: Write> ValueWriter<'a, 'w, 's, W> {
-    fn new(
-        output: &'a mut Output<'w, W>,
-        limits: &Limits,
-        options: EmitterOptions,
-        styles: Option<&'s EmitterStyles>,
-        directives: TagDirectives,
-    ) -> Self {
-        Self {
-            output,
-            options,
-            styles,
-            path: Vec::new(),
-            limits: limits.clone(),
-            depth: 0,
-            error: None,
-            in_flow: false,
-            in_key: false,
-            directives,
-            #[cfg(test)]
-            flow_loop_steps: 0,
-            #[cfg(test)]
-            block_scalar_lines: 0,
-            #[cfg(test)]
-            quoted_chunks: 0,
-        }
-    }
-
-    fn style(&self) -> NodeStyle {
-        if self.in_key {
-            NodeStyle::default()
-        } else {
-            self.styles
-                .and_then(|styles| styles.get(&self.path))
-                .unwrap_or_default()
-        }
-    }
-
-    fn scalar_style(&self) -> Option<crate::event::ScalarStyle> {
-        self.style().scalar_style.or(self.options.scalar_style)
-    }
-
-    fn styles_active(&self) -> bool {
-        self.styles.is_some_and(|styles| !styles.styles.is_empty())
-    }
-
-    fn force_flow(&self) -> bool {
-        self.style().flow == Some(true)
-    }
-
-    fn push_key(&mut self, key: &Value) {
-        if self.styles_active() {
-            self.path.push(PathSegment::Key(key.clone()));
-        }
-    }
-
-    fn push_index(&mut self, index: usize) {
-        if self.styles_active() {
-            self.path.push(PathSegment::Index(index));
-        }
-    }
-
-    fn pop_path(&mut self) {
-        if self.styles_active() {
-            self.path.pop();
-        }
-    }
-
-    fn fail(&mut self, error: Error) {
-        if self.error.is_none() {
-            self.error = Some(error);
-        }
-    }
-
-    fn push_str(&mut self, value: &str) {
-        if self.error.is_some() {
-            return;
-        }
-        if let Err(error) = self.output.push_str(value) {
-            self.error = Some(error);
-        }
-    }
-
-    fn push(&mut self, value: char) {
-        let mut buffer = [0_u8; 4];
-        self.push_str(value.encode_utf8(&mut buffer));
-    }
-
-    fn indent(&mut self, indent: usize) {
-        if self.error.is_some() {
-            return;
-        }
-        if let Err(error) = self.output.spaces(indent) {
-            self.error = Some(error);
-        }
-    }
-
-    /// Enter a collection. Returns false, after recording the error, when
-    /// the depth limit is exceeded or an earlier write failed.
-    fn enter(&mut self) -> bool {
-        if self.error.is_some() {
-            return false;
-        }
-        self.depth += 1;
-        if let Err(error) = self.limits.check_depth(self.depth) {
-            self.depth -= 1;
-            self.fail(Error::from(error));
-            return false;
-        }
-        true
-    }
-
-    fn leave(&mut self) {
-        self.depth -= 1;
-    }
-
-    /// Write a tag token. Fails for a tag whose payload is also tagged, which
-    /// YAML cannot express. A tag of the core schema on a scalar that it doesn't take was
-    /// refused before the document's first line, by the scan for the tags that need a
-    /// directive.
-    fn push_tag(&mut self, tagged: &crate::tag::TaggedValue) -> bool {
-        if self.error.is_some() {
-            return false;
-        }
-        if matches!(tagged.value, Value::Tagged(_)) {
-            self.fail(nested_tag_error());
-            return false;
-        }
-        match self
-            .directives
-            .token(&tagged.tag, RedefinedHandles::default())
-        {
-            Ok(token) => {
-                self.push_str(&token);
-                self.error.is_none()
-            }
-            Err(error) => {
-                self.fail(error);
-                false
-            }
-        }
-    }
-
-    /// The first error, if writing failed. It borrows the writer rather than take it, which would
-    /// copy it.
-    fn finish(&mut self) -> Result<(), Error> {
-        self.error.take().map_or(Ok(()), Err)
-    }
-
-    /// Write the root node, after any `---` and directives.
-    fn emit_root(&mut self, value: &Value) {
-        if self.style().flow.unwrap_or(self.options.flow) {
-            self.emit_flow(value);
-            self.push('\n');
-        } else if let Value::String(text) = value
-            && self.use_block_scalar(text)
-        {
-            self.emit_block_scalar(text, self.options.indent, true);
-        } else if let Value::Tagged(tagged) = value
-            && let Value::String(text) = &tagged.value
-            && self.use_block_scalar(text)
-        {
-            if self.push_tag(tagged) {
-                self.push(' ');
-                self.emit_block_scalar(text, self.options.indent, true);
-            }
-        } else {
-            match value {
-                Value::Mapping(mapping) if !mapping.is_empty() => self.emit_mapping(mapping, 0),
-                Value::Sequence(sequence) if !sequence.is_empty() => {
-                    self.emit_sequence(sequence, 0);
-                }
-                _ => {
-                    self.emit_flow(value);
-                    self.push('\n');
-                }
-            }
-        }
-        if self.options.explicit_end {
-            self.push_str("...\n");
-        }
-    }
-
-    fn emit_mapping(&mut self, mapping: &crate::mapping::Mapping, indent: usize) {
-        self.emit_mapping_items(mapping, indent, false);
-    }
-
-    /// Whether a block-mapping key must use the explicit `? ` form.
-    fn needs_explicit_key(&self, key: &Value) -> bool {
-        match key {
-            Value::Sequence(_) | Value::Mapping(_) | Value::Tagged(_) => true,
-            Value::String(text) => self.key_exceeds_implicit_limit(text),
-            _ => false,
-        }
-    }
-
-    fn key_exceeds_implicit_limit(&self, text: &str) -> bool {
-        let form = self.string_form(text, self.options.scalar_style);
-        Self::string_key_exceeds_limit(text, form)
-    }
-
-    fn string_key_exceeds_limit(text: &str, form: StringForm) -> bool {
-        const CAP: usize = MAX_IMPLICIT_KEY_CHARS + 1;
-        match form {
-            StringForm::Plain => {
-                text.len() > MAX_IMPLICIT_KEY_CHARS
-                    && text.chars().take(CAP).count() > MAX_IMPLICIT_KEY_CHARS
-            }
-            StringForm::SingleQuoted => {
-                single_quoted_char_len_capped(text, CAP) > MAX_IMPLICIT_KEY_CHARS
-            }
-            StringForm::DoubleQuoted => {
-                double_quoted_char_len_capped(text, CAP) > MAX_IMPLICIT_KEY_CHARS
-            }
-        }
-    }
-
-    /// How many characters a string key takes as [`ValueWriter::emit_key`] writes it, in the
-    /// current flow context, capped at `MAX_IMPLICIT_KEY_CHARS + 1` so long keys never allocate.
-    fn key_width(&self, text: &str) -> usize {
-        const CAP: usize = MAX_IMPLICIT_KEY_CHARS + 1;
-        match self.string_form(text, self.options.scalar_style) {
-            StringForm::Plain => text.chars().take(CAP).count(),
-            StringForm::SingleQuoted => single_quoted_char_len_capped(text, CAP),
-            StringForm::DoubleQuoted => double_quoted_char_len_capped(text, CAP),
-        }
-    }
-
-    /// Whether a flow-mapping key is a scalar whose text, with any tag, runs past
-    /// [`MAX_IMPLICIT_KEY_CHARS`]. YAML puts no limit on an implicit key in a flow mapping, but
-    /// readers built on libyaml refuse one past 1024 characters there too.
-    fn flow_key_is_long(&mut self, key: &Value) -> bool {
-        match key {
-            Value::String(_) => self.needs_explicit_key(key),
-            Value::Tagged(tagged) => {
-                // A tag with no form fails when it is written.
-                let Ok(token) = self
-                    .directives
-                    .token(&tagged.tag, RedefinedHandles::default())
-                else {
-                    return false;
-                };
-                let text = match &tagged.value {
-                    Value::String(text) => self.key_width(text),
-                    Value::Bool(value) => {
-                        if *value {
-                            4
-                        } else {
-                            5
-                        }
-                    }
-                    Value::Number(number) => number.to_string().len(),
-                    // A null writes no text, and a collection is explicit already.
-                    _ => 0,
-                };
-                token.chars().count() + 1 + text > MAX_IMPLICIT_KEY_CHARS
-            }
-            _ => false,
-        }
-    }
-
-    fn emit_key(&mut self, key: &Value) {
-        let in_key = std::mem::replace(&mut self.in_key, true);
-        self.emit_flow(key);
-        self.in_key = in_key;
-    }
-
-    fn emit_mapping_items(
-        &mut self,
-        mapping: &crate::mapping::Mapping,
-        indent: usize,
-        inline_first: bool,
-    ) {
-        if !self.enter() {
-            return;
-        }
-        for (index, (key, value)) in mapping.iter().enumerate() {
-            if self.error.is_some() {
-                break;
-            }
-            if index > 0 || !inline_first {
-                self.indent(indent);
-            }
-            if let Value::String(text) = key {
-                let form = self.string_form(text, self.options.scalar_style);
-                if Self::string_key_exceeds_limit(text, form) {
-                    self.push_str("? ");
-                    self.emit_string_with_form(text, form);
-                    self.push('\n');
-                    self.indent(indent);
-                    self.push(':');
-                } else {
-                    self.emit_string_with_form(text, form);
-                    self.push(':');
-                }
-            } else if self.needs_explicit_key(key) {
-                self.push_str("? ");
-                self.emit_key(key);
-                self.push('\n');
-                self.indent(indent);
-                self.push(':');
-            } else {
-                self.emit_key(key);
-                self.push(':');
-            }
-            self.push_key(key);
-            if self.force_flow()
-                && matches!(
-                    value,
-                    Value::Mapping(_) | Value::Sequence(_) | Value::Tagged(_)
-                )
-            {
-                self.push(' ');
-                self.emit_flow(value);
-                self.push('\n');
-            } else if Self::needs_block_value(value) {
-                self.push('\n');
-                self.emit_node(value, self.block_value_indent(value, indent));
-            } else {
-                self.push(' ');
-                self.emit_inline_value(value, indent + self.options.indent);
-            }
-            self.pop_path();
-        }
-        self.leave();
-    }
-
-    fn block_value_indent(&self, value: &Value, indent: usize) -> usize {
-        let sequence_like = matches!(value, Value::Sequence(sequence) if !sequence.is_empty());
-        if !self.options.indent_sequences && sequence_like {
-            indent
-        } else {
-            indent + self.options.indent
-        }
-    }
-
-    fn emit_sequence(&mut self, sequence: &[Value], indent: usize) {
-        self.emit_sequence_items(sequence, indent, false);
-    }
-
-    fn emit_sequence_items(&mut self, sequence: &[Value], indent: usize, inline_first: bool) {
-        if !self.enter() {
-            return;
-        }
-        let step = self.options.indent;
-        for (index, item) in sequence.iter().enumerate() {
-            if self.error.is_some() {
-                break;
-            }
-            if index > 0 || !inline_first {
-                self.indent(indent);
-            }
-            self.push('-');
-            self.push_index(index);
-            if self.force_flow()
-                && matches!(
-                    item,
-                    Value::Mapping(_) | Value::Sequence(_) | Value::Tagged(_)
-                )
-            {
-                self.push(' ');
-                self.emit_flow(item);
-                self.push('\n');
-            } else if let Value::Sequence(inner) = item
-                && !inner.is_empty()
-            {
-                // A compact entry starts at the child indentation, so the
-                // `-` is padded to `indent` columns.
-                self.indent(step - 1);
-                self.emit_sequence_items(inner, indent + step, true);
-            } else if let Value::Mapping(mapping) = item
-                && !mapping.is_empty()
-            {
-                self.indent(step - 1);
-                self.emit_mapping_items(mapping, indent + step, true);
-            } else if Self::needs_block_value(item) {
-                self.push('\n');
-                self.emit_node(item, indent + step);
-            } else {
-                self.push(' ');
-                self.emit_inline_value(item, indent + step);
-            }
-            self.pop_path();
-        }
-        self.leave();
-    }
-
-    fn emit_node(&mut self, value: &Value, indent: usize) {
-        match value {
-            Value::Mapping(mapping) if !mapping.is_empty() => self.emit_mapping(mapping, indent),
-            Value::Sequence(sequence) if !sequence.is_empty() => {
-                self.emit_sequence(sequence, indent);
-            }
-            Value::Tagged(tagged) => {
-                self.indent(indent);
-                if !self.push_tag(tagged) {
-                    return;
-                }
-                self.push('\n');
-                if !tagged.value.is_null() {
-                    self.emit_node(&tagged.value, indent);
-                }
-            }
-            _ => {
-                self.indent(indent);
-                self.emit_flow(value);
-                self.push('\n');
-            }
-        }
-    }
-
-    fn needs_block_value(value: &Value) -> bool {
-        match value {
-            Value::Mapping(mapping) => !mapping.is_empty(),
-            Value::Sequence(sequence) => !sequence.is_empty(),
-            Value::Tagged(tagged) => Self::needs_block_value(&tagged.value),
-            _ => false,
-        }
-    }
-
-    /// Emit a node that follows `key: ` or `- `, ending with a line break.
-    fn emit_inline_value(&mut self, value: &Value, indent: usize) {
-        match value {
-            Value::Mapping(mapping) if !mapping.is_empty() => {
-                self.push('\n');
-                self.emit_mapping(mapping, indent);
-            }
-            Value::Sequence(sequence) if !sequence.is_empty() => {
-                self.push('\n');
-                self.emit_sequence(sequence, indent);
-            }
-            Value::Tagged(tagged) => {
-                if !self.push_tag(tagged) {
-                    return;
-                }
-                if tagged.value.is_null() {
-                    self.push('\n');
-                } else if let Value::String(text) = &tagged.value
-                    && self.use_block_scalar(text)
-                {
-                    self.push(' ');
-                    self.emit_block_scalar(text, indent, false);
-                } else if Self::needs_block_value(&tagged.value) {
-                    self.push('\n');
-                    self.emit_node(&tagged.value, indent);
-                } else {
-                    self.push(' ');
-                    self.emit_flow(&tagged.value);
-                    self.push('\n');
-                }
-            }
-            Value::String(text) if self.use_block_scalar(text) => {
-                self.emit_block_scalar(text, indent, false);
-            }
-            _ => {
-                self.emit_flow(value);
-                self.push('\n');
-            }
-        }
-    }
-
-    fn use_block_scalar(&self, text: &str) -> bool {
-        if self.in_flow || self.in_key {
-            return false;
-        }
-        let block_style = match self.scalar_style() {
-            Some(
-                crate::event::ScalarStyle::SingleQuoted | crate::event::ScalarStyle::DoubleQuoted,
-            ) => return false,
-            Some(crate::event::ScalarStyle::Literal | crate::event::ScalarStyle::Folded) => true,
-            _ => text.contains('\n'),
-        };
-        block_style && block_scalar_ok(text)
-    }
-
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "the indentation indicator is a single digit in 1..=9"
-    )]
-    fn emit_block_scalar(&mut self, text: &str, content_indent: usize, root: bool) {
-        if self.error.is_some() {
-            return;
-        }
-        // A root node's indentation is -1 and an indicator is one digit, so keep a root
-        // scalar's content at most eight columns in.
-        let content_indent = if root {
-            content_indent.min(8)
-        } else {
-            content_indent
-        };
-        let trailing = text.chars().rev().take_while(|ch| *ch == '\n').count();
-        let body = &text[..text.len().saturating_sub(trailing)];
-        let folded = matches!(self.scalar_style(), Some(crate::event::ScalarStyle::Folded))
-            && can_fold(body);
-        let folded_body;
-        let inferred = if trailing == 0 {
-            Chomping::Strip
-        } else if trailing == 1 && !body.is_empty() {
-            Chomping::Clip
-        } else {
-            Chomping::Keep
-        };
-        let requested = self.style().chomping;
-        let chomping = match requested {
-            Some(Chomping::Strip) if trailing == 0 => Chomping::Strip,
-            Some(Chomping::Clip)
-                if (trailing == 1 && !body.is_empty()) || (body.is_empty() && trailing == 0) =>
-            {
-                Chomping::Clip
-            }
-            Some(Chomping::Keep) if trailing > 0 || body.is_empty() => Chomping::Keep,
-            _ => inferred,
-        };
-        let indicator = if folded { '>' } else { '|' };
-        self.push(indicator);
-        if needs_explicit_indent(text) {
-            // The indicator counts from the parent node. A root node's indentation is -1, so a
-            // root scalar needs one more than its content indentation; a nested scalar needs one
-            // indentation step.
-            let indicator = if root {
-                content_indent + 1
-            } else {
-                self.options.indent
-            };
-            self.push(char::from_digit(indicator as u32, 10).unwrap_or('0'));
-        }
-        match chomping {
-            Chomping::Strip => self.push('-'),
-            Chomping::Clip => {}
-            Chomping::Keep => self.push('+'),
-        }
-        self.push('\n');
-        if self.error.is_some() {
-            return;
-        }
-        let body = if folded {
-            // `expand_folded` only inserts line breaks, so `body.len()` is a lower bound on the
-            // bytes that will be written; reject before allocating if it already exceeds limits.
-            if let Err(err) = self.output.check_additional(body.len()) {
-                self.fail(err);
-                return;
-            }
-            folded_body = expand_folded(body);
-            folded_body.as_str()
-        } else {
-            body
-        };
-        if body.is_empty() {
-            for _ in 0..trailing {
-                if self.error.is_some() {
-                    break;
-                }
-                #[cfg(test)]
-                {
-                    self.block_scalar_lines += 1;
-                }
-                self.push('\n');
-            }
-        } else {
-            for line in body.split('\n') {
-                if self.error.is_some() {
-                    break;
-                }
-                #[cfg(test)]
-                {
-                    self.block_scalar_lines += 1;
-                }
-                if !line.is_empty() {
-                    self.indent(content_indent);
-                    self.push_str(line);
-                }
-                self.push('\n');
-            }
-            for _ in 1..trailing {
-                if self.error.is_some() {
-                    break;
-                }
-                #[cfg(test)]
-                {
-                    self.block_scalar_lines += 1;
-                }
-                self.push('\n');
-            }
-        }
-    }
-
-    /// Write a node on the current line: a scalar, or a collection in flow
-    /// style.
-    #[inline]
-    fn emit_flow(&mut self, value: &Value) {
-        match value {
-            Value::Null => self.push_str("null"),
-            Value::Bool(value) => self.push_str(if *value { "true" } else { "false" }),
-            Value::Number(value) => self.push_str(&value.to_string()),
-            Value::String(value) => self.emit_string(value),
-            // An empty collection is one level too, as the parser and the event writer count
-            // it: what is written within `max_depth` is read back within it.
-            Value::Sequence(sequence) if sequence.is_empty() => {
-                if self.enter() {
-                    self.push_str("[]");
-                    self.leave();
-                }
-            }
-            Value::Mapping(mapping) if mapping.is_empty() => {
-                if self.enter() {
-                    self.push_str("{}");
-                    self.leave();
-                }
-            }
-            Value::Sequence(sequence) => self.emit_flow_sequence(sequence),
-            Value::Mapping(mapping) => self.emit_flow_mapping(mapping),
-            Value::Tagged(tagged) => self.emit_flow_tagged(tagged),
-        }
-    }
-
-    #[inline(never)]
-    fn emit_flow_sequence(&mut self, sequence: &[Value]) {
-        if !self.enter() {
-            return;
-        }
-        let in_flow = std::mem::replace(&mut self.in_flow, true);
-        self.push('[');
-        for (index, item) in sequence.iter().enumerate() {
-            if self.error.is_some() {
-                break;
-            }
-            #[cfg(test)]
-            {
-                self.flow_loop_steps += 1;
-            }
-            if index > 0 {
-                self.push_str(", ");
-                if self.error.is_some() {
-                    break;
-                }
-            }
-            self.push_index(index);
-            self.emit_flow(item);
-            self.pop_path();
-        }
-        self.push(']');
-        self.in_flow = in_flow;
-        self.leave();
-    }
-
-    #[inline(never)]
-    fn emit_flow_mapping(&mut self, mapping: &crate::mapping::Mapping) {
-        if !self.enter() {
-            return;
-        }
-        let in_flow = std::mem::replace(&mut self.in_flow, true);
-        self.push('{');
-        for (index, (key, value)) in mapping.iter().enumerate() {
-            if self.error.is_some() {
-                break;
-            }
-            #[cfg(test)]
-            {
-                self.flow_loop_steps += 1;
-            }
-            if index > 0 {
-                self.push_str(", ");
-                if self.error.is_some() {
-                    break;
-                }
-            }
-            // libyaml writes non-empty collection keys and long
-            // keys in the explicit form; so do we.
-            let explicit = Self::needs_block_value(key) || self.flow_key_is_long(key);
-            if explicit {
-                self.push_str("? ");
-            }
-            self.emit_key(key);
-            if self.error.is_some() {
-                break;
-            }
-            // A tagged null already ends with a space.
-            if explicit && !matches!(key, Value::Tagged(tagged) if tagged.value.is_null()) {
-                self.push(' ');
-            }
-            self.push_str(": ");
-            if self.error.is_some() {
-                break;
-            }
-            self.push_key(key);
-            self.emit_flow(value);
-            self.pop_path();
-        }
-        self.push('}');
-        self.in_flow = in_flow;
-        self.leave();
-    }
-
-    #[inline(never)]
-    fn emit_flow_tagged(&mut self, tagged: &crate::tag::TaggedValue) {
-        if !self.push_tag(tagged) {
-            return;
-        }
-        if tagged.value.is_null() {
-            // `[!t ]`: libyaml needs a space between a tag and a
-            // flow indicator.
-            if self.in_flow {
-                self.push(' ');
-            }
-        } else {
-            self.push(' ');
-            self.emit_flow(&tagged.value);
-        }
-    }
-
-    /// How [`ValueWriter::emit_string`] writes `value` under `style`, in the current flow context.
-    fn string_form(&self, value: &str, style: Option<crate::event::ScalarStyle>) -> StringForm {
-        match style {
-            Some(crate::event::ScalarStyle::SingleQuoted) if single_quoted_ok(value) => {
-                StringForm::SingleQuoted
-            }
-            Some(
-                crate::event::ScalarStyle::SingleQuoted
-                | crate::event::ScalarStyle::DoubleQuoted
-                | crate::event::ScalarStyle::Literal
-                | crate::event::ScalarStyle::Folded,
-            ) => StringForm::DoubleQuoted,
-            _ if self.in_flow && plain_is_safe(value) => StringForm::Plain,
-            _ if !self.in_flow && plain_is_block_safe(value) => StringForm::Plain,
-            _ => StringForm::DoubleQuoted,
-        }
-    }
-
-    fn emit_string(&mut self, value: &str) {
-        let form = self.string_form(value, self.scalar_style());
-        self.emit_string_with_form(value, form);
-    }
-
-    #[inline]
-    fn emit_string_with_form(&mut self, value: &str, form: StringForm) {
-        match form {
-            StringForm::Plain => self.push_str(value),
-            StringForm::SingleQuoted => self.emit_single_quoted_streaming(value),
-            StringForm::DoubleQuoted => self.emit_double_quoted_streaming(value),
-        }
-    }
-
-    #[inline(never)]
-    fn emit_single_quoted_streaming(&mut self, value: &str) {
-        self.push('\'');
-        for (index, part) in value.split('\'').enumerate() {
-            if self.error.is_some() {
-                break;
-            }
-            #[cfg(test)]
-            {
-                self.quoted_chunks += 1;
-            }
-            if index > 0 {
-                self.push_str("''");
-            }
-            self.push_str(part);
-        }
-        self.push('\'');
-    }
-
-    /// Stream a double-quoted scalar directly through `self.output` without allocating an
-    /// intermediate escaped `String`, stopping immediately when `self.error` is set.
-    #[inline(never)]
-    fn emit_double_quoted_streaming(&mut self, value: &str) {
-        self.push('"');
-        let bytes = value.as_bytes();
-        let mut run_start = 0;
-        let mut index = 0;
-        let mut hex_buf = [0_u8; 10];
-        while index < bytes.len() {
-            if self.error.is_some() {
-                return;
-            }
-            let byte = bytes[index];
-            if (0x20..=0x7e).contains(&byte) && byte != b'"' && byte != b'\\' {
-                index += 1;
-                continue;
-            }
-            if index > run_start {
-                #[cfg(test)]
-                {
-                    self.quoted_chunks += 1;
-                }
-                self.push_str(&value[run_start..index]);
-                if self.error.is_some() {
-                    return;
-                }
-            }
-            #[cfg(test)]
-            {
-                self.quoted_chunks += 1;
-            }
-            if byte < 0x80 {
-                let esc = match byte {
-                    b'\\' => "\\\\",
-                    b'"' => "\\\"",
-                    b'\0' => "\\0",
-                    0x07 => "\\a",
-                    0x08 => "\\b",
-                    b'\t' => "\\t",
-                    b'\n' => "\\n",
-                    0x0b => "\\v",
-                    0x0c => "\\f",
-                    b'\r' => "\\r",
-                    0x1b => "\\e",
-                    _ => format_hex_escape(u32::from(byte), 2, b'x', &mut hex_buf),
-                };
-                self.push_str(esc);
-                index += 1;
-                run_start = index;
-            } else {
-                let Some(ch) = value[index..].chars().next() else {
-                    break;
-                };
-                let char_len = ch.len_utf8();
-                match ch {
-                    '\u{0085}' => self.push_str("\\N"),
-                    '\u{2028}' => self.push_str("\\L"),
-                    '\u{2029}' => self.push_str("\\P"),
-                    ch if !is_printable(ch) || ch == '\u{feff}' => {
-                        let code = ch as u32;
-                        let esc = if code <= 0xFF {
-                            format_hex_escape(code, 2, b'x', &mut hex_buf)
-                        } else if code <= 0xFFFF {
-                            format_hex_escape(code, 4, b'u', &mut hex_buf)
-                        } else {
-                            format_hex_escape(code, 8, b'U', &mut hex_buf)
-                        };
-                        self.push_str(esc);
-                    }
-                    _ => self.push_str(&value[index..index + char_len]),
-                }
-                index += char_len;
-                run_start = index;
-            }
-        }
-        if self.error.is_some() {
-            return;
-        }
-        if run_start < bytes.len() {
-            #[cfg(test)]
-            {
-                self.quoted_chunks += 1;
-            }
-            self.push_str(&value[run_start..]);
-        }
-        self.push('"');
-    }
-}
-
-fn format_hex_escape(code: u32, digits: usize, prefix: u8, buf: &mut [u8; 10]) -> &str {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    buf[0] = b'\\';
-    buf[1] = prefix;
-    for i in 0..digits {
-        let shift = (digits - 1 - i) * 4;
-        buf[2 + i] = HEX[((code >> shift) & 0xf) as usize];
-    }
-    std::str::from_utf8(&buf[..2 + digits]).unwrap_or("")
-}
-
-/// How the value writer writes a string scalar.
-#[derive(Clone, Copy)]
-enum StringForm {
-    Plain,
-    SingleQuoted,
-    DoubleQuoted,
 }
 
 #[cfg(test)]

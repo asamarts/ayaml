@@ -711,3 +711,391 @@ fn flow_emitter_stops_immediately_on_limit_or_writer_error() {
         }
     });
 }
+
+/// Oversized quoted, block, and multiline plain scalars fail incrementally under tight
+/// `max_scalar_bytes` without allocating full decoded buffers (AY-176).
+#[test]
+fn oversized_scalars_fail_incrementally_without_allocating_decoded_buffers() {
+    in_child!(|| {
+        use ayaml::LimitExceeded;
+
+        const SIZE: usize = 8 << 20;
+        let single = format!("'{}'", "a''".repeat(SIZE / 3));
+        let double_expand = format!("\"{}\"", "\\L".repeat(SIZE / 2));
+        let double_blanks = format!("\"a{}  b\"", "\n".repeat(SIZE));
+        let literal = format!("k: |\n{}", "  abcdefgh\n".repeat(SIZE / 11));
+        let folded = format!("k: >\n{}", "  abcdefgh\n".repeat(SIZE / 11));
+        let multiline_plain = format!("a\n{}", "  bcdefgh\n".repeat(SIZE / 10));
+
+        let tight = ParseOptions::new().with_limits(Limits::default().with_max_scalar_bytes(64));
+        let check = || {
+            for (label, input) in [
+                ("single_quoted", single.as_str()),
+                ("double_expand", double_expand.as_str()),
+                ("double_blanks", double_blanks.as_str()),
+                ("literal_block", literal.as_str()),
+                ("folded_block", folded.as_str()),
+                ("multiline_plain", multiline_plain.as_str()),
+            ] {
+                for (reader, err) in [
+                    (
+                        "parse_value_with",
+                        ayaml::parse_value_with(input, &tight).expect_err(label),
+                    ),
+                    (
+                        "parse_events_with",
+                        ayaml::parse_events_with(input, &tight)
+                            .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                            .expect_err(label),
+                    ),
+                    (
+                        "from_str_with",
+                        ayaml::from_str_with::<Value>(input, &tight).expect_err(label),
+                    ),
+                    (
+                        "SpannedTree::parse_with",
+                        SpannedTree::parse_with(input, &tight).expect_err(label),
+                    ),
+                ] {
+                    assert_eq!(err.kind(), ErrorKind::Limit, "{label}/{reader}: {err:?}");
+                    assert_eq!(
+                        err.code(),
+                        ErrorCode::ScalarSizeLimit,
+                        "{label}/{reader}: {err:?}"
+                    );
+                    assert_eq!(
+                        err.limit().map(LimitExceeded::kind),
+                        Some(LimitKind::ScalarBytes),
+                        "{label}/{reader}: {err:?}"
+                    );
+                }
+            }
+        };
+
+        if super::MEASURES_MEMORY {
+            let growth = super::peak_growth(check);
+            assert!(
+                growth <= 2 << 20,
+                "tight max_scalar_bytes rejection grew memory by {growth} bytes (expected <= 2 MiB)"
+            );
+        } else {
+            check();
+        }
+    });
+}
+
+fn wrap_event_doc<'a>(
+    directives: Vec<ayaml::Event<'a>>,
+    root: Vec<ayaml::Event<'a>>,
+) -> Vec<ayaml::Event<'a>> {
+    let mut events = vec![ayaml::Event::StreamStart {
+        span: ayaml::Span::default(),
+    }];
+    events.extend(directives);
+    events.push(ayaml::Event::DocumentStart {
+        explicit: false,
+        span: ayaml::Span::default(),
+    });
+    events.extend(root);
+    events.push(ayaml::Event::DocumentEnd {
+        explicit: false,
+        span: ayaml::Span::default(),
+    });
+    events.push(ayaml::Event::StreamEnd {
+        span: ayaml::Span::default(),
+    });
+    events
+}
+
+fn event_scalar<'a>(
+    value: &'a str,
+    style: ayaml::ScalarStyle,
+    tag: Option<ayaml::Tag>,
+    anchor: Option<ayaml::Anchor<'a>>,
+) -> ayaml::Event<'a> {
+    ayaml::Event::Scalar {
+        value: std::borrow::Cow::Borrowed(value),
+        raw: std::borrow::Cow::Borrowed(""),
+        style,
+        tag,
+        anchor,
+        span: ayaml::Span::default(),
+    }
+}
+
+fn event_kv_map(key: ayaml::Event<'_>) -> Vec<ayaml::Event<'_>> {
+    vec![
+        ayaml::Event::MappingStart {
+            tag: None,
+            anchor: None,
+            style: ayaml::CollectionStyle::Block,
+            span: ayaml::Span::default(),
+        },
+        key,
+        event_scalar("1", ayaml::ScalarStyle::Plain, None, None),
+        ayaml::Event::MappingEnd {
+            span: ayaml::Span::default(),
+        },
+    ]
+}
+
+/// Both `ValueWriter` and `EventWriter` enforce `max_output_bytes` incrementally on oversized
+/// escaped/folded scalars, long mapping keys, tags, directives, and anchors without allocating
+/// full temporary strings (AY-176).
+#[test]
+fn emitters_enforce_max_output_bytes_incrementally_without_temporary_allocations() {
+    in_child!(|| {
+        use std::borrow::Cow;
+
+        use ayaml::{
+            Anchor, EmitOptions, Emitter, EmitterOptions, EmitterStyles, Event, LimitExceeded,
+            Mapping, NodeStyle, PathSegment, ScalarStyle, Span, Tag, TaggedValue,
+        };
+
+        const SIZE: usize = 8 << 20;
+        let big_double = "a\"b\\c\n\x01".repeat(SIZE / 7);
+        let big_single = "a'".repeat(SIZE / 2);
+        let big_folded = "ab\ncd\n".repeat(SIZE / 6);
+        let big_tag = Tag::new(format!("custom {}:", "p".repeat(SIZE / 2)), "s");
+
+        let double_val = Value::String(big_double.clone());
+        let single_val = Value::String(big_single.clone());
+        let folded_val = Value::String(big_folded.clone());
+        let mut long_key_map = Mapping::new();
+        long_key_map.insert(Value::String(big_double.clone()), Value::from(1_u64));
+        let long_key_val = Value::Mapping(long_key_map);
+        let tagged_val = Value::Tagged(Box::new(TaggedValue::new(
+            big_tag.clone(),
+            Value::from(1_u64),
+        )));
+
+        let double_events = wrap_event_doc(
+            vec![],
+            vec![event_scalar(
+                &big_double,
+                ScalarStyle::DoubleQuoted,
+                None,
+                None,
+            )],
+        );
+        let single_events = wrap_event_doc(
+            vec![],
+            vec![event_scalar(
+                &big_single,
+                ScalarStyle::SingleQuoted,
+                None,
+                None,
+            )],
+        );
+        let folded_events = wrap_event_doc(
+            vec![],
+            vec![event_scalar(&big_folded, ScalarStyle::Folded, None, None)],
+        );
+        let long_key_events = wrap_event_doc(
+            vec![],
+            event_kv_map(event_scalar(
+                &big_double,
+                ScalarStyle::DoubleQuoted,
+                None,
+                None,
+            )),
+        );
+        let huge_dir_value = format!("!e! tag:example.com,2026:{}:", "a".repeat(SIZE / 2));
+        let directive_events = wrap_event_doc(
+            vec![Event::Directive {
+                name: Cow::Borrowed("TAG"),
+                value: Cow::Borrowed(&huge_dir_value),
+                span: Span::default(),
+            }],
+            vec![event_scalar("1", ScalarStyle::Plain, None, None)],
+        );
+        let tagged_events = wrap_event_doc(
+            vec![],
+            vec![event_scalar("1", ScalarStyle::Plain, Some(big_tag), None)],
+        );
+        let huge_anchor_str = "a".repeat(SIZE / 2);
+        let anchor_events = wrap_event_doc(
+            vec![],
+            vec![event_scalar(
+                "1",
+                ScalarStyle::Plain,
+                None,
+                Some(Anchor::new(huge_anchor_str.as_str())),
+            )],
+        );
+        let anchor_key_events = wrap_event_doc(
+            vec![],
+            event_kv_map(event_scalar(
+                "k",
+                ScalarStyle::Plain,
+                None,
+                Some(Anchor::new(huge_anchor_str.as_str())),
+            )),
+        );
+
+        let tight_limits = Limits::default().with_max_output_bytes(128);
+        let tight = EmitOptions::new().with_limits(tight_limits.clone());
+        let tight_sq = tight
+            .clone()
+            .with_scalar_style(Some(ScalarStyle::SingleQuoted));
+        let tight_folded = tight.clone().with_scalar_style(Some(ScalarStyle::Folded));
+        let tight_flow = tight.clone().with_flow(true);
+        let mut active_styles = EmitterStyles::new();
+        active_styles.set(
+            vec![PathSegment::key("other")],
+            NodeStyle::new().with_scalar_style(Some(ScalarStyle::DoubleQuoted)),
+        );
+        let styled_emitter_opts = EmitterOptions::new();
+        let styled_emitter =
+            Emitter::new(&tight_limits, &styled_emitter_opts).with_styles(&active_styles);
+
+        let check = || {
+            for (label, err) in [
+                (
+                    "value_double",
+                    ayaml::to_string_value_with(&double_val, &tight).expect_err("double"),
+                ),
+                (
+                    "value_single",
+                    ayaml::to_string_value_with(&single_val, &tight_sq).expect_err("single"),
+                ),
+                (
+                    "value_folded",
+                    ayaml::to_string_value_with(&folded_val, &tight_folded).expect_err("folded"),
+                ),
+                (
+                    "value_block_key",
+                    ayaml::to_string_value_with(&long_key_val, &tight).expect_err("block key"),
+                ),
+                (
+                    "value_block_key_styled",
+                    styled_emitter
+                        .value_to_string(&long_key_val)
+                        .expect_err("styled block key"),
+                ),
+                (
+                    "value_flow_key",
+                    ayaml::to_string_value_with(&long_key_val, &tight_flow).expect_err("flow key"),
+                ),
+                (
+                    "value_tagged",
+                    ayaml::to_string_value_with(&tagged_val, &tight).expect_err("tagged"),
+                ),
+                (
+                    "events_double",
+                    ayaml::to_string_events_with(&double_events, &tight).expect_err("ev double"),
+                ),
+                (
+                    "events_single",
+                    ayaml::to_string_events_with(&single_events, &tight).expect_err("ev single"),
+                ),
+                (
+                    "events_folded",
+                    ayaml::to_string_events_with(&folded_events, &tight).expect_err("ev folded"),
+                ),
+                (
+                    "events_key",
+                    ayaml::to_string_events_with(&long_key_events, &tight).expect_err("ev key"),
+                ),
+                (
+                    "events_directive",
+                    ayaml::to_string_events_with(&directive_events, &tight).expect_err("ev dir"),
+                ),
+                (
+                    "events_tagged",
+                    ayaml::to_string_events_with(&tagged_events, &tight).expect_err("ev tagged"),
+                ),
+                (
+                    "events_anchor",
+                    ayaml::to_string_events_with(&anchor_events, &tight).expect_err("ev anchor"),
+                ),
+                (
+                    "events_anchor_key",
+                    ayaml::to_string_events_with(&anchor_key_events, &tight)
+                        .expect_err("ev anchor key"),
+                ),
+            ] {
+                assert_eq!(err.kind(), ErrorKind::Limit, "{label}: {err:?}");
+                assert_eq!(err.code(), ErrorCode::OutputSizeLimit, "{label}: {err:?}");
+                assert_eq!(
+                    err.limit().map(LimitExceeded::kind),
+                    Some(LimitKind::OutputBytes),
+                    "{label}: {err:?}"
+                );
+            }
+        };
+
+        if super::MEASURES_MEMORY {
+            let growth = super::peak_growth(check);
+            assert!(
+                growth <= 2 << 20,
+                "tight max_output_bytes rejection grew memory by {growth} bytes (expected <= 2 MiB)"
+            );
+        } else {
+            check();
+        }
+    });
+}
+
+/// Iterative `ValueWriter` and `TagDirectives::scan` emit `MAX_DEPTH_CAP` (128) nested trees on a
+/// 512 KiB thread stack (4x smaller than Rust's 2 MiB default, where recursive emission previously
+/// overflowed in debug builds) (AY-176).
+#[test]
+fn value_emitter_handles_max_depth_cap_on_tiny_stack() {
+    in_child!(|| {
+        use ayaml::{EmitOptions, Emitter, EmitterOptions, MAX_DEPTH_CAP};
+
+        let limits = Limits::default().with_max_depth(MAX_DEPTH_CAP);
+        let parse_opts = ParseOptions::new().with_limits(limits.clone());
+        let values: Vec<(&str, Value)> = [
+            "flow sequence",
+            "flow mapping",
+            "block sequence",
+            "block mapping",
+            "tagged flow mapping",
+        ]
+        .into_iter()
+        .map(|shape| {
+            let input = super::nested(shape, MAX_DEPTH_CAP);
+            let value = ayaml::parse_value_with(&input, &parse_opts).expect(shape);
+            (shape, value)
+        })
+        .collect();
+
+        std::thread::Builder::new()
+            .stack_size(512 << 10)
+            .spawn(move || {
+                let emit_opts = EmitOptions::new().with_limits(limits.clone());
+                let flow_opts = emit_opts.clone().with_flow(true);
+                let emitter_opts = EmitterOptions::new();
+                let emitter = Emitter::new(&limits, &emitter_opts);
+                for (shape, value) in &values {
+                    let block = ayaml::to_string_value_with(value, &emit_opts)
+                        .unwrap_or_else(|err| panic!("{shape} block: {err}"));
+                    let flow = ayaml::to_string_value_with(value, &flow_opts)
+                        .unwrap_or_else(|err| panic!("{shape} flow: {err}"));
+                    let mut buf = Vec::new();
+                    ayaml::to_writer_value_with(&mut buf, value, &emit_opts)
+                        .unwrap_or_else(|err| panic!("{shape} writer: {err}"));
+                    assert_eq!(buf, block.as_bytes(), "{shape} writer parity");
+                    let doc = emitter
+                        .value_to_string(value)
+                        .unwrap_or_else(|err| panic!("{shape} emitter: {err}"));
+                    assert_eq!(doc, block, "{shape} emitter parity");
+                    assert_eq!(
+                        ayaml::parse_value_with(&block, &parse_opts).expect("reparse block"),
+                        *value,
+                        "{shape} block round-trip"
+                    );
+                    assert_eq!(
+                        ayaml::parse_value_with(&flow, &parse_opts).expect("reparse flow"),
+                        *value,
+                        "{shape} flow round-trip"
+                    );
+                }
+            })
+            .expect("spawn 512 KiB stack thread")
+            .join()
+            .expect("512 KiB stack emission succeeded");
+    });
+}

@@ -28,8 +28,9 @@ use std::marker::PhantomData;
 use crate::EventStream;
 use crate::emitter::{
     MAX_IMPLICIT_KEY_CHARS, Output, RedefinedHandles, TagDirectives, block_scalar_ok, can_fold,
-    emit_double_quoted, expand_folded, is_printable, looks_like_leading_zero_numeral,
-    needs_explicit_indent, plain_text_ok, single_quoted_ok, validate_options,
+    double_quoted_char_len_capped, is_printable, looks_like_leading_zero_numeral,
+    needs_explicit_indent, plain_text_ok, single_quoted_char_len_capped, single_quoted_ok,
+    validate_options, write_double_quoted, write_folded_body, write_single_quoted,
 };
 use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::{Anchor, CollectionStyle, Event, ScalarStyle};
@@ -336,30 +337,50 @@ fn anchor_name_ok(name: &str) -> bool {
         })
 }
 
-/// Append a scalar on one line: plain or single-quoted when the text allows
+/// Stream a scalar on one line directly to `output`: plain or single-quoted when the text allows
 /// that style in this context, double-quoted otherwise.
-fn scalar_inline(
+fn write_scalar_inline<W: Write>(
     value: &str,
     style: ScalarStyle,
     flow: bool,
     tag: Option<&Tag>,
-    output: &mut String,
-) {
+    output: &mut Output<'_, W>,
+) -> Result<(), Error> {
     let plain =
         plain_text_ok(value, flow) && (tag.is_some() || !looks_like_leading_zero_numeral(value));
     match style {
         ScalarStyle::Plain if plain => output.push_str(value),
+        ScalarStyle::SingleQuoted if single_quoted_ok(value) => write_single_quoted(
+            value,
+            output,
+            #[cfg(test)]
+            None,
+        ),
+        _ => write_double_quoted(
+            value,
+            output,
+            #[cfg(test)]
+            None,
+        ),
+    }
+}
+
+/// Character count of `write_scalar_inline`, capped at `cap`, without allocating.
+fn scalar_inline_char_len_capped(
+    value: &str,
+    style: ScalarStyle,
+    flow: bool,
+    tag: Option<&Tag>,
+    cap: usize,
+) -> usize {
+    let plain =
+        plain_text_ok(value, flow) && (tag.is_some() || !looks_like_leading_zero_numeral(value));
+    match style {
+        ScalarStyle::Plain if plain => value.chars().take(cap).count(),
         ScalarStyle::SingleQuoted if single_quoted_ok(value) => {
-            output.push('\'');
-            for (index, part) in value.split('\'').enumerate() {
-                if index > 0 {
-                    output.push_str("''");
-                }
-                output.push_str(part);
-            }
-            output.push('\'');
+            single_quoted_char_len_capped(value, cap)
         }
-        _ => emit_double_quoted(value, output),
+        _ => double_quoted_char_len_capped(value, cap),
     }
 }
 
@@ -427,6 +448,17 @@ where
             match event.borrow() {
                 Event::StreamStart { .. } | Event::StreamEnd { .. } => {}
                 Event::Directive { name, value, .. } => {
+                    // Reject directives that already exceed `max_output_bytes` before scanning
+                    // characters or allocating a validation line.
+                    let directive_bytes = usize::from(open_ended)
+                        .saturating_mul(4)
+                        .saturating_add(1)
+                        .saturating_add(name.len())
+                        .saturating_add(1)
+                        .saturating_add(value.len())
+                        .saturating_add(1);
+                    self.output.check_additional(directive_bytes)?;
+
                     // The parser reads a name up to a space or tab, and neither may hold a line
                     // break. A byte order mark is rejected in directive names and parameters,
                     // while a trailing comment in compatibility mode may hold one, matching the
@@ -493,13 +525,18 @@ where
                     let root = self.node_event()?;
                     self.node(root, Pos::Root)?;
                     if !self.directives.is_empty() {
-                        let mut header = String::new();
+                        let header_len = usize::from(open_ended)
+                            .saturating_mul(4)
+                            .saturating_add(self.directives.lines_byte_len())
+                            .saturating_add(usize::from(!marker).saturating_mul(4));
+                        self.output.check_additional(header_len)?;
+                        let mut header = String::with_capacity(header_len);
                         // A directive can't follow a document that `...` didn't end. The
                         // document's own directives wrote one already, and cleared `open_ended`.
                         if open_ended {
                             header.push_str("...\n");
                         }
-                        header.push_str(&self.directives.lines());
+                        self.directives.push_lines_into(&mut header);
                         if !marker {
                             header.push_str("---\n");
                         }
@@ -547,8 +584,11 @@ where
         };
         let line = format!("%{name} {value}\n");
         // The stream's start, and then the directive or the reason it is none. Only the
-        // line's syntax is asked about, so the caller's limits on what it reads stay out.
-        let limits = Limits::default();
+        // line's syntax is asked about, bounded by the caller's output limit rather than
+        // reader-side limits.
+        let limits = Limits::default()
+            .with_max_input_bytes(self.limits.max_output_bytes)
+            .with_max_tag_expansion_bytes(self.limits.max_output_bytes);
         let scan = |compat: bool| -> Result<(), Box<Error>> {
             let mut scanner = Scanner::with_compat(&line, &limits, compat)?;
             scanner.next_token(&limits)?;
@@ -573,13 +613,13 @@ where
         Ok(())
     }
 
-    /// `&anchor !tag`, or an empty string.
-    fn properties(
+    /// Validate an optional anchor (and record it in `self.anchors` within `max_anchors`) and an
+    /// optional tag, without allocating any formatted property string.
+    fn validate_properties(
         &mut self,
         anchor: Option<&Anchor<'_>>,
         tag: Option<&Tag>,
-    ) -> Result<String, Error> {
-        let mut output = String::new();
+    ) -> Result<(), Error> {
         if let Some(anchor) = anchor {
             if !anchor_name_ok(anchor.as_str()) {
                 return Err(emitter_error(format!(
@@ -591,23 +631,83 @@ where
             // name is new to the document once.
             if !self.anchors.contains(anchor.as_str()) {
                 self.limits.check_anchors(self.anchors.len() + 1)?;
+                self.output
+                    .check_additional(1usize.saturating_add(anchor.as_str().len()))?;
                 self.anchors.insert(anchor.as_str().to_owned());
             }
-            output.push('&');
-            output.push_str(anchor.as_str());
         }
         if let Some(tag) = tag {
-            if !output.is_empty() {
-                output.push(' ');
-            }
-            output.push_str(&self.directives.token(tag, self.handles)?);
+            // Validate tag form and ensure any required `%TAG` directive fits within output limits.
+            self.directives
+                .token_char_len_capped(tag, self.handles, 1, self.output)?;
         }
-        Ok(output)
+        Ok(())
     }
 
-    /// `*name`, for an alias whose name reads back and whose anchor a node earlier in its
-    /// document has. Every alias is written through here, a mapping's key too.
-    fn alias_token(&self, anchor: &Anchor<'_>) -> Result<String, Error> {
+    /// Validate optional properties and compute their character length capped at `cap`, without
+    /// allocating a formatted property string.
+    fn properties_char_len_capped(
+        &mut self,
+        anchor: Option<&Anchor<'_>>,
+        tag: Option<&Tag>,
+        cap: usize,
+    ) -> Result<usize, Error> {
+        let mut total = 0usize;
+        if let Some(anchor) = anchor {
+            if !anchor_name_ok(anchor.as_str()) {
+                return Err(emitter_error(format!(
+                    "cannot write the anchor name {:?}",
+                    anchor.as_str()
+                )));
+            }
+            if !self.anchors.contains(anchor.as_str()) {
+                self.limits.check_anchors(self.anchors.len() + 1)?;
+                self.output
+                    .check_additional(1usize.saturating_add(anchor.as_str().len()))?;
+                self.anchors.insert(anchor.as_str().to_owned());
+            }
+            total = 1usize.saturating_add(anchor.as_str().chars().take(cap).count());
+        }
+        if let Some(tag) = tag {
+            let sep = usize::from(total > 0);
+            let rem = cap.saturating_sub(total.saturating_add(sep));
+            let tag_len = self.directives.token_char_len_capped(
+                tag,
+                self.handles,
+                rem.max(1),
+                self.output,
+            )?;
+            total = total.saturating_add(sep).saturating_add(tag_len);
+        }
+        Ok(total.min(cap))
+    }
+
+    /// Stream `&anchor !tag` directly to `self.output` after validating them, returning whether
+    /// any property was written.
+    fn write_properties(
+        &mut self,
+        anchor: Option<&Anchor<'_>>,
+        tag: Option<&Tag>,
+    ) -> Result<bool, Error> {
+        let mut wrote = false;
+        if let Some(anchor) = anchor {
+            self.output.push_str("&")?;
+            self.output.push_str(anchor.as_str())?;
+            wrote = true;
+        }
+        if let Some(tag) = tag {
+            if wrote {
+                self.output.push_str(" ")?;
+            }
+            self.directives.write_tag(tag, self.handles, self.output)?;
+            wrote = true;
+        }
+        Ok(wrote)
+    }
+
+    /// Validate an alias name and check that an anchor of that name appeared earlier in the
+    /// document.
+    fn validate_alias(&self, anchor: &Anchor<'_>) -> Result<(), Error> {
         if !anchor_name_ok(anchor.as_str()) {
             return Err(emitter_error(format!(
                 "cannot write the alias name {:?}",
@@ -620,12 +720,13 @@ where
                 anchor.as_str()
             )));
         }
-        Ok(format!("*{}", anchor.as_str()))
+        Ok(())
     }
 
     fn alias(&mut self, anchor: &Anchor<'_>) -> Result<(), Error> {
-        let token = self.alias_token(anchor)?;
-        self.push(&token)
+        self.validate_alias(anchor)?;
+        self.push("*")?;
+        self.push(anchor.as_str())
     }
 
     fn separate(&mut self, pos: Pos) -> Result<(), Error> {
@@ -696,17 +797,18 @@ where
         anchor: Option<&Anchor<'_>>,
         pos: Pos,
     ) -> Result<(), Error> {
-        let mut text = self.properties(anchor, tag)?;
+        self.validate_properties(anchor, tag)?;
+        let has_props = anchor.is_some() || tag.is_some();
         if matches!(style, ScalarStyle::Literal | ScalarStyle::Folded) && block_scalar_ok(value) {
             self.separate(pos)?;
-            if !text.is_empty() {
-                text.push(' ');
-                self.push(&text)?;
+            if has_props {
+                self.write_properties(anchor, tag)?;
+                self.push(" ")?;
             }
             return self.block_scalar(value, style, pos.content_indent(), matches!(pos, Pos::Root));
         }
         if style == ScalarStyle::Plain && value.is_empty() {
-            if text.is_empty() {
+            if !has_props {
                 // The root of a document that is only `---`.
                 return if matches!(pos, Pos::Root) {
                     Ok(())
@@ -715,16 +817,16 @@ where
                 };
             }
             self.separate(pos)?;
-            self.push(&text)?;
+            self.write_properties(anchor, tag)?;
             return self.push("\n");
         }
         self.separate(pos)?;
-        if !text.is_empty() {
-            text.push(' ');
+        if has_props {
+            self.write_properties(anchor, tag)?;
+            self.push(" ")?;
         }
-        scalar_inline(value, style, false, tag, &mut text);
-        text.push('\n');
-        self.push(&text)
+        write_scalar_inline(value, style, false, tag, self.output)?;
+        self.push("\n")
     }
 
     #[allow(
@@ -766,13 +868,23 @@ where
             }
             return Ok(());
         }
-        let folded_body = folded.then(|| expand_folded(body));
-        for line in folded_body.as_deref().unwrap_or(body).split('\n') {
-            if !line.is_empty() {
-                self.output.spaces(content_indent)?;
-                self.push(line)?;
+        if folded {
+            self.output.check_additional(body.len())?;
+            write_folded_body(
+                body,
+                content_indent,
+                self.output,
+                #[cfg(test)]
+                None,
+            )?;
+        } else {
+            for line in body.split('\n') {
+                if !line.is_empty() {
+                    self.output.spaces(content_indent)?;
+                    self.push(line)?;
+                }
+                self.push("\n")?;
             }
-            self.push("\n")?;
         }
         for _ in 1..trailing {
             self.push("\n")?;
@@ -789,29 +901,30 @@ where
         pos: Pos,
         stack: &mut Vec<Frame>,
     ) -> Result<(), Error> {
-        let properties = self.properties(anchor, tag)?;
+        self.validate_properties(anchor, tag)?;
+        let has_props = anchor.is_some() || tag.is_some();
         let (indent, inline) = match pos {
             Pos::Root => {
-                if !properties.is_empty() {
-                    self.push(&properties)?;
+                if has_props {
+                    self.write_properties(anchor, tag)?;
                     self.push("\n")?;
                 }
                 (0, false)
             }
-            Pos::Entry(indent) if properties.is_empty() => {
+            Pos::Entry(indent) if !has_props => {
                 self.push(" ")?;
                 (indent + STEP, true)
             }
             Pos::Entry(indent) => {
                 self.push(" ")?;
-                self.push(&properties)?;
+                self.write_properties(anchor, tag)?;
                 self.push("\n")?;
                 (indent + STEP, false)
             }
             Pos::Value(indent) => {
-                if !properties.is_empty() {
+                if has_props {
                     self.push(" ")?;
-                    self.push(&properties)?;
+                    self.write_properties(anchor, tag)?;
                 }
                 self.push("\n")?;
                 // Sequences under a mapping key are indentless, as libyaml
@@ -865,9 +978,8 @@ where
                     indent,
                     inline: false,
                 });
-                if let Some(mut text) = self.implicit_key(key.borrow())? {
-                    text.push(':');
-                    self.push(&text)?;
+                if self.try_write_implicit_key(key.borrow())? {
+                    self.push(":")?;
                     let value = self.node_event()?;
                     self.block_node(value, Pos::Value(indent), stack)
                 } else {
@@ -946,15 +1058,25 @@ where
         Ok(())
     }
 
-    /// The text of a block-mapping key written in the implicit form, or
-    /// `None` when the key needs `? `: collections, empty keys, block
-    /// scalars, and keys longer than [`MAX_IMPLICIT_KEY_CHARS`].
-    fn implicit_key(&mut self, key: &Event<'_>) -> Result<Option<String>, Error> {
+    /// Stream a block-mapping key in implicit form directly to `self.output` if it fits within
+    /// [`MAX_IMPLICIT_KEY_CHARS`], returning `false` when the key needs `? `: collections, empty
+    /// keys, block scalars, and keys longer than [`MAX_IMPLICIT_KEY_CHARS`].
+    fn try_write_implicit_key(&mut self, key: &Event<'_>) -> Result<bool, Error> {
+        const CAP: usize = MAX_IMPLICIT_KEY_CHARS + 1;
         match key {
             Event::Alias { anchor, .. } => {
                 // `:` can be part of an alias name, so it needs a space.
-                let token = format!("{} ", self.alias_token(anchor)?);
-                Ok((token.chars().count() <= MAX_IMPLICIT_KEY_CHARS).then_some(token))
+                self.validate_alias(anchor)?;
+                let width = 1usize
+                    .saturating_add(anchor.as_str().chars().take(CAP).count())
+                    .saturating_add(1);
+                if width > MAX_IMPLICIT_KEY_CHARS {
+                    return Ok(false);
+                }
+                self.push("*")?;
+                self.push(anchor.as_str())?;
+                self.push(" ")?;
+                Ok(true)
             }
             Event::Scalar {
                 value,
@@ -966,16 +1088,28 @@ where
                 let block = matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
                     && block_scalar_ok(value);
                 if block || (*style == ScalarStyle::Plain && value.is_empty()) {
-                    return Ok(None);
+                    return Ok(false);
                 }
-                let mut text = self.properties(anchor.as_ref(), tag.as_ref())?;
-                if !text.is_empty() {
-                    text.push(' ');
+                let props_len =
+                    self.properties_char_len_capped(anchor.as_ref(), tag.as_ref(), CAP)?;
+                let sep = usize::from(props_len > 0);
+                let rem = CAP.saturating_sub(props_len.saturating_add(sep));
+                let scalar_len = if rem == 0 {
+                    0
+                } else {
+                    scalar_inline_char_len_capped(value, *style, false, tag.as_ref(), rem)
+                };
+                if props_len.saturating_add(sep).saturating_add(scalar_len) > MAX_IMPLICIT_KEY_CHARS
+                {
+                    return Ok(false);
                 }
-                scalar_inline(value, *style, false, tag.as_ref(), &mut text);
-                Ok((text.chars().count() <= MAX_IMPLICIT_KEY_CHARS).then_some(text))
+                if self.write_properties(anchor.as_ref(), tag.as_ref())? {
+                    self.push(" ")?;
+                }
+                write_scalar_inline(value, *style, false, tag.as_ref(), self.output)?;
+                Ok(true)
             }
-            _ => Ok(None),
+            _ => Ok(false),
         }
     }
 
@@ -988,10 +1122,9 @@ where
         anchor: Option<&Anchor<'_>>,
         stack: &mut Vec<Frame>,
     ) -> Result<(), Error> {
-        let mut properties = self.properties(anchor, tag)?;
-        if !properties.is_empty() {
-            properties.push(' ');
-            self.push(&properties)?;
+        self.validate_properties(anchor, tag)?;
+        if self.write_properties(anchor, tag)? {
+            self.push(" ")?;
         }
         self.enter()?;
         self.push(if sequence { "[" } else { "{" })?;
@@ -1006,11 +1139,12 @@ where
     /// Whether a flow-mapping key needs `? `, as libyaml writes it: an empty
     /// key, a non-empty collection, or a long scalar.
     fn flow_key_is_explicit(&mut self, key: &Event<'_>) -> Result<bool, Error> {
+        const CAP: usize = MAX_IMPLICIT_KEY_CHARS + 1;
         Ok(match key {
             Event::SequenceStart { .. } => !matches!(self.peek()?, Some(Event::SequenceEnd { .. })),
             Event::MappingStart { .. } => !matches!(self.peek()?, Some(Event::MappingEnd { .. })),
             Event::Alias { anchor, .. } => {
-                anchor.as_str().chars().count().saturating_add(2) > MAX_IMPLICIT_KEY_CHARS
+                anchor.as_str().chars().take(CAP).count().saturating_add(2) > MAX_IMPLICIT_KEY_CHARS
             }
             Event::Scalar {
                 value,
@@ -1022,9 +1156,15 @@ where
                 if is_empty_plain(key) {
                     true
                 } else {
-                    let mut text = self.properties(anchor.as_ref(), tag.as_ref())?;
-                    scalar_inline(value, *style, true, tag.as_ref(), &mut text);
-                    text.chars().count() > MAX_IMPLICIT_KEY_CHARS
+                    let props_len =
+                        self.properties_char_len_capped(anchor.as_ref(), tag.as_ref(), CAP)?;
+                    let rem = CAP.saturating_sub(props_len);
+                    let scalar_len = if rem == 0 {
+                        0
+                    } else {
+                        scalar_inline_char_len_capped(value, *style, true, tag.as_ref(), rem)
+                    };
+                    props_len.saturating_add(scalar_len) > MAX_IMPLICIT_KEY_CHARS
                 }
             }
             _ => false,
@@ -1047,16 +1187,15 @@ where
                 anchor,
                 ..
             } => {
-                let mut text = self.properties(anchor.as_ref(), tag.as_ref())?;
-                if !text.is_empty() {
+                self.validate_properties(anchor.as_ref(), tag.as_ref())?;
+                if self.write_properties(anchor.as_ref(), tag.as_ref())? {
                     // `[!t ]`: libyaml needs a space between properties and
                     // a flow indicator.
-                    text.push(' ');
+                    self.push(" ")?;
                 }
                 if !(*style == ScalarStyle::Plain && value.is_empty()) {
-                    scalar_inline(value, *style, true, tag.as_ref(), &mut text);
+                    write_scalar_inline(value, *style, true, tag.as_ref(), self.output)?;
                 }
-                self.push(&text)?;
                 Ok(false)
             }
             Event::SequenceStart { tag, anchor, .. } => {
@@ -1220,5 +1359,299 @@ mod stream_block_scalar_tests {
         let original =
             crate::parse_value("literal: |\n  one\n  two\nfolded: >\n  a b\n").expect("original");
         assert_eq!(decoded, original);
+    }
+
+    fn wrap_test_doc(
+        directives: Vec<crate::Event<'static>>,
+        root: Vec<crate::Event<'static>>,
+    ) -> Vec<crate::Event<'static>> {
+        let mut events = vec![crate::Event::StreamStart {
+            span: crate::Span::default(),
+        }];
+        events.extend(directives);
+        events.push(crate::Event::DocumentStart {
+            explicit: false,
+            span: crate::Span::default(),
+        });
+        events.extend(root);
+        events.push(crate::Event::DocumentEnd {
+            explicit: false,
+            span: crate::Span::default(),
+        });
+        events.push(crate::Event::StreamEnd {
+            span: crate::Span::default(),
+        });
+        events
+    }
+
+    fn test_scalar(
+        value: std::borrow::Cow<'static, str>,
+        style: crate::ScalarStyle,
+        tag: Option<crate::Tag>,
+        anchor: Option<crate::Anchor<'static>>,
+    ) -> crate::Event<'static> {
+        crate::Event::Scalar {
+            value,
+            raw: std::borrow::Cow::Borrowed(""),
+            style,
+            tag,
+            anchor,
+            span: crate::Span::default(),
+        }
+    }
+
+    fn test_kv_map(
+        style: crate::CollectionStyle,
+        key: crate::Event<'static>,
+    ) -> Vec<crate::Event<'static>> {
+        vec![
+            crate::Event::MappingStart {
+                tag: None,
+                anchor: None,
+                style,
+                span: crate::Span::default(),
+            },
+            key,
+            test_scalar(
+                std::borrow::Cow::Borrowed("1"),
+                crate::ScalarStyle::Plain,
+                None,
+                None,
+            ),
+            crate::Event::MappingEnd {
+                span: crate::Span::default(),
+            },
+        ]
+    }
+
+    fn oversized_event_limit_cases() -> Vec<(&'static str, Vec<crate::Event<'static>>)> {
+        use std::borrow::Cow;
+
+        use crate::{Anchor, CollectionStyle, Event, ScalarStyle, Span, Tag};
+
+        vec![
+            (
+                "double_quoted",
+                wrap_test_doc(
+                    vec![],
+                    vec![test_scalar(
+                        Cow::Owned("a\"b\\c\n".repeat(10_000)),
+                        ScalarStyle::DoubleQuoted,
+                        None,
+                        None,
+                    )],
+                ),
+            ),
+            (
+                "single_quoted",
+                wrap_test_doc(
+                    vec![],
+                    vec![test_scalar(
+                        Cow::Owned("it's ".repeat(10_000)),
+                        ScalarStyle::SingleQuoted,
+                        None,
+                        None,
+                    )],
+                ),
+            ),
+            (
+                "folded_block",
+                wrap_test_doc(
+                    vec![],
+                    vec![test_scalar(
+                        Cow::Owned("line\n".repeat(10_000)),
+                        ScalarStyle::Folded,
+                        None,
+                        None,
+                    )],
+                ),
+            ),
+            (
+                "block_long_key",
+                wrap_test_doc(
+                    vec![],
+                    test_kv_map(
+                        CollectionStyle::Block,
+                        test_scalar(
+                            Cow::Owned("k\"\\".repeat(10_000)),
+                            ScalarStyle::DoubleQuoted,
+                            None,
+                            None,
+                        ),
+                    ),
+                ),
+            ),
+            (
+                "flow_long_key",
+                wrap_test_doc(
+                    vec![],
+                    test_kv_map(
+                        CollectionStyle::Flow,
+                        test_scalar(
+                            Cow::Owned("k\"\\".repeat(10_000)),
+                            ScalarStyle::DoubleQuoted,
+                            None,
+                            None,
+                        ),
+                    ),
+                ),
+            ),
+            (
+                "huge_directive_tag",
+                wrap_test_doc(
+                    vec![],
+                    vec![test_scalar(
+                        Cow::Borrowed("v"),
+                        ScalarStyle::Plain,
+                        Some(Tag::new(format!("custom {}:", "p".repeat(10_000)), "s")),
+                        None,
+                    )],
+                ),
+            ),
+            (
+                "huge_local_tag",
+                wrap_test_doc(
+                    vec![],
+                    vec![test_scalar(
+                        Cow::Borrowed("v"),
+                        ScalarStyle::Plain,
+                        Some(Tag::local("x".repeat(10_000))),
+                        None,
+                    )],
+                ),
+            ),
+            (
+                "huge_directive",
+                wrap_test_doc(
+                    vec![Event::Directive {
+                        name: Cow::Borrowed("TAG"),
+                        value: Cow::Owned(format!(
+                            "!e! tag:example.com,2026:{}:",
+                            "a".repeat(10_000)
+                        )),
+                        span: Span::default(),
+                    }],
+                    vec![test_scalar(
+                        Cow::Borrowed("v"),
+                        ScalarStyle::Plain,
+                        None,
+                        None,
+                    )],
+                ),
+            ),
+            (
+                "huge_anchor",
+                wrap_test_doc(
+                    vec![],
+                    vec![test_scalar(
+                        Cow::Borrowed("v"),
+                        ScalarStyle::Plain,
+                        None,
+                        Some(Anchor::owned("a".repeat(10_000))),
+                    )],
+                ),
+            ),
+            (
+                "huge_anchor_key",
+                wrap_test_doc(
+                    vec![],
+                    test_kv_map(
+                        CollectionStyle::Block,
+                        test_scalar(
+                            Cow::Borrowed("k"),
+                            ScalarStyle::Plain,
+                            None,
+                            Some(Anchor::owned("a".repeat(10_000))),
+                        ),
+                    ),
+                ),
+            ),
+        ]
+    }
+
+    #[test]
+    fn event_writer_enforces_output_limit_incrementally_on_scalars_keys_tags_and_directives() {
+        use std::borrow::Cow;
+
+        use crate::{EmitOptions, ErrorKind, Event, LimitKind, Limits, ScalarStyle, Span};
+
+        let tight = EmitOptions::new().with_limits(Limits::default().with_max_output_bytes(64));
+        let cases = oversized_event_limit_cases();
+
+        for (label, events) in &cases {
+            let err = crate::to_string_events_with(events, &tight)
+                .expect_err(&format!("{label}: to_string_events_with"));
+            assert_eq!(err.kind(), ErrorKind::Limit, "{label}: {err}");
+            assert_eq!(
+                err.limit().map(crate::LimitExceeded::kind),
+                Some(LimitKind::OutputBytes),
+                "{label}: {err}"
+            );
+            let mut buf = Vec::new();
+            let err = crate::to_writer_events_with(&mut buf, events, &tight)
+                .expect_err(&format!("{label}: to_writer_events_with"));
+            assert_eq!(err.kind(), ErrorKind::Limit, "{label}: {err}");
+            assert_eq!(
+                err.limit().map(crate::LimitExceeded::kind),
+                Some(LimitKind::OutputBytes),
+                "{label}: {err}"
+            );
+        }
+
+        // 2. Folded scalar where `body.len() <= max_output_bytes` but folded expansion exceeds it.
+        let folded_events = wrap_test_doc(
+            vec![],
+            vec![test_scalar(
+                Cow::Owned("a\n".repeat(40)),
+                ScalarStyle::Folded,
+                None,
+                None,
+            )],
+        );
+        let mid_limit =
+            EmitOptions::new().with_limits(Limits::default().with_max_output_bytes(100));
+        let err = crate::to_string_events_with(&folded_events, &mid_limit)
+            .expect_err("folded expansion limit");
+        assert_eq!(
+            err.limit().map(crate::LimitExceeded::kind),
+            Some(LimitKind::OutputBytes)
+        );
+
+        // 3. Directive validation respects `max_output_bytes` boundary exactly while ignoring
+        //    reader-side `max_input_bytes`.
+        let dir_events = wrap_test_doc(
+            vec![Event::Directive {
+                name: Cow::Borrowed("TAG"),
+                value: Cow::Borrowed("!e! tag:example.com,2026:"),
+                span: Span::default(),
+            }],
+            vec![test_scalar(
+                Cow::Borrowed("a"),
+                ScalarStyle::Plain,
+                None,
+                None,
+            )],
+        );
+        let full = crate::to_string_events(&dir_events).expect("emit directive doc");
+        let exact = EmitOptions::new().with_limits(
+            Limits::default()
+                .with_max_input_bytes(4)
+                .with_max_output_bytes(full.len()),
+        );
+        assert_eq!(
+            crate::to_string_events_with(&dir_events, &exact).expect("exact output limit"),
+            full
+        );
+        let one_short = EmitOptions::new().with_limits(
+            Limits::default()
+                .with_max_input_bytes(4)
+                .with_max_output_bytes(full.len() - 1),
+        );
+        let err =
+            crate::to_string_events_with(&dir_events, &one_short).expect_err("one byte short");
+        assert_eq!(
+            err.limit().map(crate::LimitExceeded::kind),
+            Some(LimitKind::OutputBytes)
+        );
     }
 }
