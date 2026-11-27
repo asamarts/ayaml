@@ -90,36 +90,92 @@ pub(crate) fn compare_dirs(base_dir: &Path, cur_dir: &Path) -> Result<String, St
     Ok(out)
 }
 
+fn row_label(implementation: Option<&str>, scenario: &str, operation: &str) -> String {
+    match implementation {
+        Some(impl_name) => format!("{impl_name}/{scenario} [{operation}]"),
+        None => format!("{scenario} [{operation}]"),
+    }
+}
+
 /// Render a Markdown diff table for [`SpeedRecord`] rows, rejecting fixture SHA-256 drift.
 ///
 /// # Errors
 ///
-/// Returns an error if a shared `(scenario, operation)` key has differing `fixture_sha256`.
+/// Returns an error if a shared `(implementation, scenario, operation)` key has differing
+/// `fixture_sha256`.
 pub(crate) fn format_speed_diff(
     baseline: &[SpeedRecord],
     current: &[SpeedRecord],
 ) -> Result<String, String> {
     let base_map: BTreeMap<_, _> = baseline.iter().map(|r| (r.key(), r)).collect();
-    let mut out = String::from(
-        "## Speed (`median_ns`)\n\n\
-         | scenario | operation | baseline (ns) | current (ns) | delta | throughput (MiB/s) |\n\
-         | --- | --- | ---: | ---: | ---: | ---: |\n",
-    );
+    let show_impl = baseline.iter().any(|r| r.implementation.is_some())
+        || current.iter().any(|r| r.implementation.is_some());
+    let mut out = if show_impl {
+        String::from(
+            "## Speed (`median_ns`)\n\n\
+             | implementation | scenario | operation | baseline (ns) | current (ns) | delta | throughput (MiB/s) |\n\
+             | --- | --- | --- | ---: | ---: | ---: | ---: |\n",
+        )
+    } else {
+        String::from(
+            "## Speed (`median_ns`)\n\n\
+             | scenario | operation | baseline (ns) | current (ns) | delta | throughput (MiB/s) |\n\
+             | --- | --- | ---: | ---: | ---: | ---: |\n",
+        )
+    };
+    let mut matched = 0_usize;
     for cur in current {
         let Some(base) = base_map.get(&cur.key()) else {
             continue;
         };
         if base.fixture_sha256 != cur.fixture_sha256 {
             return Err(format!(
-                "fixture SHA-256 drift on {} ({}): {} -> {}",
-                cur.scenario, cur.operation, base.fixture_sha256, cur.fixture_sha256
+                "fixture SHA-256 drift on {}: {} -> {}",
+                row_label(
+                    cur.implementation
+                        .as_deref()
+                        .or(base.implementation.as_deref()),
+                    &cur.scenario,
+                    &cur.operation
+                ),
+                base.fixture_sha256,
+                cur.fixture_sha256
             ));
         }
+        matched += 1;
         let delta = (cur.median_ns - base.median_ns) / base.median_ns * 100.0;
-        let _ = writeln!(
-            out,
-            "| {} | {} | {:.1} | {:.1} | {:+.2}% | {:.2} |",
-            cur.scenario, cur.operation, base.median_ns, cur.median_ns, delta, cur.throughput_mib_s
+        if show_impl {
+            let impl_name = cur
+                .implementation
+                .as_deref()
+                .or(base.implementation.as_deref())
+                .unwrap_or("ayaml");
+            let _ = writeln!(
+                out,
+                "| {impl_name} | {} | {} | {:.1} | {:.1} | {:+.2}% | {:.2} |",
+                cur.scenario,
+                cur.operation,
+                base.median_ns,
+                cur.median_ns,
+                delta,
+                cur.throughput_mib_s
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "| {} | {} | {:.1} | {:.1} | {:+.2}% | {:.2} |",
+                cur.scenario,
+                cur.operation,
+                base.median_ns,
+                cur.median_ns,
+                delta,
+                cur.throughput_mib_s
+            );
+        }
+    }
+    if matched == 0 && !baseline.is_empty() && !current.is_empty() {
+        out.push_str(
+            "\n> Note: zero matching `(implementation, scenario, operation)` rows between baseline and current `speed.jsonl`.\n",
         );
     }
     out.push('\n');
@@ -130,38 +186,84 @@ pub(crate) fn format_speed_diff(
 ///
 /// # Errors
 ///
-/// Returns an error if a shared `(scenario, operation)` key has differing `fixture_sha256`.
+/// Returns an error if a shared `(implementation, scenario, operation)` key has differing
+/// `fixture_sha256`.
 pub(crate) fn format_memory_diff(
     baseline: &[MemoryRecord],
     current: &[MemoryRecord],
 ) -> Result<String, String> {
     let base_map: BTreeMap<_, _> = baseline.iter().map(|r| (r.key(), r)).collect();
-    let mut out = String::from(
-        "## Memory (`peak_bytes` / `allocations`)\n\n\
-         | scenario | operation | base peak (B) | cur peak (B) | peak delta | base allocs | cur allocs | alloc delta |\n\
-         | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n",
-    );
+    let show_impl = baseline.iter().any(|r| r.implementation.is_some())
+        || current.iter().any(|r| r.implementation.is_some());
+    let mut out = if show_impl {
+        String::from(
+            "## Memory (`peak_bytes` / `allocations`)\n\n\
+             | implementation | scenario | operation | base peak (B) | cur peak (B) | peak delta | base allocs | cur allocs | alloc delta |\n\
+             | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n",
+        )
+    } else {
+        String::from(
+            "## Memory (`peak_bytes` / `allocations`)\n\n\
+             | scenario | operation | base peak (B) | cur peak (B) | peak delta | base allocs | cur allocs | alloc delta |\n\
+             | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n",
+        )
+    };
+    let mut matched = 0_usize;
     for cur in current {
         let Some(base) = base_map.get(&cur.key()) else {
             continue;
         };
         if base.fixture_sha256 != cur.fixture_sha256 {
             return Err(format!(
-                "fixture SHA-256 drift on {} ({}): {} -> {}",
-                cur.scenario, cur.operation, base.fixture_sha256, cur.fixture_sha256
+                "fixture SHA-256 drift on {}: {} -> {}",
+                row_label(
+                    cur.implementation
+                        .as_deref()
+                        .or(base.implementation.as_deref()),
+                    &cur.scenario,
+                    &cur.operation
+                ),
+                base.fixture_sha256,
+                cur.fixture_sha256
             ));
         }
-        let _ = writeln!(
-            out,
-            "| {} | {} | {} | {} | {} | {} | {} | {} |",
-            cur.scenario,
-            cur.operation,
-            base.peak_bytes,
-            cur.peak_bytes,
-            pct_u64(base.peak_bytes, cur.peak_bytes),
-            base.allocations,
-            cur.allocations,
-            pct_u64(base.allocations, cur.allocations),
+        matched += 1;
+        if show_impl {
+            let impl_name = cur
+                .implementation
+                .as_deref()
+                .or(base.implementation.as_deref())
+                .unwrap_or("ayaml");
+            let _ = writeln!(
+                out,
+                "| {impl_name} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                cur.scenario,
+                cur.operation,
+                base.peak_bytes,
+                cur.peak_bytes,
+                pct_u64(base.peak_bytes, cur.peak_bytes),
+                base.allocations,
+                cur.allocations,
+                pct_u64(base.allocations, cur.allocations),
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "| {} | {} | {} | {} | {} | {} | {} | {} |",
+                cur.scenario,
+                cur.operation,
+                base.peak_bytes,
+                cur.peak_bytes,
+                pct_u64(base.peak_bytes, cur.peak_bytes),
+                base.allocations,
+                cur.allocations,
+                pct_u64(base.allocations, cur.allocations),
+            );
+        }
+    }
+    if matched == 0 && !baseline.is_empty() && !current.is_empty() {
+        out.push_str(
+            "\n> Note: zero matching `(implementation, scenario, operation)` rows between baseline and current `memory.jsonl`.\n",
         );
     }
     out.push('\n');
@@ -229,17 +331,19 @@ pub(crate) fn evaluate_memory_gate(
     let mut violations = Vec::new();
     for base in baseline {
         let key = base.key();
+        let label = row_label(
+            base.implementation.as_deref(),
+            &base.scenario,
+            &base.operation,
+        );
         let Some(cur) = cur_map.get(&key) else {
-            violations.push(format!(
-                "{} [{}]: missing from current memory run",
-                base.scenario, base.operation
-            ));
+            violations.push(format!("{label}: missing from current memory run"));
             continue;
         };
         if base.fixture_sha256 != cur.fixture_sha256 {
             violations.push(format!(
-                "{} [{}]: fixture_sha256 changed ({} -> {})",
-                base.scenario, base.operation, base.fixture_sha256, cur.fixture_sha256
+                "{label}: fixture_sha256 changed ({} -> {})",
+                base.fixture_sha256, cur.fixture_sha256
             ));
             continue;
         }
@@ -255,8 +359,7 @@ pub(crate) fn evaluate_memory_gate(
             let limit = allowed_limit(bval, thresholds.max_bytes_pct, thresholds.min_bytes_floor);
             if cval > limit {
                 violations.push(format!(
-                    "{} [{}]: {metric} regressed {bval} -> {cval} (limit {limit})",
-                    base.scenario, base.operation
+                    "{label}: {metric} regressed {bval} -> {cval} (limit {limit})"
                 ));
             }
         }
@@ -267,8 +370,8 @@ pub(crate) fn evaluate_memory_gate(
         );
         if cur.allocations > alloc_limit {
             violations.push(format!(
-                "{} [{}]: allocations regressed {} -> {} (limit {alloc_limit})",
-                base.scenario, base.operation, base.allocations, cur.allocations
+                "{label}: allocations regressed {} -> {} (limit {alloc_limit})",
+                base.allocations, cur.allocations
             ));
         }
     }
@@ -333,29 +436,24 @@ pub(crate) fn evaluate_speed_gate(
     let mut violations = Vec::new();
     for base in baseline {
         let key = base.key();
+        let label = row_label(
+            base.implementation.as_deref(),
+            &base.scenario,
+            &base.operation,
+        );
         let Some(cur) = cur_map.get(&key) else {
-            violations.push(format!(
-                "{} [{}]: missing from current speed run",
-                base.scenario, base.operation
-            ));
+            violations.push(format!("{label}: missing from current speed run"));
             continue;
         };
         if base.fixture_sha256 != cur.fixture_sha256 {
-            violations.push(format!(
-                "{} [{}]: fixture_sha256 changed",
-                base.scenario, base.operation
-            ));
+            violations.push(format!("{label}: fixture_sha256 changed"));
             continue;
         }
         let pct = (cur.median_ns - base.median_ns) / base.median_ns * 100.0;
         if pct > thresholds.max_speed_pct {
             violations.push(format!(
-                "{} [{}]: median_ns slowed {:.1} -> {:.1} ({pct:+.2}% > +{:.2}%)",
-                base.scenario,
-                base.operation,
-                base.median_ns,
-                cur.median_ns,
-                thresholds.max_speed_pct
+                "{label}: median_ns slowed {:.1} -> {:.1} ({pct:+.2}% > +{:.2}%)",
+                base.median_ns, cur.median_ns, thresholds.max_speed_pct
             ));
         }
     }
@@ -373,12 +471,21 @@ pub(crate) fn render_report(dir: &Path, title: &str) -> Result<String, String> {
         let sha_short: String = fp.git_sha.chars().take(12).collect();
         let _ = writeln!(
             out,
-            "- **Platform:** `{}/{}` ({}, {} logical CPUs)\n\
-             - **Kernel:** `{}`\n\
-             - **Compiler:** `{}`\n\
-             - **Commit:** `{sha_short}`\n\
-             - **Fixture manifest SHA-256:** `{}`\n",
-            fp.os, fp.arch, fp.cpu, fp.cpu_count, fp.kernel, fp.rustc, fp.fixture_manifest_sha256
+            "- **Platform:** `{}/{}` ({}, {} logical CPUs)",
+            fp.os, fp.arch, fp.cpu, fp.cpu_count
+        );
+        if let Some(ref kernel) = fp.kernel {
+            let _ = writeln!(out, "- **Kernel:** `{kernel}`");
+        }
+        let _ = writeln!(out, "- **Compiler:** `{}`", fp.rustc);
+        let _ = writeln!(out, "- **Commit:** `{sha_short}`");
+        if let Some(ref captured_date) = fp.captured_date {
+            let _ = writeln!(out, "- **Captured:** `{captured_date}`");
+        }
+        let _ = writeln!(
+            out,
+            "- **Fixture manifest SHA-256:** `{}`\n",
+            fp.fixture_manifest_sha256
         );
     }
 
@@ -387,17 +494,34 @@ pub(crate) fn render_report(dir: &Path, title: &str) -> Result<String, String> {
     let speed_path = dir.join("speed.jsonl");
     if speed_path.is_file() {
         let rows = read_speed_jsonl(&speed_path)?;
-        out.push_str(
-            "## Speed\n\n\
-             | scenario | operation | bytes | median (ns) | stddev (ns) | throughput (MiB/s) |\n\
-             | --- | --- | ---: | ---: | ---: | ---: |\n",
-        );
-        for r in &rows {
-            let _ = writeln!(
-                out,
-                "| {} | {} | {} | {:.1} | {:.1} | {:.2} |",
-                r.scenario, r.operation, r.bytes, r.median_ns, r.stddev_ns, r.throughput_mib_s
+        let show_impl = rows.iter().any(|r| r.implementation.is_some());
+        if show_impl {
+            out.push_str(
+                "## Speed\n\n\
+                 | implementation | scenario | operation | bytes | median (ns) | stddev (ns) | throughput (MiB/s) |\n\
+                 | --- | --- | --- | ---: | ---: | ---: | ---: |\n",
             );
+            for r in &rows {
+                let impl_name = r.implementation.as_deref().unwrap_or("ayaml");
+                let _ = writeln!(
+                    out,
+                    "| {impl_name} | {} | {} | {} | {:.1} | {:.1} | {:.2} |",
+                    r.scenario, r.operation, r.bytes, r.median_ns, r.stddev_ns, r.throughput_mib_s
+                );
+            }
+        } else {
+            out.push_str(
+                "## Speed\n\n\
+                 | scenario | operation | bytes | median (ns) | stddev (ns) | throughput (MiB/s) |\n\
+                 | --- | --- | ---: | ---: | ---: | ---: |\n",
+            );
+            for r in &rows {
+                let _ = writeln!(
+                    out,
+                    "| {} | {} | {} | {:.1} | {:.1} | {:.2} |",
+                    r.scenario, r.operation, r.bytes, r.median_ns, r.stddev_ns, r.throughput_mib_s
+                );
+            }
         }
         out.push('\n');
         sections += 1;
@@ -406,24 +530,48 @@ pub(crate) fn render_report(dir: &Path, title: &str) -> Result<String, String> {
     let mem_path = dir.join("memory.jsonl");
     if mem_path.is_file() {
         let rows = read_memory_jsonl(&mem_path)?;
-        out.push_str(
-            "## Memory\n\n\
-             | scenario | operation | bytes | peak (B) | live (B) | allocs | total (B) | peak/input |\n\
-             | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n",
-        );
-        for r in &rows {
-            let _ = writeln!(
-                out,
-                "| {} | {} | {} | {} | {} | {} | {} | {:.2}x |",
-                r.scenario,
-                r.operation,
-                r.bytes,
-                r.peak_bytes,
-                r.live_bytes,
-                r.allocations,
-                r.total_allocated_bytes,
-                r.peak_to_input_ratio
+        let show_impl = rows.iter().any(|r| r.implementation.is_some());
+        if show_impl {
+            out.push_str(
+                "## Memory\n\n\
+                 | implementation | scenario | operation | bytes | peak (B) | live (B) | allocs | total (B) | peak/input |\n\
+                 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n",
             );
+            for r in &rows {
+                let impl_name = r.implementation.as_deref().unwrap_or("ayaml");
+                let _ = writeln!(
+                    out,
+                    "| {impl_name} | {} | {} | {} | {} | {} | {} | {} | {:.2}x |",
+                    r.scenario,
+                    r.operation,
+                    r.bytes,
+                    r.peak_bytes,
+                    r.live_bytes,
+                    r.allocations,
+                    r.total_allocated_bytes,
+                    r.peak_to_input_ratio
+                );
+            }
+        } else {
+            out.push_str(
+                "## Memory\n\n\
+                 | scenario | operation | bytes | peak (B) | live (B) | allocs | total (B) | peak/input |\n\
+                 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n",
+            );
+            for r in &rows {
+                let _ = writeln!(
+                    out,
+                    "| {} | {} | {} | {} | {} | {} | {} | {:.2}x |",
+                    r.scenario,
+                    r.operation,
+                    r.bytes,
+                    r.peak_bytes,
+                    r.live_bytes,
+                    r.allocations,
+                    r.total_allocated_bytes,
+                    r.peak_to_input_ratio
+                );
+            }
         }
         out.push('\n');
         sections += 1;
@@ -503,6 +651,7 @@ fn read_any_fingerprint(dir: &Path) -> Result<Option<Fingerprint>, String> {
         "memory.fingerprint.json",
         "callgrind.fingerprint.json",
         "scale.fingerprint.json",
+        "fingerprint.json",
     ] {
         let p = dir.join(name);
         if p.is_file() {

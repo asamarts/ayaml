@@ -7,8 +7,12 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::io::Cursor;
 
-use ayaml::{ColumnEncoding, Deserializer, EmitOptions, ErrorCode, LineIndex, SpannedTree, Value};
+use ayaml::{
+    ColumnEncoding, Deserializer, DocumentDeserializer, EmitOptions, ErrorCode, LineIndex,
+    ParseOptions, PathSegment, Spanned, SpannedTree, Value,
+};
 use ayaml_fixtures::{Fixture, bulk_automation_files, generate};
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +59,49 @@ pub struct FrontmatterBorrowed<'a> {
     /// Classification tags borrowed from input.
     #[serde(borrow)]
     pub tags: Vec<&'a str>,
+}
+
+/// Spanned typed Serde target matching `frontmatter-tiny` via [`Spanned`].
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct FrontmatterSpanned {
+    /// Spanned task identifier.
+    pub id: Spanned<String>,
+    /// Spanned human-readable title.
+    pub title: Spanned<String>,
+    /// Spanned numeric phase.
+    pub phase: Spanned<u32>,
+    /// Spanned lifecycle status string.
+    pub status: Spanned<String>,
+    /// Spanned effort estimate in days.
+    pub effort_days: Spanned<f64>,
+    /// Spanned blocking task identifiers.
+    pub blocked_by: Vec<Spanned<String>>,
+    /// Spanned repository paths.
+    pub paths: Vec<Spanned<String>>,
+    /// Spanned classification tags.
+    pub tags: Vec<Spanned<String>>,
+}
+
+/// Spanned typed Serde target matching `boundary-*` fixtures via [`Spanned`].
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct BoundarySpanned {
+    /// Spanned service name header.
+    pub service: Spanned<String>,
+    /// Spanned key-value entries map.
+    pub entries: BTreeMap<String, Spanned<String>>,
+}
+
+/// Wrap a YAML frontmatter payload inside standard `---` delimiters with a trailing Markdown body.
+#[must_use]
+pub fn wrap_frontmatter_doc(yaml: &str) -> String {
+    let mut doc = String::with_capacity(yaml.len() + 64);
+    doc.push_str("---\n");
+    doc.push_str(yaml);
+    if !yaml.ends_with('\n') {
+        doc.push('\n');
+    }
+    doc.push_str("---\n# Benchmark Body\n\nBody paragraph following YAML frontmatter.\n");
+    doc
 }
 
 /// Owned typed Serde target matching `boundary-*` fixtures straddling the 4 KiB threshold.
@@ -279,6 +326,95 @@ pub fn probe_line_index(input: &str) -> usize {
     probe_line_index_queries(input, &index)
 }
 
+fn validate_feature_scenarios(front: &Fixture, fm_owned: &FrontmatterOwned) -> Result<(), String> {
+    let edited_front = ayaml_edit::replace_scalar(
+        &front.content,
+        &[PathSegment::key("status")],
+        &Value::String("done".to_owned()),
+    )
+    .map_err(|e| format!("ayaml-edit frontmatter replace_scalar failed: {e}"))?;
+    if !edited_front.output().contains("status: done") {
+        return Err("ayaml-edit frontmatter output missing updated scalar".to_owned());
+    }
+    let fm_wrapped = wrap_frontmatter_doc(&front.content);
+    let fm_parsed = ayaml::parse_frontmatter::<FrontmatterBorrowed<'_>>(&fm_wrapped)
+        .map_err(|e| format!("parse_frontmatter failed: {e}"))?
+        .ok_or_else(|| "parse_frontmatter returned None".to_owned())?;
+    if fm_parsed.frontmatter.id != fm_owned.id || !fm_parsed.body.starts_with("# Benchmark Body") {
+        return Err("parse_frontmatter value/body mismatch".to_owned());
+    }
+    let compose = must_fixture("container-compose");
+    let unmerged_compose = ayaml::parse_value(&compose.content)
+        .map_err(|e| format!("container-compose unmerged parse failed: {e}"))?;
+    let merged_compose =
+        ayaml::parse_value_with(&compose.content, &ParseOptions::new().with_merge_keys(true))
+            .map_err(|e| format!("container-compose merge_keys failed: {e}"))?;
+    if !merged_compose.is_mapping() || merged_compose == unmerged_compose {
+        return Err("container-compose merge_keys did not expand merge entries".to_owned());
+    }
+    let fm_spanned: FrontmatterSpanned = ayaml::from_str(&front.content)
+        .map_err(|e| format!("frontmatter Spanned<T> decode failed: {e}"))?;
+    if fm_spanned.id.into_inner() != fm_owned.id {
+        return Err("frontmatter Spanned<T> id mismatch".to_owned());
+    }
+    let b4 = must_fixture("boundary-4kb-below");
+    let edited_b4 = ayaml_edit::replace_scalar(
+        &b4.content,
+        &[PathSegment::key("service")],
+        &Value::String("updated-svc".to_owned()),
+    )
+    .map_err(|e| format!("ayaml-edit boundary-4kb-below failed: {e}"))?;
+    if !edited_b4.output().contains("service: updated-svc") {
+        return Err("ayaml-edit boundary-4kb-below missing updated scalar".to_owned());
+    }
+    let b4_spanned: BoundarySpanned = ayaml::from_str(&b4.content)
+        .map_err(|e| format!("boundary-4kb-below Spanned<T> decode failed: {e}"))?;
+    if b4_spanned.entries.is_empty() {
+        return Err("boundary-4kb-below Spanned<T> entries empty".to_owned());
+    }
+    let b4_doc_de = DocumentDeserializer::from_str(&b4.content)
+        .map_err(|e| format!("boundary-4kb-below DocumentDeserializer failed: {e}"))?;
+    let b4_borrowed = BoundaryBorrowed::deserialize(b4_doc_de)
+        .map_err(|e| format!("boundary-4kb-below DocumentDeserializer decode failed: {e}"))?;
+    if b4_borrowed.entries.len() != b4_spanned.entries.len() {
+        return Err("boundary-4kb-below DocumentDeserializer entries mismatch".to_owned());
+    }
+    let b4_reader: BoundaryOwned = ayaml::from_reader(Cursor::new(b4.content.as_bytes()))
+        .map_err(|e| format!("boundary-4kb-below from_reader failed: {e}"))?;
+    if b4_reader.entries.len() != b4_spanned.entries.len() {
+        return Err("boundary-4kb-below from_reader entries mismatch".to_owned());
+    }
+    let b4_compat: Value = ayaml::compat::from_str(&b4.content)
+        .map_err(|e| format!("boundary-4kb-below libyaml-compat failed: {e}"))?;
+    if !b4_compat.is_mapping() {
+        return Err("boundary-4kb-below libyaml-compat root must be mapping".to_owned());
+    }
+    let doc_de = DocumentDeserializer::from_str(&front.content)
+        .map_err(|e| format!("DocumentDeserializer::from_str failed: {e}"))?;
+    let fm_doc_de = FrontmatterBorrowed::deserialize(doc_de)
+        .map_err(|e| format!("DocumentDeserializer deserialize failed: {e}"))?;
+    if fm_doc_de.id != fm_owned.id {
+        return Err("DocumentDeserializer id mismatch".to_owned());
+    }
+    let fm_reader: FrontmatterOwned = ayaml::from_reader(Cursor::new(front.content.as_bytes()))
+        .map_err(|e| format!("from_reader frontmatter failed: {e}"))?;
+    if fm_reader != *fm_owned {
+        return Err("from_reader frontmatter mismatch".to_owned());
+    }
+    let depth64 = must_fixture("depth-64");
+    let depth64_compat: Value = ayaml::compat::from_str(&depth64.content)
+        .map_err(|e| format!("libyaml-compat depth-64 failed: {e}"))?;
+    if !depth64_compat.is_sequence() {
+        return Err("libyaml-compat depth-64 root must be sequence".to_owned());
+    }
+    let compose_compat: Value = ayaml::compat::from_str(&compose.content)
+        .map_err(|e| format!("libyaml-compat container-compose failed: {e}"))?;
+    if !compose_compat.is_mapping() {
+        return Err("libyaml-compat container-compose root must be mapping".to_owned());
+    }
+    Ok(())
+}
+
 /// Pre-timing semantic validation covering every benchmarked read, emit, span, boundary, scaling,
 /// and error path.
 ///
@@ -457,7 +593,11 @@ pub fn validate_all_scenarios() -> Result<ValidationSummary, String> {
         return Err("unicode-multibyte LineIndex probe returned 0".to_owned());
     }
 
-    // 7. Error/rejection paths + late typed mismatch.
+    // 7. Post-0.2.3 API workloads: ayaml-edit, frontmatter, merge_keys, Spanned<T>,
+    //    DocumentDeserializer, from_reader, depth-64, and libyaml-compat.
+    validate_feature_scenarios(&front, &fm_owned)?;
+
+    // 8. Error/rejection paths + late typed mismatch.
     for &id in ERROR_IDS {
         let fixture = must_fixture(id);
         let err = ayaml::parse_value(&fixture.content)

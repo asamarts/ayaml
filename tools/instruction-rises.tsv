@@ -1,17 +1,13 @@
 # Accepted rises in tools/check_instructions.py, one per line and tab-separated:
-# OPERATION	WORKLOAD	PERCENT	REASON
-# A line says why a rise was accepted when it was. The code it names may be gone since: the
-# chunked event feed of AY-096 was removed by AY-117, and the typed read of `tiny` fell again.
-emit	tiny	8	D82: before its first line, the writer looks through the value for tags that need a %TAG directive, about 75 instructions a document
-emit	flow-depth-64	21	D82: the look for tags that need a %TAG directive costs about 60 instructions a collection, and this input is 64 nested collections around one scalar
-typed	tiny	8	AY-096: the chunked event feed adds a branch per event to keep large typed documents below their peak target
-typed	short-sequence	7	AY-104: a typed read builds its value from events it takes from the parser one by one, and keeps no tree of the document; that costs about 160 instructions an item here, and an untyped decode of short scalars peaks 15% to 32% lower
-typed	mapping-1000	7	AY-104: as for the short sequence, about 400 instructions an entry, part of them for a map that is no longer told its size
-typed	aliases-1000	7	AY-104: as for the short sequence; each alias is still read from the anchored tree
-emit	aliases-1000	6	pre-1.0 hardening PR: emitter.rs is untouched (Ir +0.00%); binary code layout shift from merge/frontmatter/Spanned hardening adds +5.25% simulated Callgrind EstCycles
-emit	nested-keys	6	pre-1.0 hardening PR: emitter.rs is untouched (Ir +0.09%); binary code layout shift from merge/frontmatter/Spanned hardening adds +5.61% simulated Callgrind EstCycles
-emit	nested-keys	6	AY-180: emit_flow_mapping disassembly is byte-identical (0 Ir delta); binary address shift causes Callgrind branch-predictor aliasing (+5.26% simulated EstCycles, +0.73% Ir)
-typed	frontmatter-tiny	7	AY-181: unifying <= 4 KiB typed decoding onto the streaming reader (D107) keeps Ir near-flat (+0.07%) while adding simulated cache/branch misses (+5.26% EstCycles) on unhinted 9-key Value decoding in exchange for -49.7% peak heap and -28.3% allocations
-borrowed	frontmatter-tiny	6	AY-177: Ir is +0.76% (+416 Ir) while larger binary layout from Tape and ParserBuf shifts simulated Callgrind cache/branch predictors (+5.14% EstCycles on 323 B doc; boundary-4kb borrowed drops -3.13% Ir / -2.56% EstCycles)
-spanned	boundary-4kb-below	6	AY-177: Ir is +0.11% (+889 Ir) while larger binary layout from Tape and ParserBuf shifts simulated Callgrind cache-set misses (+5.55% EstCycles on 4 KiB spanned doc; ci-workflow/escape-routes/nested-keys spanned Ir drops -0.67% to -1.68%)
-spanned	boundary-4kb-above	6	AY-177: Ir is +0.34% (+3042 Ir) while larger binary layout from Tape and ParserBuf shifts simulated Callgrind cache-set misses (+5.72% EstCycles on 4 KiB spanned doc; ci-workflow/escape-routes/nested-keys spanned Ir drops -0.67% to -1.68%)
+# OPERATION	WORKLOAD	IR_PERCENT	CYCLES_PERCENT	REASON
+# Use `-` in IR_PERCENT or CYCLES_PERCENT to keep that metric at its default limit
+# (+2.0% Ir / +5.0% EstimatedCycles) so an EstCycles layout exception never relaxes Ir.
+# Only lines added by the current change take effect; historical rows document past decisions.
+typed	aliases-1000	7	7	AY-104: as for the short sequence; each alias is still read from the anchored tree
+emit	aliases-1000	-	6	pre-1.0 hardening PR: emitter.rs is untouched (Ir +0.00%); binary code layout shift from merge/frontmatter/Spanned hardening adds +5.25% simulated Callgrind EstCycles
+emit	nested-keys	-	6	pre-1.0 hardening PR: emitter.rs is untouched (Ir +0.09%); binary code layout shift from merge/frontmatter/Spanned hardening adds +5.61% simulated Callgrind EstCycles
+emit	nested-keys	-	6	AY-180: emit_flow_mapping disassembly is byte-identical (0 Ir delta); binary address shift causes Callgrind branch-predictor aliasing (+5.26% simulated EstCycles, +0.73% Ir)
+typed	frontmatter-tiny	-	7	AY-181: unifying <= 4 KiB typed decoding onto the streaming reader (D107) keeps Ir near-flat (+0.07%) while adding simulated cache/branch misses (+5.26% EstCycles) on unhinted 9-key Value decoding in exchange for -49.7% peak heap and -28.3% allocations
+borrowed	frontmatter-tiny	-	6	AY-177: Ir is +0.76% (+416 Ir) while larger binary layout from Tape and ParserBuf shifts simulated Callgrind cache/branch predictors (+5.14% EstCycles on 323 B doc; boundary-4kb borrowed drops -3.13% Ir / -2.56% EstCycles)
+spanned	boundary-4kb-below	-	6	AY-177: Ir is +0.11% (+889 Ir) while larger binary layout from Tape and ParserBuf shifts simulated Callgrind cache-set misses (+5.55% EstCycles on 4 KiB spanned doc; ci-workflow/escape-routes/nested-keys spanned Ir drops -0.67% to -1.68%)
+spanned	boundary-4kb-above	-	6	AY-177: Ir is +0.34% (+3042 Ir) while larger binary layout from Tape and ParserBuf shifts simulated Callgrind cache-set misses (+5.72% EstCycles on 4 KiB spanned doc; ci-workflow/escape-routes/nested-keys spanned Ir drops -0.67% to -1.68%)

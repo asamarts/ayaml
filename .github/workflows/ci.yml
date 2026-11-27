@@ -104,9 +104,11 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      # Pinned so `tools/instruction-baseline.jsonl` cumulative drift checks do not break on
+      # rolling stable LLVM codegen shifts; move the pin and refresh the baseline together.
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: stable
+          toolchain: "1.100.0"
       - name: Install valgrind
         run: |
           set -euo pipefail
@@ -310,6 +312,8 @@ jobs:
           toolchain: stable
       - name: Test the checks
         run: python3 tools/test_ci_checks.py
+      - name: Test the performance gates
+        run: python3 tools/test_perf_gates.py
       - name: Test the docs check
         run: python3 tools/test_docs_check.py
       - name: Test the multi-crate release checks

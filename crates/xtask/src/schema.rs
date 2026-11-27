@@ -22,20 +22,34 @@ pub(crate) struct Fingerprint {
     pub(crate) os: String,
     /// Target CPU architecture (e.g. `x86_64`, `aarch64`).
     pub(crate) arch: String,
-    /// Kernel release string (e.g. `Linux 6.12.0`).
-    pub(crate) kernel: String,
+    /// Kernel release string (e.g. `Linux 6.12.0`), omitted in sanitized published artifacts.
+    pub(crate) kernel: Option<String>,
     /// CPU model string when available.
     pub(crate) cpu: String,
     /// Logical CPU count.
     pub(crate) cpu_count: u64,
     /// Rust compiler version string (`rustc --version`).
     pub(crate) rustc: String,
-    /// Workspace git commit SHA (`HEAD`) when available.
+    /// Workspace git commit SHA (`git_sha` or sanitized `public_git_sha`).
     pub(crate) git_sha: String,
+    /// Whether this fingerprint originated from a sanitized `public_git_sha` field.
+    pub(crate) uses_public_git_sha: bool,
     /// Combined SHA-256 digest of the `ayaml-fixtures` catalog manifest.
     pub(crate) fixture_manifest_sha256: String,
-    /// UNIX timestamp in seconds when captured.
-    pub(crate) timestamp_unix: u64,
+    /// UNIX timestamp in seconds when captured, omitted in sanitized published artifacts.
+    pub(crate) timestamp_unix: Option<u64>,
+    /// Calendar date (`YYYY-MM-DD`) used by sanitized published benchmark snapshots.
+    pub(crate) captured_date: Option<String>,
+    /// Optional pinned CPU core index used during isolated benchmark runs.
+    pub(crate) cpu_pin: Option<u64>,
+    /// Optional CPU frequency governor (e.g. `performance`).
+    pub(crate) governor: Option<String>,
+    /// Optional historical comparison baseline commit SHA (e.g. `v0.2.3`).
+    pub(crate) baseline_v023_git_sha: Option<String>,
+    /// Optional pinned row count for `speed.jsonl`.
+    pub(crate) speed_rows: Option<u64>,
+    /// Optional pinned row count for `memory.jsonl`.
+    pub(crate) memory_rows: Option<u64>,
 }
 
 impl Fingerprint {
@@ -65,13 +79,20 @@ impl Fingerprint {
             schema_version: SCHEMA_VERSION,
             os: std::env::consts::OS.to_owned(),
             arch: std::env::consts::ARCH.to_owned(),
-            kernel,
+            kernel: Some(kernel),
             cpu,
             cpu_count,
             rustc,
             git_sha,
+            uses_public_git_sha: false,
             fixture_manifest_sha256,
-            timestamp_unix,
+            timestamp_unix: Some(timestamp_unix),
+            captured_date: None,
+            cpu_pin: None,
+            governor: None,
+            baseline_v023_git_sha: None,
+            speed_rows: None,
+            memory_rows: None,
         }
     }
 
@@ -85,16 +106,46 @@ impl Fingerprint {
         map.insert("schema_version".into(), Value::from(self.schema_version));
         map.insert("os".into(), Value::from(self.os.clone()));
         map.insert("arch".into(), Value::from(self.arch.clone()));
-        map.insert("kernel".into(), Value::from(self.kernel.clone()));
+        if let Some(ref kernel) = self.kernel {
+            map.insert("kernel".into(), Value::from(kernel.clone()));
+        }
         map.insert("cpu".into(), Value::from(self.cpu.clone()));
         map.insert("cpu_count".into(), Value::from(self.cpu_count));
+        if let Some(cpu_pin) = self.cpu_pin {
+            map.insert("cpu_pin".into(), Value::from(cpu_pin));
+        }
+        if let Some(ref governor) = self.governor {
+            map.insert("governor".into(), Value::from(governor.clone()));
+        }
         map.insert("rustc".into(), Value::from(self.rustc.clone()));
-        map.insert("git_sha".into(), Value::from(self.git_sha.clone()));
+        let sha_key = if self.uses_public_git_sha {
+            "public_git_sha"
+        } else {
+            "git_sha"
+        };
+        map.insert(sha_key.into(), Value::from(self.git_sha.clone()));
+        if let Some(ref base_sha) = self.baseline_v023_git_sha {
+            map.insert(
+                "baseline_v023_git_sha".into(),
+                Value::from(base_sha.clone()),
+            );
+        }
         map.insert(
             "fixture_manifest_sha256".into(),
             Value::from(self.fixture_manifest_sha256.clone()),
         );
-        map.insert("timestamp_unix".into(), Value::from(self.timestamp_unix));
+        if let Some(timestamp_unix) = self.timestamp_unix {
+            map.insert("timestamp_unix".into(), Value::from(timestamp_unix));
+        }
+        if let Some(ref captured_date) = self.captured_date {
+            map.insert("captured_date".into(), Value::from(captured_date.clone()));
+        }
+        if let Some(speed_rows) = self.speed_rows {
+            map.insert("speed_rows".into(), Value::from(speed_rows));
+        }
+        if let Some(memory_rows) = self.memory_rows {
+            map.insert("memory_rows".into(), Value::from(memory_rows));
+        }
         serde_json::to_string_pretty(&Value::Object(map))
             .map(|mut s| {
                 s.push('\n');
@@ -103,7 +154,8 @@ impl Fingerprint {
             .map_err(|e| format!("failed to serialize fingerprint: {e}"))
     }
 
-    /// Parse and strictly validate a fingerprint JSON document.
+    /// Parse and strictly validate a fingerprint JSON document (including sanitized published
+    /// snapshots that omit `kernel`/`timestamp_unix` and use `public_git_sha`).
     ///
     /// # Errors
     ///
@@ -120,17 +172,50 @@ impl Fingerprint {
                 "unsupported fingerprint schema_version {schema_version}"
             ));
         }
+        let raw_git_sha = opt_nonempty_str(obj, "git_sha")?;
+        let public_git_sha = opt_nonempty_str(obj, "public_git_sha")?;
+        let (git_sha, uses_public_git_sha) = match (raw_git_sha, public_git_sha) {
+            (Some(raw), Some(pub_sha)) => {
+                if raw != pub_sha {
+                    return Err(
+                        "fingerprint has conflicting `git_sha` and `public_git_sha` values"
+                            .to_owned(),
+                    );
+                }
+                (raw, false)
+            }
+            (Some(raw), None) => (raw, false),
+            (None, Some(pub_sha)) => (pub_sha, true),
+            (None, None) => {
+                return Err("missing string field `git_sha` (or `public_git_sha`)".to_owned());
+            }
+        };
+        let speed_rows = opt_u64(obj, "speed_rows")?;
+        if speed_rows == Some(0) {
+            return Err("fingerprint speed_rows must be >= 1".to_owned());
+        }
+        let memory_rows = opt_u64(obj, "memory_rows")?;
+        if memory_rows == Some(0) {
+            return Err("fingerprint memory_rows must be >= 1".to_owned());
+        }
         let fp = Self {
             schema_version,
             os: req_nonempty_str(obj, "os")?,
             arch: req_nonempty_str(obj, "arch")?,
-            kernel: req_nonempty_str(obj, "kernel")?,
+            kernel: opt_nonempty_str(obj, "kernel")?,
             cpu: req_nonempty_str(obj, "cpu")?,
             cpu_count: req_u64(obj, "cpu_count")?,
             rustc: req_nonempty_str(obj, "rustc")?,
-            git_sha: req_nonempty_str(obj, "git_sha")?,
+            git_sha,
+            uses_public_git_sha,
             fixture_manifest_sha256: req_sha256_or_unknown(obj, "fixture_manifest_sha256")?,
-            timestamp_unix: req_u64(obj, "timestamp_unix")?,
+            timestamp_unix: opt_u64(obj, "timestamp_unix")?,
+            captured_date: opt_nonempty_str(obj, "captured_date")?,
+            cpu_pin: opt_u64(obj, "cpu_pin")?,
+            governor: opt_nonempty_str(obj, "governor")?,
+            baseline_v023_git_sha: opt_nonempty_str(obj, "baseline_v023_git_sha")?,
+            speed_rows,
+            memory_rows,
         };
         if fp.cpu_count == 0 {
             return Err("fingerprint cpu_count must be >= 1".to_owned());
@@ -144,6 +229,8 @@ impl Fingerprint {
 pub(crate) struct SpeedRecord {
     /// Schema version (`1`).
     pub(crate) schema_version: u64,
+    /// Optional implementation identifier (e.g. `ayaml`, `rapidyaml`) in multi-library datasets.
+    pub(crate) implementation: Option<String>,
     /// Fixture/scenario identifier.
     pub(crate) scenario: String,
     /// Operation/layer measured (e.g. `parse_value`, `typed_struct`).
@@ -160,13 +247,20 @@ pub(crate) struct SpeedRecord {
     pub(crate) stddev_ns: f64,
     /// Throughput in MiB/s derived from `bytes` and `median_ns`.
     pub(crate) throughput_mib_s: f64,
+    /// Optional number of timing rounds averaged into this row.
+    pub(crate) rounds: Option<u64>,
 }
 
 impl SpeedRecord {
-    /// Stable lookup key `(scenario, operation)`.
+    /// Stable lookup key `(implementation, scenario, operation)`, defaulting absent
+    /// `implementation` to `"ayaml"` so single-library and multi-library artifacts align cleanly.
     #[must_use]
-    pub(crate) fn key(&self) -> (String, String) {
-        (self.scenario.clone(), self.operation.clone())
+    pub(crate) fn key(&self) -> (String, String, String) {
+        (
+            self.implementation.as_deref().unwrap_or("ayaml").to_owned(),
+            self.scenario.clone(),
+            self.operation.clone(),
+        )
     }
 
     /// Serialize to a single JSONL line.
@@ -177,6 +271,9 @@ impl SpeedRecord {
     pub(crate) fn to_json_line(&self) -> Result<String, String> {
         let mut map = Map::new();
         map.insert("schema_version".into(), Value::from(self.schema_version));
+        if let Some(ref implementation) = self.implementation {
+            map.insert("implementation".into(), Value::from(implementation.clone()));
+        }
         map.insert("scenario".into(), Value::from(self.scenario.clone()));
         map.insert("operation".into(), Value::from(self.operation.clone()));
         map.insert("bytes".into(), Value::from(self.bytes));
@@ -191,6 +288,9 @@ impl SpeedRecord {
             "throughput_mib_s".into(),
             Value::from(self.throughput_mib_s),
         );
+        if let Some(rounds) = self.rounds {
+            map.insert("rounds".into(), Value::from(rounds));
+        }
         serde_json::to_string(&Value::Object(map))
             .map_err(|e| format!("failed to serialize speed record: {e}"))
     }
@@ -210,8 +310,13 @@ impl SpeedRecord {
         if schema_version != SCHEMA_VERSION {
             return Err(format!("unsupported speed schema_version {schema_version}"));
         }
+        let rounds = opt_u64(obj, "rounds")?;
+        if rounds == Some(0) {
+            return Err("field `rounds` must be >= 1".to_owned());
+        }
         Ok(Self {
             schema_version,
+            implementation: opt_nonempty_str(obj, "implementation")?,
             scenario: req_nonempty_str(obj, "scenario")?,
             operation: req_nonempty_str(obj, "operation")?,
             bytes: req_u64(obj, "bytes")?,
@@ -220,6 +325,7 @@ impl SpeedRecord {
             mean_ns: req_pos_f64(obj, "mean_ns")?,
             stddev_ns: req_nonneg_f64(obj, "stddev_ns")?,
             throughput_mib_s: req_nonneg_f64(obj, "throughput_mib_s")?,
+            rounds,
         })
     }
 }
@@ -229,6 +335,8 @@ impl SpeedRecord {
 pub(crate) struct MemoryRecord {
     /// Schema version (`1`).
     pub(crate) schema_version: u64,
+    /// Optional implementation identifier (e.g. `ayaml`, `rapidyaml`) in multi-library datasets.
+    pub(crate) implementation: Option<String>,
     /// Fixture identifier.
     pub(crate) scenario: String,
     /// Operation measured (`parse_value`, `typed_struct`, etc.).
@@ -250,10 +358,15 @@ pub(crate) struct MemoryRecord {
 }
 
 impl MemoryRecord {
-    /// Stable lookup key `(scenario, operation)`.
+    /// Stable lookup key `(implementation, scenario, operation)`, defaulting absent
+    /// `implementation` to `"ayaml"` so single-library and multi-library artifacts align cleanly.
     #[must_use]
-    pub(crate) fn key(&self) -> (String, String) {
-        (self.scenario.clone(), self.operation.clone())
+    pub(crate) fn key(&self) -> (String, String, String) {
+        (
+            self.implementation.as_deref().unwrap_or("ayaml").to_owned(),
+            self.scenario.clone(),
+            self.operation.clone(),
+        )
     }
 
     /// Serialize to a single JSONL line.
@@ -264,6 +377,9 @@ impl MemoryRecord {
     pub(crate) fn to_json_line(&self) -> Result<String, String> {
         let mut map = Map::new();
         map.insert("schema_version".into(), Value::from(self.schema_version));
+        if let Some(ref implementation) = self.implementation {
+            map.insert("implementation".into(), Value::from(implementation.clone()));
+        }
         map.insert("scenario".into(), Value::from(self.scenario.clone()));
         map.insert("operation".into(), Value::from(self.operation.clone()));
         map.insert("bytes".into(), Value::from(self.bytes));
@@ -305,6 +421,7 @@ impl MemoryRecord {
         }
         Ok(Self {
             schema_version,
+            implementation: opt_nonempty_str(obj, "implementation")?,
             scenario: req_nonempty_str(obj, "scenario")?,
             operation: req_nonempty_str(obj, "operation")?,
             bytes: req_u64(obj, "bytes")?,
@@ -600,6 +717,19 @@ pub(crate) fn read_speed_jsonl(path: &Path) -> Result<Vec<SpeedRecord>, String> 
     if rows.is_empty() {
         return Err(format!("{} contains no speed records", path.display()));
     }
+    let mut seen = std::collections::BTreeSet::new();
+    for row in &rows {
+        let key = row.key();
+        if !seen.insert(key.clone()) {
+            return Err(format!(
+                "{}: duplicate speed record key ({}, {}, {})",
+                path.display(),
+                key.0,
+                key.1,
+                key.2
+            ));
+        }
+    }
     Ok(rows)
 }
 
@@ -607,7 +737,7 @@ pub(crate) fn read_speed_jsonl(path: &Path) -> Result<Vec<SpeedRecord>, String> 
 ///
 /// # Errors
 ///
-/// Returns an error if the file cannot be read or any row is invalid.
+/// Returns an error if the file cannot be read, any row is invalid, or keys duplicate.
 pub(crate) fn read_memory_jsonl(path: &Path) -> Result<Vec<MemoryRecord>, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let rows: Result<Vec<_>, _> = text
@@ -619,6 +749,19 @@ pub(crate) fn read_memory_jsonl(path: &Path) -> Result<Vec<MemoryRecord>, String
     if rows.is_empty() {
         return Err(format!("{} contains no memory records", path.display()));
     }
+    let mut seen = std::collections::BTreeSet::new();
+    for row in &rows {
+        let key = row.key();
+        if !seen.insert(key.clone()) {
+            return Err(format!(
+                "{}: duplicate memory record key ({}, {}, {})",
+                path.display(),
+                key.0,
+                key.1,
+                key.2
+            ));
+        }
+    }
     Ok(rows)
 }
 
@@ -626,7 +769,7 @@ pub(crate) fn read_memory_jsonl(path: &Path) -> Result<Vec<MemoryRecord>, String
 ///
 /// # Errors
 ///
-/// Returns an error if the file cannot be read or any row is invalid.
+/// Returns an error if the file cannot be read, any row is invalid, or keys duplicate.
 pub(crate) fn read_callgrind_jsonl(path: &Path) -> Result<Vec<CallgrindRecord>, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let rows: Result<Vec<_>, _> = text
@@ -637,6 +780,18 @@ pub(crate) fn read_callgrind_jsonl(path: &Path) -> Result<Vec<CallgrindRecord>, 
     let rows = rows?;
     if rows.is_empty() {
         return Err(format!("{} contains no callgrind records", path.display()));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for row in &rows {
+        let key = row.key();
+        if !seen.insert(key.clone()) {
+            return Err(format!(
+                "{}: duplicate callgrind record key ({}, {})",
+                path.display(),
+                key.0,
+                key.1
+            ));
+        }
     }
     Ok(rows)
 }
@@ -694,6 +849,21 @@ fn req_nonempty_str(obj: &Map<String, Value>, key: &str) -> Result<String, Strin
         return Err(format!("field `{key}` must not be empty"));
     }
     Ok(s.to_owned())
+}
+
+fn opt_nonempty_str(obj: &Map<String, Value>, key: &str) -> Result<Option<String>, String> {
+    match obj.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| format!("invalid optional string field `{key}`"))?;
+            if s.trim().is_empty() {
+                return Err(format!("field `{key}` must not be empty"));
+            }
+            Ok(Some(s.to_owned()))
+        }
+    }
 }
 
 fn req_sha256_or_unknown(obj: &Map<String, Value>, key: &str) -> Result<String, String> {

@@ -42,6 +42,14 @@ pub(crate) const PR_SUITE_IDS: &[&str] = &[
     "structural/parse_value/large-scalar-1mb",
     "spans/spanned_tree/ci-workflow",
     "errors/from_str_err/typed-mismatch-late",
+    "features/ayaml_edit/frontmatter-tiny",
+    "features/frontmatter/frontmatter-tiny",
+    "features/merge_keys/container-compose",
+    "features/spanned_typed/frontmatter-tiny",
+    "features/doc_deserializer/frontmatter-tiny",
+    "features/from_reader/frontmatter-tiny",
+    "features/libyaml_compat/container-compose",
+    "features/libyaml_compat/depth-64",
 ];
 
 /// Suite selection for `cargo xtask det`.
@@ -1125,6 +1133,8 @@ pub(crate) fn run_callgrind_once(
         .args([
             "--tool=callgrind",
             "--cache-sim=yes",
+            "--I1=32768,8,64",
+            "--LL=8388608,16,64",
             "--branch-sim=yes",
             "--collect-atstart=no",
             "--toggle-collect=*__ayaml_det_measure*",

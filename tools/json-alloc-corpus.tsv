@@ -1,28 +1,27 @@
 # Allocation budgets for an untyped decode into a JSON tree, checked by tools/check_alloc_corpus.sh
 # with AYAML_JSON=1: the nine document shapes of issue #178, measured as the issue measures them,
-# and four more below them.
+# and five more below them.
 # The decode goes through the compatibility reader with the count limits lifted, and a
 # reallocation counts by the bytes it adds.
-# Each budget is about 1.10 times the measured value, rounded up. The shapes peak at 0.52 to
-# 0.96 times the issue's reference, so that room keeps each within the 1.2 times it asks for.
+# Each budget is about 1.10 times the measured value, rounded up.
 # Lower a row in the change that lowers its measurement.
 # path	json_peak	json_allocs	json_total
-@service-37kb	890000	4960	970000
-@service-1mb	26700000	148000	27200000
-@service-4mb	107000000	589000	109000000
-@block-map-1mb	27200000	129000	27200000
-@flow-map-1mb	24600000	117000	24600000
-@flow-ints-1mb	19600000	34	19600000
-@flow-ones-1mb	53700000	36	53700000
-@block-seq-1mb	14900000	79500	14900000
-@block-words-1mb	19200000	143000	19200000
+@service-37kb	600000	4350	600000
+@service-1mb	17300000	130000	17300000
+@service-4mb	69200000	519000	69200000
+@block-map-1mb	11800000	129000	11800000
+@flow-map-1mb	24500000	117000	24500000
+@flow-ints-1mb	19500000	38	19500000
+@flow-ones-1mb	53700000	40	53700000
+@block-seq-1mb	5500000	79500	5500000
+@block-words-1mb	5310000	143000	5310000
 # Shapes that a reader of events can't read entry by entry, so that what they cost can't grow
 # unseen. A root with an anchor is built whole, and peaks as a read that builds the tree first:
 # the tokens are freed before the tree is read. A node with an anchor inside the root is kept
 # for the aliases that may follow it, beside the tokens and the value. A directive is an event
 # with no node, and none waits for the reader beyond a few.
-@anchored-flow-ones-1mb	79300000	41	97700000
-@anchored-block-words-1mb	25500000	143000	30800000
-@anchored-maps-50000	88000000	386000	116000000
-@anchored-inner-flow-1mb	82000000	70	100000000
-@directives-100k	13300000	111000	13300000
+@anchored-flow-ones-1mb	79300000	44	97700000
+@anchored-block-words-1mb	16900000	143000	16900000
+@anchored-maps-50000	81600000	386000	85200000
+@anchored-inner-flow-1mb	81400000	66	99900000
+@directives-100k	26000	111000	3550000

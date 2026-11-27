@@ -300,6 +300,8 @@ job_features() {
 job_policy() {
   step "test the checks" python3 tools/test_ci_checks.py
   # Mirrors: python3 tools/test_ci_checks.py
+  step "test the performance gates" python3 tools/test_perf_gates.py
+  # Mirrors: python3 tools/test_perf_gates.py
   step "test the docs check" python3 tools/test_docs_check.py
   # Mirrors: python3 tools/test_docs_check.py
   step "test the multi-crate release checks" python3 tools/test_multi_crate_release.py

@@ -10,6 +10,8 @@
 //! - `spans`: `SpannedTree::parse` and `LineIndex` position/offset conversions
 //! - `structural`: depth, alias reuse, large scalar, flow collections, short block entries, nested keys
 //! - `errors`: early/late syntax, duplicate key, depth limit, invalid escape, and late typed decode
+//! - `features`: `ayaml-edit`, `frontmatter`, `merge_keys`, `Spanned<T>`, `DocumentDeserializer`,
+//!   `from_reader`, and `libyaml-compat` workloads
 //!
 //! A mandatory pre-timing semantic validation step verifies every benchmarked path before timing.
 #![allow(
@@ -19,16 +21,22 @@
 
 use std::collections::BTreeMap;
 use std::hint::black_box;
+use std::io::Cursor;
 use std::sync::Once;
 
-use ayaml::{EmitOptions, Limits, LineIndex, SpannedTree, Value};
+use ayaml::{
+    DocumentDeserializer, EmitOptions, Limits, LineIndex, ParseOptions, PathSegment, SpannedTree,
+    Value,
+};
 use ayaml_bench::{
-    BOUNDARY_IDS, BoundaryBorrowed, BoundaryOwned, DOMAIN_IDS, ERROR_IDS, FrontmatterBorrowed,
-    FrontmatterOwned, SCALING_IDS, STRUCTURAL_IDS, must_fixture, probe_line_index_queries,
-    stream_cluster_borrowed, stream_cluster_owned, validate_all_scenarios,
+    BOUNDARY_IDS, BoundaryBorrowed, BoundaryOwned, BoundarySpanned, DOMAIN_IDS, ERROR_IDS,
+    FrontmatterBorrowed, FrontmatterOwned, FrontmatterSpanned, SCALING_IDS, STRUCTURAL_IDS,
+    must_fixture, probe_line_index_queries, stream_cluster_borrowed, stream_cluster_owned,
+    validate_all_scenarios, wrap_frontmatter_doc,
 };
 use ayaml_fixtures::bulk_automation_files;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use serde::Deserialize as _;
 
 static VALIDATED: Once = Once::new();
 
@@ -566,6 +574,212 @@ fn bench_errors(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_features_frontmatter(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+) {
+    let need_front = [
+        "features/ayaml_edit/frontmatter-tiny",
+        "features/frontmatter/frontmatter-tiny",
+        "features/spanned_typed/frontmatter-tiny",
+        "features/doc_deserializer/frontmatter-tiny",
+        "features/from_reader/frontmatter-tiny",
+    ]
+    .into_iter()
+    .any(item_selected);
+    if !need_front {
+        return;
+    }
+    let front = must_fixture("frontmatter-tiny");
+    group.throughput(Throughput::Bytes(front.bytes as u64));
+    if item_selected("features/ayaml_edit/frontmatter-tiny") {
+        let path = [PathSegment::key("status")];
+        let replacement = Value::String("done".to_owned());
+        group.bench_function("ayaml_edit/frontmatter-tiny", |b| {
+            b.iter(|| {
+                black_box(
+                    ayaml_edit::replace_scalar(
+                        black_box(&front.content),
+                        black_box(&path),
+                        black_box(&replacement),
+                    )
+                    .expect("ayaml_edit frontmatter"),
+                )
+            });
+        });
+    }
+    if item_selected("features/frontmatter/frontmatter-tiny") {
+        let wrapped = wrap_frontmatter_doc(&front.content);
+        group.throughput(Throughput::Bytes(wrapped.len() as u64));
+        group.bench_function("frontmatter/frontmatter-tiny", |b| {
+            b.iter(|| {
+                black_box(
+                    ayaml::parse_frontmatter::<FrontmatterBorrowed<'_>>(black_box(&wrapped))
+                        .expect("frontmatter"),
+                )
+            });
+        });
+        group.throughput(Throughput::Bytes(front.bytes as u64));
+    }
+    if item_selected("features/spanned_typed/frontmatter-tiny") {
+        group.bench_function("spanned_typed/frontmatter-tiny", |b| {
+            b.iter(|| {
+                black_box(
+                    ayaml::from_str::<FrontmatterSpanned>(black_box(&front.content))
+                        .expect("spanned_typed frontmatter"),
+                )
+            });
+        });
+    }
+    if item_selected("features/doc_deserializer/frontmatter-tiny") {
+        group.bench_function("doc_deserializer/frontmatter-tiny", |b| {
+            b.iter(|| {
+                let de = DocumentDeserializer::from_str(black_box(&front.content))
+                    .expect("doc_de frontmatter");
+                black_box(FrontmatterBorrowed::deserialize(de).expect("doc_de decode"))
+            });
+        });
+    }
+    if item_selected("features/from_reader/frontmatter-tiny") {
+        group.bench_function("from_reader/frontmatter-tiny", |b| {
+            b.iter(|| {
+                black_box(
+                    ayaml::from_reader::<_, FrontmatterOwned>(Cursor::new(black_box(
+                        front.content.as_bytes(),
+                    )))
+                    .expect("from_reader frontmatter"),
+                )
+            });
+        });
+    }
+}
+
+fn bench_features_boundary_and_compat(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+) {
+    let need_b4 = [
+        "features/ayaml_edit/boundary-4kb-below",
+        "features/spanned_typed/boundary-4kb-below",
+        "features/doc_deserializer/boundary-4kb-below",
+        "features/from_reader/boundary-4kb-below",
+        "features/libyaml_compat/boundary-4kb-below",
+    ]
+    .into_iter()
+    .any(item_selected);
+    if need_b4 {
+        let b4 = must_fixture("boundary-4kb-below");
+        group.throughput(Throughput::Bytes(b4.bytes as u64));
+        if item_selected("features/ayaml_edit/boundary-4kb-below") {
+            let path = [PathSegment::key("service")];
+            let replacement = Value::String("updated-svc".to_owned());
+            group.bench_function("ayaml_edit/boundary-4kb-below", |b| {
+                b.iter(|| {
+                    black_box(
+                        ayaml_edit::replace_scalar(
+                            black_box(&b4.content),
+                            black_box(&path),
+                            black_box(&replacement),
+                        )
+                        .expect("ayaml_edit boundary"),
+                    )
+                });
+            });
+        }
+        if item_selected("features/spanned_typed/boundary-4kb-below") {
+            group.bench_function("spanned_typed/boundary-4kb-below", |b| {
+                b.iter(|| {
+                    black_box(
+                        ayaml::from_str::<BoundarySpanned>(black_box(&b4.content))
+                            .expect("spanned_typed boundary"),
+                    )
+                });
+            });
+        }
+        if item_selected("features/doc_deserializer/boundary-4kb-below") {
+            group.bench_function("doc_deserializer/boundary-4kb-below", |b| {
+                b.iter(|| {
+                    let de = DocumentDeserializer::from_str(black_box(&b4.content))
+                        .expect("doc_de boundary");
+                    black_box(BoundaryBorrowed::deserialize(de).expect("doc_de boundary decode"))
+                });
+            });
+        }
+        if item_selected("features/from_reader/boundary-4kb-below") {
+            group.bench_function("from_reader/boundary-4kb-below", |b| {
+                b.iter(|| {
+                    black_box(
+                        ayaml::from_reader::<_, BoundaryOwned>(Cursor::new(black_box(
+                            b4.content.as_bytes(),
+                        )))
+                        .expect("from_reader boundary"),
+                    )
+                });
+            });
+        }
+        if item_selected("features/libyaml_compat/boundary-4kb-below") {
+            group.bench_function("libyaml_compat/boundary-4kb-below", |b| {
+                b.iter(|| {
+                    black_box(
+                        ayaml::compat::from_str::<Value>(black_box(&b4.content))
+                            .expect("compat boundary"),
+                    )
+                });
+            });
+        }
+    }
+
+    if item_selected("features/merge_keys/container-compose")
+        || item_selected("features/libyaml_compat/container-compose")
+    {
+        let compose = must_fixture("container-compose");
+        group.throughput(Throughput::Bytes(compose.bytes as u64));
+        if item_selected("features/merge_keys/container-compose") {
+            let merge_opts = ParseOptions::new().with_merge_keys(true);
+            group.bench_function("merge_keys/container-compose", |b| {
+                b.iter(|| {
+                    black_box(
+                        ayaml::parse_value_with(black_box(&compose.content), &merge_opts)
+                            .expect("merge_keys"),
+                    )
+                });
+            });
+        }
+        if item_selected("features/libyaml_compat/container-compose") {
+            group.bench_function("libyaml_compat/container-compose", |b| {
+                b.iter(|| {
+                    black_box(
+                        ayaml::compat::from_str::<Value>(black_box(&compose.content))
+                            .expect("compat compose"),
+                    )
+                });
+            });
+        }
+    }
+
+    if item_selected("features/libyaml_compat/depth-64") {
+        let depth64 = must_fixture("depth-64");
+        group.throughput(Throughput::Bytes(depth64.bytes as u64));
+        group.bench_function("libyaml_compat/depth-64", |b| {
+            b.iter(|| {
+                black_box(
+                    ayaml::compat::from_str::<Value>(black_box(&depth64.content))
+                        .expect("compat depth-64"),
+                )
+            });
+        });
+    }
+}
+
+fn bench_features(c: &mut Criterion) {
+    ensure_validated();
+    if !group_selected("features") {
+        return;
+    }
+    let mut group = c.benchmark_group("features");
+    bench_features_frontmatter(&mut group);
+    bench_features_boundary_and_compat(&mut group);
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_domains,
@@ -575,6 +789,7 @@ criterion_group!(
     bench_emit,
     bench_spans,
     bench_structural,
-    bench_errors
+    bench_errors,
+    bench_features
 );
 criterion_main!(benches);

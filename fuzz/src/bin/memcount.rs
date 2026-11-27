@@ -23,6 +23,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::hint::black_box;
+use std::io::Cursor;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -423,6 +424,43 @@ struct BoundaryBorrowed<'a> {
     entries: BTreeMap<&'a str, Cow<'a, str>>,
 }
 
+#[allow(
+    dead_code,
+    reason = "fields are populated by Serde during Spanned<T> allocation measurements"
+)]
+#[derive(Clone, Debug, Deserialize)]
+struct FrontmatterSpanned {
+    id: ayaml::Spanned<String>,
+    title: ayaml::Spanned<String>,
+    phase: ayaml::Spanned<u32>,
+    status: ayaml::Spanned<String>,
+    effort_days: ayaml::Spanned<f64>,
+    blocked_by: Vec<ayaml::Spanned<String>>,
+    paths: Vec<ayaml::Spanned<String>>,
+    tags: Vec<ayaml::Spanned<String>>,
+}
+
+#[allow(
+    dead_code,
+    reason = "fields are populated by Serde during Spanned<T> allocation measurements"
+)]
+#[derive(Clone, Debug, Deserialize)]
+struct BoundarySpanned {
+    service: ayaml::Spanned<String>,
+    entries: BTreeMap<String, ayaml::Spanned<String>>,
+}
+
+fn wrap_frontmatter_doc(yaml: &str) -> String {
+    let mut doc = String::with_capacity(yaml.len() + 64);
+    doc.push_str("---\n");
+    doc.push_str(yaml);
+    if !yaml.ends_with('\n') {
+        doc.push('\n');
+    }
+    doc.push_str("---\n# Benchmark Body\n\nBody paragraph following YAML frontmatter.\n");
+    doc
+}
+
 #[derive(Clone, Copy, Debug)]
 struct AllocSample {
     peak_bytes: usize,
@@ -481,6 +519,15 @@ fn format_jsonl_row(
     )
 }
 
+#[expect(
+    dead_code,
+    reason = "holds Tape/TapeDocuments live until after measure_op snapshots live_bytes"
+)]
+enum TapeLive<'a> {
+    Single(ayaml::Tape<'a>),
+    Docs(ayaml::TapeDocuments<'a>),
+}
+
 fn measure_tape_or_buf_mode(
     fixture: &ayaml_fixtures::Fixture,
     mode: &str,
@@ -490,10 +537,10 @@ fn measure_tape_or_buf_mode(
         "tape" => measure_op(false, || {
             if fixture.multi_document {
                 let docs = ayaml::parse_tape_documents(input).expect("parse_tape_documents");
-                black_box(docs.len())
+                black_box(TapeLive::Docs(docs))
             } else {
                 let tape = ayaml::parse_tape(input).expect("parse_tape");
-                black_box(tape.root().kind() as usize)
+                black_box(TapeLive::Single(tape))
             }
         }),
         "tape_buf" => {
@@ -504,13 +551,13 @@ fn measure_tape_or_buf_mode(
                 ));
                 measure_op(false, || {
                     let docs = buf.parse_tape_documents(input).expect("tape_buf docs");
-                    black_box(docs.len())
+                    black_box(TapeLive::Docs(docs))
                 })
             } else {
                 drop(black_box(buf.parse_tape(input).expect("warmup tape")));
                 measure_op(false, || {
                     let tape = buf.parse_tape(input).expect("tape_buf");
-                    black_box(tape.root().kind() as usize)
+                    black_box(TapeLive::Single(tape))
                 })
             }
         }
@@ -595,8 +642,152 @@ fn measure_tape_or_buf_mode(
     Ok(Some(sample))
 }
 
+fn measure_feature_mode(
+    fixture: &ayaml_fixtures::Fixture,
+    mode: &str,
+) -> Result<Option<AllocSample>, String> {
+    let input = &fixture.content;
+    let sample = match mode {
+        "ayaml_edit" => match fixture.id.as_str() {
+            "frontmatter-tiny" => {
+                let path = [ayaml::PathSegment::key("status")];
+                let replacement = ayaml::Value::String("done".to_owned());
+                measure_op(false, || {
+                    ayaml_edit::replace_scalar(input, &path, &replacement)
+                        .expect("ayaml_edit frontmatter")
+                })
+            }
+            id if id.starts_with("boundary-") => {
+                let path = [ayaml::PathSegment::key("service")];
+                let replacement = ayaml::Value::String("updated-svc".to_owned());
+                measure_op(false, || {
+                    ayaml_edit::replace_scalar(input, &path, &replacement)
+                        .expect("ayaml_edit boundary")
+                })
+            }
+            other => {
+                return Err(format!("ayaml_edit mode unsupported for fixture {other}"));
+            }
+        },
+        "frontmatter" => {
+            if fixture.multi_document {
+                return Err(format!(
+                    "frontmatter mode requires single-document fixture (got {})",
+                    fixture.id
+                ));
+            }
+            let wrapped = wrap_frontmatter_doc(input);
+            match fixture.id.as_str() {
+                "frontmatter-tiny" => measure_op(false, || {
+                    ayaml::parse_frontmatter::<FrontmatterBorrowed<'_>>(&wrapped)
+                        .expect("parse_frontmatter")
+                        .expect("frontmatter present")
+                }),
+                _ => measure_op(false, || {
+                    ayaml::parse_frontmatter_value(&wrapped)
+                        .expect("parse_frontmatter_value")
+                        .expect("frontmatter present")
+                }),
+            }
+        }
+        "merge_keys" => {
+            let options = ayaml::ParseOptions::new().with_merge_keys(true);
+            if fixture.multi_document {
+                measure_op(false, || {
+                    ayaml::parse_documents_with(input, &options).expect("merge_keys docs")
+                })
+            } else {
+                measure_op(false, || {
+                    ayaml::parse_value_with(input, &options).expect("merge_keys value")
+                })
+            }
+        }
+        "spanned_typed" => match fixture.id.as_str() {
+            "frontmatter-tiny" => measure_op(false, || {
+                ayaml::from_str::<FrontmatterSpanned>(input).expect("frontmatter spanned")
+            }),
+            id if id.starts_with("boundary-") => measure_op(false, || {
+                ayaml::from_str::<BoundarySpanned>(input).expect("boundary spanned")
+            }),
+            _ => measure_op(false, || {
+                ayaml::from_str::<BTreeMap<String, ayaml::Spanned<ayaml::Value>>>(input)
+                    .expect("spanned map")
+            }),
+        },
+        "doc_deserializer" => {
+            if fixture.multi_document {
+                return Err(format!(
+                    "doc_deserializer requires single-document fixture (got {})",
+                    fixture.id
+                ));
+            }
+            match fixture.id.as_str() {
+                "frontmatter-tiny" => measure_op(false, || {
+                    let de = ayaml::DocumentDeserializer::from_str(input).expect("doc_de");
+                    FrontmatterBorrowed::deserialize(de).expect("doc_de frontmatter")
+                }),
+                id if id.starts_with("boundary-") => measure_op(false, || {
+                    let de = ayaml::DocumentDeserializer::from_str(input).expect("doc_de");
+                    BoundaryBorrowed::deserialize(de).expect("doc_de boundary")
+                }),
+                _ => measure_op(false, || {
+                    let de = ayaml::DocumentDeserializer::from_str(input).expect("doc_de");
+                    ayaml::Value::deserialize(de).expect("doc_de value")
+                }),
+            }
+        }
+        "from_reader" => {
+            if fixture.multi_document {
+                return Err(format!(
+                    "from_reader requires single-document fixture (got {})",
+                    fixture.id
+                ));
+            }
+            match fixture.id.as_str() {
+                "frontmatter-tiny" => measure_op(false, || {
+                    ayaml::from_reader::<_, FrontmatterOwned>(Cursor::new(input.as_bytes()))
+                        .expect("from_reader frontmatter")
+                }),
+                id if id.starts_with("boundary-") => measure_op(false, || {
+                    ayaml::from_reader::<_, BoundaryOwned>(Cursor::new(input.as_bytes()))
+                        .expect("from_reader boundary")
+                }),
+                _ => measure_op(false, || {
+                    ayaml::from_reader::<_, ayaml::Value>(Cursor::new(input.as_bytes()))
+                        .expect("from_reader value")
+                }),
+            }
+        }
+        "libyaml_compat" => {
+            if fixture.multi_document {
+                return Err(format!(
+                    "libyaml_compat requires single-document fixture (got {})",
+                    fixture.id
+                ));
+            }
+            measure_op(false, || {
+                ayaml::compat::from_str::<ayaml::Value>(input).expect("libyaml_compat value")
+            })
+        }
+        "parse_value_err" => measure_op(false, || {
+            ayaml::parse_value(input).expect_err("expected parse error")
+        }),
+        _ => return Ok(None),
+    };
+    Ok(Some(sample))
+}
+
 fn measure_fixture_mode(fixture: &ayaml_fixtures::Fixture, mode: &str) -> Result<String, String> {
     if let Some(sample) = measure_tape_or_buf_mode(fixture, mode)? {
+        return Ok(format_jsonl_row(
+            &fixture.id,
+            fixture.bytes,
+            &fixture.sha256,
+            mode,
+            sample,
+        ));
+    }
+    if let Some(sample) = measure_feature_mode(fixture, mode)? {
         return Ok(format_jsonl_row(
             &fixture.id,
             fixture.bytes,
@@ -731,8 +922,17 @@ const BASELINE_CASES: &[(&str, &[&str])] = &[
             "typed_borrowed",
             "json_compat",
             "spanned_tree",
+            "tape",
+            "tape_buf",
+            "tape_buf_recycle",
             "emit_value",
             "serialize_serde",
+            "ayaml_edit",
+            "frontmatter",
+            "spanned_typed",
+            "doc_deserializer",
+            "from_reader",
+            "libyaml_compat",
         ],
     ),
     (
@@ -742,6 +942,11 @@ const BASELINE_CASES: &[(&str, &[&str])] = &[
             "typed_struct",
             "typed_borrowed",
             "serialize_serde",
+            "ayaml_edit",
+            "spanned_typed",
+            "doc_deserializer",
+            "from_reader",
+            "libyaml_compat",
         ],
     ),
     (
@@ -751,6 +956,11 @@ const BASELINE_CASES: &[(&str, &[&str])] = &[
             "typed_struct",
             "typed_borrowed",
             "serialize_serde",
+            "ayaml_edit",
+            "spanned_typed",
+            "doc_deserializer",
+            "from_reader",
+            "libyaml_compat",
         ],
     ),
     (
@@ -760,6 +970,9 @@ const BASELINE_CASES: &[(&str, &[&str])] = &[
             "typed_value",
             "json_compat",
             "spanned_tree",
+            "tape",
+            "tape_buf",
+            "tape_buf_recycle",
             "emit_value",
             "serialize_serde",
         ],
@@ -772,7 +985,10 @@ const BASELINE_CASES: &[(&str, &[&str])] = &[
         "ci-workflow",
         &["parse_value", "typed_value", "spanned_tree"],
     ),
-    ("container-compose", &["parse_value", "json_compat"]),
+    (
+        "container-compose",
+        &["parse_value", "json_compat", "merge_keys", "libyaml_compat"],
+    ),
     (
         "lockfile-wide",
         &["parse_value", "typed_value", "emit_value"],
@@ -784,96 +1000,292 @@ const BASELINE_CASES: &[(&str, &[&str])] = &[
         "scale-map-100kb",
         &["parse_value", "typed_borrowed", "json_compat"],
     ),
+    (
+        "depth-64",
+        &[
+            "parse_value",
+            "typed_value",
+            "tape",
+            "spanned_tree",
+            "libyaml_compat",
+        ],
+    ),
     ("aliases-1000", &["parse_value", "typed_value"]),
 ];
 
-fn run_jsonl_cli(args: &[String]) {
+fn full_suite_modes(spec: &ayaml_fixtures::FixtureSpec) -> Vec<&'static str> {
+    if !spec.expect_valid {
+        return vec!["parse_value_err"];
+    }
+    if spec.multi_document {
+        return vec![
+            "parse_value",
+            "spanned_tree",
+            "tape",
+            "tape_buf",
+            "tape_buf_recycle",
+            "parse_value_buf",
+            "emit_value",
+        ];
+    }
+    let mut modes = vec![
+        "parse_value",
+        "typed_value",
+        "spanned_tree",
+        "tape",
+        "tape_buf",
+        "tape_buf_recycle",
+        "parse_value_buf",
+        "emit_value",
+        "serialize_serde",
+        "from_reader",
+    ];
+    if spec.id != "nested-keys" {
+        modes.push("libyaml_compat");
+    }
+    match spec.id {
+        "frontmatter-tiny" => modes.extend([
+            "typed_struct",
+            "typed_borrowed",
+            "from_str_buf",
+            "json_compat",
+            "ayaml_edit",
+            "frontmatter",
+            "spanned_typed",
+            "doc_deserializer",
+        ]),
+        id if id.starts_with("boundary-") => modes.extend([
+            "typed_struct",
+            "typed_borrowed",
+            "from_str_buf",
+            "ayaml_edit",
+            "spanned_typed",
+            "doc_deserializer",
+        ]),
+        "container-compose" => modes.extend(["json_compat", "merge_keys"]),
+        "openapi-spec" | "json-in-yaml" => modes.push("json_compat"),
+        "scale-map-100kb" => modes.extend(["typed_borrowed", "json_compat"]),
+        _ => {}
+    }
+    modes
+}
+
+const KNOWN_JSONL_MODES: &[&str] = &[
+    "scan",
+    "events",
+    "parse_value",
+    "typed_value",
+    "typed_struct",
+    "typed_borrowed",
+    "json_compat",
+    "spanned_tree",
+    "tape",
+    "tape_buf",
+    "tape_buf_recycle",
+    "parse_value_buf",
+    "from_str_buf",
+    "emit_value",
+    "serialize_serde",
+    "ayaml_edit",
+    "frontmatter",
+    "merge_keys",
+    "spanned_typed",
+    "doc_deserializer",
+    "from_reader",
+    "libyaml_compat",
+    "parse_value_err",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JsonlSuite {
+    Baseline,
+    Full,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct JsonlCliConfig<'a> {
+    fixture_id: Option<&'a str>,
+    mode: Option<&'a str>,
+    suite: Option<JsonlSuite>,
+}
+
+fn next_cli_value<'a>(
+    flag: &str,
+    inline: Option<&'a str>,
+    args: &'a [String],
+    idx: &mut usize,
+) -> Result<&'a str, String> {
+    if let Some(val) = inline {
+        if val.is_empty() {
+            return Err(format!("missing value for {flag}"));
+        }
+        return Ok(val);
+    }
+    *idx += 1;
+    let Some(val) = args.get(*idx).map(String::as_str) else {
+        return Err(format!("missing value for {flag}"));
+    };
+    if val.is_empty() || val.starts_with("--") {
+        return Err(format!("missing value for {flag} (got {val:?})"));
+    }
+    Ok(val)
+}
+
+fn parse_jsonl_cli_args(args: &[String]) -> Result<JsonlCliConfig<'_>, String> {
     let mut fixture_id: Option<&str> = None;
     let mut mode: Option<&str> = None;
-    let mut suite_baseline = false;
+    let mut suite: Option<JsonlSuite> = None;
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
-            "--jsonl" => {}
-            "--suite" => {
-                i += 1;
-                if args.get(i).map(String::as_str) == Some("baseline") {
-                    suite_baseline = true;
-                } else {
-                    eprintln!("unknown --suite value");
-                    std::process::exit(2);
+        let (flag, inline) = match args[i].split_once('=') {
+            Some((k, v)) if k.starts_with('-') => (k, Some(v)),
+            _ => (args[i].as_str(), None),
+        };
+        match flag {
+            "--jsonl" => {
+                if inline.is_some() {
+                    return Err("--jsonl does not accept a value".to_owned());
                 }
             }
+            "--suite" => {
+                if suite.is_some() {
+                    return Err("duplicate --suite option".to_owned());
+                }
+                let raw = next_cli_value(flag, inline, args, &mut i)?;
+                suite = match raw {
+                    "baseline" => Some(JsonlSuite::Baseline),
+                    "full" => Some(JsonlSuite::Full),
+                    other => {
+                        return Err(format!(
+                            "unknown --suite value {other:?} (expected `baseline` or `full`)"
+                        ));
+                    }
+                };
+            }
             "--fixture" => {
-                i += 1;
-                fixture_id = args.get(i).map(String::as_str);
+                if fixture_id.is_some() {
+                    return Err("duplicate --fixture option".to_owned());
+                }
+                fixture_id = Some(next_cli_value(flag, inline, args, &mut i)?);
             }
             "--mode" => {
-                i += 1;
-                mode = args.get(i).map(String::as_str);
+                if mode.is_some() {
+                    return Err("duplicate --mode option".to_owned());
+                }
+                let raw = next_cli_value(flag, inline, args, &mut i)?;
+                if !KNOWN_JSONL_MODES.contains(&raw) {
+                    return Err(format!("unknown --mode value {raw:?}"));
+                }
+                mode = Some(raw);
             }
             other => {
-                eprintln!("unknown --jsonl option: {other}");
-                std::process::exit(2);
+                return Err(format!("unknown --jsonl option: {other}"));
             }
         }
         i += 1;
     }
+    if suite.is_some() && fixture_id.is_some() {
+        return Err("--suite and --fixture cannot be combined".to_owned());
+    }
+    Ok(JsonlCliConfig {
+        fixture_id,
+        mode,
+        suite,
+    })
+}
 
-    if suite_baseline || fixture_id.is_none() {
-        for &(id, modes) in BASELINE_CASES {
-            let fixture = ayaml_fixtures::generate(id)
-                .unwrap_or_else(|| panic!("unknown baseline fixture {id}"));
-            for &m in modes {
-                if let Some(filter) = mode
-                    && filter != m
-                {
-                    continue;
+fn run_jsonl_cases(
+    cases: &[(ayaml_fixtures::Fixture, Vec<&str>)],
+    mode_filter: Option<&str>,
+) -> usize {
+    let mut emitted = 0_usize;
+    for (fixture, modes) in cases {
+        for &m in modes {
+            if let Some(filter) = mode_filter
+                && filter != m
+            {
+                continue;
+            }
+            match measure_fixture_mode(fixture, m) {
+                Ok(line) => {
+                    println!("{line}");
+                    emitted += 1;
                 }
-                match measure_fixture_mode(&fixture, m) {
-                    Ok(line) => println!("{line}"),
-                    Err(err) => {
-                        eprintln!("{err}");
-                        std::process::exit(1);
-                    }
+                Err(err) => {
+                    eprintln!("{err}");
+                    std::process::exit(1);
                 }
             }
         }
+    }
+    emitted
+}
+
+fn run_jsonl_cli(args: &[String]) {
+    let cfg = parse_jsonl_cli_args(args).unwrap_or_else(|err| {
+        eprintln!("{err}");
+        std::process::exit(2);
+    });
+
+    if let Some(id) = cfg.fixture_id {
+        let fixture = ayaml_fixtures::generate(id).unwrap_or_else(|| {
+            eprintln!("unknown fixture id: {id}");
+            std::process::exit(2);
+        });
+        let modes: Vec<&str> = if let Some(m) = cfg.mode {
+            vec![m]
+        } else if !fixture.expect_valid {
+            vec!["parse_value_err"]
+        } else if fixture.multi_document {
+            vec!["parse_value", "spanned_tree", "emit_value"]
+        } else {
+            vec![
+                "parse_value",
+                "typed_value",
+                "spanned_tree",
+                "emit_value",
+                "serialize_serde",
+            ]
+        };
+        run_jsonl_cases(&[(fixture, modes)], None);
         return;
     }
 
-    let id = fixture_id.expect("checked Some above");
-    let fixture = ayaml_fixtures::generate(id).unwrap_or_else(|| {
-        eprintln!("unknown fixture id: {id}");
-        std::process::exit(2);
-    });
-    let modes: Vec<&str> = if let Some(m) = mode {
-        vec![m]
-    } else if fixture.multi_document {
-        vec!["parse_value", "spanned_tree", "emit_value"]
-    } else {
-        vec![
-            "parse_value",
-            "typed_value",
-            "spanned_tree",
-            "emit_value",
-            "serialize_serde",
-        ]
-    };
-    for m in modes {
-        match measure_fixture_mode(&fixture, m) {
-            Ok(line) => println!("{line}"),
-            Err(err) => {
-                eprintln!("{err}");
-                std::process::exit(1);
-            }
+    let emitted = match cfg.suite.unwrap_or(JsonlSuite::Baseline) {
+        JsonlSuite::Baseline => {
+            let cases: Vec<_> = BASELINE_CASES
+                .iter()
+                .map(|&(id, modes)| {
+                    let fixture = ayaml_fixtures::generate(id)
+                        .unwrap_or_else(|| panic!("unknown baseline fixture {id}"));
+                    (fixture, modes.to_vec())
+                })
+                .collect();
+            run_jsonl_cases(&cases, cfg.mode)
         }
+        JsonlSuite::Full => {
+            let mut total = 0_usize;
+            for spec in ayaml_fixtures::catalog_specs() {
+                let fixture = ayaml_fixtures::generate(spec.id)
+                    .unwrap_or_else(|| panic!("unknown catalog fixture {}", spec.id));
+                let modes = full_suite_modes(spec);
+                total += run_jsonl_cases(&[(fixture, modes)], cfg.mode);
+            }
+            total
+        }
+    };
+    if emitted == 0 {
+        eprintln!("no suite cases matched --mode {:?}", cfg.mode.unwrap_or(""));
+        std::process::exit(2);
     }
 }
 
 fn main() {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
-    if raw_args.iter().any(|a| a == "--jsonl") {
+    if raw_args
+        .iter()
+        .any(|a| a == "--jsonl" || a.starts_with("--jsonl="))
+    {
         run_jsonl_cli(&raw_args);
         return;
     }
@@ -1148,6 +1560,13 @@ mod tests {
             "from_str_buf",
             "emit_value",
             "serialize_serde",
+            "ayaml_edit",
+            "frontmatter",
+            "merge_keys",
+            "spanned_typed",
+            "doc_deserializer",
+            "from_reader",
+            "libyaml_compat",
         ] {
             let line = super::measure_fixture_mode(&fixture, mode).expect("measure mode");
             let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSONL");
@@ -1161,5 +1580,59 @@ mod tests {
             assert!(parsed["total_allocated_bytes"].as_u64().is_some());
             assert!(parsed["peak_to_input_ratio"].as_f64().is_some());
         }
+
+        // Error-path fixtures run `parse_value_err`.
+        let err_fx = ayaml_fixtures::generate("err-depth-limit").expect("err-depth-limit");
+        let err_line = super::measure_fixture_mode(&err_fx, "parse_value_err").expect("err mode");
+        let parsed_err: serde_json::Value = serde_json::from_str(&err_line).expect("valid JSONL");
+        assert_eq!(parsed_err["operation"], "parse_value_err");
+
+        // `--suite full` covers all 40 catalog fixtures and is a superset of BASELINE_CASES.
+        let specs = ayaml_fixtures::catalog_specs();
+        assert_eq!(specs.len(), 40);
+        for spec in specs {
+            let modes = super::full_suite_modes(spec);
+            assert!(!modes.is_empty(), "empty full-suite modes for {}", spec.id);
+        }
+        for &(id, baseline_modes) in super::BASELINE_CASES {
+            let spec = specs
+                .iter()
+                .find(|s| s.id == id)
+                .unwrap_or_else(|| panic!("baseline fixture {id} missing from catalog"));
+            let full_modes = super::full_suite_modes(spec);
+            for &m in baseline_modes {
+                assert!(
+                    full_modes.contains(&m),
+                    "full suite missing baseline mode {m} for {id}"
+                );
+            }
+        }
+
+        // Strict `--jsonl` CLI parser validation.
+        let sv = |xs: &[&str]| xs.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let full_args = sv(&["--jsonl", "--suite=full", "--mode=tape"]);
+        let parsed = super::parse_jsonl_cli_args(&full_args).expect("valid full suite args");
+        assert_eq!(parsed.suite, Some(super::JsonlSuite::Full));
+        assert_eq!(parsed.mode, Some("tape"));
+        assert!(super::parse_jsonl_cli_args(&sv(&["--jsonl=bogus"])).is_err());
+        assert!(
+            super::parse_jsonl_cli_args(&sv(&[
+                "--jsonl",
+                "--suite",
+                "full",
+                "--fixture",
+                "frontmatter-tiny"
+            ]))
+            .is_err()
+        );
+        assert!(super::parse_jsonl_cli_args(&sv(&["--jsonl", "--mode", "bogus"])).is_err());
+        assert!(super::parse_jsonl_cli_args(&sv(&["--jsonl", "--mode", "--suite"])).is_err());
+        assert!(super::parse_jsonl_cli_args(&sv(&["--jsonl", "--suite", ""])).is_err());
+        assert!(
+            super::parse_jsonl_cli_args(&sv(&[
+                "--jsonl", "--suite", "baseline", "--suite", "full"
+            ]))
+            .is_err()
+        );
     }
 }

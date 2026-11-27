@@ -72,7 +72,8 @@ cargo xtask fixtures --verify                     # verify SHA-256 catalog diges
 cargo xtask fixtures --json                       # print deterministic JSON manifest
 cargo xtask speed --out-dir target/xtask          # run Criterion and export speed.jsonl
 cargo xtask speed --quick --filter frontmatter    # fast filtered smoke run
-cargo xtask memory --suite baseline               # counting-allocator JSONL probe
+cargo xtask memory --suite baseline               # counting-allocator JSONL probe (baseline matrix)
+cargo xtask memory --suite full --out-dir target/xtask # full 40-fixture counting-allocator probe
 cargo xtask det --suite pr --base HEAD~1          # steady-state Callgrind over ayaml-bench
 cargo xtask det --suite pr --anchor main          # check cumulative drift against an anchor ref
 cargo xtask profile --tool callgrind --bench structural/parse_value/depth-64
@@ -109,11 +110,12 @@ Machine hostnames and local filesystem paths are omitted.
 
 `tools/check_instructions.py` (invoked directly or via `cargo xtask det --legacy-probe`) runs
 `tools/instruction-probe.rs` under Valgrind Callgrind with
-`--cache-sim=yes --branch-sim=yes`. Each `(operation, workload)` cell executes
+`--cache-sim=yes --branch-sim=yes` and pinned simulated cache geometry
+(`--I1=32768,8,64 --LL=8388608,16,64`). Each `(operation, workload)` cell executes
 a warmup iteration (`K1 = 1`) followed by `N` steady-state iterations (`4` for
 parse operations, `12` for emit, and `64` for `walk` to amortize setup
-variance), and computes per-iteration counters as
-`(counts(K1 + N) - counts(K1)) / N`.
+variance), and computes per-iteration counters from `(counts(K1 + N) - counts(K1))`
+divided by `N` with half-up rounding.
 
 The gate checks both:
 
@@ -122,8 +124,13 @@ The gate checks both:
   fails above `+5.0%`.
 
 Level-1 and last-level cache misses and branch mispredictions are also recorded in
-`callgrind.jsonl` for diagnostics. If a rise is deliberate, add a tab-separated
-entry to `tools/instruction-rises.tsv` in the same pull request explaining why.
+`callgrind.jsonl` for diagnostics. If a rise is deliberate, add a 5-column tab-separated
+entry (`OPERATION`, `WORKLOAD`, `IR_PERCENT`, `CYCLES_PERCENT`, `REASON`) to
+`tools/instruction-rises.tsv` in the same pull request explaining why, using `-` for any
+metric that should remain at its default limit so an `EstimatedCycles` exception never
+relaxes `Ir`. When `tools/instruction-baseline.jsonl` is present, `tools/check_instructions.py`
+also checks every matching cell against the pinned release baseline (`+10.0%` `Ir` and `+15.0%`
+`EstimatedCycles`) to catch multi-PR cumulative creep (refreshable via `--record-baseline`).
 CI runs the allocation budgets and steady-state Callgrind comparison on every
 pull request; it does not gate wall-clock Criterion timings because shared
 hosted runners exhibit run-to-run timing noise.
@@ -161,13 +168,18 @@ counting allocator in `fuzz/src/bin/memcount.rs`:
    `tools/alloc-baseline.jsonl`):** gates peak bytes, live bytes, total
    allocated bytes (up to `+10%` or `512 B` floor), and allocation counts (up
    to `+5%` or `4` allocs floor) across the shared `ayaml-fixtures` domains,
-   4 KiB boundary, scaling points, and stress shapes.
+   4 KiB boundary, scaling points, stress shapes (`depth-64`, `aliases-1000`),
+   and post-0.2.3 APIs (`ayaml-edit`, `frontmatter`, `merge_keys`, `Spanned<T>`,
+   `DocumentDeserializer`, `from_reader`, `Tape`/`ParserBuf`, and
+   `libyaml-compat`). When actual peak bytes or allocations drop more than `15%`
+   below the committed baseline, `check_alloc_baseline.py` prints a ratchet
+   warning suggesting `--record`.
 2. **Legacy corpus budgets (`tools/check_alloc_corpus.sh`):**
    - `tools/alloc-corpus.tsv` budgets parsing, emission, and serialization of
-     the `Value` path (about 1.25x measured values; short-node workloads stay
-     at most 130x input bytes in total).
-   - `tools/typed-alloc-corpus.tsv` budgets typed decoding of a 20 KB
-     configuration fixture (peaking around 175 KB and retaining around 98 KB).
+     the `Value` path (about 1.15x measured parse peak and 1.20x other metrics).
+   - `tools/typed-alloc-corpus.tsv` budgets typed decoding across real-world
+     configs and stress shapes (about 1.10x measured parse peak and 1.20x other
+     metrics).
    - `tools/json-alloc-corpus.tsv` budgets an untyped decode into a JSON tree
      through the compatibility reader on the document shapes of issue #178
      (counting reallocation growth by delta bytes, budgeted at about 1.10x).
