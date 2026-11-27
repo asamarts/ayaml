@@ -34,6 +34,7 @@ use crate::emitter::{
 use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::{Anchor, CollectionStyle, Event, ScalarStyle};
 use crate::limits::Limits;
+use crate::mapping::GlobalHasher;
 use crate::options::EmitOptions;
 use crate::scanner::Scanner;
 use crate::tag::Tag;
@@ -247,8 +248,8 @@ where
         handles: RedefinedHandles::default(),
         directives: TagDirectives::default(),
         declared: Vec::new(),
-        anchors: HashSet::new(),
-        handles_seen: HashSet::new(),
+        anchors: HashSet::with_hasher(GlobalHasher),
+        handles_seen: HashSet::with_hasher(GlobalHasher),
         version_seen: false,
         marker: PhantomData,
     };
@@ -375,10 +376,10 @@ struct EventWriter<'o, 'w, 'l, 'e, W: Write, I, B> {
     declared: Vec<String>,
     /// The anchors that the document being written has defined so far. An alias refers to one
     /// of them, and to none of another document.
-    anchors: HashSet<String>,
+    anchors: HashSet<String, GlobalHasher>,
     /// Every handle that the next document's `%TAG` directives have declared, `!` and `!!`
     /// included: a document gives a handle one prefix.
-    handles_seen: HashSet<String>,
+    handles_seen: HashSet<String, GlobalHasher>,
     /// Whether the next document has its `%YAML` directive already.
     version_seen: bool,
     marker: PhantomData<Event<'e>>,

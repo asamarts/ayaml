@@ -21,13 +21,11 @@
 //! reads, the stream is read to its end, and the tokens are freed, so the target's value is
 //! built beside the tree alone, as the tree reader builds it.
 
-use std::collections::HashSet;
-
 use serde::Deserializer;
 use serde::de::{Deserialize, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
 use super::{
-    Builder, Node, NodeDeserializer, NodeOptions, SeenKey, SeenNodeKeys, check_consumed,
+    Builder, Node, NodeDeserializer, NodeOptions, SeenNodeKeys, SeenScalarKeys, check_consumed,
     collection_drops, inside_key, node_key_text, parse_document, plain_scalar, scalar_key_text,
     with_span,
 };
@@ -52,8 +50,8 @@ pub(super) fn read<'de, T: DeserializeSeed<'de>>(
             .with_span(Span::empty(0))
             .with_location(Location::new(1, 1))
     })?;
-    // The scanner reads the whole input before the first event, here and for the tree, so its
-    // error is the same one and needs no second read.
+    // Both `DocumentEvents` and `parse_document` stream lazily through the same bounded
+    // `LineWindow`, so scanner and parser errors occur in identical document order.
     let events = DocumentEvents::new(input, limits, options.compat_flow).map_err(located)?;
     let mut stream = Stream::new(events, input.len(), limits, options);
     let result = stream.document(|document| seed.deserialize(document));
@@ -64,8 +62,8 @@ pub(super) fn read<'de, T: DeserializeSeed<'de>>(
         (_, Some(fault)) => fault,
         (Err(error), None) => {
             // The target failed while reading; `read_with_target` already settled and checked the
-            // rest of the root node. Validate the document/stream end on the already-scanned
-            // tokens so valid YAML with a Serde mismatch skips a full second parse.
+            // rest of the root node. Validate the document/stream end incrementally so valid YAML
+            // with a Serde mismatch skips a full second parse.
             if stream.validate_end().is_ok() && stream.fault.is_none() {
                 return Err(located(error));
             }
@@ -144,6 +142,10 @@ impl Ahead {
 }
 
 /// A collection that is read entry by entry.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Open lives only on the per-depth parser stack and keeps small mapping seen-key sets inline without heap allocation"
+)]
 enum Open<'de> {
     Sequence {
         /// The items that a visitor has asked for.
@@ -153,7 +155,7 @@ enum Open<'de> {
     },
     Mapping {
         /// The scalar keys of the entries read so far, where a duplicate is refused.
-        seen: HashSet<SeenKey<'de>>,
+        seen: SeenScalarKeys<'de>,
         /// Non-scalar keys of the entries read so far, moved in by cached node hash without cloning.
         seen_nodes: Option<Box<SeenNodeKeys<'de>>>,
         /// The key whose value is still to be read.
@@ -224,8 +226,8 @@ impl<'de> Stream<'de> {
         Ok(value)
     }
 
-    /// Finish checking the document and trailing stream after a target-side error, using the
-    /// already-scanned tokens so valid YAML skips a second parse.
+    /// Finish checking the document and trailing stream after a target-side error without
+    /// rebuilding the full tree, so valid YAML skips a second parse.
     fn validate_end(&mut self) -> Result<(), Error> {
         if self.ended {
             return Ok(());
@@ -440,7 +442,7 @@ impl<'de> Stream<'de> {
             Open::Sequence { read: 0, known }
         } else {
             Open::Mapping {
-                seen: HashSet::new(),
+                seen: SeenScalarKeys::new(),
                 seen_nodes: None,
                 key: None,
                 read: 0,
@@ -1029,12 +1031,25 @@ mod tests {
         for i in 0..300 {
             let _ = writeln!(anchored_many, "- &a{i} {{x: {i}, y: w}}");
         }
+        // Multi-line anchored documents stream through the bounded line window without buffering
+        // all 3,000 tokens at once, keeping peak token storage to a small constant window.
+        let limits = Limits::default();
+        let events = DocumentEvents::new(&anchored_many, &limits, false).expect("a scanned input");
+        let mut stream = Stream::new(events, anchored_many.len(), &limits, NodeOptions::default());
+        stream
+            .document(|document| IgnoredAny::deserialize(document))
+            .expect("anchored_many");
+        assert!(
+            stream.events.peak_tokens() <= 512 && stream.events.peak_tokens_cap() <= 512,
+            "anchored_many peak tokens={}, cap={}",
+            stream.events.peak_tokens(),
+            stream.events.peak_tokens_cap(),
+        );
         let big_seq = format!("[1{}]", ",1".repeat(600));
         let big_anchored = format!("k: &a {big_seq}\n");
         let big_tagged = format!("k: !t {big_seq}\n");
         let big_key = format!("? {big_seq}\n: 1\n");
         for (label, input) in [
-            ("anchored_many", anchored_many.as_str()),
             ("big_anchored", big_anchored.as_str()),
             ("big_tagged", big_tagged.as_str()),
             ("big_key", big_key.as_str()),

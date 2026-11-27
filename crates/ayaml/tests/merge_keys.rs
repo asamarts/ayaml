@@ -530,6 +530,69 @@ out:
     }
 }
 
+/// Multi-document `Deserializer` / `parse_documents_with` share `AliasBudget` across documents,
+/// merge alias errors report `ErrorKind::Composition` + exact codes, and `Value::apply_merge_keys_with_limits`
+/// enforces `LimitKind::Depth` on deep complex keys without leaving the mapping mutated.
+#[test]
+fn merge_keys_shared_multi_doc_budget_composition_kind_and_complex_key_depth() {
+    use ayaml::LimitExceeded;
+
+    let two_docs = "---\na: &a {x: 1}\nb: {<<: *a}\n---\nc: &c {y: 2}\nd: {<<: *c}\n";
+    let deref_opts = ParseOptions::new()
+        .with_limits(Limits::default().with_max_alias_dereferences(1))
+        .with_merge_keys(true);
+
+    let mut de = Deserializer::from_str_with(two_docs, &deref_opts).expect("de");
+    let doc1: Value = de.next().expect("doc 1 ok").expect("doc 1 present");
+    assert_eq!(doc1["b"]["x"].as_u64(), Some(1));
+    let doc2_err = de
+        .next::<Value>()
+        .expect_err("doc 2 must fail against shared alias budget");
+    assert_eq!(doc2_err.kind(), ErrorKind::Limit);
+    assert_eq!(
+        doc2_err.limit().map(LimitExceeded::kind),
+        Some(LimitKind::AliasDereferences)
+    );
+    let docs_err = ayaml::parse_documents_with(two_docs, &deref_opts)
+        .expect_err("parse_documents_with must enforce stream-wide alias budget");
+    assert_eq!(
+        docs_err.limit().map(LimitExceeded::kind),
+        Some(LimitKind::AliasDereferences)
+    );
+
+    // Merge alias errors report `ErrorKind::Composition` (never dead `ErrorKind::Alias`).
+    for (input, code) in [
+        ("out:\n  <<: *missing\n", ErrorCode::UnknownAnchor),
+        ("out:\n  <<: [*missing]\n", ErrorCode::UnknownAnchor),
+        ("a: &a\n  <<: *a\n", ErrorCode::CyclicAlias),
+    ] {
+        let err = ayaml::parse_value_with(input, &MERGE).expect_err(input);
+        assert_eq!(err.kind(), ErrorKind::Composition, "{input}: {err}");
+        assert_eq!(err.code(), code, "{input}: {err}");
+    }
+
+    // `Value::apply_merge_keys_with_limits` enforces `max_depth` on deep complex keys cleanly.
+    let mut deep_key = Value::from("leaf");
+    for _ in 0..6 {
+        let mut inner = ayaml::Mapping::new();
+        inner.insert(Value::from("k"), deep_key);
+        deep_key = Value::Mapping(inner);
+    }
+    let mut outer = ayaml::Mapping::new();
+    outer.insert(deep_key, Value::from(1_u64));
+    let mut root = Value::Mapping(outer);
+    let original = root.clone();
+    let err = root
+        .apply_merge_keys_with_limits(&Limits::default().with_max_depth(4))
+        .expect_err("deep complex key must exceed max_depth");
+    assert_eq!(err.kind(), ErrorKind::Limit);
+    assert_eq!(err.limit().map(LimitExceeded::kind), Some(LimitKind::Depth));
+    assert_eq!(
+        root, original,
+        "failed depth check must not leave partial mutation"
+    );
+}
+
 fn proptest_config() -> ProptestConfig {
     let default_cases = if cfg!(miri) { 2 } else { 128 };
     let cases = std::env::var("PROPTEST_CASES")

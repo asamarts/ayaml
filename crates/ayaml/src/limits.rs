@@ -525,6 +525,23 @@ impl Limits {
     }
 }
 
+/// A zero-sized cryptographic SipHash-1-3 hasher that reuses one process-wide random seed,
+/// preserving PRF-grade `HashDoS` resistance without repeated `RandomState::new()` calls.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct GlobalHasher;
+
+impl std::hash::BuildHasher for GlobalHasher {
+    type Hasher = std::collections::hash_map::DefaultHasher;
+
+    #[inline]
+    fn build_hasher(&self) -> Self::Hasher {
+        static STATE: std::sync::OnceLock<std::hash::RandomState> = std::sync::OnceLock::new();
+        STATE
+            .get_or_init(std::hash::RandomState::new)
+            .build_hasher()
+    }
+}
+
 /// The alias use charged so far: dereferences and the estimated bytes they
 /// materialize. One budget covers a whole stream, so a multi-document
 /// stream cannot multiply it.

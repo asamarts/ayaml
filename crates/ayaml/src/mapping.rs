@@ -7,7 +7,6 @@
 //! implementations named `indexmap`'s own iterator types, which made that crate's major version part
 //! of this one's.
 
-use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::hash::{BuildHasher, Hash, Hasher, RandomState};
 use std::iter::FusedIterator;
@@ -17,24 +16,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use indexmap::{Equivalent, IndexMap};
 
+pub(crate) use crate::limits::GlobalHasher;
 use crate::value::{NULL_VALUE, Value};
 
 /// Maximum number of entries stored in the compact linear small-map representation before
 /// promoting to a hash-indexed `IndexMap`.
 pub(crate) const SMALL_LIMIT: usize = 8;
-
-/// A zero-sized hasher that uses one process-wide random seed, leaving room for the hash cache.
-#[derive(Clone, Default)]
-struct GlobalHasher;
-
-impl BuildHasher for GlobalHasher {
-    type Hasher = DefaultHasher;
-
-    fn build_hasher(&self) -> Self::Hasher {
-        static STATE: OnceLock<RandomState> = OnceLock::new();
-        STATE.get_or_init(RandomState::new).build_hasher()
-    }
-}
 
 /// A borrowed string key that hashes and compares as `Value::String` does.
 struct StringKey<'a>(&'a str);

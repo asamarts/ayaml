@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::{Anchor, Event, ScalarStyle};
 use crate::limits::{AliasBudget, Limits};
-use crate::mapping::{Mapping, SMALL_LIMIT};
+use crate::mapping::{GlobalHasher, Mapping, SMALL_LIMIT};
 use crate::resolver::{resolve_plain, resolve_scalar_cow};
 use crate::span::Span;
 use crate::tag::{Tag, TaggedValue};
@@ -89,7 +89,7 @@ fn estimate_size(value: &Value, node_cost: usize) -> usize {
 /// for it yet, so an alias there is rejected, even when an earlier node has the anchor.
 #[derive(Debug)]
 pub(crate) struct Anchors<T> {
-    nodes: HashMap<String, AnchorNode<T>>,
+    nodes: HashMap<String, AnchorNode<T>, GlobalHasher>,
 }
 
 #[derive(Debug)]
@@ -102,7 +102,7 @@ enum AnchorNode<T> {
 impl<T> Anchors<T> {
     pub(crate) fn new() -> Self {
         Self {
-            nodes: HashMap::new(),
+            nodes: HashMap::with_hasher(GlobalHasher),
         }
     }
 

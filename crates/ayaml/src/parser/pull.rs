@@ -2,13 +2,14 @@
 //!
 //! The grammar already runs on an explicit stack (see `Parser::run`), so it can stop between
 //! two steps and go on later. A reader that builds its value from the events takes each one as
-//! it needs it, and no vector of events, and no tree made from them, stands between the tokens
-//! and the value. A step that emits a run of events, of scalar entries or of directives, stops
-//! within the run, so the events that wait stay a few however long the run is.
+//! it needs it, and no vector of events, no full-document token buffer, and no tree made from
+//! them stands between the scanner and the value. A step that emits a run of events, of scalar
+//! entries or of directives, stops within the run, so the events that wait stay a few however
+//! long the run is.
 
 use std::collections::VecDeque;
 
-use super::{Cont, EventSink, Lines, Opening, Parser, Step, matched_flow_end, read_lines};
+use super::{Cont, EventSink, Opening, Parser, Step};
 use crate::error::{Error, ErrorKind};
 use crate::event::Event;
 use crate::limits::Limits;
@@ -26,8 +27,6 @@ pub(crate) struct DocumentEvents<'a> {
     step: Option<Step<'a>>,
     /// The grammar's continuations while a root is being read.
     stack: Vec<Cont>,
-    stream_start: Span,
-    stream_end: Span,
 }
 
 /// Where the grammar stands between two events.
@@ -47,45 +46,27 @@ enum State {
 }
 
 impl<'a> DocumentEvents<'a> {
-    /// Scan the input. An error here is the scanner's, before any event.
+    /// Prepare a streaming parser over `input` without materializing the full document's tokens.
     pub(crate) fn new(input: &'a str, limits: &Limits, compat_flow: bool) -> Result<Self, Error> {
-        let mut scanner =
-            Scanner::with_compat(input, limits, compat_flow).map_err(|error| *error)?;
-        let Lines {
-            lines,
-            tokens,
-            stream_start,
-            stream_end,
-            scanner_error,
-            truncated_last_line,
-            ..
-        } = read_lines(&mut scanner, limits).map_err(|error| *error)?;
-        let end = stream_end.map_or(input.len(), Span::start);
+        let scanner = Scanner::with_compat(input, limits, compat_flow).map_err(|error| *error)?;
         Ok(Self {
-            parser: Parser {
-                lines,
-                token_arena: tokens,
-                sink: EventSink::Queue {
+            parser: Parser::new(
+                scanner,
+                EventSink::Queue {
                     events: VecDeque::with_capacity(2 * EventSink::QUEUE_ROOM),
                     root_entries: None,
+                    room: EventSink::QUEUE_ROOM,
+                    want_root_entries: true,
                 },
-                limits: limits.clone(),
+                limits,
                 input,
-                compat: compat_flow,
-                documents: 0,
-                emitted: 0,
-                single_document: true,
-                stop_at_second: true,
-                end,
-                scanner_error,
-                truncated_last_line,
-                column_cache: (u32::MAX, 0, 0),
-            },
+                compat_flow,
+                true,
+                true,
+            ),
             state: State::Start,
             step: None,
             stack: Vec::new(),
-            stream_start: stream_start.unwrap_or_else(|| Span::empty(0)),
-            stream_end: stream_end.unwrap_or_else(|| Span::empty(input.len())),
         })
     }
 
@@ -196,103 +177,49 @@ impl<'a> DocumentEvents<'a> {
         }
     }
 
-    /// Free the token arena and parser tables as soon as the parser has finished emitting all
-    /// events for a large input, even while the last few events still wait in the lookahead queue.
+    /// Free the token window and parser tables as soon as the parser has finished emitting all
+    /// events for a large single-line flow input, even while the last few events still wait in
+    /// the lookahead queue.
     pub(crate) fn release_tokens(&mut self) {
-        if matches!(self.state, State::Finished) && self.parser.token_arena.len() >= 1_024 {
+        if matches!(self.state, State::Finished) && self.parser.window.tokens_len() >= 1_024 {
             self.clear_parser_storage();
         }
     }
 
     fn clear_parser_storage(&mut self) {
-        self.parser.lines = Vec::new();
-        self.parser.token_arena = Vec::new();
+        self.parser.window.release();
         self.stack = Vec::new();
     }
 
-    /// Whether building the whole document as a tree (and freeing the token arena before the
-    /// target reads) avoids holding tokens, whole-node trees, and the target's value at once.
-    ///
-    /// Inspects the already-scanned token arena in a single pass with no second scan:
-    /// - Documents dense in anchors (e.g. serializers preserving object identity) keep every
-    ///   anchored node alive in `anchors` beside the tokens and target value.
-    /// - Documents containing a large non-root node that must be built whole (an anchored node,
-    ///   a node with a kept tag, or a large collection key) would otherwise keep that tree alive
-    ///   beside the tokens and target value.
+    /// Whether building the whole document as a tree (and freeing a large single-line flow token
+    /// buffer before the target reads) avoids holding tokens, whole-node trees, and the target's
+    /// value at once.
     pub(crate) fn should_build_whole(&self, drop_global_tags: bool) -> bool {
-        use crate::scanner::TokenKind;
-
-        let tokens = &self.parser.token_arena;
-        if tokens.len() < 1_024 {
-            return false;
-        }
-        let large_span = tokens.len() / 4;
-        let mut anchors = 0_usize;
-        for (index, token) in tokens.iter().enumerate() {
-            match &token.kind {
-                TokenKind::Anchor => {
-                    anchors += 1;
-                    if self.next_node_is_large(index + 1, large_span) {
-                        return true;
-                    }
-                }
-                TokenKind::Tag(tag)
-                    if !(tag.is_core_collection()
-                        || tag.is_core_scalar()
-                        || (drop_global_tags && tag.is_non_core_global())) =>
-                {
-                    if self.next_node_is_large(index + 1, large_span) {
-                        return true;
-                    }
-                }
-                TokenKind::Key => {
-                    if self.next_node_is_large(index + 1, large_span) {
-                        return true;
-                    }
-                }
-                TokenKind::FlowSequenceStart { end } | TokenKind::FlowMappingStart { end } => {
-                    // An implicit complex flow key (`[...]: v` or `{...}: v`) is built whole.
-                    if let Some(close) = matched_flow_end(*end)
-                        && close.saturating_sub(index) >= large_span
-                        && matches!(
-                            tokens.get(close + 1).map(|t| &t.kind),
-                            Some(TokenKind::Value)
-                        )
-                    {
-                        return true;
-                    }
-                }
-                _ => {}
-            }
-        }
-        anchors >= 16 && anchors.saturating_mul(32) >= tokens.len()
+        self.parser.window.should_build_whole(drop_global_tags)
     }
 
-    /// Whether the node starting at or right after `start` (skipping a second property like a tag
-    /// or anchor) is a flow collection covering at least `large_span` tokens.
-    fn next_node_is_large(&self, mut index: usize, large_span: usize) -> bool {
-        use crate::scanner::TokenKind;
-
-        let tokens = &self.parser.token_arena;
-        while matches!(
-            tokens.get(index).map(|t| &t.kind),
-            Some(TokenKind::Anchor | TokenKind::Tag(_))
-        ) {
-            index += 1;
-        }
-        if let Some(TokenKind::FlowSequenceStart { end } | TokenKind::FlowMappingStart { end }) =
-            tokens.get(index).map(|t| &t.kind)
-        {
-            return matched_flow_end(*end)
-                .is_some_and(|close| close.saturating_sub(index) >= large_span);
-        }
-        false
-    }
-
-    /// How many tokens are held.
+    /// How many tokens are currently held in the window.
     #[cfg(test)]
     pub(crate) fn tokens(&self) -> usize {
-        self.parser.token_arena.len()
+        self.parser.window.tokens_len()
+    }
+
+    /// Current allocated capacity of the window's token buffer.
+    #[cfg(test)]
+    pub(crate) fn tokens_cap(&self) -> usize {
+        self.parser.window.tokens_cap()
+    }
+
+    /// Peak tokens ever held simultaneously in the window.
+    #[cfg(test)]
+    pub(crate) fn peak_tokens(&self) -> usize {
+        self.parser.window.peak_tokens_len()
+    }
+
+    /// Peak token buffer capacity ever allocated by the window.
+    #[cfg(test)]
+    pub(crate) fn peak_tokens_cap(&self) -> usize {
+        self.parser.window.peak_tokens_cap()
     }
 
     /// Run the grammar until enough events wait or the stream is over.
@@ -310,19 +237,17 @@ impl<'a> DocumentEvents<'a> {
             let state = std::mem::replace(&mut self.state, State::Finished);
             self.state = match state {
                 State::Start => {
-                    self.parser.emit(Event::StreamStart {
-                        span: self.stream_start,
-                    })?;
+                    let span = self.parser.window.ensure_started(&self.parser.limits)?;
+                    self.parser.emit(Event::StreamStart { span })?;
                     State::Between(0)
                 }
-                State::Between(index) if index < self.parser.lines.len() => {
-                    self.open(index, false)?
-                }
-                State::Between(_) => {
-                    if let Some(error) = self.parser.scanner_error.take() {
-                        return Err(error);
+                State::Between(index) => {
+                    if self.parser.ensure_line(index)? {
+                        self.open(index, false)?
+                    } else {
+                        self.parser.window.take_scanner_error()?;
+                        self.end()?
                     }
-                    self.end()?
                 }
                 // Past the last line too: directives with no document after them are an error.
                 State::Directives(index) => self.open(index, true)?,
@@ -379,9 +304,12 @@ impl<'a> DocumentEvents<'a> {
     }
 
     fn end(&mut self) -> Result<State, Box<Error>> {
-        self.parser.emit(Event::StreamEnd {
-            span: self.stream_end,
-        })?;
+        let span = self
+            .parser
+            .window
+            .stream_end()
+            .unwrap_or_else(|| Span::empty(self.parser.input.len()));
+        self.parser.emit(Event::StreamEnd { span })?;
         Ok(State::Finished)
     }
 }

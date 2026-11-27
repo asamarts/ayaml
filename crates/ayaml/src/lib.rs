@@ -758,13 +758,11 @@ enum EventStreamInner<'a> {
 
 /// A pull traversal over spanned parser events.
 ///
-/// Events are produced lazily in document-sized chunks. Pulling stops further
-/// scanning when the consumer drops the stream, and syntax errors are returned
-/// as iterator items rather than being discovered only after the whole input is
-/// parsed. An alias is reported as written and is not checked against earlier
-/// anchors; composing values does that check. The current implementation
-/// buffers one document at a time; finer per-event streaming and bounded line
-/// buffering remain hardening work.
+/// Events are produced lazily through a bounded line/token window and event queue.
+/// Pulling stops further scanning when the consumer drops the stream, and syntax
+/// errors are returned as iterator items rather than being discovered only after
+/// the whole input is parsed. An alias is reported as written and is not checked
+/// against earlier anchors; composing values does that check.
 #[derive(Debug)]
 pub struct EventStream<'a> {
     inner: EventStreamInner<'a>,
@@ -1578,3 +1576,58 @@ pub fn parse_frontmatter_value_with<'a>(
 
 /// The crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[cfg(all(test, feature = "libyaml-compat"))]
+mod compat_tests {
+    use crate::{Error, ErrorCode, ErrorKind, LimitExceeded, LimitKind, Location, Span};
+
+    #[test]
+    fn compat_map_error_preserves_limit_metadata_on_remapped_limits() {
+        let span = Span::new(4, 5);
+        let loc = Location::new(2, 3);
+
+        let depth = Error::from(LimitExceeded::new(LimitKind::Depth, 128, 129))
+            .with_span(span)
+            .with_location(loc);
+        let mapped_depth = crate::compat::map_error(depth);
+        assert_eq!(mapped_depth.kind(), ErrorKind::Serde);
+        assert_eq!(mapped_depth.code(), ErrorCode::DepthLimit);
+        assert_eq!(mapped_depth.span(), Some(span));
+        assert_eq!(mapped_depth.location(), Some(loc));
+        assert_eq!(
+            mapped_depth.limit().map(LimitExceeded::kind),
+            Some(LimitKind::Depth)
+        );
+        assert_eq!(mapped_depth.limit().map(LimitExceeded::observed), Some(129));
+
+        let docs = Error::from(LimitExceeded::new(LimitKind::Documents, 1, 2))
+            .with_span(span)
+            .with_location(loc);
+        let mapped_docs = crate::compat::map_error(docs);
+        assert_eq!(mapped_docs.kind(), ErrorKind::Parser);
+        assert_eq!(mapped_docs.code(), ErrorCode::DocumentCountLimit);
+        assert_eq!(
+            mapped_docs.limit().map(LimitExceeded::kind),
+            Some(LimitKind::Documents)
+        );
+        assert_eq!(mapped_docs.limit().map(LimitExceeded::observed), Some(2));
+
+        let trailing = Error::coded(
+            ErrorKind::Parser,
+            ErrorCode::TrailingDocuments,
+            "trailing docs",
+        )
+        .with_span(span)
+        .with_location(loc);
+        let mapped_trailing = crate::compat::map_error(trailing);
+        assert_eq!(mapped_trailing.kind(), ErrorKind::Parser);
+        assert_eq!(mapped_trailing.code(), ErrorCode::TrailingDocuments);
+        assert!(mapped_trailing.limit().is_none());
+
+        let other = Error::coded(ErrorKind::Scanner, ErrorCode::UnexpectedToken, "bad token")
+            .with_span(span)
+            .with_location(loc);
+        let mapped_other = crate::compat::map_error(other.clone());
+        assert_eq!(mapped_other, other);
+    }
+}

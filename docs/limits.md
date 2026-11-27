@@ -84,19 +84,19 @@ one place is refused there by every reader, in one mode. With more than one prob
 limit broken in more than one place, two limits, or a limit and a syntax error, the readers can
 report different ones, because they don't check in the same order:
 
-- `parse_events` and the `Deserializer` read a stream a document at a time, and count its start
-  before they scan anything. They can stop at an earlier document than the readers that scan the
-  whole stream before they parse it.
+- `parse_events` and the `Deserializer` read a stream lazily, counting the stream's start
+  before scanning document content. They can stop at an earlier document than readers that
+  consume the whole stream before returning.
 - `parse_value`, `parse_documents`, and the readers of one document into a type, such as
-  `from_str`, report the first problem in a document, whatever the input's size: any that the
-  scanner finds, which reads the whole input first, and then the first that parsing or building
-  meets. The `Deserializer` reads a document's events before it builds from them, so within a
-  document it reports a syntax error before an earlier problem in what the events build, such
-  as a duplicate key.
+  `from_str`, scan logical lines incrementally and report the first problem in document order,
+  whatever the input's size (whether found by the scanner, parser, or builder). The
+  `Deserializer` reads a document's events before it builds from them, so within a document it
+  reports a syntax error before an earlier problem in what the events build, such as a
+  duplicate key.
 - A reader of one document into a type reads an input of more than 4 KiB from its events, and
   reports what is wrong with the document before anything about the target, wherever each
-  stands. To do that it reads a refused input a second time, building the document as the
-  other readers do, unless the scanner refused it, which reads the whole input before either.
+  stands. To do that it validates the remainder of the document on target-side errors and, when
+  needed, reads a refused input a second time, building the document as the other readers do.
   By then its target has read what stands before the fault, as it would read that part of a
   document that is accepted, aliases included. So a refusal can cost such a reader two reads:
   one that an accepted document of the same content up to the fault would cost, and one that
@@ -111,9 +111,9 @@ report different ones, because they don't check in the same order:
 - The events of the stream, as `parse_events` yields them: its start and end, each document's
   start and end, each directive, collection start and end, scalar, and alias. Every reader counts
   them alike, each event once, including the readers that build values without keeping events.
-- The tokens a read keeps: each scalar, anchor, alias, tag, document marker, and directive, and
-  each indicator, `-`, `?`, `:`, `,`, and the brackets and braces of flow collections. The eager
-  readers keep the tokens of the whole stream, so this count is what bounds their memory.
+- The tokens a read scans: each scalar, anchor, alias, tag, document marker, and directive, and
+  each indicator, `-`, `?`, `:`, `,`, and the brackets and braces of flow collections. Counting
+  every token bounds total scanning work as well as peak memory on single-line flow inputs.
 
 A line break, a blank line, and a comment count as neither, so lines without content don't use up
 the limit. `a: 1` is 8 events, from the stream's start to its end, and 3 tokens. Tokens can
@@ -173,33 +173,26 @@ lines count. A value is never longer than its text, except where a double-quoted
 
 ## Memory
 
-A read holds the input, an index of its line starts, and its tokens, besides what it
-builds. `parse_events` and the `Deserializer` read one document at a time and hold
-that document's tokens. Every other reader holds the tokens of the whole stream.
+A read holds the input, a small bounded window of active logical lines and tokens, and what it
+builds. Error line/column coordinates are computed lazily from the input slice when an error is
+constructed, so successful parses allocate no line-start index.
 
-- The index takes 8 bytes for each CR or LF in the input, so input of blank lines, a
-  byte each, costs 8 times its size there. That is 8 bytes a line, or under 16 where
-  lines end in CRLF. An error at the end of the input is placed without a second index.
-- A token takes 32 bytes on a 64-bit target, and every token a read keeps counts against
-  `max_events`. A directive, and a scalar that is quoted, a block scalar, or on several lines
-  each hold a second allocation of 32 to 48 bytes, and their text where decoding changes it. A
-  tag holds one too, and its name in full, as a prefix and a suffix. So at the default limit a
-  read holds about 32 MB of tokens when they are plain scalars and indicators, about 65 MB when
-  every one is a quoted scalar, and about 80 MB when every one is a short tag such as `!a`. A
-  tag that a handle expands holds the expanded name: every one a `!!a` comes to about 100 MB,
-  and names that a `%TAG` prefix makes long to about 150 MB, where `max_tag_expansion_bytes`
-  stops them.
-- The readers that scan the whole stream keep its tokens in one arena, which reserves room for
-  no more tokens than `max_events` allows, whatever the input promises. Each reservation is made
-  fallibly (`try_reserve_exact`), so a reservation that overflows capacity on any target ends in
-  a `LimitKind::Events` error rather than a panic. Whenever the arena fills past 1,024 tokens, it
-  estimates the remaining tokens from the higher of the whole prefix's density and the density
-  since the previous estimate (starting from the first content token): one reservation is at most
-  eight times the tokens already scanned, and at least a sixteenth of the arena or one chunk. So
-  a dense tail after a megabyte comment or block-scalar head converges in a few reservations, the
-  copying stays linear in the tokens, and an arena of more than 8,192 tokens ends within eight
-  times the tokens it holds; a smaller one is trimmed to them. `parse_events` and the
-  `Deserializer` keep one document's tokens, in vectors that double.
+- A token takes 32 bytes on a 64-bit target, and every token a read scans counts against
+  `max_events`. A directive, an escaped or multiline quoted scalar, or a block scalar holds a
+  second allocation for its decoded text; single-line unescaped quoted scalars and plain scalars
+  slice the input directly. A tag holds its name as a prefix and suffix.
+- All readers (`parse_value`, `parse_documents`, `parse_events`, `from_str*`, `SpannedTree`, and
+  `Deserializer`) scan logical lines incrementally in small bounded batches (up to 128 lines or
+  384 tokens, roughly 12 to 16 KiB on block documents) and reuse or free retired token storage
+  between batches. `parse_events` and `Deserializer` buffer at most one bounded event queue
+  (~250 events) rather than a whole document's events.
+- When a single logical line (such as a large flow collection) exceeds the batch window, the token
+  buffer reserves room for no more tokens than `max_events` allows, whatever the input promises.
+  Each reservation is made fallibly (`try_reserve_exact`), so an overflowing reservation ends in a
+  `LimitKind::Events` error rather than a panic. Past 1,024 tokens on one line, growth estimates
+  remaining tokens from the higher of the whole prefix's density and recent density (starting from
+  the first content token), capped at eight times the tokens already scanned; once that oversized
+  line retires, the buffer is released immediately.
 - A reader of one document into a type, such as `from_str`, holds no tree of an input of more
   than 4 KiB beside those: it builds the target's value from the events, and keeps a tree only
   of what an alias may read again, of a collection that keeps its tag, of what an enum reads,

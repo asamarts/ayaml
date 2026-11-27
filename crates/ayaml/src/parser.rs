@@ -8,6 +8,8 @@
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
+#[cfg(test)]
+use std::panic::AssertUnwindSafe;
 
 use crate::composer::StreamingComposer;
 use crate::error::{Error, ErrorCode, ErrorKind};
@@ -31,10 +33,21 @@ mod pull;
 mod state;
 #[cfg(test)]
 mod tests;
+mod window;
 
 use state::{
     BlockState, Call, Cont, DUPLICATE_PROPERTIES, FlowLack, FlowState, NO_VALUE_INDEX, NodeBounds,
     Opening, Properties, Run, Step,
+};
+use window::LineWindow;
+#[cfg(kani)]
+use window::compact_shift;
+#[cfg(test)]
+use window::{Line, TOKEN_ARENA_MID_CHUNK, push_token, read_lines, reserve_tokens};
+#[cfg(any(test, kani))]
+use window::{
+    TOKEN_ARENA_AHEAD, TOKEN_ARENA_CHUNK, TOKEN_ARENA_SMALL_CHUNK, arena_growth, estimated_growth,
+    mid_input_token_capacity, prefix_token_capacity,
 };
 
 /// Convert a bounded parser index or count to `u32`, returning an event-count limit error if it
@@ -60,386 +73,11 @@ fn fit_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
-/// Decode an inline flow closing partner index (`UNMATCHED_FLOW` means unmatched).
+/// Decode an inline flow closing partner's relative token distance (`UNMATCHED_FLOW` means
+/// unmatched).
 #[inline]
 pub(super) fn matched_flow_end(end: u32) -> Option<usize> {
     (end != UNMATCHED_FLOW).then_some(end as usize)
-}
-
-/// A logical line's token range in the parser's shared token arena.
-#[derive(Clone, Copy, Debug)]
-struct Line {
-    start: u32,
-    end: u32,
-    indent: u32,
-}
-
-impl Line {
-    /// The line of `tokens[start..end]`, from `input`. Its indent is its first token's column,
-    /// less any tab before that token and what follows the tab: YAML indents with spaces alone
-    /// (production 63), so a tab there separates and `k:\n\tv` holds `v` at indent 0.
-    fn new(
-        tokens: &[Token<'_>],
-        start: usize,
-        end: usize,
-        input: &str,
-        compat: bool,
-    ) -> Result<Self, Box<Error>> {
-        let first_span = tokens.get(start).map_or_else(|| Span::empty(0), |t| t.span);
-        let indent = tokens.get(start).map_or(0, |token| {
-            let offset = token.span.start();
-            let bytes = input.as_bytes();
-            let mut i = offset;
-            let mut first_tab: Option<usize> = None;
-            while i > 0 {
-                match bytes[i - 1] {
-                    b' ' => i -= 1,
-                    b'\t' => {
-                        i -= 1;
-                        first_tab = Some(i);
-                    }
-                    _ => break,
-                }
-            }
-            if i == 0 || matches!(bytes[i - 1], b'\n' | b'\r') {
-                first_tab.map_or(offset - i, |tab| tab - i)
-            } else {
-                let column = column_on_line(input, offset, compat).saturating_sub(1);
-                match first_tab {
-                    Some(tab) => column.saturating_sub(offset - tab),
-                    None => column,
-                }
-            }
-        });
-        Ok(Self {
-            start: to_u32(start, first_span, input, compat)?,
-            end: to_u32(end, first_span, input, compat)?,
-            indent: to_u32(indent, first_span, input, compat)?,
-        })
-    }
-
-    #[inline]
-    fn start(self) -> usize {
-        self.start as usize
-    }
-
-    #[inline]
-    fn end(self) -> usize {
-        self.end as usize
-    }
-
-    #[inline]
-    fn indent(self) -> usize {
-        self.indent as usize
-    }
-
-    #[inline]
-    fn len(self) -> usize {
-        (self.end - self.start) as usize
-    }
-
-    #[inline]
-    fn is_empty(self) -> bool {
-        self.start == self.end
-    }
-
-    #[inline]
-    fn advance(&mut self, count: usize) {
-        self.start = self.start.saturating_add(fit_u32(count)).min(self.end);
-    }
-}
-
-/// Token-arena growth chunks. Power-of-two growth leaves large unused
-/// capacity on wide inputs; fixed chunks bound the waste. Small inputs use a
-/// smaller first chunk so the shrink-to-fit transient stays cheap.
-const TOKEN_ARENA_CHUNK: usize = 8 * 1024;
-/// A first chunk for input dense in short lines, where more tokens share each allocation.
-const TOKEN_ARENA_WIDE_CHUNK: usize = 16 * 1024;
-const TOKEN_ARENA_SMALL_CHUNK: usize = 64;
-const TOKEN_ARENA_MID_CHUNK: usize = 256;
-
-fn reserve_tokens(
-    tokens: &mut Vec<Token<'_>>,
-    additional: usize,
-    most: usize,
-    span: Span,
-    input: &str,
-    compat: bool,
-) -> Result<(), Box<Error>> {
-    tokens.try_reserve_exact(additional).map_err(|_| {
-        let observed = u64::try_from(tokens.len().saturating_add(additional)).unwrap_or(u64::MAX);
-        let limit = u64::try_from(most).unwrap_or(u64::MAX);
-        Box::new(
-            Error::from(crate::limits::LimitExceeded::new(
-                crate::limits::LimitKind::Events,
-                limit,
-                observed,
-            ))
-            .with_span(span)
-            .with_input_location(input, compat),
-        )
-    })
-}
-
-#[cfg(test)]
-fn push_token<'a>(
-    tokens: &mut Vec<Token<'a>>,
-    token: Token<'a>,
-    chunk: usize,
-    most: usize,
-    input: &str,
-) -> Result<(), Box<Error>> {
-    if tokens.len() == tokens.capacity() {
-        // The scanner refuses the token after `most`, so no arena holds more than that.
-        let room = most.saturating_sub(tokens.len()).max(1);
-        let additional = arena_growth(tokens.len(), chunk).min(room);
-        reserve_tokens(tokens, additional, most, token.span, input, false)?;
-    }
-    tokens.push(token);
-    Ok(())
-}
-
-/// How many tokens a full arena of `len` grows by before any estimate: its first chunk, and
-/// then as many tokens as it holds. Only an input of at most 32 KiB gets past its first chunk
-/// this way; a larger one has an estimate by then (see [`read_lines`]).
-const fn arena_growth(len: usize, chunk: usize) -> usize {
-    if len <= chunk { chunk } else { len }
-}
-
-/// Logical lines read from the scanner, plus the stream boundary spans.
-#[allow(
-    clippy::struct_field_names,
-    reason = "the field name matches the domain term for this line collection"
-)]
-struct Lines<'a> {
-    lines: Vec<Line>,
-    tokens: Vec<Token<'a>>,
-    stream_start: Option<Span>,
-    stream_end: Option<Span>,
-    /// A scanner failure deferred until the parser checks earlier tokens, so raising
-    /// `max_depth` cannot swap an earlier error for a later scanner error.
-    scanner_error: Option<Box<Error>>,
-    /// Whether the final line in `lines` was truncated mid-line by `scanner_error`.
-    truncated_last_line: bool,
-    /// How many times the token arena was reallocated, which the tests bound.
-    #[cfg(test)]
-    growths: usize,
-}
-
-/// The token arena capacity to reserve before scanning a mid-sized document, or `None` to grow
-/// as tokens arrive. Ordinary lines are dense enough that one estimate from the input length
-/// avoids several arena copies; long-line inputs skip it, so a large scalar does not reserve an
-/// arena it will not use.
-fn mid_input_token_capacity(input_len: usize, line_count: usize, most: usize) -> Option<usize> {
-    if (4097..=32768).contains(&input_len) && line_count > 0 && input_len / line_count <= 80 {
-        Some((input_len / 10).min(most))
-    } else {
-        None
-    }
-}
-
-/// How far one reservation may run ahead of the tokens already scanned. An estimate comes from
-/// the input read so far, and the rest of the input may hold far fewer tokens, so a reservation
-/// stays within this multiple of the tokens that exist. A document that keeps its density takes
-/// a few reservations, each from a later and better estimate.
-const TOKEN_ARENA_AHEAD: usize = 8;
-
-/// How many tokens a full arena of `len` grows by once estimates have begun: up to `estimate`,
-/// the tokens the whole input is expected to hold, and by a sixteenth of `len` or a chunk at
-/// least. An estimate that expects few more tokens can be wrong, and growing by less would copy
-/// the arena once for every few tokens. The arena never passes `most`, the tokens the limits
-/// let a reader keep; a full arena that holds as many grows by one, for a token the scanner
-/// has already counted.
-const fn estimated_growth(len: usize, estimate: usize, chunk: usize, most: usize) -> usize {
-    let sixteenth = len / 16;
-    let least = if sixteenth > chunk { sixteenth } else { chunk };
-    let wanted = estimate.saturating_sub(len);
-    let growth = if wanted > least { wanted } else { least };
-    let room = most.saturating_sub(len);
-    let room = if room == 0 { 1 } else { room };
-    if growth < room { growth } else { room }
-}
-
-/// Tokens to hold after scanning a prefix, or `None` before enough tokens show the density.
-/// The estimate projects the remaining bytes from the higher of the whole prefix's density and
-/// the density since the previous estimate `(last_tokens, last_consumed)`, so a dense tail after
-/// a sparse comment or block-scalar head converges in a few reservations. It is capped at the
-/// input's length, since a token takes a byte at least, at `most`, the tokens the limits let a
-/// reader keep, and at [`TOKEN_ARENA_AHEAD`] times the tokens already scanned. That last cap is
-/// what keeps a comment-only rest, or one large scalar, from reserving an arena it will not use.
-fn prefix_token_capacity(
-    tokens: usize,
-    consumed: usize,
-    last_tokens: usize,
-    last_consumed: usize,
-    input_len: usize,
-    most: usize,
-) -> Option<usize> {
-    const THRESHOLD: usize = 1_024;
-    if tokens < THRESHOLD || consumed == 0 {
-        return None;
-    }
-    // In 128 bits: on a 32-bit target the product passes `usize` for an input of a few hundred
-    // KiB. A sixty-fourth is added, because an estimate that falls a few tokens short costs
-    // another growth step, which is larger than that margin.
-    let overall = tokens as u128 * input_len as u128 / consumed as u128;
-    let remaining = input_len.saturating_sub(consumed) as u128;
-    let recent_tokens = tokens.saturating_sub(last_tokens) as u128;
-    let recent_bytes = consumed.saturating_sub(last_consumed) as u128;
-    let recent = if recent_tokens > 0 && recent_bytes > 0 {
-        (tokens as u128).saturating_add(recent_tokens * remaining / recent_bytes)
-    } else {
-        0
-    };
-    let estimate = overall.max(recent);
-    let estimate = usize::try_from(estimate.saturating_add(estimate / 64)).unwrap_or(usize::MAX);
-    let cap = input_len
-        .min(most)
-        .min(tokens.saturating_mul(TOKEN_ARENA_AHEAD));
-    Some(estimate.min(cap).max(tokens))
-}
-
-/// Group scanner tokens into logical lines as they arrive.
-///
-/// This avoids first collecting every token in one vector and then copying
-/// them into per-line vectors. A block scalar consumes the rest of its line,
-/// so it flushes the logical line immediately.
-fn read_lines<'a>(scanner: &mut Scanner<'a>, limits: &Limits) -> Result<Lines<'a>, Box<Error>> {
-    let input = scanner.input();
-    let input_len = scanner.input_len();
-    let compat = scanner.is_compat();
-    let most = limits.max_events;
-    let mut mid_capacity = None;
-    let (initial_chunk, chunk) = match input_len {
-        0..=4096 => (TOKEN_ARENA_SMALL_CHUNK, TOKEN_ARENA_SMALL_CHUNK),
-        4097..=32768 => {
-            let line_count = lines_at_most(input.as_bytes());
-            mid_capacity = mid_input_token_capacity(input_len, line_count, most);
-            (TOKEN_ARENA_MID_CHUNK, TOKEN_ARENA_MID_CHUNK)
-        }
-        _ => {
-            // Sample the first 4 KiB without allocating a line index: short lines carry many
-            // tokens for their bytes, while a few long lines (such as one large scalar) start
-            // with the small chunk and step up only if tokens turn out dense.
-            let sample = &input.as_bytes()[..4096];
-            let sample_lines = lines_at_most(sample);
-            if sample_lines == 0 || sample.len() / sample_lines > 80 {
-                (TOKEN_ARENA_SMALL_CHUNK, TOKEN_ARENA_CHUNK)
-            } else if sample.len() / sample_lines <= 10 {
-                (TOKEN_ARENA_WIDE_CHUNK, TOKEN_ARENA_WIDE_CHUNK)
-            } else {
-                (TOKEN_ARENA_CHUNK, TOKEN_ARENA_CHUNK)
-            }
-        }
-    };
-    let mut lines = Vec::new();
-    let mut tokens = Vec::new();
-    if let Some(capacity) = mid_capacity {
-        reserve_tokens(&mut tokens, capacity, most, Span::empty(0), input, compat)?;
-    }
-    let mut last_tokens = 0_usize;
-    let mut last_consumed = 0_usize;
-    let mut line_start = 0;
-    let mut stream_start = None;
-    let mut stream_end = None;
-    let mut scanner_error = None;
-    let mut truncated_last_line = false;
-    #[cfg(test)]
-    let mut growths = 0;
-    loop {
-        let token = match scanner.next_token(limits) {
-            Ok(Some(token)) => token,
-            Ok(None) => break,
-            Err(error) => {
-                if !scanner.saw_flow_start() {
-                    return Err(error);
-                }
-                truncated_last_line = tokens.len() > line_start;
-                scanner_error = Some(error);
-                break;
-            }
-        };
-        match token.kind {
-            TokenKind::StreamStart => stream_start = Some(token.span),
-            TokenKind::StreamEnd => {
-                stream_end = Some(token.span);
-                break;
-            }
-            TokenKind::LineBreak => {
-                if tokens.len() > line_start {
-                    lines.push(Line::new(&tokens, line_start, tokens.len(), input, compat)?);
-                    line_start = tokens.len();
-                }
-            }
-            _ => {
-                let block_scalar = token.kind.scalar_style().is_some_and(|style| {
-                    matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
-                });
-                let consumed = token.span.end();
-                if tokens.is_empty() {
-                    // Start the recent-density window at the first content token so leading
-                    // comments or blank lines do not depress the first full-arena estimate.
-                    last_consumed = token.span.start();
-                }
-                #[cfg(test)]
-                let capacity_before = tokens.capacity();
-                if tokens.len() == tokens.capacity() {
-                    let room = most.saturating_sub(tokens.len()).max(1);
-                    let step_chunk = if tokens.is_empty() {
-                        initial_chunk
-                    } else {
-                        chunk
-                    };
-                    let additional = if let Some(capacity) = prefix_token_capacity(
-                        tokens.len() + 1,
-                        consumed,
-                        last_tokens,
-                        last_consumed,
-                        input_len,
-                        most,
-                    ) {
-                        last_tokens = tokens.len() + 1;
-                        last_consumed = consumed;
-                        estimated_growth(tokens.len(), capacity, step_chunk, most)
-                    } else {
-                        arena_growth(tokens.len(), step_chunk).min(room)
-                    };
-                    reserve_tokens(&mut tokens, additional, most, token.span, input, compat)?;
-                }
-                tokens.push(token);
-                #[cfg(test)]
-                {
-                    growths += usize::from(tokens.capacity() != capacity_before);
-                }
-                if block_scalar {
-                    lines.push(Line::new(&tokens, line_start, tokens.len(), input, compat)?);
-                    line_start = tokens.len();
-                }
-            }
-        }
-    }
-    if tokens.len() > line_start {
-        lines.push(Line::new(&tokens, line_start, tokens.len(), input, compat)?);
-    }
-    // Small token arenas gain more from exact capacity than the one-time copy
-    // costs in peak memory. Large arenas keep their growth capacity so the
-    // shrink copy does not dominate the parse peak.
-    if tokens.len() <= 8192 {
-        tokens.shrink_to_fit();
-    }
-    if scanner.saw_flow_start() {
-        link_flow_ends(&mut tokens);
-    }
-    Ok(Lines {
-        lines,
-        tokens,
-        stream_start,
-        stream_end,
-        scanner_error,
-        truncated_last_line,
-        #[cfg(test)]
-        growths,
-    })
 }
 
 /// A consumer that receives events as the parser produces them.
@@ -459,24 +97,31 @@ enum EventSink<'a> {
     Streaming(Box<StreamingComposer<'a>>),
     Typed(Box<crate::typed::Builder<'a>>),
     #[cfg(test)]
-    Consumer(Box<dyn EventConsumer<'a> + 'a>),
-    /// Events that wait for a reader to take them (see [`DocumentEvents`]), and how many
-    /// entries the root holds, where the grammar counts them before it reads them.
+    Consumer(AssertUnwindSafe<Box<dyn EventConsumer<'a> + 'a>>),
+    /// Events that wait for a reader to take them (see [`DocumentEvents`] and [`EventCursor`]),
+    /// and how many entries the root holds, where the grammar counts them before it reads them.
     Queue {
         events: VecDeque<Event<'a>>,
         root_entries: Option<usize>,
+        room: usize,
+        want_root_entries: bool,
     },
 }
 
 impl<'a> EventSink<'a> {
-    /// The events a queue holds before the grammar stops for its reader. A step of the grammar
-    /// emits a few events, and a run of scalar entries or of directives stops when this many
-    /// wait.
+    /// Default queue watermark for `DocumentEvents` (typed streaming). A step of the grammar
+    /// emits a few events, and a run of scalar entries or directives stops when this many wait.
     const QUEUE_ROOM: usize = 16;
 
+    /// Larger queue watermark for `EventCursor` (`parse_events` / `SpannedTree::parse`), keeping
+    /// the parser loop hot in instruction cache across batches while staying inside one 256-slot
+    /// `VecDeque` allocation (~26 KiB).
+    const CURSOR_QUEUE_ROOM: usize = 250;
+
     /// Whether a reader should take the waiting events before more are emitted.
+    #[inline]
     fn is_full(&self) -> bool {
-        matches!(self, Self::Queue { events, .. } if events.len() >= Self::QUEUE_ROOM)
+        matches!(self, Self::Queue { events, room, .. } if events.len() >= *room)
     }
 
     /// The events that wait for a reader, if this sink keeps them for one.
@@ -487,13 +132,25 @@ impl<'a> EventSink<'a> {
         }
     }
 
+    /// Whether this sink uses root flow collection entry-count hints.
+    #[inline]
+    fn wants_collection_hint(&self) -> bool {
+        match self {
+            Self::Events(_) => false,
+            Self::Queue {
+                want_root_entries, ..
+            } => *want_root_entries,
+            _ => true,
+        }
+    }
+
     /// Say how many entries the root flow collection holds, before its start event.
     fn reserve_collection(&mut self, entries: usize) {
         match self {
             Self::Streaming(composer) => composer.reserve_collection(entries),
             Self::Typed(builder) => builder.reserve_collection(entries),
             #[cfg(test)]
-            Self::Consumer(consumer) => consumer.reserve_collection(entries),
+            Self::Consumer(consumer) => consumer.0.reserve_collection(entries),
             Self::Queue { root_entries, .. } => *root_entries = Some(entries),
             Self::Events(_) => {}
         }
@@ -503,10 +160,12 @@ impl<'a> EventSink<'a> {
     fn event(&mut self, event: Event<'a>) -> Result<(), Box<Error>> {
         match self {
             Self::Events(events) => {
-                // Grow by half instead of doubling. The capacity estimate is close but can be
-                // short on nested documents; this avoids reserving twice the events that fit.
+                // Double while small, then grow by half to avoid reserving twice the events that
+                // fit on wide documents.
                 if events.len() == events.capacity() {
-                    events.reserve_exact((events.capacity() / 2).max(16));
+                    let cap = events.capacity();
+                    let growth = if cap < 4096 { cap.max(16) } else { cap / 2 };
+                    events.reserve_exact(growth);
                 }
                 events.push(event);
                 Ok(())
@@ -514,7 +173,7 @@ impl<'a> EventSink<'a> {
             Self::Streaming(composer) => composer.event(event),
             Self::Typed(builder) => builder.push_event(event),
             #[cfg(test)]
-            Self::Consumer(consumer) => consumer.event(event).map_err(Box::new),
+            Self::Consumer(consumer) => consumer.0.event(event).map_err(Box::new),
             Self::Queue { events, .. } => {
                 events.push_back(event);
                 Ok(())
@@ -577,13 +236,8 @@ impl<'a> EventSink<'a> {
     }
 }
 
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "the flags describe independent parser modes and truncation state, not an enum"
-)]
 struct Parser<'a> {
-    lines: Vec<Line>,
-    token_arena: Vec<Token<'a>>,
+    window: LineWindow<'a>,
     sink: EventSink<'a>,
     limits: Limits,
     input: &'a str,
@@ -592,7 +246,7 @@ struct Parser<'a> {
     compat: bool,
     documents: usize,
     /// The events of the stream so far, its start and end included, which count against
-    /// `max_events`. A document-sized parse starts from the count before it.
+    /// `max_events`.
     emitted: usize,
     /// Stop at a second document start, as a single-document entry point
     /// needs: the rest of the stream is never parsed.
@@ -600,40 +254,32 @@ struct Parser<'a> {
     /// Emit the second document start and stop, instead of reporting it here. The typed builder
     /// then builds the first document before it reports the trailing one (AY-027).
     stop_at_second: bool,
-    /// Where the lines end: the stream end, or for one document of a lazy read, the next
-    /// document's first token. An empty node after the last line is placed here.
-    end: usize,
-    /// Deferred scanner failure recorded after earlier tokens were scanned.
-    scanner_error: Option<Box<Error>>,
-    /// Whether the last line in `lines` was truncated mid-line by `scanner_error`.
-    truncated_last_line: bool,
     /// Last computed `(line_index, byte_offset, 1-based column)` for incremental compact-block
     /// column lookup without rescanning from line start at each nesting level.
     column_cache: (u32, u32, u32),
 }
 
-/// Pair every flow collection's opening token with its closing token index in place, without
-/// allocating a `HashMap`.
-fn link_flow_ends(tokens: &mut [Token<'_>]) {
-    let mut stack = Vec::new();
-    for index in 0..tokens.len() {
-        match tokens[index].kind {
-            TokenKind::FlowSequenceStart { .. } | TokenKind::FlowMappingStart { .. } => {
-                stack.push(index);
-            }
-            TokenKind::FlowSequenceEnd | TokenKind::FlowMappingEnd => {
-                if let Some(open) = stack.pop()
-                    && let Ok(close) = u32::try_from(index)
-                    && close != UNMATCHED_FLOW
-                {
-                    match &mut tokens[open].kind {
-                        TokenKind::FlowSequenceStart { end }
-                        | TokenKind::FlowMappingStart { end } => *end = close,
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
+impl<'a> Parser<'a> {
+    fn new(
+        scanner: Scanner<'a>,
+        sink: EventSink<'a>,
+        limits: &Limits,
+        input: &'a str,
+        compat: bool,
+        single_document: bool,
+        stop_at_second: bool,
+    ) -> Self {
+        Self {
+            window: LineWindow::new(scanner, input, compat),
+            sink,
+            limits: limits.clone(),
+            input,
+            compat,
+            documents: 0,
+            emitted: 0,
+            single_document,
+            stop_at_second,
+            column_cache: (u32::MAX, 0, 0),
         }
     }
 }
@@ -664,57 +310,37 @@ fn flow_entry_count(tokens: &[Token<'_>], open: usize, close: usize) -> usize {
     entries + usize::from(content)
 }
 
-/// Parse one document's lines for the pull cursor. Its events and document count continue from
-/// the `counted` events and `documents` already seen before them, and the updated counts come
-/// back with them. `end` is where the lines stop.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "internal pull-cursor handoff mirrors Parser's initial state directly"
-)]
-fn parse_lines<'a>(
-    lines: Lines<'a>,
-    limits: &Limits,
-    input: &'a str,
-    counted: usize,
-    documents: usize,
-    single_document: bool,
-    end: usize,
-    compat: bool,
-) -> Result<(Vec<Event<'a>>, usize, usize), Error> {
-    let event_capacity = event_capacity(&lines.lines, &lines.tokens);
-    let mut parser = Parser {
-        lines: lines.lines,
-        token_arena: lines.tokens,
-        sink: EventSink::Events(Vec::with_capacity(event_capacity)),
-        limits: limits.clone(),
-        input,
-        compat,
-        documents,
-        emitted: counted,
-        single_document,
-        stop_at_second: false,
-        end,
-        scanner_error: lines.scanner_error,
-        truncated_last_line: lines.truncated_last_line,
-        column_cache: (u32::MAX, 0, 0),
+/// Modest initial capacity for eager `Vec<Event>` parses without pre-scanning the whole input.
+fn initial_event_capacity(input: &str, max_events: usize) -> usize {
+    let estimate = if input.len() <= 4096 {
+        (input.len() / 16).clamp(8, 256)
+    } else {
+        let sample = &input.as_bytes()[..4096];
+        let sample_lines = lines_at_most(sample);
+        if sample_lines == 0 || sample.len() / sample_lines > 80 {
+            let starts_flow = sample
+                .iter()
+                .find(|byte| !byte.is_ascii_whitespace())
+                .is_some_and(|byte| matches!(byte, b'[' | b'{'));
+            if starts_flow {
+                (input.len() / 6).clamp(256, 4096)
+            } else {
+                16
+            }
+        } else {
+            (input.len() / 16).clamp(256, 4096)
+        }
     };
-    parser.parse_stream().map_err(|error| *error)?;
-    match parser.sink {
-        EventSink::Events(events) => Ok((events, parser.emitted, parser.documents)),
-        _ => unreachable!("event sink kind changed during parsing"),
-    }
+    estimate.min(max_events.max(8))
 }
 
+#[cfg(test)]
 fn event_capacity(lines: &[Line], tokens: &[Token<'_>]) -> usize {
     let base_headroom = if lines.iter().any(|line| line.indent() > 0) {
         256
     } else {
         200
     };
-    // An event can represent an implicit collection that has no token of its own. Four fifths
-    // of the token count plus headroom reserves close to the actual event count on large
-    // documents, while scaling small documents proportionally to token + line count avoids
-    // reserving ~35-42 KiB for tiny configs.
     let large = tokens
         .len()
         .saturating_mul(4)
@@ -764,43 +390,30 @@ pub(crate) fn parse_document_typed<'a>(
     compat_flow: bool,
     builder: crate::typed::Builder<'a>,
 ) -> Result<crate::typed::Node<'a>, Error> {
-    let mut scanner = Scanner::with_compat(input, limits, compat_flow).map_err(|error| *error)?;
-    let Lines {
-        lines,
-        tokens,
-        stream_start,
-        stream_end,
-        scanner_error,
-        truncated_last_line,
-        ..
-    } = read_lines(&mut scanner, limits).map_err(|error| *error)?;
-    let end = stream_end.map_or(input.len(), Span::start);
-    let mut parser = Parser {
-        lines,
-        token_arena: tokens,
-        sink: EventSink::Typed(Box::new(builder)),
-        limits: limits.clone(),
+    let scanner = Scanner::with_compat(input, limits, compat_flow).map_err(|error| *error)?;
+    let mut parser = Parser::new(
+        scanner,
+        EventSink::Typed(Box::new(builder)),
+        limits,
         input,
-        compat: compat_flow,
-        documents: 0,
-        emitted: 0,
-        single_document: true,
-        stop_at_second: true,
-        end,
-        scanner_error,
-        truncated_last_line,
-        column_cache: (u32::MAX, 0, 0),
-    };
+        compat_flow,
+        true,
+        true,
+    );
+    let stream_start = parser
+        .window
+        .ensure_started(&parser.limits)
+        .map_err(|error| *error)?;
     parser
-        .emit(Event::StreamStart {
-            span: stream_start.unwrap_or_else(|| Span::empty(0)),
-        })
+        .emit(Event::StreamStart { span: stream_start })
         .map_err(|error| *error)?;
     parser.parse_stream().map_err(|error| *error)?;
+    let stream_end = parser
+        .window
+        .stream_end()
+        .unwrap_or_else(|| Span::empty(input.len()));
     parser
-        .emit(Event::StreamEnd {
-            span: stream_end.unwrap_or_else(|| Span::empty(input.len())),
-        })
+        .emit(Event::StreamEnd { span: stream_end })
         .map_err(|error| *error)?;
     match parser.sink {
         EventSink::Typed(mut builder) => builder.finish_document_node(),
@@ -815,46 +428,33 @@ pub(crate) fn parse_document_with_consumer<'a>(
     compat_flow: bool,
     consumer: Box<dyn EventConsumer<'a> + 'a>,
 ) -> Result<(), Error> {
-    let mut scanner = Scanner::with_compat(input, limits, compat_flow).map_err(|error| *error)?;
-    let Lines {
-        lines,
-        tokens,
-        stream_start,
-        stream_end,
-        scanner_error,
-        truncated_last_line,
-        ..
-    } = read_lines(&mut scanner, limits).map_err(|error| *error)?;
-    let end = stream_end.map_or(input.len(), Span::start);
-    let mut parser = Parser {
-        lines,
-        token_arena: tokens,
-        sink: EventSink::Consumer(consumer),
-        limits: limits.clone(),
+    let scanner = Scanner::with_compat(input, limits, compat_flow).map_err(|error| *error)?;
+    let mut parser = Parser::new(
+        scanner,
+        EventSink::Consumer(AssertUnwindSafe(consumer)),
+        limits,
         input,
-        compat: compat_flow,
-        documents: 0,
-        emitted: 0,
-        single_document: true,
-        stop_at_second: true,
-        end,
-        scanner_error,
-        truncated_last_line,
-        column_cache: (u32::MAX, 0, 0),
-    };
+        compat_flow,
+        true,
+        true,
+    );
+    let stream_start = parser
+        .window
+        .ensure_started(&parser.limits)
+        .map_err(|error| *error)?;
     parser
-        .emit(Event::StreamStart {
-            span: stream_start.unwrap_or_else(|| Span::empty(0)),
-        })
+        .emit(Event::StreamStart { span: stream_start })
         .map_err(|error| *error)?;
     parser.parse_stream().map_err(|error| *error)?;
+    let stream_end = parser
+        .window
+        .stream_end()
+        .unwrap_or_else(|| Span::empty(input.len()));
     parser
-        .emit(Event::StreamEnd {
-            span: stream_end.unwrap_or_else(|| Span::empty(input.len())),
-        })
+        .emit(Event::StreamEnd { span: stream_end })
         .map_err(|error| *error)?;
     match parser.sink {
-        EventSink::Consumer(mut consumer) => consumer.finish(),
+        EventSink::Consumer(mut consumer) => consumer.0.finish(),
         _ => unreachable!("event sink kind changed during parsing"),
     }
 }
@@ -866,45 +466,33 @@ fn parse_events_with_compat<'a>(
     single_document: bool,
     stop_at_second: bool,
 ) -> Result<Vec<Event<'a>>, Error> {
-    let mut scanner = Scanner::with_compat(input, limits, compat_flow).map_err(|error| *error)?;
-    let Lines {
-        lines,
-        tokens,
-        stream_start,
-        stream_end,
-        scanner_error,
-        truncated_last_line,
-        ..
-    } = read_lines(&mut scanner, limits).map_err(|error| *error)?;
-
-    let event_capacity = event_capacity(&lines, &tokens).saturating_add(2);
-    let end = stream_end.map_or(input.len(), Span::start);
-    let mut parser = Parser {
-        lines,
-        token_arena: tokens,
-        sink: EventSink::Events(Vec::with_capacity(event_capacity)),
-        limits: limits.clone(),
+    let scanner = Scanner::with_compat(input, limits, compat_flow).map_err(|error| *error)?;
+    let mut parser = Parser::new(
+        scanner,
+        EventSink::Events(Vec::with_capacity(initial_event_capacity(
+            input,
+            limits.max_events,
+        ))),
+        limits,
         input,
-        compat: compat_flow,
-        documents: 0,
-        emitted: 0,
+        compat_flow,
         single_document,
         stop_at_second,
-        end,
-        scanner_error,
-        truncated_last_line,
-        column_cache: (u32::MAX, 0, 0),
-    };
+    );
+    let stream_start = parser
+        .window
+        .ensure_started(&parser.limits)
+        .map_err(|error| *error)?;
     parser
-        .emit(Event::StreamStart {
-            span: stream_start.unwrap_or_else(|| Span::empty(0)),
-        })
+        .emit(Event::StreamStart { span: stream_start })
         .map_err(|error| *error)?;
     parser.parse_stream().map_err(|error| *error)?;
+    let stream_end = parser
+        .window
+        .stream_end()
+        .unwrap_or_else(|| Span::empty(input.len()));
     parser
-        .emit(Event::StreamEnd {
-            span: stream_end.unwrap_or_else(|| Span::empty(input.len())),
-        })
+        .emit(Event::StreamEnd { span: stream_end })
         .map_err(|error| *error)?;
     match parser.sink {
         EventSink::Events(events) => Ok(events),
@@ -915,48 +503,38 @@ fn parse_events_with_compat<'a>(
 /// Compose a single document directly from the parser without allocating an event vector or
 /// single-element document `Vec`. A second document is an error at its start.
 pub(crate) fn parse_value(input: &str, limits: &Limits) -> Result<Value, Error> {
-    let mut scanner = Scanner::new(input, limits).map_err(|error| *error)?;
-    let lines = read_lines(&mut scanner, limits).map_err(|error| *error)?;
-    let mut parser = Parser {
-        lines: lines.lines,
-        token_arena: lines.tokens,
-        sink: EventSink::Streaming(Box::new(StreamingComposer::new_single(
+    let scanner = Scanner::new(input, limits).map_err(|error| *error)?;
+    let mut parser = Parser::new(
+        scanner,
+        EventSink::Streaming(Box::new(StreamingComposer::new_single(
             limits.clone(),
             input.len(),
         ))),
-        limits: limits.clone(),
+        limits,
         input,
-        compat: false,
-        documents: 0,
-        emitted: 0,
-        single_document: true,
-        stop_at_second: false,
-        end: lines.stream_end.map_or(input.len(), Span::start),
-        scanner_error: lines.scanner_error,
-        truncated_last_line: lines.truncated_last_line,
-        column_cache: (u32::MAX, 0, 0),
-    };
+        false,
+        true,
+        false,
+    );
+    let stream_start = parser
+        .window
+        .ensure_started(&parser.limits)
+        .map_err(|error| *error)?;
     parser
-        .emit(Event::StreamStart {
-            span: lines.stream_start.unwrap_or_else(|| Span::empty(0)),
-        })
+        .emit(Event::StreamStart { span: stream_start })
         .map_err(|error| *error)?;
     parser
         .parse_stream()
         .map_err(|error| (*error).with_input_location(input, false))?;
+    let stream_end = parser
+        .window
+        .stream_end()
+        .unwrap_or_else(|| Span::empty(input.len()));
     parser
-        .emit(Event::StreamEnd {
-            span: lines.stream_end.unwrap_or_else(|| Span::empty(input.len())),
-        })
+        .emit(Event::StreamEnd { span: stream_end })
         .map_err(|error| *error)?;
-    let Parser {
-        lines: parser_lines,
-        token_arena,
-        sink,
-        ..
-    } = parser;
-    drop(parser_lines);
-    drop(token_arena);
+    let Parser { window, sink, .. } = parser;
+    drop(window);
     match sink {
         EventSink::Streaming(composer) => composer
             .finish_single()
@@ -972,49 +550,39 @@ pub(crate) fn parse_documents(
     limits: &Limits,
     single_document: bool,
 ) -> Result<Vec<Value>, Error> {
-    let mut scanner = Scanner::new(input, limits).map_err(|error| *error)?;
-    let lines = read_lines(&mut scanner, limits).map_err(|error| *error)?;
-    let mut parser = Parser {
-        lines: lines.lines,
-        token_arena: lines.tokens,
-        sink: EventSink::Streaming(Box::new(StreamingComposer::new(
+    let scanner = Scanner::new(input, limits).map_err(|error| *error)?;
+    let mut parser = Parser::new(
+        scanner,
+        EventSink::Streaming(Box::new(StreamingComposer::new(
             limits.clone(),
             input.len(),
         ))),
-        limits: limits.clone(),
+        limits,
         input,
-        compat: false,
-        documents: 0,
-        emitted: 0,
+        false,
         single_document,
-        stop_at_second: false,
-        end: lines.stream_end.map_or(input.len(), Span::start),
-        scanner_error: lines.scanner_error,
-        truncated_last_line: lines.truncated_last_line,
-        column_cache: (u32::MAX, 0, 0),
-    };
+        false,
+    );
     // The composer ignores the stream events, but they count as an event parse counts them.
+    let stream_start = parser
+        .window
+        .ensure_started(&parser.limits)
+        .map_err(|error| *error)?;
     parser
-        .emit(Event::StreamStart {
-            span: lines.stream_start.unwrap_or_else(|| Span::empty(0)),
-        })
+        .emit(Event::StreamStart { span: stream_start })
         .map_err(|error| *error)?;
     parser
         .parse_stream()
         .map_err(|error| (*error).with_input_location(input, false))?;
+    let stream_end = parser
+        .window
+        .stream_end()
+        .unwrap_or_else(|| Span::empty(input.len()));
     parser
-        .emit(Event::StreamEnd {
-            span: lines.stream_end.unwrap_or_else(|| Span::empty(input.len())),
-        })
+        .emit(Event::StreamEnd { span: stream_end })
         .map_err(|error| *error)?;
-    let Parser {
-        lines: parser_lines,
-        token_arena,
-        sink,
-        ..
-    } = parser;
-    drop(parser_lines);
-    drop(token_arena);
+    let Parser { window, sink, .. } = parser;
+    drop(window);
     match sink {
         EventSink::Streaming(composer) => composer
             .finish()
@@ -1038,23 +606,13 @@ impl<'a> Parser<'a> {
         if !structural {
             return None;
         }
-        let indent = self.lines.get(index)?.indent();
+        let indent = self.window.get_line(index)?.indent();
         if index == 0 && indent > 0 {
             return Some("a document's first node cannot be indented".to_owned());
         }
-        let parent = (0..index)
-            .rev()
-            .find(|&line| self.lines[line].indent() < indent)?;
-        if indent != self.lines[parent].indent() + 1 {
-            return None;
-        }
-        let token = self.line_first(parent)?;
-        let position = self.at(token.span.start());
-        let kind = if matches!(token.kind, TokenKind::BlockEntry) {
-            "sequence"
-        } else {
-            "mapping"
-        };
+        let (parent_offset, is_seq) = self.window.compat_parent(index, indent)?;
+        let position = self.at(parent_offset);
+        let kind = if is_seq { "sequence" } else { "mapping" };
         Some(format!(
             "this line is indented differently from the {kind} at line {} column {}",
             position.line(),
@@ -1125,22 +683,24 @@ impl<'a> Parser<'a> {
     /// The number of top-level entries in the flow collection that opens at `tokens.start + start`,
     /// or `None` when the collection is malformed or not flow.
     fn flow_entries(&self, tokens: Run, start: usize) -> Option<usize> {
-        let open = self.lines[tokens.line()].start() + tokens.start() + start;
-        let close = match self.token_arena.get(open)?.kind {
+        let line_tokens = self.line_tokens(tokens.line());
+        let open = tokens.start() + start;
+        let delta = match line_tokens.get(open)?.kind {
             TokenKind::FlowSequenceStart { end } | TokenKind::FlowMappingStart { end } => {
                 matched_flow_end(end)?
             }
             _ => return None,
         };
-        Some(flow_entry_count(&self.token_arena, open, close))
+        let close = open.checked_add(delta)?;
+        (close < line_tokens.len()).then(|| flow_entry_count(line_tokens, open, close))
     }
 
     /// Surface a deferred scanner error once parsing reaches the truncated EOF boundary, before
     /// synthesizing an empty node or closing a block collection at EOF.
     #[inline]
     pub(super) fn check_truncated_eof(&mut self, index: usize) -> Result<(), Box<Error>> {
-        if self.scanner_error.is_some() && index >= self.lines.len() {
-            return self.take_deferred_scanner_error();
+        if self.window.has_scanner_error() && index >= self.window.loaded_end() {
+            return self.window.take_scanner_error();
         }
         Ok(())
     }
@@ -1153,13 +713,13 @@ impl<'a> Parser<'a> {
         run: Run,
         index: usize,
     ) -> Result<(), Box<Error>> {
-        if self.truncated_last_line
-            && self.scanner_error.is_some()
+        if self.window.truncated_last_line()
+            && self.window.has_scanner_error()
             && index >= run.len()
-            && run.line() + 1 == self.lines.len()
-            && run.end() == self.lines[run.line()].len()
+            && run.line() + 1 == self.window.loaded_end()
+            && run.end() == self.window.line(run.line()).len()
         {
-            return self.take_deferred_scanner_error();
+            return self.window.take_scanner_error();
         }
         Ok(())
     }
@@ -1173,10 +733,10 @@ impl<'a> Parser<'a> {
         current_index: usize,
         indent: usize,
     ) -> bool {
-        self.truncated_last_line
-            && self.scanner_error.is_some()
-            && current_index + 1 == self.lines.len()
-            && self.lines[current_index].indent() == indent
+        self.window.truncated_last_line()
+            && self.window.has_scanner_error()
+            && current_index + 1 == self.window.loaded_end()
+            && self.window.line(current_index).indent() == indent
             && !self.line_starts_with(current_index, |kind| {
                 matches!(
                     kind,
@@ -1187,20 +747,11 @@ impl<'a> Parser<'a> {
             })
     }
 
-    #[cold]
-    #[inline(never)]
-    fn take_deferred_scanner_error(&mut self) -> Result<(), Box<Error>> {
-        if let Some(error) = self.scanner_error.take() {
-            return Err(error);
-        }
-        Ok(())
-    }
-
     /// Read every document of the stream.
     fn parse_stream(&mut self) -> Result<(), Box<Error>> {
         let mut index = 0;
         let mut directives = false;
-        while index < self.lines.len() {
+        while self.ensure_line(index)? {
             let opening = self.open_document(index, directives)?;
             // Only a sink that keeps events for a reader stops among the directives.
             directives = matches!(opening, Opening::Directives(_));
@@ -1216,10 +767,7 @@ impl<'a> Parser<'a> {
                 }
             };
         }
-        if let Some(error) = self.scanner_error.take() {
-            return Err(error);
-        }
-        Ok(())
+        self.window.take_scanner_error()
     }
 
     /// Read from line `index` to a document's root: its directives and its start. The root is
@@ -1232,9 +780,13 @@ impl<'a> Parser<'a> {
         mut index: usize,
         mut saw_directive: bool,
     ) -> Result<Opening<'a>, Box<Error>> {
-        while let Some(TokenKind::Directive(directive)) =
-            self.line_first(index).map(|token| &token.kind)
-        {
+        self.window.retire_before(index);
+        while self.ensure_line(index)? {
+            let Some(TokenKind::Directive(directive)) =
+                self.line_first(index).map(|token| &token.kind)
+            else {
+                break;
+            };
             let Some(span) = self.line_first(index).map(|token| token.span) else {
                 break;
             };
@@ -1246,14 +798,13 @@ impl<'a> Parser<'a> {
             self.emit(event)?;
             saw_directive = true;
             index += 1;
+            self.window.retire_before(index);
             if self.sink.is_full() {
                 return Ok(Opening::Directives(index));
             }
         }
-        if index >= self.lines.len() {
-            if let Some(error) = self.scanner_error.take() {
-                return Err(error);
-            }
+        if !self.ensure_line(index)? {
+            self.window.take_scanner_error()?;
             if saw_directive {
                 return Err(self.error(
                     self.empty_span(index),
@@ -1280,9 +831,10 @@ impl<'a> Parser<'a> {
         // allows any number of document suffixes between documents, so a
         // `...`-only stream has zero documents.
         if !saw_directive
-            && self.lines[index].len() == 1
+            && self.window.line(index).len() == 1
             && self.line_starts_with(index, |kind| matches!(kind, TokenKind::DocumentEnd))
         {
+            self.window.retire_before(index + 1);
             return Ok(Opening::NoDocument(index + 1));
         }
 
@@ -1297,8 +849,9 @@ impl<'a> Parser<'a> {
             document_start_span = self
                 .take_line_first_span(index)
                 .unwrap_or(document_start_span);
-            if self.lines[index].is_empty() {
+            if self.window.line(index).is_empty() {
                 index += 1;
+                self.window.retire_before(index);
             } else {
                 let line = self.line_run(index);
                 let (_, _, rest_start) = self.properties(line)?;
@@ -1349,7 +902,7 @@ impl<'a> Parser<'a> {
             span: document_start_span,
         })?;
 
-        if index < self.lines.len()
+        if self.ensure_line(index)?
             && !self.line_starts_with(index, |kind| matches!(kind, TokenKind::DocumentEnd))
             && !self.line_starts_with(index, |kind| {
                 matches!(kind, TokenKind::DocumentStart { .. })
@@ -1371,7 +924,7 @@ impl<'a> Parser<'a> {
             Ok(Opening::Root {
                 call: Some(Call::Node {
                     index,
-                    indent: self.lines[index].indent(),
+                    indent: self.window.line(index).indent(),
                     depth: 0,
                     tag: None,
                     anchor: None,
@@ -1395,9 +948,10 @@ impl<'a> Parser<'a> {
     /// End the document whose root stops before line `index`, and return the line the next one
     /// starts at. `root_block` says whether the root is a block collection.
     fn close_document(&mut self, mut index: usize, root_block: bool) -> Result<usize, Box<Error>> {
+        self.window.retire_before(index);
         let mut explicit_end = false;
         let mut document_end_span = self.last_span(index);
-        if index < self.lines.len()
+        if self.ensure_line(index)?
             && self.line_starts_with(index, |kind| matches!(kind, TokenKind::DocumentEnd))
         {
             explicit_end = true;
@@ -1412,14 +966,15 @@ impl<'a> Parser<'a> {
                 ));
             }
             index += 1;
+            self.window.retire_before(index);
         }
         self.emit(Event::DocumentEnd {
             explicit: explicit_end,
             span: document_end_span,
         })?;
 
-        if index < self.lines.len()
-            && !explicit_end
+        if !explicit_end
+            && self.ensure_line(index)?
             && !self.line_starts_with(index, |kind| {
                 matches!(kind, TokenKind::DocumentStart { .. })
             })
@@ -1451,7 +1006,7 @@ impl<'a> Parser<'a> {
                     | TokenKind::DoubleQuotedScalar
                     | TokenKind::Scalar(_),
                 ) if root_block
-                    && self.lines[index].indent() > 0
+                    && self.window.line(index).indent() > 0
                     && previous_line_is_blank(self.input, span.start()) =>
                 {
                     (

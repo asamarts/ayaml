@@ -1588,3 +1588,79 @@ fn truncated_flow_and_document_marker_lines_surface_exact_errors() {
     assert_eq!(val_err.code(), ev_err.code());
     assert_eq!(val_err.span(), ev_err.span());
 }
+
+/// Batch-crossing (>128 lines) single-pass document-order error precedence agrees across public
+/// readers: earlier duplicate-key/parser errors beat later scanner errors, and valid prefixes
+/// surface the later scanner error cleanly.
+#[test]
+fn batch_crossing_document_order_errors_agree_across_readers() {
+    use std::fmt::Write as _;
+
+    // 140 valid lines, then duplicate key `k0`, then later scanner error `@`.
+    let mut dup_before_scan = String::new();
+    for i in 0..140 {
+        let _ = writeln!(dup_before_scan, "k{i}: {i}");
+    }
+    dup_before_scan.push_str("k0: 999\nbad: @\n");
+
+    let val_err = ayaml::parse_value(&dup_before_scan).expect_err("parse_value dup");
+    assert_eq!(val_err.kind(), ErrorKind::DuplicateKey);
+    let typed_err = ayaml::from_str::<Value>(&dup_before_scan).expect_err("from_str dup");
+    assert_eq!(typed_err.to_string(), val_err.to_string());
+
+    // 140 valid lines, then parser syntax error before later `@`.
+    let mut parse_before_scan = String::new();
+    for i in 0..140 {
+        let _ = writeln!(parse_before_scan, "k{i}: {i}");
+    }
+    parse_before_scan.push_str("bad: [1, , 2]\ntail: @\n");
+    let p_val = ayaml::parse_value(&parse_before_scan).expect_err("parse_value syntax");
+    let p_typed = ayaml::from_str::<Value>(&parse_before_scan).expect_err("from_str syntax");
+    let p_ev = ayaml::parse_events(&parse_before_scan)
+        .expect("events")
+        .collect::<Result<Vec<_>, _>>()
+        .expect_err("events syntax");
+    let mut de = Deserializer::from_str(&parse_before_scan).expect("de");
+    let p_de = de.next::<Value>().expect_err("de syntax");
+    for (label, err) in [
+        ("parse_value", p_val),
+        ("from_str", p_typed),
+        ("parse_events", p_ev),
+        ("Deserializer", p_de),
+    ] {
+        assert_eq!(err.kind(), ErrorKind::Parser, "{label}: {err}");
+    }
+
+    // 140 valid lines followed by `@` surfaces `ErrorKind::Scanner` identically across all readers.
+    let mut valid_then_scan = String::new();
+    for i in 0..140 {
+        let _ = writeln!(valid_then_scan, "k{i}: {i}");
+    }
+    valid_then_scan.push_str("tail: @\n");
+    for (label, err) in [
+        (
+            "parse_value",
+            ayaml::parse_value(&valid_then_scan).expect_err("val"),
+        ),
+        (
+            "from_str",
+            ayaml::from_str::<Value>(&valid_then_scan).expect_err("typed"),
+        ),
+        (
+            "parse_events",
+            ayaml::parse_events(&valid_then_scan)
+                .expect("events")
+                .collect::<Result<Vec<_>, _>>()
+                .expect_err("ev"),
+        ),
+        (
+            "Deserializer",
+            Deserializer::from_str(&valid_then_scan)
+                .expect("de")
+                .next::<Value>()
+                .expect_err("de"),
+        ),
+    ] {
+        assert_eq!(err.kind(), ErrorKind::Scanner, "{label}: {err}");
+    }
+}

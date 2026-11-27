@@ -25,6 +25,7 @@ impl<'a> Parser<'a> {
             .check_depth(depth)
             .map_err(|error| self.limit_at(span, error))?;
         loop {
+            self.window.retire_before(index);
             let line = self.line_run(index);
             let (line_tag, line_anchor, rest_start) = self.properties(line)?;
             let inherited_tag = tag.clone();
@@ -44,7 +45,11 @@ impl<'a> Parser<'a> {
                 }
                 let next_index = index + 1;
                 let has_properties = tag.is_some() || anchor.is_some();
-                let next_indent = self.lines.get(next_index).map_or(0, |line| line.indent());
+                let has_next = self.ensure_line(next_index)?;
+                let next_indent = self
+                    .window
+                    .get_line(next_index)
+                    .map_or(0, super::window::Line::indent);
                 // After a property-only line, a `-` line may start the node's
                 // block sequence down to the parent's bound: a mapping value's
                 // sequence may sit at the key's column, a sequence entry's
@@ -61,7 +66,7 @@ impl<'a> Parser<'a> {
                 });
                 // Other content may sit left of the property line, down to
                 // the parent's bound (`-\n    !t\n  x`).
-                let next_is_node = next_index < self.lines.len()
+                let next_is_node = has_next
                     && (next_indent >= indent.min(bounds.min_indent)
                         || next_is_indentless_sequence
                         || next_is_block_scalar)
@@ -73,7 +78,7 @@ impl<'a> Parser<'a> {
                     });
                 if has_properties && next_is_node {
                     index = next_index;
-                    indent = self.lines[index].indent();
+                    indent = self.window.line(index).indent();
                     continue;
                 }
                 self.check_truncated_eof(next_index)?;
@@ -186,38 +191,82 @@ impl<'a> Parser<'a> {
                 (rest, state.current_index as usize)
             } else {
                 let current_index = state.current_index as usize;
-                if current_index >= self.lines.len()
-                    || self.lines[current_index].indent() != state.indent as usize
-                    || !self.line_starts_with(current_index, |kind| {
-                        matches!(kind, TokenKind::BlockEntry)
-                    })
-                {
-                    self.check_truncated_eof(current_index)?;
-                    self.emit(Event::SequenceEnd {
-                        span: self.last_span(current_index),
-                    })?;
-                    return Ok(Step::Return(current_index));
+                self.window.retire_before(current_index);
+                let line = if self.ensure_line(current_index)? {
+                    Some(self.window.line(current_index))
+                } else {
+                    None
+                };
+                match line {
+                    Some(line)
+                        if line.indent() == state.indent as usize
+                            && self
+                                .window
+                                .line_slice(line)
+                                .first()
+                                .is_some_and(|t| matches!(t.kind, TokenKind::BlockEntry)) =>
+                    {
+                        (
+                            Run {
+                                line: fit_u32(current_index),
+                                start: 1,
+                                end: fit_u32(line.len()),
+                            },
+                            current_index + 1,
+                        )
+                    }
+                    _ => {
+                        self.check_truncated_eof(current_index)?;
+                        self.emit(Event::SequenceEnd {
+                            span: self.last_span(current_index),
+                        })?;
+                        return Ok(Step::Return(current_index));
+                    }
                 }
-                (self.line_run(current_index).from(1), current_index + 1)
             };
             state.entries += 1;
-            let span = self.last_span(state.current_index as usize);
+            let entry_index = state.current_index as usize;
             self.limits
                 .check_collection_entries(state.entries as usize)
-                .map_err(|error| self.limit_at(span, error))?;
-            // The overwhelmingly common block-sequence entry is one scalar.
-            // Emit it inline so a wide sequence does not pay a continuation
-            // stack push/pop and nested parser call for every item.
-            if self.is_single_scalar(rest) {
-                self.emit_scalar_token(rest, 0, None, None)?;
-                state.current_index = fit_u32(next_index);
-                // A reader that takes the events one at a time gets its turn here, so that
-                // they don't all wait for it at once.
-                if self.sink.is_full() {
-                    stack.push(Cont::Sequence(state));
-                    return Ok(Step::Return(next_index));
+                .map_err(|error| {
+                    let span = self.last_span(entry_index);
+                    self.limit_at(span, error)
+                })?;
+            // The overwhelmingly common block-sequence entry is a single scalar or alias.
+            // Emit it inline so a wide sequence does not pay continuation stack push/pop
+            // and nested parser calls for every item.
+            if rest.len() == 1 {
+                let kind = &self.token(rest, 0).kind;
+                if matches!(
+                    kind,
+                    TokenKind::PlainScalar
+                        | TokenKind::SingleQuotedScalar
+                        | TokenKind::DoubleQuotedScalar
+                        | TokenKind::Scalar(_)
+                ) {
+                    self.emit_scalar_token(rest, 0, None, None)?;
+                    state.current_index = fit_u32(next_index);
+                    // A reader that takes the events one at a time gets its turn here, so that
+                    // they don't all wait for it at once.
+                    if self.sink.is_full() {
+                        stack.push(Cont::Sequence(state));
+                        return Ok(Step::Return(next_index));
+                    }
+                    continue;
                 }
-                continue;
+                if matches!(kind, TokenKind::Alias) {
+                    let span = self.token(rest, 0).span;
+                    self.emit(Event::Alias {
+                        anchor: Anchor::new(&self.input[span.start() + 1..span.end()]),
+                        span,
+                    })?;
+                    state.current_index = fit_u32(next_index);
+                    if self.sink.is_full() {
+                        stack.push(Cont::Sequence(state));
+                        return Ok(Step::Return(next_index));
+                    }
+                    continue;
+                }
             }
             let (indent, depth) = (state.indent as usize, state.depth as usize);
             stack.push(Cont::Sequence(state));
@@ -252,10 +301,10 @@ impl<'a> Parser<'a> {
         stack: &mut Vec<Cont>,
     ) -> Result<Step<'a>, Box<Error>> {
         if rest.is_empty() {
-            if next_index < self.lines.len() && self.lines[next_index].indent() > indent {
+            if self.ensure_line(next_index)? && self.window.line(next_index).indent() > indent {
                 return Ok(Step::Call(Call::Node {
                     index: next_index,
-                    indent: self.lines[next_index].indent(),
+                    indent: self.window.line(next_index).indent(),
                     depth,
                     tag: None,
                     anchor: None,
@@ -271,10 +320,10 @@ impl<'a> Parser<'a> {
         let content = rest.from(rest_start);
         if content.is_empty() {
             if tag.is_some() || anchor.is_some() {
-                if next_index < self.lines.len() && self.lines[next_index].indent() > indent {
+                if self.ensure_line(next_index)? && self.window.line(next_index).indent() > indent {
                     return Ok(Step::Call(Call::Node {
                         index: next_index,
-                        indent: self.lines[next_index].indent(),
+                        indent: self.window.line(next_index).indent(),
                         depth,
                         tag,
                         anchor,
@@ -286,6 +335,7 @@ impl<'a> Parser<'a> {
                 self.emit_null_scalar_with(span, tag, anchor)?;
                 return Ok(Step::Return(next_index));
             }
+            let _ = self.ensure_line(next_index)?;
             let span = self.empty_span(next_index);
             self.emit_null_scalar(span)?;
             return Ok(Step::Return(next_index));
@@ -394,23 +444,44 @@ impl<'a> Parser<'a> {
                 first
             } else {
                 let current_index = state.current_index as usize;
-                if current_index >= self.lines.len()
-                    || self.lines[current_index].indent() != state.indent as usize
-                    || !is_mapping_line(self.line_tokens(current_index))
-                {
-                    if self.is_truncated_mapping_key_line(current_index, state.indent as usize) {
+                self.window.retire_before(current_index);
+                let line = if self.ensure_line(current_index)? {
+                    Some(self.window.line(current_index))
+                } else {
+                    None
+                };
+                match line {
+                    Some(line)
+                        if line.indent() == state.indent as usize
+                            && is_mapping_line(self.window.line_slice(line)) =>
+                    {
                         state.current_index += 1;
-                        self.line_run(current_index)
-                    } else {
+                        Run {
+                            line: fit_u32(current_index),
+                            start: 0,
+                            end: fit_u32(line.len()),
+                        }
+                    }
+                    Some(line)
+                        if self.is_truncated_mapping_key_line(
+                            current_index,
+                            state.indent as usize,
+                        ) =>
+                    {
+                        state.current_index += 1;
+                        Run {
+                            line: fit_u32(current_index),
+                            start: 0,
+                            end: fit_u32(line.len()),
+                        }
+                    }
+                    _ => {
                         self.check_truncated_eof(current_index)?;
                         self.emit(Event::MappingEnd {
                             span: self.last_span(current_index),
                         })?;
                         return Ok(Step::Return(current_index));
                     }
-                } else {
-                    state.current_index += 1;
-                    self.line_run(current_index)
                 }
             };
             let (indent, depth) = (state.indent as usize, state.depth as usize);
@@ -422,8 +493,8 @@ impl<'a> Parser<'a> {
                 let key_rest = tokens.from(1);
                 let current_index = state.current_index as usize;
                 if self.is_single_scalar(key_rest)
-                    && current_index < self.lines.len()
-                    && self.lines[current_index].indent() == indent
+                    && self.ensure_line(current_index)?
+                    && self.window.line(current_index).indent() == indent
                     && self.line_starts_with(current_index, |kind| matches!(kind, TokenKind::Value))
                 {
                     let value_run = self.line_run(current_index).from(1);
@@ -452,8 +523,8 @@ impl<'a> Parser<'a> {
                 let key_rest = tokens.from(1);
                 let current_index = state.current_index as usize;
                 if key_rest.is_empty() {
-                    if current_index < self.lines.len() {
-                        let next_indent = self.lines[current_index].indent();
+                    if self.ensure_line(current_index)? {
+                        let next_indent = self.window.line(current_index).indent();
                         let indentless_sequence = next_indent == indent
                             && self.line_starts_with(current_index, |kind| {
                                 matches!(kind, TokenKind::BlockEntry)
@@ -479,8 +550,8 @@ impl<'a> Parser<'a> {
                 // sequence, as on a mapping value's line.
                 let (tag, anchor, rest_start) = self.properties(key_rest)?;
                 if rest_start == key_rest.len()
-                    && current_index < self.lines.len()
-                    && self.lines[current_index].indent() == indent
+                    && self.ensure_line(current_index)?
+                    && self.window.line(current_index).indent() == indent
                     && self.line_starts_with(current_index, |kind| {
                         matches!(kind, TokenKind::BlockEntry)
                     })
@@ -594,12 +665,14 @@ impl<'a> Parser<'a> {
     ) -> Result<Step<'a>, Box<Error>> {
         state.entries += 1;
         let current_index = state.current_index as usize;
+        self.window.retire_before(current_index);
+        let has_current = self.ensure_line(current_index)?;
         let span = self.empty_span(current_index);
         self.limits
             .check_collection_entries(state.entries as usize)
             .map_err(|error| self.limit_at(span, error))?;
-        let has_value_line = current_index < self.lines.len()
-            && self.lines[current_index].indent() == state.indent as usize
+        let has_value_line = has_current
+            && self.window.line(current_index).indent() == state.indent as usize
             && self.line_starts_with(current_index, |kind| matches!(kind, TokenKind::Value));
         if has_value_line {
             let value = self.line_run(current_index).from(1);
@@ -674,10 +747,11 @@ impl<'a> Parser<'a> {
         let (tag, anchor, rest_start) = self.properties(value)?;
         let content = value.from(rest_start);
         if content.is_empty() {
+            let has_next = self.ensure_line(current_index)?;
             let next_indent = self
-                .lines
-                .get(current_index)
-                .map_or(0, |line| line.indent());
+                .window
+                .get_line(current_index)
+                .map_or(0, super::window::Line::indent);
             let indentless_sequence = next_indent == indent
                 && self
                     .line_starts_with(current_index, |kind| matches!(kind, TokenKind::BlockEntry));
@@ -694,16 +768,11 @@ impl<'a> Parser<'a> {
                     .map(|token| token.span.start())
                     .is_some_and(|offset| self.column_at(current_index, offset) == 1)
                 && current_index > 0
-                && self
-                    .line_tokens(current_index - 1)
-                    .iter()
-                    .any(|token| matches!(token.kind, TokenKind::Anchor));
-            if current_index < self.lines.len()
-                && (next_indent > indent || indentless_sequence || block_scalar)
-            {
+                && self.window.line_had_anchor(current_index - 1);
+            if has_next && (next_indent > indent || indentless_sequence || block_scalar) {
                 return Ok(Step::Call(Call::Node {
                     index: current_index,
-                    indent: self.lines[current_index].indent(),
+                    indent: self.window.line(current_index).indent(),
                     depth: depth + 1,
                     tag,
                     anchor,
@@ -800,8 +869,7 @@ impl<'a> Parser<'a> {
                 FlowLack::Node(ErrorCode::UnexpectedToken, "expected a node".to_owned()),
             ));
         }
-        let abs = self.lines[tokens.line()].start() + tokens.start() + index;
-        let token = &mut self.token_arena[abs];
+        let token = self.window.token_mut(tokens, index);
         let span = token.span;
         match &mut token.kind {
             TokenKind::PlainScalar => {

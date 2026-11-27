@@ -30,6 +30,7 @@ impl<'a> Parser<'a> {
             .check_depth(depth + 1)
             .map_err(|error| self.limit_at(start_span, error))?;
         if depth == 0
+            && self.sink.wants_collection_hint()
             && let Some(entries) = self.flow_entries(tokens, start)
         {
             self.sink
@@ -325,6 +326,7 @@ impl<'a> Parser<'a> {
             .check_depth(depth + 1)
             .map_err(|error| self.limit_at(start_span, error))?;
         if depth == 0
+            && self.sink.wants_collection_hint()
             && let Some(entries) = self.flow_entries(tokens, start)
         {
             self.sink
@@ -352,7 +354,6 @@ impl<'a> Parser<'a> {
         stack: &mut Vec<Cont>,
     ) -> Result<Step<'a>, Box<Error>> {
         let tokens = state.tokens;
-        let base = self.lines[tokens.line()].start() + tokens.start();
         loop {
             let mut index = state.index as usize;
             if index >= tokens.len() {
@@ -413,10 +414,11 @@ impl<'a> Parser<'a> {
                             self.token(tokens, index + 2).kind,
                             TokenKind::FlowSequenceStart { .. }
                         );
-                        if let Some(close) = matched_flow_end(end)
-                            && close < base + tokens.len()
+                        if let Some(delta) = matched_flow_end(end)
+                            && let Some(close) = (index + 2).checked_add(delta)
+                            && close < tokens.len()
                         {
-                            let value_end = close - base + 1;
+                            let value_end = close + 1;
                             if self.token_at(tokens, value_end).is_some_and(|after| {
                                 matches!(
                                     after.kind,
@@ -597,7 +599,6 @@ impl<'a> Parser<'a> {
     )]
     pub(super) fn implicit_flow_colon(&self, run: Run, start: usize) -> Option<usize> {
         let tokens = self.tokens(run);
-        let base = self.lines[run.line()].start() + run.start();
         let mut depth = 0usize;
         let mut index = start;
         while index < tokens.len() {
@@ -606,8 +607,8 @@ impl<'a> Parser<'a> {
                 TokenKind::FlowSequenceStart { end } | TokenKind::FlowMappingStart { end } => {
                     // A nested collection is one key candidate. Jump over it in one step rather
                     // than rescanning its content at every enclosing level.
-                    if let Some(close) = matched_flow_end(end) {
-                        index = close - base + 1;
+                    if let Some(delta) = matched_flow_end(end) {
+                        index = index.saturating_add(delta).saturating_add(1);
                         continue;
                     }
                     depth += 1;
@@ -642,16 +643,16 @@ impl<'a> Parser<'a> {
     )]
     pub(super) fn find_flow_value(&self, run: Run, start: usize) -> usize {
         let tokens = self.tokens(run);
-        let base = self.lines[run.line()].start() + run.start();
         let mut depth = 0usize;
         let mut index = start;
         while index < tokens.len() {
             match tokens[index].kind {
                 TokenKind::FlowSequenceStart { end } | TokenKind::FlowMappingStart { end } => {
-                    if let Some(close) = matched_flow_end(end)
-                        && close < base + tokens.len()
+                    if let Some(delta) = matched_flow_end(end)
+                        && let Some(close) = index.checked_add(delta)
+                        && close < tokens.len()
                     {
-                        index = close - base + 1;
+                        index = close + 1;
                         continue;
                     }
                     depth += 1;
@@ -674,16 +675,16 @@ impl<'a> Parser<'a> {
     /// Where the flow item from `start` ends, on the same terms as [`Self::find_flow_value`].
     pub(super) fn find_flow_item_end(&self, run: Run, start: usize) -> usize {
         let tokens = self.tokens(run);
-        let base = self.lines[run.line()].start() + run.start();
         let mut depth = 0usize;
         let mut index = start;
         while index < tokens.len() {
             match tokens[index].kind {
                 TokenKind::FlowSequenceStart { end } | TokenKind::FlowMappingStart { end } => {
-                    if let Some(close) = matched_flow_end(end)
-                        && close < base + tokens.len()
+                    if let Some(delta) = matched_flow_end(end)
+                        && let Some(close) = index.checked_add(delta)
+                        && close < tokens.len()
                     {
-                        index = close - base + 1;
+                        index = close + 1;
                         continue;
                     }
                     depth += 1;
@@ -713,7 +714,7 @@ impl<'a> Parser<'a> {
     pub(super) fn flow_error(&mut self, tokens: Run, index: usize, lack: FlowLack) -> Box<Error> {
         let failure = self.token_at(tokens, index).map(|token| token.span);
         if failure.is_none()
-            && let Some(error) = self.scanner_error.take()
+            && let Err(error) = self.window.take_scanner_error()
         {
             return error;
         }
@@ -780,12 +781,12 @@ impl<'a> Parser<'a> {
     ) -> FlowLack {
         // The tokens before the failure on its logical line, which a run that starts at an item
         // leaves out.
-        let line = &self.lines[tokens.line()];
-        let at = line.start() + tokens.start() + index.min(tokens.len());
+        let line_tokens = self.line_tokens(tokens.line());
+        let at = tokens.start() + index.min(tokens.len());
         let before = |back: usize| {
             at.checked_sub(back)
-                .filter(|&token| token >= line.start())
-                .map(|token| &self.token_arena[token].kind)
+                .and_then(|token| line_tokens.get(token))
+                .map(|token| &token.kind)
         };
         let failing = self.token_at(tokens, index).map(|token| &token.kind);
         // In a flow sequence, libyaml takes the `:`, `,` or `]` after an empty `?` key as part of
@@ -824,10 +825,10 @@ impl<'a> Parser<'a> {
     /// span, and whether it is a sequence. A closing bracket here closes what it follows, since
     /// the parse stops at the first one that doesn't match.
     pub(super) fn open_flow(&self, tokens: Run, index: usize) -> Option<(Span, bool)> {
-        let line = &self.lines[tokens.line()];
-        let before = (line.start() + tokens.start() + index).min(line.end());
+        let line_tokens = self.line_tokens(tokens.line());
+        let before = (tokens.start() + index).min(line_tokens.len());
         let mut closed = 0_usize;
-        for token in self.token_arena[line.start()..before].iter().rev() {
+        for token in line_tokens[..before].iter().rev() {
             match token.kind {
                 TokenKind::FlowSequenceEnd | TokenKind::FlowMappingEnd => closed += 1,
                 TokenKind::FlowSequenceStart { .. } | TokenKind::FlowMappingStart { .. }
@@ -893,52 +894,38 @@ impl<'a> Parser<'a> {
         Ok((tag, anchor, index))
     }
 
-    /// All of line `index`'s tokens.
+    #[inline]
+    pub(super) fn ensure_line(&mut self, index: usize) -> Result<bool, Box<Error>> {
+        self.window.ensure_line(index, &self.limits)
+    }
+
+    /// The first surviving token of line `index`, if present in the active window.
+    #[inline]
     pub(super) fn line_first(&self, index: usize) -> Option<&Token<'a>> {
-        let line = self.lines.get(index)?;
-        if line.is_empty() {
-            return None;
-        }
-        self.token_arena.get(line.start())
+        self.window.line_first(index)
     }
 
-    pub(super) fn line_last(&self, index: usize) -> Option<&Token<'a>> {
-        let line = self.lines.get(index)?;
-        if line.is_empty() {
-            return None;
-        }
-        line.end()
-            .checked_sub(1)
-            .and_then(|end| self.token_arena.get(end))
-    }
-
+    #[inline]
     pub(super) fn line_tokens(&self, index: usize) -> &[Token<'a>] {
-        let line = &self.lines[index];
-        &self.token_arena[line.start()..line.end()]
+        self.window.line_tokens(index)
     }
 
     pub(super) fn take_line_first_span(&mut self, index: usize) -> Option<Span> {
-        let line = self.lines.get_mut(index)?;
-        if line.is_empty() {
-            return None;
-        }
-        let span = self.token_arena[line.start()].span;
-        line.advance(1);
-        Some(span)
+        self.window.take_line_first_span(index)
     }
 
+    #[inline]
     pub(super) fn line_run(&self, index: usize) -> Run {
         Run {
             line: fit_u32(index),
             start: 0,
-            end: fit_u32(self.lines[index].len()),
+            end: fit_u32(self.window.line(index).len()),
         }
     }
 
     #[inline]
     pub(super) fn tokens(&self, run: Run) -> &[Token<'a>] {
-        let line = &self.lines[run.line()];
-        &self.token_arena[line.start() + run.start()..line.start() + run.end()]
+        self.window.run_tokens(run)
     }
 
     /// The token at `index` within `run`, which must exist.
@@ -981,8 +968,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Emit a scalar token directly from `token_arena[run + offset]` via the sink's scalar
-    /// fast path, moving owned escaped/block scalar text without cloning.
+    /// Emit a scalar token directly from the active line window via the sink's scalar fast path,
+    /// moving owned escaped/block scalar text without cloning.
     #[inline]
     pub(super) fn emit_scalar_token(
         &mut self,
@@ -991,8 +978,7 @@ impl<'a> Parser<'a> {
         tag: Option<Tag>,
         anchor: Option<Anchor<'a>>,
     ) -> Result<(), Box<Error>> {
-        let abs = self.lines[run.line()].start() + run.start() + offset;
-        let token = &mut self.token_arena[abs];
+        let token = self.window.token_mut(run, offset);
         let span = token.span;
         match &mut token.kind {
             TokenKind::PlainScalar => {
@@ -1075,6 +1061,16 @@ impl<'a> Parser<'a> {
         self.sink.scalar(value, raw, style, tag, anchor, span)
     }
 
+    /// Count one event against `max_events` without pushing it into the sink (used when
+    /// `EventCursor` yields `StreamStart` directly before allocating its queue).
+    #[inline]
+    pub(super) fn count_event(&mut self, span: Span) -> Result<(), Box<Error>> {
+        self.emitted = self.emitted.saturating_add(1);
+        self.limits
+            .check_events(self.emitted)
+            .map_err(|error| self.limit_at(span, error))
+    }
+
     /// Count one event against `max_events`, and pass it on.
     pub(super) fn emit(&mut self, mut event: Event<'a>) -> Result<(), Box<Error>> {
         match &mut event {
@@ -1121,21 +1117,17 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn empty_span(&self, index: usize) -> Span {
-        if self.lines.get(index).is_some()
-            && let Some(token) = self.line_first(index)
-        {
-            let marker = token.span.start();
-            return Span::empty(marker);
+        if let Some(token) = self.line_first(index) {
+            return Span::empty(token.span.start());
         }
-        Span::empty(self.end)
+        Span::empty(self.window.end_offset())
     }
 
     pub(super) fn last_span(&self, index: usize) -> Span {
         if index > 0
-            && self.lines.get(index - 1).is_some()
-            && let Some(token) = self.line_last(index - 1)
+            && let Some(end) = self.window.line_last_end(index - 1)
         {
-            return Span::empty(token.span.end());
+            return Span::empty(end);
         }
         self.empty_span(index)
     }

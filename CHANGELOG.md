@@ -79,6 +79,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `<= 64 B`), deferred `Scanner` tag-handle maps, added a `<= 18`-digit `u64` integer fast path,
   and added specialized `EventSink` scalar callbacks bypassing `Event::Scalar` construction for
   internal composers and typed builders.
+- Replaced whole-document upfront token/line buffering with a single-pass bounded `LineWindow`
+  streaming parser (`<= 128` logical lines / `<= 384` tokens per batch) across `parse_value`,
+  `parse_documents`, `parse_events`, `from_str*`, `SpannedTree::parse`, and `Deserializer`, cutting
+  transient parser heap by >98% and reducing peak heap by 30% to 58% on large block and OpenAPI
+  documents (`1.00x`–`1.05x` peak/live on OpenAPI fixtures); standardized internal hash maps/sets
+  and node hashes on the process-wide cryptographic SipHash-1-3 `GlobalHasher` and added inline
+  `<= 8`-key `SeenScalarKeys` for zero-allocation small-mapping duplicate checks during typed
+  decoding.
 
 ## [0.2.3] — 2026-11-21
 

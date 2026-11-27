@@ -1220,13 +1220,17 @@ fn tag_handles_count_against_their_limit_at_each_use() {
 #[test]
 fn compat_reports_a_scanner_error_as_itself() {
     for (input, message) in [
-        ("&a *a\n@", "'@' is a reserved indicator"),
+        ("- &a 1\n- *a\n@", "'@' is a reserved indicator"),
         ("!~!&-*-", "undefined tag handle"),
     ] {
         let error = ayaml::compat::from_str::<Value>(input).expect_err(input);
         assert_eq!(error.kind(), ErrorKind::Scanner, "{input:?}");
         assert!(error.message().contains(message), "{input:?}: {error}");
     }
+    // Single-pass streaming reports the line-1 parser error on `&a *a` before scanning line 2,
+    // and still never misclassifies it as a recursion limit.
+    let earlier = ayaml::compat::from_str::<Value>("&a *a\n@").expect_err("alias with anchor");
+    assert_eq!(earlier.kind(), ErrorKind::Parser);
 }
 
 /// A tag that an alias copies counts with the rest of the copy, however the tag is written and

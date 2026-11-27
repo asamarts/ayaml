@@ -330,5 +330,18 @@ fn opt_in_merge_keys_enforces_cumulative_alias_budget_across_sibling_mappings() 
                 "{label}: {err:?}"
             );
         }
+
+        // Deep programmatic `Value::Tagged` chains do not overflow the stack in
+        // `Value::apply_merge_keys_with_limits`.
+        let mut tagged = Value::from(1_u64);
+        for _ in 0..2_000 {
+            tagged = Value::Tagged(Box::new(ayaml::TaggedValue::new(
+                ayaml::Tag::new("!", "t"),
+                tagged,
+            )));
+        }
+        tagged
+            .apply_merge_keys_with_limits(&Limits::default())
+            .expect("deep tagged chain stays iterative");
     });
 }

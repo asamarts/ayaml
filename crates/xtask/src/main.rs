@@ -855,6 +855,49 @@ mod tests {
             GateThresholds::default(),
         )
         .expect("gate pass");
+        // Unpaired `--baseline` / `--current` must fail rather than silently skipping checks.
+        assert!(
+            run_gate(
+                &repo_root().expect("root"),
+                Some(&base_dir),
+                None,
+                None,
+                false,
+                GateThresholds::default(),
+            )
+            .is_err()
+        );
+        assert!(
+            run_gate(
+                &repo_root().expect("root"),
+                None,
+                Some(&cur_dir),
+                None,
+                false,
+                GateThresholds::default(),
+            )
+            .is_err()
+        );
+        // `evaluate_speed_gate` flags missing keys in current run.
+        let missing_speed = evaluate_speed_gate(&base_speed, &[], GateThresholds::default());
+        assert!(
+            missing_speed
+                .iter()
+                .any(|v| v.contains("missing from current speed run")),
+            "expected missing-key speed violation, got {missing_speed:?}"
+        );
+        // `render_report` handles short and multi-byte UTF-8 `git_sha` values without panicking.
+        for sha in ["abc", "é🚀1234567890"] {
+            let mut short_fp = fp.clone();
+            short_fp.git_sha = sha.to_owned();
+            fs::write(
+                cur_dir.join("memory.fingerprint.json"),
+                short_fp.to_pretty_json().expect("short fp"),
+            )
+            .expect("write short fp");
+            let r = render_report(&cur_dir, "Test Report").expect("report with short/utf8 sha");
+            assert!(r.contains("# Test Report"));
+        }
         let report = render_report(&cur_dir, "Test Report").expect("report");
         assert!(report.contains("# Test Report"));
         assert!(report.contains("openapi-spec"));

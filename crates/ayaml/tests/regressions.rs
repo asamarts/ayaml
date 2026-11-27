@@ -11,6 +11,8 @@ mod indentation;
 mod structure;
 #[path = "regressions/typed.rs"]
 mod typed;
+#[path = "regressions/window.rs"]
+mod window;
 
 use serde_json::{Value as Json, json};
 

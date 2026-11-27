@@ -10,3 +10,4 @@ typed	mapping-1000	7	AY-104: as for the short sequence, about 400 instructions a
 typed	aliases-1000	7	AY-104: as for the short sequence; each alias is still read from the anchored tree
 emit	aliases-1000	6	pre-1.0 hardening PR: emitter.rs is untouched (Ir +0.00%); binary code layout shift from merge/frontmatter/Spanned hardening adds +5.25% simulated Callgrind EstCycles
 emit	nested-keys	6	pre-1.0 hardening PR: emitter.rs is untouched (Ir +0.09%); binary code layout shift from merge/frontmatter/Spanned hardening adds +5.61% simulated Callgrind EstCycles
+emit	nested-keys	6	AY-180: emit_flow_mapping disassembly is byte-identical (0 Ir delta); binary address shift causes Callgrind branch-predictor aliasing (+5.26% simulated EstCycles, +0.73% Ir)

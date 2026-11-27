@@ -1057,5 +1057,22 @@ mod tests {
             .expect("owned bytes")
             .expect("one doc");
         assert_eq!(owned_bytes.0.len(), 5_001);
+
+        // `Option<Spanned<u32>>` preserves the alias use-site span (`*b`) on both small and >4 KiB
+        // streaming paths.
+        let small_alias = "base: &b 42\ncopy: *b\n";
+        let big_alias = format!(
+            "{}{small_alias}",
+            "# padding to exceed 4 KiB streaming threshold\n".repeat(100)
+        );
+        for doc in [small_alias, big_alias.as_str()] {
+            let decoded: BTreeMap<String, Option<Spanned<u32>>> =
+                from_str(doc).expect("alias spanned");
+            assert_eq!(
+                decoded["copy"].as_ref().unwrap().span().slice(doc),
+                Some("*b")
+            );
+            assert_eq!(*decoded["copy"].as_ref().unwrap().get_ref(), 42);
+        }
     }
 }

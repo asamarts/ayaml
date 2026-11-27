@@ -20,6 +20,7 @@ use crate::composer::Anchors;
 use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::{Anchor, CollectionStyle, Event, ScalarStyle};
 use crate::limits::{AliasBudget, Limits};
+use crate::mapping::GlobalHasher;
 use crate::parser::EventCursor;
 use crate::resolver::resolve_scalar;
 use crate::span::Span;
@@ -834,7 +835,8 @@ fn apply_event_merge<'a>(
     limits: &Limits,
     budget: &mut AliasBudget,
 ) -> Result<(), Error> {
-    let mut seen: HashSet<Value> = HashSet::with_capacity(entries.len());
+    let mut seen: HashSet<Value, GlobalHasher> =
+        HashSet::with_capacity_and_hasher(entries.len(), GlobalHasher);
     for (k, _, _) in entries.iter() {
         if let Some(val) = node_key_value(k, limits.max_depth, false, budget, input_len, limits)? {
             seen.insert(val);
@@ -979,7 +981,7 @@ fn merge_entries<'a>(
     from_alias: bool,
     merge_span: Span,
     entries: &mut Vec<(Arc<EventNode<'a>>, Arc<EventNode<'a>>, bool)>,
-    seen: &mut HashSet<Value>,
+    seen: &mut HashSet<Value, GlobalHasher>,
     size: &mut usize,
     height: &mut usize,
     current_depth: usize,
@@ -987,7 +989,8 @@ fn merge_entries<'a>(
     input_len: usize,
     limits: &Limits,
 ) -> Result<(), Error> {
-    let mut inline_seen = (!from_alias).then(|| HashSet::with_capacity(src_entries.len()));
+    let mut inline_seen =
+        (!from_alias).then(|| HashSet::with_capacity_and_hasher(src_entries.len(), GlobalHasher));
     for (src_key, src_val, src_strip) in src_entries {
         let key_val = node_key_value(src_key, limits.max_depth, false, budget, input_len, limits)?;
         if let Some(ref mut local) = inline_seen
@@ -1047,8 +1050,9 @@ fn emit_node<'a>(
     budget: &mut AliasBudget,
     emitted_events: &mut usize,
 ) -> Result<(), Error> {
-    let mut emitted_anchors: HashMap<String, u64> = HashMap::new();
-    let mut open_anchors: HashMap<String, usize> = HashMap::new();
+    let mut emitted_anchors: HashMap<String, u64, GlobalHasher> =
+        HashMap::with_hasher(GlobalHasher);
+    let mut open_anchors: HashMap<String, usize, GlobalHasher> = HashMap::with_hasher(GlobalHasher);
     let mut stack = vec![EmitStep::Node {
         node: root,
         strip_anchors: false,
@@ -1259,4 +1263,159 @@ fn push_event<'a>(
         .map_err(|e| Error::from(e).with_span(span))?;
     out.push(event);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MergedEventStream, expand_single_document, is_dropped_core_collection_tag,
+        wrap_collection_tag,
+    };
+    use crate::error::{ErrorCode, ErrorKind};
+    use crate::event::Event;
+    use crate::limits::{AliasBudget, LimitKind, Limits};
+    use crate::mapping::Mapping;
+    use crate::tag::Tag;
+    use crate::value::Value;
+
+    #[test]
+    fn core_collection_tag_helpers_match_value_merge_rules() {
+        for dropped in [
+            Tag::new("tag:yaml.org,2002:", "map"),
+            Tag::new("tag:yaml.org,2002:", "seq"),
+            Tag::new("tag:yaml.org,2002:", "set"),
+            Tag::new("tag:yaml.org,2002:", "omap"),
+            Tag::new("tag:yaml.org,2002:", "pairs"),
+            Tag::new("tag:yaml.org,2002:", "int"),
+        ] {
+            assert!(is_dropped_core_collection_tag(&dropped), "{dropped}");
+            assert!(
+                matches!(
+                    wrap_collection_tag(Some(&dropped), Value::Mapping(Mapping::new())),
+                    Value::Mapping(_)
+                ),
+                "{dropped}"
+            );
+        }
+        for kept in [
+            Tag::new("!", "custom"),
+            Tag::new("!", "set"),
+            Tag::new("tag:yaml.org,2002:", "timestamp"),
+            Tag::new("tag:yaml.org,2002:", "binary"),
+            Tag::new("tag:yaml.org,2002:", "merge"),
+            Tag::new("tag:example.com,2024:", "map"),
+        ] {
+            assert!(!is_dropped_core_collection_tag(&kept), "{kept}");
+            assert!(
+                matches!(
+                    wrap_collection_tag(Some(&kept), Value::Mapping(Mapping::new())),
+                    Value::Tagged(_)
+                ),
+                "{kept}"
+            );
+        }
+    }
+
+    #[test]
+    fn merged_event_stream_enforces_cumulative_budget_across_siblings_and_documents() {
+        let header = "a0: &a0 [1,1,1,1,1,1,1,1,1,1]\n\
+                      a1: &a1 [*a0,*a0,*a0,*a0,*a0,*a0,*a0,*a0,*a0,*a0]\n";
+        let mut sibling_doc = String::from(header);
+        for i in 0..20 {
+            use std::fmt::Write as _;
+            let _ = writeln!(sibling_doc, "m{i}: {{ ? *a1 : 1, <<: {{}} }}");
+        }
+        let exp_limits = Limits::default().with_max_alias_expansion_bytes(128 * 1024);
+        let mut exp_stream = MergedEventStream::new(&sibling_doc, &exp_limits).expect("stream");
+        let mut exp_err = None;
+        while let Some(item) = exp_stream.next_event().transpose() {
+            if let Err(err) = item {
+                exp_err = Some(err);
+                break;
+            }
+        }
+        let err = exp_err.expect("sibling alias keys must charge cumulative expansion budget");
+        assert_eq!(err.kind(), ErrorKind::Limit);
+        assert_eq!(
+            err.limit().map(crate::LimitExceeded::kind),
+            Some(LimitKind::AliasExpansion)
+        );
+
+        // Two documents share one caller `AliasBudget` across `next_document_with_budget`.
+        let two_docs = "---\na: &a {x: 1}\nb: {<<: *a}\n---\nc: &c {y: 2}\nd: {<<: *c}\n";
+        let deref_limits = Limits::default().with_max_alias_dereferences(1);
+        let mut stream = MergedEventStream::new(two_docs, &deref_limits).expect("two-doc stream");
+        let mut budget = AliasBudget::default();
+        assert!(
+            stream
+                .next_document_with_budget(&mut budget)
+                .expect("doc 1 ok")
+                .is_some()
+        );
+        let doc2_err = stream
+            .next_document_with_budget(&mut budget)
+            .expect_err("doc 2 must exceed shared deref budget");
+        assert_eq!(doc2_err.kind(), ErrorKind::Limit);
+        assert_eq!(
+            doc2_err.limit().map(crate::LimitExceeded::kind),
+            Some(LimitKind::AliasDereferences)
+        );
+    }
+
+    #[test]
+    fn merge_alias_errors_report_composition_kind_and_fuse_stream_cleanly() {
+        let limits = Limits::default();
+        for (input, expected_code) in [
+            ("out:\n  <<: *missing\n", ErrorCode::UnknownAnchor),
+            ("out:\n  <<: [*missing]\n", ErrorCode::UnknownAnchor),
+            ("a: &a\n  <<: *a\n", ErrorCode::CyclicAlias),
+        ] {
+            let mut stream = MergedEventStream::new(input, &limits).expect("stream");
+            let mut saw_err = None;
+            while let Some(item) = stream.next_event().transpose() {
+                if let Err(err) = item {
+                    saw_err = Some(err);
+                    break;
+                }
+            }
+            let err = saw_err.expect("merge alias error");
+            assert_eq!(err.kind(), ErrorKind::Composition, "{input:?}: {err}");
+            assert_eq!(err.code(), expected_code, "{input:?}: {err}");
+            // Error fusion: subsequent pulls yield Ok(None).
+            assert!(
+                stream.next_event().expect("fused stream").is_none(),
+                "{input:?}: stream must fuse"
+            );
+        }
+    }
+
+    #[test]
+    fn merged_stream_preserves_bom_lexical_scoping_and_single_doc_boundaries() {
+        let limits = Limits::default();
+        let bom_input = "\u{feff}a: &a {x: 1}\nb: {<<: *a}\n";
+        let mut bom_stream = MergedEventStream::new(bom_input, &limits).expect("bom stream");
+        let mut events = Vec::new();
+        while let Some(ev) = bom_stream.next_event().expect("bom events") {
+            events.push(ev);
+        }
+        assert!(matches!(
+            events.first(),
+            Some(Event::StreamStart { span }) if span.start() == 3 && span.end() == 3
+        ));
+
+        // Lexical anchor epoch scoping: redefining `&v` before merge does not hijack earlier alias.
+        let scoped = "a: &v 1\nbase: &b {k: *v}\nc: &v 2\nout: {<<: *b}\n";
+        let (expanded, _) = expand_single_document(scoped, &limits).expect("lexical scoping");
+        assert!(expanded.iter().any(|e| matches!(
+            e,
+            Event::Scalar { value, .. } if value == "1"
+        )));
+
+        // `expand_single_document` handles empty streams and rejects trailing documents.
+        let (empty, _) = expand_single_document("", &limits).expect("empty stream");
+        assert_eq!(empty.len(), 0);
+        let trailing_err =
+            expand_single_document("---\na: 1\n---\nb: 2\n", &limits).expect_err("trailing doc");
+        assert_eq!(trailing_err.code(), ErrorCode::TrailingDocuments);
+    }
 }
