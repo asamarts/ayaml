@@ -15,7 +15,7 @@ use std::borrow::Cow;
 use std::fmt;
 
 use crate::limits::{LimitExceeded, LimitKind, MAX_DEPTH};
-use crate::mapping::Mapping;
+use crate::mapping::{Mapping, SMALL_LIMIT};
 use crate::number::Number;
 use crate::tag::{Tag, TaggedValue};
 use crate::value::Value;
@@ -135,6 +135,62 @@ impl<'de> Deserialize<'de> for Mapping {
 
 struct MappingVisitor;
 
+/// Build a [`Mapping`] from a Serde [`MapAccess`] without intermediate growth or shrink
+/// reallocations on small unhinted mappings (`<= SMALL_LIMIT` entries).
+fn visit_mapping_entries<'de, A: MapAccess<'de>>(mut access: A) -> Result<Mapping, A::Error> {
+    if let Some(hint) = access.size_hint() {
+        let mut mapping = Mapping::with_capacity(hint.min(4096));
+        while let Some((key, value)) = access.next_entry()? {
+            mapping.insert_new(key, value).map_err(|key| {
+                serde::de::Error::custom(format!("duplicate entry with key {key}"))
+            })?;
+        }
+        if hint > 4096 {
+            mapping.shrink_to_fit();
+        }
+        return Ok(mapping);
+    }
+    visit_mapping_unhinted(access)
+}
+
+fn visit_mapping_unhinted<'de, A: MapAccess<'de>>(mut access: A) -> Result<Mapping, A::Error> {
+    let Some((first_key, first_value)) = access.next_entry()? else {
+        return Ok(Mapping::new());
+    };
+    let mut small = [const { (Value::Null, Value::Null) }; SMALL_LIMIT];
+    small[0] = (first_key, first_value);
+    let mut len = 1_usize;
+    while let Some((key, value)) = access.next_entry()? {
+        if len < SMALL_LIMIT {
+            if let Some((existing, _)) = small[..len].iter().find(|(existing, _)| existing == &key)
+            {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate entry with key {}",
+                    crate::value::key_text(existing)
+                )));
+            }
+            small[len] = (key, value);
+            len += 1;
+        } else {
+            let mut mapping = Mapping::with_capacity(14);
+            for (k, v) in small {
+                drop(mapping.insert_new(k, v));
+            }
+            mapping.insert_new(key, value).map_err(|key| {
+                serde::de::Error::custom(format!("duplicate entry with key {key}"))
+            })?;
+            while let Some((key, value)) = access.next_entry()? {
+                mapping.insert_new(key, value).map_err(|key| {
+                    serde::de::Error::custom(format!("duplicate entry with key {key}"))
+                })?;
+            }
+            mapping.shrink_to_fit();
+            return Ok(mapping);
+        }
+    }
+    Ok(Mapping::from_small_drain(small.into_iter().take(len)))
+}
+
 impl<'de> Visitor<'de> for MappingVisitor {
     type Value = Mapping;
 
@@ -142,20 +198,8 @@ impl<'de> Visitor<'de> for MappingVisitor {
         formatter.write_str("a YAML mapping")
     }
 
-    fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
-        let told = access.size_hint();
-        let mut mapping = Mapping::with_capacity(told.unwrap_or(0).min(4096));
-        while let Some((key, value)) = access.next_entry()? {
-            mapping.insert_new(key, value).map_err(|key| {
-                serde::de::Error::custom(format!("duplicate entry with key {key}"))
-            })?;
-        }
-        // As for a `Value`: a mapping that wasn't told its size (or exceeded the initial cap)
-        // gives back what it doesn't need.
-        if told.is_none_or(|hint| hint > 4096) {
-            mapping.shrink_to_fit();
-        }
-        Ok(mapping)
+    fn visit_map<A: MapAccess<'de>>(self, access: A) -> Result<Self::Value, A::Error> {
+        visit_mapping_entries(access)
     }
 }
 
@@ -243,36 +287,25 @@ impl<'de> Visitor<'de> for ValueVisitor {
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
-        let told = access.size_hint();
-        let hint = told.unwrap_or(0);
-        let mut sequence = if (1..=1024).contains(&hint) {
-            Vec::with_capacity(hint)
-        } else {
-            Vec::new()
-        };
-        while let Some(value) = access.next_element()? {
-            sequence.push(value);
+        if let Some(hint) = access.size_hint() {
+            let mut sequence = if (1..=1024).contains(&hint) {
+                Vec::with_capacity(hint)
+            } else {
+                Vec::new()
+            };
+            while let Some(value) = access.next_element()? {
+                sequence.push(value);
+            }
+            if hint > 1024 {
+                sequence.shrink_to_fit();
+            }
+            return Ok(Value::Sequence(sequence));
         }
-        // A collection that wasn't told its size (or exceeded the initial cap) has grown by
-        // doubling, and would keep up to twice the room that its entries need.
-        if told.is_none_or(|hint| hint > 1024) {
-            sequence.shrink_to_fit();
-        }
-        Ok(Value::Sequence(sequence))
+        visit_seq_unhinted(access)
     }
 
-    fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
-        let told = access.size_hint();
-        let mut mapping = Mapping::with_capacity(told.unwrap_or(0).min(4096));
-        while let Some((key, value)) = access.next_entry()? {
-            mapping.insert_new(key, value).map_err(|key| {
-                serde::de::Error::custom(format!("duplicate entry with key {key}"))
-            })?;
-        }
-        if told.is_none_or(|hint| hint > 4096) {
-            mapping.shrink_to_fit();
-        }
-        Ok(Value::Mapping(mapping))
+    fn visit_map<A: MapAccess<'de>>(self, access: A) -> Result<Self::Value, A::Error> {
+        visit_mapping_entries(access).map(Value::Mapping)
     }
 
     /// A tagged node arrives as an enum whose variant is the tag's Serde
@@ -291,6 +324,33 @@ impl<'de> Deserialize<'de> for Value {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserializer.deserialize_any(ValueVisitor)
     }
+}
+
+fn visit_seq_unhinted<'de, A: SeqAccess<'de>>(mut access: A) -> Result<Value, A::Error> {
+    let Some(first) = access.next_element()? else {
+        return Ok(Value::Sequence(Vec::new()));
+    };
+    let mut small = [const { Value::Null }; SMALL_LIMIT];
+    small[0] = first;
+    let mut len = 1_usize;
+    while let Some(value) = access.next_element()? {
+        if len < SMALL_LIMIT {
+            small[len] = value;
+            len += 1;
+        } else {
+            let mut sequence = Vec::with_capacity(SMALL_LIMIT * 2);
+            sequence.extend(small);
+            sequence.push(value);
+            while let Some(value) = access.next_element()? {
+                sequence.push(value);
+            }
+            sequence.shrink_to_fit();
+            return Ok(Value::Sequence(sequence));
+        }
+    }
+    let mut sequence = Vec::with_capacity(len);
+    sequence.extend(small.into_iter().take(len));
+    Ok(Value::Sequence(sequence))
 }
 
 /// Deserialize a value from an already-composed generic value.
@@ -1733,222 +1793,4 @@ impl SerializeStructVariant for ValueStructVariantSerializer {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::Value;
-    use serde::Deserialize as _;
-
-    #[test]
-    fn serde_json_round_trips_generic_values() {
-        let value = crate::parse_value("a: 1\nb:\n  - true\n  - text\n").expect("parse");
-        let json = serde_json::to_string(&value).expect("serialize");
-        let decoded: Value = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(decoded, value);
-    }
-
-    #[test]
-    fn serde_deserializes_scalars_and_sequences() {
-        let value: Value = serde_json::from_str("[null, true, 3, 1.5, \"x\"]").expect("value");
-        assert_eq!(value[0], Value::Null);
-        assert_eq!(value[1], Value::Bool(true));
-        assert_eq!(value[2].as_u64(), Some(3));
-        assert_eq!(value[3].as_f64(), Some(1.5));
-        assert_eq!(value[4], Value::from("x"));
-    }
-
-    #[test]
-    fn a_string_target_accepts_only_string_values() {
-        use serde::Deserialize as _;
-        assert_eq!(String::deserialize(Value::from("text")).unwrap(), "text");
-        for value in [Value::from(false), Value::from(42_u64), Value::Null] {
-            assert!(String::deserialize(value).is_err());
-        }
-    }
-
-    #[test]
-    fn value_deserializer_accepts_plain_unit_enum_variants() {
-        #[derive(Debug, PartialEq, serde::Deserialize)]
-        #[serde(rename_all = "snake_case")]
-        enum Mode {
-            Fast,
-            Careful,
-        }
-
-        let mode = Mode::deserialize(Value::from("careful")).expect("unit variant");
-        assert_eq!(mode, Mode::Careful);
-    }
-
-    /// A key that is a null, a boolean or a number is kept as it is, and its text is written only
-    /// for an error's path. Tests can't count allocations, so this looks at what a read keeps.
-    #[test]
-    fn a_scalar_key_is_kept_without_its_text() {
-        use super::{PlainKey, ValueMapAccess};
-        use crate::tag::{Tag, TaggedValue};
-        use serde::de::{IgnoredAny, MapAccess as _};
-
-        let tagged = Value::Tagged(Box::new(TaggedValue::new(
-            Tag::new("!", "t"),
-            Value::from(7_u64),
-        )));
-        for (key, text) in [
-            (Value::Null, "null"),
-            (Value::from(true), "true"),
-            (Value::from(42_u64), "42"),
-            (Value::from(-3_i64), "-3"),
-            (Value::from(1.5), "1.5"),
-            (tagged, "7"),
-        ] {
-            let mut mapping = crate::Mapping::new();
-            mapping.insert(key.clone(), Value::Null);
-            let mut access = ValueMapAccess {
-                iter: mapping.into_iter(),
-                key: None,
-                plain_key: None,
-                value: None,
-            };
-            access.next_key::<IgnoredAny>().expect("a key");
-            assert!(access.key.is_none(), "{key:?} kept text");
-            let kept = access.plain_key.expect("the key is kept");
-            assert!(
-                matches!(
-                    kept,
-                    PlainKey::Null | PlainKey::Bool(_) | PlainKey::Number(_)
-                ),
-                "{key:?}"
-            );
-            assert_eq!(kept.to_string(), text, "{key:?}");
-        }
-        // A string key keeps its own text, which isn't copied, and a collection keeps nothing.
-        let mut mapping = crate::Mapping::new();
-        mapping.insert(Value::from("name"), Value::Null);
-        mapping.insert(Value::Sequence(vec![]), Value::Null);
-        let mut access = ValueMapAccess {
-            iter: mapping.into_iter(),
-            key: None,
-            plain_key: None,
-            value: None,
-        };
-        access.next_key::<IgnoredAny>().expect("a key");
-        assert_eq!(access.key.as_deref(), Some("name"));
-        access.next_value::<IgnoredAny>().expect("a value");
-        access.next_key::<IgnoredAny>().expect("a key");
-        assert!(access.key.is_none() && access.plain_key.is_none());
-    }
-
-    /// A variant's name that no path keeps is given to the visitor, and one that a path keeps is
-    /// lent to it.
-    #[test]
-    fn a_variant_s_name_is_moved_unless_a_path_keeps_it() {
-        use super::ValueEnumAccess;
-        use serde::de::{DeserializeSeed, Deserializer, EnumAccess as _, Visitor};
-        use std::borrow::Cow;
-
-        /// Where the text it was handed lives.
-        struct Address;
-        impl<'de> DeserializeSeed<'de> for Address {
-            type Value = usize;
-            fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<usize, D::Error> {
-                deserializer.deserialize_identifier(self)
-            }
-        }
-        impl Visitor<'_> for Address {
-            type Value = usize;
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("a name")
-            }
-            fn visit_string<E>(self, text: String) -> Result<usize, E> {
-                Ok(text.as_ptr().addr())
-            }
-            // The name is always handed over owned, so a visitor that takes only that form reads it.
-            fn visit_str<E: serde::de::Error>(self, _text: &str) -> Result<usize, E> {
-                Err(E::custom("the name was only lent"))
-            }
-        }
-
-        let name = String::from("Right");
-        let address = name.as_ptr().addr();
-        let access = ValueEnumAccess {
-            variant: Cow::Owned(name),
-            value: Value::Null,
-            in_path: false,
-            bare: true,
-            entered: None,
-        };
-        let (handed, variant) = access.variant_seed(Address).expect("a name");
-        assert_eq!(handed, address, "the name was copied");
-        assert!(variant.name.is_none());
-
-        let key = String::from("Right");
-        let access = ValueEnumAccess {
-            variant: Cow::Borrowed(&key),
-            value: Value::Null,
-            in_path: true,
-            bare: true,
-            entered: None,
-        };
-        let (handed, variant) = access.variant_seed(Address).expect("a name");
-        assert_ne!(handed, key.as_ptr().addr());
-        assert!(matches!(variant.name, Some(Cow::Borrowed("Right"))));
-    }
-
-    /// A value read as an enum gives up its tag's suffix, or its string, as the variant's name,
-    /// without copying it.
-    #[test]
-    fn an_enum_s_name_is_moved_out_of_its_value() {
-        use super::enum_parts;
-        use crate::tag::{Tag, TaggedValue};
-
-        let suffix = String::from("Right");
-        let address = suffix.as_ptr().addr();
-        let tagged = Value::Tagged(Box::new(TaggedValue::new(
-            Tag::local(suffix),
-            Value::from(5_u64),
-        )));
-        let (name, value) = enum_parts(tagged).expect("a variant");
-        assert_eq!((name.as_str(), name.as_ptr().addr()), ("Right", address));
-        assert_eq!(value, Value::from(5_u64));
-
-        let text = String::from("Left");
-        let address = text.as_ptr().addr();
-        let (name, value) = enum_parts(Value::String(text)).expect("a variant");
-        assert_eq!((name.as_str(), name.as_ptr().addr()), ("Left", address));
-        assert!(value.is_null());
-
-        let key = String::from("Both");
-        let address = key.as_ptr().addr();
-        let mut mapping = crate::Mapping::new();
-        mapping.insert(Value::String(key), Value::from(1_u64));
-        let (name, value) = enum_parts(Value::Mapping(mapping)).expect("a variant");
-        assert_eq!((name.as_str(), name.as_ptr().addr()), ("Both", address));
-        assert_eq!(value, Value::from(1_u64));
-    }
-    /// A mapping that is told its size reserves that room once, and keeps no more: it holds
-    /// what one made for that many entries holds. Grown from nothing it would hold more.
-    #[test]
-    fn a_mapping_that_is_told_its_size_reserves_it_once() {
-        use serde::Deserialize as _;
-        use serde::de::value::{Error as ValueError, MapDeserializer, SeqDeserializer};
-
-        for entries in [3_usize, 100, 1_000] {
-            let pairs = || (0..entries).map(|index| (format!("k{index}"), index as u64));
-            let room = crate::Mapping::with_capacity(entries).capacity();
-            let told = MapDeserializer::<_, ValueError>::new(pairs());
-            let mapping = crate::Mapping::deserialize(told).expect("a mapping");
-            assert_eq!((mapping.len(), mapping.capacity()), (entries, room));
-            // A `Value` that is a mapping, or a sequence, does the same.
-            let told = MapDeserializer::<_, ValueError>::new(pairs());
-            let Value::Mapping(mapping) = Value::deserialize(told).expect("a mapping") else {
-                panic!("a mapping");
-            };
-            assert_eq!((mapping.len(), mapping.capacity()), (entries, room));
-            let told = SeqDeserializer::<_, ValueError>::new(0..entries as u64);
-            let Value::Sequence(items) = Value::deserialize(told).expect("a sequence") else {
-                panic!("a sequence");
-            };
-            assert_eq!(items.len(), entries);
-            // A sequence takes the size for its room from 8 items on, up to 1,024.
-            if entries >= 8 {
-                assert_eq!(items.capacity(), entries);
-            }
-        }
-    }
-}
+mod tests;

@@ -29,8 +29,8 @@ enum State {
     Finished,
 }
 
-/// A streaming pull cursor used by the public event traversal, `SpannedTree`, `Deserializer`,
-/// and merge-key expansion.
+/// A streaming pull cursor used by the public event traversal, `Deserializer`,
+/// and merge-key expansion (including `SpannedTree` when merge keys are enabled).
 pub(crate) struct EventCursor<'a> {
     parser: Parser<'a>,
     state: State,

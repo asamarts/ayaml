@@ -761,7 +761,7 @@ the change that closes AY-104.
 ## D95: A typed read builds its value from events, and reports what a tree of the document reports
 
 **Date:** 2026-11-18
-**Status:** Accepted
+**Status:** Accepted (4 KiB tree-fallback split superseded by D107)
 
 **Decision.** A reader of one document into a type reads an input of more than 4 KiB from the
 parser's events, which it takes as its target asks for values. A scalar is one node that the
@@ -1184,3 +1184,44 @@ data-driven benchmark views without duplicating prose.
 `npm --prefix site install --no-audit --no-fund && npm --prefix site run build`, validates every internal link and fragment
 with `npm --prefix site run check:links`, runs `cargo test --doc -p ayaml-conformance --all-features --locked`,
 and deploys `site/dist` to GitHub Pages.
+
+## D107: Stream typed Serde reads at every input size and stream `SpannedTree` directly
+
+**Date:** 2026-11-26
+**Status:** Accepted (supersedes the 4 KiB tree-fallback threshold in D95)
+
+**Decision.** Remove the `SMALL_INPUT_BYTES = 4096` tree-fallback threshold in `crates/ayaml/src/typed.rs`
+so single-document typed Serde decoding streams directly from parser events at every input size,
+while keeping the cold whole-document error fallback (D95) for exact document-order error precedence
+and keeping `from_str_by_tree` under `#[cfg(any(test, feature = "bench-internals"))]` as a differential
+test oracle. Combine unified streaming with:
+
+- Input-sized `LineWindow` batch limits and `DocumentEvents` lookahead queues (small `<= 512 B`,
+  medium `<= 8 KiB`, full `> 8 KiB`) plus `refill_for_hint()` so small collections still provide exact
+  Serde `size_hint()`.
+- Shared flat-stack duplicate-key tracking (`Stream::seen_keys`) with linear comparison for small
+  mappings, zero-box unambiguous string keys (`PendingStreamKey::String`), and direct untagged scalar
+  fast paths on `StreamDeserializer` that bypass constructing an 80-byte `Node<'de>`.
+- Stack-buffered small-collection fast paths (`<= 8` entries) in `MappingVisitor` and `ValueVisitor`
+  when `size_hint().is_none()`.
+- Direct `EventSink::Spanned` streaming into `spanned::Builder` (for default and `compat` non-merged
+  `SpannedTree` parses), compact 56-byte `SpannedNode` layout with transient build-only metadata,
+  shared builder scratch buffers, LIFO pending-key stack, and borrowed `SpannedKey<'a>` small/large
+  duplicate tracking.
+
+**Alternatives.** Keep the 4 KiB tree fallback: causes a sharp peak-heap cliff just below 4 KiB
+(`boundary-4kb-below` peaking 2x higher than `boundary-4kb-above`) and adds ~16 allocations on tiny
+frontmatter inputs. Lower the threshold to 512 B: shifts the cliff rather than eliminating it and
+keeps two live production decoding paths.
+
+**Why.** After streaming line-window scanning (AY-180), eliminating the 4 KiB split removes the
+peak-heap cliff completely, cuts `frontmatter-tiny` typed peak heap below 3 KiB and allocations to
+18, aligns `typed_value` allocation count within a handful of allocations of `parse_value`, and
+reduces `SpannedTree` peak heap by roughly 70% and allocations by roughly 80% with zero public API
+changes.
+
+**Consequences.** Any single-document typed read (even `<= 4 KiB`) streams directly from events, so
+a stateful `DeserializeSeed` must still discard partial writes on error as documented on
+`from_str_seed`. `SpannedTree::parse_with` with `merge_keys(true)` continues to flow through the
+spanned merge-key event iterator. Both `ayaml_typed_from_events` CI jobs and differential
+`from_str_by_tree` tests continue to verify exact parity.

@@ -33,17 +33,21 @@ Each layer has a narrow responsibility:
 - The **resolver** implements the documented scalar profile. Events always
   retain the original scalar text, style, tag, and span before resolution.
 - The **Serde layer** decodes from the same event stream and preserves source
-  spans through typed errors. A read of one document of more than 4 KiB takes
-  the events from the parser as its target asks for values, and builds no tree
-  of the document: a scalar is read and dropped, and a collection is read entry
-  by entry. It builds a tree only of what is read whole or again: a node with an
-  anchor, a collection that keeps its tag, a mapping key, and what an enum
-  reads. A target can tell the two readers apart in two ways only: collection
-  size hints are bounded by the parser's lookahead window (exact for root flow
-  collections), and it may have read the start of a document that is then
-  refused (D95). A smaller read builds the document's tree and reads from that,
-  `Deserializer` decodes each document directly from spanned events, and every
-  read reports the error that the tree gives (D95).
+  spans through typed errors. Single-document typed reads (`from_str*`,
+  `from_slice*`, `from_reader*` when `merge_keys` is disabled) stream events directly
+  from the parser as the target asks for values at every input size (D107),
+  building no whole-document tree: untagged scalars are read directly without
+  wrapping into a `Node`, and collections are read entry by entry with inline
+  small-map duplicate tracking. A tree is built only for nodes that must be
+  read whole or replayed: a node with an anchor, a collection that keeps its
+  tag, a complex mapping key, or an enum node (as well as `DocumentDeserializer`
+  and `merge_keys(true)` reads). A target can observe streaming
+  in only two ways: collection size hints are bounded by the parser's
+  lookahead window (exact for root flow collections and small collections that
+  fit inside the lookahead queue), and it may have read the start of a
+  document that is then refused (D95, D107). `Deserializer` likewise decodes
+  each document directly from spanned events, and every read reports the error
+  that the whole-document tree gives (D95).
   An error below the document's root also names the
   path to what failed, as in `tasks[0].limits.cpu`. The path is built only as an
   error travels outwards, so a read from the input that succeeds allocates and

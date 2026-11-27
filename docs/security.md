@@ -80,7 +80,7 @@ the caller does not trust the input.
 ### Streaming typed reads and side-effecting seeds
 
 Single-document typed readers (`from_str`, `from_slice`, `from_str_seed`, and their `_with`
-forms) stream inputs larger than 4 KiB directly from parser events without materializing an
+forms) stream inputs at every size directly from parser events without materializing an
 intermediate document tree. If a late syntax or duplicate-key fault occurs, the reader drops
 the first pass and rebuilds the document to report the earliest document error. A custom
 `DeserializeSeed` that mutates external state while reading will have observed the prefix

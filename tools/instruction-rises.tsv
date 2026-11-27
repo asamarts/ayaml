@@ -11,3 +11,4 @@ typed	aliases-1000	7	AY-104: as for the short sequence; each alias is still read
 emit	aliases-1000	6	pre-1.0 hardening PR: emitter.rs is untouched (Ir +0.00%); binary code layout shift from merge/frontmatter/Spanned hardening adds +5.25% simulated Callgrind EstCycles
 emit	nested-keys	6	pre-1.0 hardening PR: emitter.rs is untouched (Ir +0.09%); binary code layout shift from merge/frontmatter/Spanned hardening adds +5.61% simulated Callgrind EstCycles
 emit	nested-keys	6	AY-180: emit_flow_mapping disassembly is byte-identical (0 Ir delta); binary address shift causes Callgrind branch-predictor aliasing (+5.26% simulated EstCycles, +0.73% Ir)
+typed	frontmatter-tiny	7	AY-181: unifying <= 4 KiB typed decoding onto the streaming reader (D107) keeps Ir near-flat (+0.07%) while adding simulated cache/branch misses (+5.26% EstCycles) on unhinted 9-key Value decoding in exchange for -49.7% peak heap and -28.3% allocations

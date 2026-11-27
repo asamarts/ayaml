@@ -93,7 +93,7 @@ report different ones, because they don't check in the same order:
   `Deserializer` reads a document's events before it builds from them, so within a document it
   reports a syntax error before an earlier problem in what the events build, such as a
   duplicate key.
-- A reader of one document into a type reads an input of more than 4 KiB from its events, and
+- A reader of one document into a type streams from its events at every input size, and
   reports what is wrong with the document before anything about the target, wherever each
   stands. To do that it validates the remainder of the document on target-side errors and, when
   needed, reads a refused input a second time, building the document as the other readers do.
@@ -193,18 +193,19 @@ constructed, so successful parses allocate no line-start index.
   remaining tokens from the higher of the whole prefix's density and recent density (starting from
   the first content token), capped at eight times the tokens already scanned; once that oversized
   line retires, the buffer is released immediately.
-- A reader of one document into a type, such as `from_str`, holds no tree of an input of more
-  than 4 KiB beside those: it builds the target's value from the events, and keeps a tree only
+- A reader of one document into a type, such as `from_str`, holds no whole-document tree at any
+  input size: it builds the target's value directly from events, and keeps a tree only
   of what an alias may read again, of a collection that keeps its tag, of what an enum reads,
-  and of a mapping's key while its value is read. With duplicate keys refused it also holds a
-  set of each open mapping's keys, at 24 bytes a slot and the text of a key that isn't taken
-  from the source as it stands. A root that is built whole, because it has an anchor or a tag
-  that it keeps or because an enum reads it, is the document as a tree: the tokens are freed
-  before its target reads it. A document dense in anchored nodes or containing a large non-root
-  anchored, kept-tag, or complex-key collection is likewise built as a tree in a single scan
-  with its tokens freed before its target reads it; a large non-root node that reaches the end
-  of the document (such as an enum) also frees the token arena before the target reads it. A
-  read that fails frees its tokens and then builds the document once more to report the error.
+  and of a complex mapping key while its value is read. With duplicate keys refused it tracks
+  small mappings (up to 12 scalar keys) in a shared flat stack and promotes larger mappings to a
+  hash table (24 bytes a slot plus any decoded key text). A root that is built whole, because it
+  has an anchor or a tag that it keeps or because an enum reads it, is the document as a tree:
+  the tokens are freed before its target reads it. A document dense in anchored nodes or
+  containing a large non-root anchored, kept-tag, or complex-key collection is likewise built as
+  a tree in a single scan with its tokens freed before its target reads it; a large non-root
+  node that reaches the end of the document (such as an enum) also frees the token arena before
+  the target reads it. A read that fails frees its tokens and then builds the document once more
+  to report the error.
 - A collection that is read from events tells its target its exact size whenever it is a root
   flow collection (whose entries the parser counts first) or whenever its end is already among
   the events waiting in the lookahead queue (which covers most small block and nested

@@ -12,7 +12,7 @@ key caveats across `ayaml` and `ayaml-edit`.
 
 | Task | Recommended API | Key behavior |
 | --- | --- | --- |
-| Decode one document into a Rust struct | `from_str`, `from_str_with`, `from_slice`, `from_slice_with`, `from_str_seed`, `from_str_seed_with` | Streams directly from events above 4 KiB; rejects trailing documents and duplicate keys. |
+| Decode one document into a Rust struct | `from_str`, `from_str_with`, `from_slice`, `from_slice_with`, `from_str_seed`, `from_str_seed_with` | Streams directly from events at every input size; rejects trailing documents and duplicate keys. |
 | Zero-copy `&str` struct decode | `from_str_borrowed`, `from_slice_borrowed`, `from_str_with`, `from_slice_with` | Borrows unescaped scalars straight from the input slice; use `Cow<'a, str>` or `String` when escapes or folding may occur. |
 | Bounded I/O stream decode | `from_reader`, `from_reader_with` | Stops reading after `max_input_bytes + 1` bytes before UTF-8 validation. |
 | In-memory `Value` <-> Serde conversion | `from_value`, `from_value_seed`, `to_value` | Converts between `ayaml::Value` and typed Rust structs without re-parsing text (`from_value` rejects `Spanned<T>` and treats `Value::Null` as explicit null). |

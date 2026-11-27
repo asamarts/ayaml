@@ -87,6 +87,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and node hashes on the process-wide cryptographic SipHash-1-3 `GlobalHasher` and added inline
   `<= 8`-key `SeenScalarKeys` for zero-allocation small-mapping duplicate checks during typed
   decoding.
+- Unified single-document typed Serde decoding to stream directly from parser events at every input
+  size (removing the 4 KiB tree-fallback cliff, D107) with input-sized `LineWindow` batch limits
+  and `DocumentEvents` lookahead queues, shared flat-stack duplicate-key tracking, zero-box string
+  keys, direct untagged scalar deserialization fast paths, and stack-buffered small unhinted
+  `Value`/`Mapping` visitors — cutting `frontmatter-tiny` typed peak heap to 2.85 KiB (18
+  allocations), eliminating the 4 KiB peak-heap cliff (`boundary-4kb-below`/`above` at 31.2/33.1
+  KiB and 385/418 allocations), and bringing `openapi-spec`/`scale-openapi-1mb` `typed_value`
+  allocations within 1 to 5 allocations of `parse_value`.
+- Streamed `SpannedTree::parse` and `SpannedTree::parse_compat_with` directly via
+  `EventSink::Spanned`, compacted `SpannedNode` from 152 B to 56 B (`Entry` from 312 B to 120 B)
+  with transient build-only metadata, added reusable builder scratch buffers, a LIFO pending-key
+  stack, borrowed `SpannedKey` small/large duplicate tracking, and zero-allocation string key
+  lookups — reducing `SpannedTree` peak heap by 58% to 70%, allocations by 77% to 82%, and
+  instruction counts by 14% to 23% across domain workloads with zero public API changes.
 
 ## [0.2.3] — 2026-11-21
 

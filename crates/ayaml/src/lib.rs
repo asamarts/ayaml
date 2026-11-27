@@ -372,7 +372,7 @@ pub mod compat {
     /// Deserialize one document with a caller-supplied seed under the
     /// compatibility policies.
     ///
-    /// An input of more than 4 KiB is read into the seed as it is parsed, as
+    /// Inputs at every size are streamed directly into the seed as they are parsed, as
     /// [`from_str`](crate::from_str) says. A seed that writes to its caller's data as it reads
     /// may have written the start of a document that is then refused, so on an error what it
     /// wrote is to be dropped.
@@ -669,8 +669,8 @@ pub mod internals {
         crate::composer::compose_documents(events, input_len, limits)
     }
 
-    /// Decode one document into a typed value by building its whole tree first, as a typed read
-    /// of a small input does. `compat` reads with the compatibility scanner and keeps duplicate
+    /// Decode one document into a typed value by building its whole tree first (internal oracle).
+    /// `compat` reads with the compatibility scanner and keeps duplicate
     /// keys, as `compat::from_str` does, but reports errors as default mode words them. The
     /// tests compare this reader with [`from_str_by_events`].
     ///
@@ -708,8 +708,8 @@ pub mod internals {
         )
     }
 
-    /// Decode one document into a typed value from the parser's events, as a typed read of a
-    /// larger input does, whatever this input's size. `compat` is as for [`from_str_by_tree`].
+    /// Decode one document into a typed value directly from the parser's events, matching
+    /// [`crate::from_str`]. `compat` is as for [`from_str_by_tree`].
     ///
     /// # Errors
     ///
@@ -1141,10 +1141,11 @@ fn parse_stream_documents(input: &str, limits: &Limits) -> Result<Vec<Value>, Er
 /// documents are rejected. An error names the span of the YAML node it is about. Use
 /// `ayaml::compat` for libyaml-compatible decoding.
 ///
-/// An input of more than 4 KiB is read into the target as it is parsed. The value and the
-/// error are what they would be otherwise, but the target's `Deserialize` may have run on the
+/// Inputs at every size are streamed directly into the target as they are parsed. The value and
+/// the error are what they would be otherwise, but the target's `Deserialize` may have run on the
 /// start of a document that is then refused, and collection size hints are bounded by the
-/// parser's lookahead window (exact for root flow collections).
+/// parser's lookahead window (exact for root flow collections and small collections inside the
+/// lookahead queue).
 ///
 /// # Errors
 ///
@@ -1234,10 +1235,10 @@ pub fn from_str_borrowed_with_limits<'de, T: serde::Deserialize<'de>>(
 /// `input`.
 ///
 /// It reads as [`from_str_borrowed`] does, under the default YAML 1.2.2 rules and limits.
-/// Duplicate keys and trailing documents are rejected. An input of more than 4 KiB is read into
-/// the seed as it is parsed, as [`from_str`] says: a seed that writes to its caller's data as it
-/// reads may have written the start of a document that is then refused, so on an error what it
-/// wrote is to be dropped.
+/// Duplicate keys and trailing documents are rejected. Inputs at every size are streamed directly
+/// into the seed as they are parsed, as [`from_str`] says: a seed that writes to its caller's data
+/// as it reads may have written the start of a document that is then refused, so on an error what
+/// it wrote is to be dropped.
 ///
 /// # Errors
 ///

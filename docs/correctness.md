@@ -126,11 +126,11 @@ silent formatting corruption during source-preserving edits.
   [`crates/ayaml/tests/shared_vectors.rs`](https://github.com/asamarts/ayaml/blob/main/crates/ayaml/tests/shared_vectors.rs)
   validates `LineIndex` UTF-8, Unicode scalar, and UTF-16 column conversions against shared
   format-contract test vectors under `tests/vectors/`.
-- **Forced event-stream equivalence:** Single-document typed Serde decoding uses an
-  in-memory tree for inputs up to 4 KiB and streams directly from parser events above 4 KiB.
-  Every PR runs the entire `ayaml` test suite a second time with
-  `RUSTFLAGS="--cfg ayaml_typed_from_events"`, forcing even tiny test inputs through the
-  event-streaming decoder so both paths are guaranteed to agree on every edge case.
+- **Event-stream vs. tree oracle equivalence:** Single-document typed Serde decoding streams
+  directly from parser events at every input size, while retaining the whole-document tree
+  reader as an internal test oracle (`from_str_by_tree`). Differential tests and property tests
+  verify both readers agree on every value and error, and every PR runs the full `ayaml` test
+  suite under `RUSTFLAGS="--cfg ayaml_typed_from_events"` as well.
 - **Runtime self-verification in `ayaml-edit`:** Before `ayaml-edit` returns
   `Ok(VerifiedEdit)`, it re-parses the spliced YAML with `ayaml` and verifies that both the
   resulting `Value` tree and the canonical event stream match the exact intended edit and
@@ -215,7 +215,7 @@ document with anchors) that humans rarely write by hand.
 - Every PR runs the default case count; a daily scheduled workflow
   ([`.github/workflows/proptest.yml`](https://github.com/asamarts/ayaml/blob/main/.github/workflows/proptest.yml))
   scales up to **16,384** generated cases per property in `properties` (release mode, plus
-  8,192 release cases with `RUSTFLAGS="--cfg ayaml_typed_from_events"` forcing event-stream
+  8,192 release cases with `RUSTFLAGS="--cfg ayaml_typed_from_events"` exercising event-stream
   typed decoding at every input size) and **2,048** cases per property across `frontmatter`,
   `spanned_typed`, `merge_keys`, and `ayaml-edit`.
 

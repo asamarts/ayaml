@@ -175,14 +175,12 @@ counting allocator in `fuzz/src/bin/memcount.rs`:
 What holds those peaks down: the token arena is sized from the density of the
 input scanned so far, within the token limit (`docs/limits.md` gives its
 bounds). Event vectors reserve four fifths of the token count plus headroom. A
-typed read of more than 4 KiB builds its value from the parser's events as it
-takes them, so neither a vector of the document's events nor a tree of its
-nodes stands between the tokens and the value: a scalar is one node that the
-target reads and drops, and a collection is read entry by entry. Only what is
-read whole or again is built as a tree: a node with an anchor, a collection
-that keeps its tag, a mapping key, and what an enum reads. A smaller read
-builds the tree, which costs a document of a few bytes about 1,300 fewer
-instructions, 7,000 against 8,300 for `a`. Scalar tokens keep their raw text as
+typed read builds its value directly from the parser's events at every input
+size (D107), so neither a vector of the document's events nor a tree of its
+nodes stands between the tokens and the value: a scalar is read directly from
+the event and a collection is read entry by entry. Only what is read whole or
+again is built as a tree: a node with an anchor, a collection that keeps its
+tag, a complex mapping key, and what an enum reads. Scalar tokens keep their raw text as
 a span and box only values that need decoding; typed nodes box tags, keep
 scalar text as a source slice, and cache hashes in one atomic word. The parser
 counts a root flow collection's entries before it reads them: a root that is
