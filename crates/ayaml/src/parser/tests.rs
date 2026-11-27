@@ -1107,7 +1107,7 @@ fn a_megabyte_sparse_head_before_a_dense_tail_takes_few_reservations() {
 
 #[test]
 fn overflowing_token_reservation_returns_token_limit_error_without_panicking() {
-    let mut tokens: Vec<Token<'_>> = Vec::new();
+    let mut tokens: Vec<Token> = Vec::new();
     let err = super::reserve_tokens(
         &mut tokens,
         usize::MAX,
@@ -1187,7 +1187,7 @@ fn a_root_flow_collection_reserves_its_entries_on_any_line() {
 
 #[test]
 fn a_token_stays_small() {
-    assert!(size_of::<Token<'_>>() <= 32, "{}", size_of::<Token<'_>>());
+    assert!(size_of::<Token>() <= 32, "{}", size_of::<Token>());
 }
 
 #[test]

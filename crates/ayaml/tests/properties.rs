@@ -691,6 +691,30 @@ proptest! {
         prop_assert_eq!(&composed, &cursor_borrowed, "input:\n{}", input);
         prop_assert_eq!(&composed, &cursor_owned, "input:\n{}", input);
 
+        // Flat-array Tape DOM and ParserBuf reuse must agree identically.
+        let mut buf = ayaml::ParserBuf::new();
+        let tape = buf
+            .parse_tape(&input)
+            .unwrap_or_else(|error| panic!("parse_tape failed: {error}\ninput:\n{input}"));
+        prop_assert_eq!(tape.to_value(), composed.clone(), "tape.to_value:\n{}", input);
+        let from_tape: Value = serde::Deserialize::deserialize(&tape)
+            .unwrap_or_else(|error| panic!("Value::deserialize(&tape) failed: {error}\ninput:\n{input}"));
+        prop_assert_eq!(from_tape, composed.clone(), "tape serde:\n{}", input);
+        tape.recycle_into(&mut buf);
+        let tape2 = buf
+            .parse_tape(&input)
+            .unwrap_or_else(|error| panic!("recycled parse_tape failed: {error}\ninput:\n{input}"));
+        prop_assert_eq!(tape2.to_value(), composed.clone(), "recycled tape:\n{}", input);
+        tape2.recycle_into(&mut buf);
+        let buf_val = buf
+            .parse_value(&input)
+            .unwrap_or_else(|error| panic!("buf.parse_value failed: {error}\ninput:\n{input}"));
+        prop_assert_eq!(buf_val, composed.clone(), "buf.parse_value:\n{}", input);
+        let buf_typed: Value = buf
+            .from_str(&input)
+            .unwrap_or_else(|error| panic!("buf.from_str failed: {error}\ninput:\n{input}"));
+        prop_assert_eq!(buf_typed, composed, "buf.from_str:\n{}", input);
+
         #[cfg(feature = "libyaml-compat")]
         {
             let _ = ayaml::compat::from_str::<Value>(&input);
@@ -748,6 +772,17 @@ proptest! {
         }
         prop_assert_eq!(&streamed, &docs, "input:\n{}", input);
 
+        let mut buf = ayaml::ParserBuf::new();
+        let tape_docs = buf
+            .parse_tape_documents(&input)
+            .unwrap_or_else(|error| panic!("parse_tape_documents failed: {error}\ninput:\n{input}"));
+        prop_assert_eq!(tape_docs.to_values(), docs.clone(), "tape_docs:\n{}", input);
+        tape_docs.recycle_into(&mut buf);
+        let buf_docs = buf
+            .parse_documents(&input)
+            .unwrap_or_else(|error| panic!("buf.parse_documents failed: {error}\ninput:\n{input}"));
+        prop_assert_eq!(buf_docs, docs.clone(), "buf.parse_documents:\n{}", input);
+
         let emitted_docs = ayaml::to_string_documents(&docs).expect("emit documents");
         let reparsed_docs = ayaml::parse_documents(&emitted_docs).unwrap_or_else(|error| {
             panic!("reparse documents failed: {error}\ninput:\n{input}\nemitted:\n{emitted_docs}")
@@ -770,7 +805,10 @@ proptest! {
     fn mutated_structured_yaml_readers_agree(input in mutated_structured_yaml()) {
         let composed = ayaml::parse_value(&input);
         let borrowed = ayaml::from_str_borrowed::<Value>(&input);
-        match (composed, borrowed) {
+        let mut buf = ayaml::ParserBuf::new();
+        let tape = buf.parse_tape(&input);
+        let buf_typed = buf.from_str::<Value>(&input);
+        match (&composed, &borrowed) {
             (Ok(composed), Ok(borrowed)) => prop_assert_eq!(composed, borrowed),
             (Err(_), Err(_)) => {}
             (Ok(value), Err(error)) => {
@@ -783,6 +821,43 @@ proptest! {
                 prop_assert!(
                     false,
                     "composed error {error:?}, borrowed {value:?}\ninput:\n{input}"
+                );
+            }
+        }
+        match (&composed, tape) {
+            (Ok(expected), Ok(actual)) => {
+                prop_assert_eq!(&actual.to_value(), expected);
+                actual.recycle_into(&mut buf);
+            }
+            (Err(e1), Err(e2)) => {
+                prop_assert_eq!(e1.kind(), e2.kind());
+                prop_assert_eq!(e1.code(), e2.code());
+                prop_assert_eq!(e1.span(), e2.span());
+                prop_assert_eq!(e1.location(), e2.location());
+                prop_assert_eq!(e1.limit(), e2.limit());
+                prop_assert_eq!(e1.masked(), e2.masked());
+            }
+            (c, t) => {
+                prop_assert!(
+                    false,
+                    "parse_value={c:?} vs parse_tape={t:?}\ninput:\n{input}"
+                );
+            }
+        }
+        match (&borrowed, &buf_typed) {
+            (Ok(a), Ok(b)) => prop_assert_eq!(a, b),
+            (Err(e1), Err(e2)) => {
+                prop_assert_eq!(e1.kind(), e2.kind());
+                prop_assert_eq!(e1.code(), e2.code());
+                prop_assert_eq!(e1.span(), e2.span());
+                prop_assert_eq!(e1.location(), e2.location());
+                prop_assert_eq!(e1.limit(), e2.limit());
+                prop_assert_eq!(e1.masked(), e2.masked());
+            }
+            (a, b) => {
+                prop_assert!(
+                    false,
+                    "from_str_borrowed={a:?} vs buf.from_str={b:?}\ninput:\n{input}"
                 );
             }
         }

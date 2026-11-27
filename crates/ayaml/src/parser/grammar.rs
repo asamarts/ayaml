@@ -5,7 +5,7 @@ use super::{
     to_u32, value_indicator_index,
 };
 
-impl<'a> Parser<'a> {
+impl<'a> Parser<'a, '_> {
     #[allow(
         clippy::too_many_arguments,
         reason = "the grammar routine takes its full parsed state explicitly so recursion stays heap-based"
@@ -889,31 +889,19 @@ impl<'a> Parser<'a> {
                 Ok(Step::Return(index + 1))
             }
             TokenKind::SingleQuotedScalar => {
-                self.emit_scalar(
-                    Cow::Borrowed(&self.input[span.start() + 1..span.end() - 1]),
-                    &self.input[span.start()..span.end()],
-                    ScalarStyle::SingleQuoted,
-                    tag,
-                    anchor,
-                    span,
-                )?;
+                let inner = Span::new(span.start() + 1, span.end() - 1);
+                self.emit_quoted_scalar(inner, ScalarStyle::SingleQuoted, tag, anchor, span)?;
                 Ok(Step::Return(index + 1))
             }
             TokenKind::DoubleQuotedScalar => {
-                self.emit_scalar(
-                    Cow::Borrowed(&self.input[span.start() + 1..span.end() - 1]),
-                    &self.input[span.start()..span.end()],
-                    ScalarStyle::DoubleQuoted,
-                    tag,
-                    anchor,
-                    span,
-                )?;
+                let inner = Span::new(span.start() + 1, span.end() - 1);
+                self.emit_quoted_scalar(inner, ScalarStyle::DoubleQuoted, tag, anchor, span)?;
                 Ok(Step::Return(index + 1))
             }
             TokenKind::Scalar(scalar) => {
-                let value = std::mem::replace(&mut scalar.value, Cow::Borrowed(""));
+                let value = std::mem::replace(&mut scalar.value, crate::scanner::TokenText::EMPTY);
                 let style = scalar.style;
-                self.emit_scalar(
+                self.emit_scalar_token_text(
                     value,
                     &self.input[span.start()..span.end()],
                     style,

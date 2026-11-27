@@ -22,7 +22,7 @@ use super::{Run, fit_u32, matched_flow_end, to_u32};
 
 /// A logical line's token range in the parser's token buffer.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Line {
+pub(crate) struct Line {
     pub(super) start: u32,
     pub(super) end: u32,
     pub(super) indent: u32,
@@ -33,7 +33,7 @@ impl Line {
     /// less any tab before that token and what follows the tab: YAML indents with spaces alone
     /// (production 63), so a tab there separates and `k:\n\tv` holds `v` at indent 0.
     pub(super) fn new(
-        tokens: &[Token<'_>],
+        tokens: &[Token],
         start: usize,
         end: usize,
         input: &str,
@@ -105,11 +105,51 @@ impl Line {
 
 /// Compact summary of a retired line for compatibility-mode indentation diagnostics (`compat` only).
 #[derive(Clone, Copy, Debug)]
-struct CompatParent {
+pub(crate) struct CompatParent {
     indent: u32,
     /// Byte offset of the line's first surviving token when retired, or `None` if empty.
     first_offset: Option<usize>,
     is_block_entry: bool,
+}
+
+/// Reusable `'static` line-window and scanner scratch checked out from [`crate::ParserBuf`].
+#[derive(Debug, Default)]
+pub(crate) struct WindowScratch {
+    pub(crate) lines: Vec<Line>,
+    pub(crate) tokens: Vec<Token>,
+    pub(crate) flow_link_stack: Vec<usize>,
+    pub(crate) compat_parents: Vec<CompatParent>,
+    pub(crate) scanner: crate::scanner::ScannerScratch,
+}
+
+impl WindowScratch {
+    pub(crate) fn clear_and_clamp(&mut self) {
+        self.lines.clear();
+        if self.lines.capacity() > 256 {
+            self.lines = Vec::new();
+        }
+        self.tokens.clear();
+        if self.tokens.capacity() > WINDOW_SHRINK_CAP {
+            self.tokens = Vec::new();
+        }
+        self.flow_link_stack.clear();
+        if self.flow_link_stack.capacity() > 256 {
+            self.flow_link_stack = Vec::new();
+        }
+        self.compat_parents.clear();
+        if self.compat_parents.capacity() > 256 {
+            self.compat_parents = Vec::new();
+        }
+        self.scanner.clear_and_clamp();
+    }
+
+    pub(crate) fn release_all(&mut self) {
+        self.lines = Vec::new();
+        self.tokens = Vec::new();
+        self.flow_link_stack = Vec::new();
+        self.compat_parents = Vec::new();
+        self.scanner.release_all();
+    }
 }
 
 /// Token-arena growth chunks used when a single logical line (e.g., a large flow collection)
@@ -151,7 +191,7 @@ const fn batch_limits(input_len: usize) -> (usize, usize) {
 }
 
 pub(super) fn reserve_tokens(
-    tokens: &mut Vec<Token<'_>>,
+    tokens: &mut Vec<Token>,
     additional: usize,
     most: usize,
     span: Span,
@@ -174,9 +214,9 @@ pub(super) fn reserve_tokens(
 }
 
 #[cfg(test)]
-pub(super) fn push_token<'a>(
-    tokens: &mut Vec<Token<'a>>,
-    token: Token<'a>,
+pub(super) fn push_token(
+    tokens: &mut Vec<Token>,
+    token: Token,
     chunk: usize,
     most: usize,
     input: &str,
@@ -264,7 +304,7 @@ pub(super) fn prefix_token_capacity(
 /// Pair every flow collection's opening token with the relative token distance to its matching
 /// closing token (`close - open`), making links invariant under both window compaction and
 /// leading token advancement (`line.advance(1)`), reusing `stack` to avoid per-line allocations.
-pub(super) fn link_flow_ends_with_stack(tokens: &mut [Token<'_>], stack: &mut Vec<usize>) {
+pub(super) fn link_flow_ends_with_stack(tokens: &mut [Token], stack: &mut Vec<usize>) {
     stack.clear();
     for index in 0..tokens.len() {
         match tokens[index].kind {
@@ -320,7 +360,7 @@ pub(super) struct LineWindow<'a> {
     /// Active logical lines in the current batch (`base_line .. base_line + lines.len()`).
     lines: Vec<Line>,
     /// Token storage for the current batch (cleared/reused in O(1) at batch boundaries).
-    tokens: Vec<Token<'a>>,
+    tokens: Vec<Token>,
     /// Reusable stack for per-line flow partner linking (zero allocs on block-only docs).
     flow_link_stack: Vec<usize>,
     /// Recent density state for large single-line flow collections.
@@ -355,6 +395,19 @@ pub(super) struct LineWindow<'a> {
 
 impl<'a> LineWindow<'a> {
     pub(super) fn new(scanner: Scanner<'a>, input: &'a str, compat: bool) -> Self {
+        Self::with_scratch(scanner, input, compat, WindowScratch::default())
+    }
+
+    pub(super) fn with_scratch(
+        scanner: Scanner<'a>,
+        input: &'a str,
+        compat: bool,
+        mut scratch: WindowScratch,
+    ) -> Self {
+        scratch.lines.clear();
+        scratch.tokens.clear();
+        scratch.flow_link_stack.clear();
+        scratch.compat_parents.clear();
         let chunk = if input.len() <= 4096 {
             TOKEN_ARENA_SMALL_CHUNK
         } else {
@@ -367,9 +420,9 @@ impl<'a> LineWindow<'a> {
             base_line: 0,
             loaded_end: 0,
             retire_mark: 0,
-            lines: Vec::new(),
-            tokens: Vec::new(),
-            flow_link_stack: Vec::new(),
+            lines: scratch.lines,
+            tokens: scratch.tokens,
+            flow_link_stack: scratch.flow_link_stack,
             last_tokens: 0,
             last_consumed: 0,
             chunk,
@@ -382,12 +435,24 @@ impl<'a> LineWindow<'a> {
             truncated_last_line: false,
             last_retired_end: None,
             last_retired_had_anchor: false,
-            compat_parents: Vec::new(),
+            compat_parents: scratch.compat_parents,
             #[cfg(test)]
             peak_tokens_len: 0,
             #[cfg(test)]
             peak_tokens_cap: 0,
         }
+    }
+
+    pub(super) fn take_scratch(&mut self) -> WindowScratch {
+        let mut scratch = WindowScratch {
+            lines: std::mem::take(&mut self.lines),
+            tokens: std::mem::take(&mut self.tokens),
+            flow_link_stack: std::mem::take(&mut self.flow_link_stack),
+            compat_parents: std::mem::take(&mut self.compat_parents),
+            scanner: self.scanner.take_scratch(),
+        };
+        scratch.clear_and_clamp();
+        scratch
     }
 
     #[inline]
@@ -678,7 +743,7 @@ impl<'a> LineWindow<'a> {
     #[inline]
     fn push_token_into_window(
         &mut self,
-        token: Token<'a>,
+        token: Token,
         most: usize,
         input_len: usize,
     ) -> Result<(), Box<Error>> {
@@ -798,17 +863,17 @@ impl<'a> LineWindow<'a> {
     }
 
     #[inline]
-    pub(super) fn line_slice(&self, line: Line) -> &[Token<'a>] {
+    pub(super) fn line_slice(&self, line: Line) -> &[Token] {
         &self.tokens[line.start()..line.end()]
     }
 
     #[inline]
-    pub(super) fn line_tokens(&self, index: usize) -> &[Token<'a>] {
+    pub(super) fn line_tokens(&self, index: usize) -> &[Token] {
         self.line_slice(self.line(index))
     }
 
     #[inline]
-    pub(super) fn line_first(&self, index: usize) -> Option<&Token<'a>> {
+    pub(super) fn line_first(&self, index: usize) -> Option<&Token> {
         let line = self.get_line(index)?;
         if line.is_empty() {
             return None;
@@ -828,13 +893,13 @@ impl<'a> LineWindow<'a> {
     }
 
     #[inline]
-    pub(super) fn run_tokens(&self, run: Run) -> &[Token<'a>] {
+    pub(super) fn run_tokens(&self, run: Run) -> &[Token] {
         let line = self.line(run.line());
         &self.tokens[line.start() + run.start()..line.start() + run.end()]
     }
 
     #[inline]
-    pub(super) fn token_mut(&mut self, run: Run, offset: usize) -> &mut Token<'a> {
+    pub(super) fn token_mut(&mut self, run: Run, offset: usize) -> &mut Token {
         let abs = self.line(run.line()).start() + run.start() + offset;
         &mut self.tokens[abs]
     }
@@ -977,7 +1042,7 @@ fn push_compat_parent(parents: &mut Vec<CompatParent>, parent: CompatParent) {
     parents.push(parent);
 }
 
-fn next_node_is_large(line_tokens: &[Token<'_>], mut index: usize, large_span: usize) -> bool {
+fn next_node_is_large(line_tokens: &[Token], mut index: usize, large_span: usize) -> bool {
     while matches!(
         line_tokens.get(index).map(|t| &t.kind),
         Some(TokenKind::Anchor | TokenKind::Tag(_))
@@ -994,16 +1059,13 @@ fn next_node_is_large(line_tokens: &[Token<'_>], mut index: usize, large_span: u
 
 /// Whole-document logical-line reader retained for arena-growth unit tests.
 #[cfg(test)]
-pub(super) struct Lines<'a> {
-    pub(super) tokens: Vec<Token<'a>>,
+pub(super) struct Lines {
+    pub(super) tokens: Vec<Token>,
     pub(super) growths: usize,
 }
 
 #[cfg(test)]
-pub(super) fn read_lines<'a>(
-    scanner: &mut Scanner<'a>,
-    limits: &Limits,
-) -> Result<Lines<'a>, Box<Error>> {
+pub(super) fn read_lines(scanner: &mut Scanner<'_>, limits: &Limits) -> Result<Lines, Box<Error>> {
     let input = scanner.input();
     let input_len = scanner.input_len();
     let compat = scanner.is_compat();

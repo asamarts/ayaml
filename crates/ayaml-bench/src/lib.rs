@@ -338,11 +338,25 @@ pub fn validate_all_scenarios() -> Result<ValidationSummary, String> {
     }
 
     let bulk = bulk_automation_files(32);
+    let mut bulk_buf = ayaml::ParserBuf::new();
     for file in &bulk {
         let val = ayaml::parse_value(&file.content)
             .map_err(|e| format!("bulk file `{}` parse failed: {e}", file.id))?;
         if !val.is_sequence() {
             return Err(format!("bulk file `{}` root must be sequence", file.id));
+        }
+        let tape = bulk_buf
+            .parse_tape(&file.content)
+            .map_err(|e| format!("bulk file `{}` tape parse failed: {e}", file.id))?;
+        if tape.to_value() != val {
+            return Err(format!("bulk file `{}` tape mismatch", file.id));
+        }
+        tape.recycle_into(&mut bulk_buf);
+        let buf_val = bulk_buf
+            .parse_value(&file.content)
+            .map_err(|e| format!("bulk file `{}` buf parse_value failed: {e}", file.id))?;
+        if buf_val != val {
+            return Err(format!("bulk file `{}` buf parse_value mismatch", file.id));
         }
     }
 
@@ -371,6 +385,11 @@ pub fn validate_all_scenarios() -> Result<ValidationSummary, String> {
     let openapi = must_fixture("openapi-spec");
     let openapi_val =
         ayaml::parse_value(&openapi.content).map_err(|e| format!("openapi parse failed: {e}"))?;
+    let openapi_tape = ayaml::parse_tape(&openapi.content)
+        .map_err(|e| format!("openapi tape parse failed: {e}"))?;
+    if openapi_tape.to_value() != openapi_val {
+        return Err("openapi tape.to_value mismatch".to_owned());
+    }
     let emitted_block = ayaml::to_string_value(&openapi_val)
         .map_err(|e| format!("openapi block emit failed: {e}"))?;
     let emitted_flow = ayaml::to_string_value_with(&openapi_val, &EmitOptions::flow())

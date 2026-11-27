@@ -146,6 +146,7 @@ mod resolver;
     reason = "the conformance and benchmark layers use these hooks only under their features"
 )]
 mod scanner;
+mod scratch;
 mod serde_impl;
 mod spanned;
 mod typed;
@@ -157,6 +158,7 @@ pub mod mapping;
 pub mod number;
 pub mod span;
 pub mod tag;
+pub mod tape;
 pub mod value;
 
 pub use error::{Error, ErrorCode, ErrorKind, MaskedError};
@@ -171,10 +173,14 @@ pub use mapping::{Entry, Mapping};
 pub use number::Number;
 pub use options::{EmitOptions, ParseOptions};
 pub use position::{ColumnEncoding, LineIndex, PositionError};
+pub use scratch::ParserBuf;
 #[allow(deprecated, reason = "re-export the compatibility marker")]
 pub use span::{Location, Marker, Position, Span, Spanned};
 pub use spanned::{SpannedNode, SpannedTree};
 pub use tag::{Tag, TaggedValue};
+pub use tape::{
+    Tape, TapeDocuments, TapeDocumentsIter, TapeKind, TapeMapIter, TapeRef, TapeSeqIter,
+};
 pub use typed::DocumentDeserializer;
 pub use value::Value;
 
@@ -473,6 +479,73 @@ pub mod compat {
             input,
             &options.limits,
             node_options(options.global_tags),
+        )
+        .map_err(map_error)
+    }
+
+    /// Deserialize a typed value with compatibility policies, reusing scratch from `buf`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+    pub fn from_str_in<'de, T: serde::Deserialize<'de>>(
+        input: &'de str,
+        buf: &mut crate::ParserBuf,
+    ) -> Result<T, Error> {
+        from_str_with_in(input, &ParseOptions::new(), buf)
+    }
+
+    /// Deserialize a typed value with compatibility options, reusing scratch from `buf`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+    pub fn from_str_with_in<'de, T: serde::Deserialize<'de>>(
+        input: &'de str,
+        options: &ParseOptions,
+        buf: &mut crate::ParserBuf,
+    ) -> Result<T, Error> {
+        crate::typed::from_str_with_options_in(
+            input,
+            &options.limits,
+            node_options(options.global_tags),
+            buf,
+        )
+        .map_err(map_error)
+    }
+
+    /// Deserialize one document with a caller-supplied seed under compatibility policies,
+    /// reusing scratch from `buf`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+    pub fn from_str_seed_in<'de, T: serde::de::DeserializeSeed<'de>>(
+        input: &'de str,
+        seed: T,
+        buf: &mut crate::ParserBuf,
+    ) -> Result<T::Value, Error> {
+        from_str_seed_with_in(input, &ParseOptions::new(), seed, buf)
+    }
+
+    /// Deserialize one document with a caller-supplied seed and compatibility options,
+    /// reusing scratch from `buf`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
+    pub fn from_str_seed_with_in<'de, T: serde::de::DeserializeSeed<'de>>(
+        input: &'de str,
+        options: &ParseOptions,
+        seed: T,
+        buf: &mut crate::ParserBuf,
+    ) -> Result<T::Value, Error> {
+        crate::typed::from_str_seed_with_options_in(
+            input,
+            &options.limits,
+            node_options(options.global_tags),
+            seed,
+            buf,
         )
         .map_err(map_error)
     }
@@ -983,6 +1056,12 @@ pub fn parse_events_with<'a>(
     input: &'a str,
     options: &ParseOptions,
 ) -> Result<EventStream<'a>, Error> {
+    options.limits.validate()?;
+    options.limits.check_input(input.len()).map_err(|error| {
+        Error::from(error)
+            .with_span(Span::empty(0))
+            .with_location(Location::new(1, 1))
+    })?;
     if options.merge_keys {
         merge::events::MergedEventStream::new(input, &options.limits).map(|merged| EventStream {
             inner: EventStreamInner::Merged(Box::new(merged)),
@@ -1573,6 +1652,236 @@ pub fn parse_frontmatter_value_with<'a>(
     options: &ParseOptions,
 ) -> Result<Option<ParsedFrontmatter<'a, Value>>, Error> {
     frontmatter::parse_frontmatter_value_with(input, options)
+}
+
+/// Parse one YAML document into a zero-copy flat-array [`Tape`].
+///
+/// Uses the same YAML 1.2.2 grammar, resolution, duplicate-key checks, and default
+/// resource limits as [`parse_value`], storing all nodes in a compact flat array and
+/// borrowing unmodified scalar slices directly from `input`.
+///
+/// # Errors
+///
+/// Returns an error when the input is invalid, contains trailing documents, or exceeds
+/// a configured limit.
+pub fn parse_tape(input: &str) -> Result<Tape<'_>, Error> {
+    Tape::parse(input)
+}
+
+/// Parse one YAML document into a [`Tape`] with explicit parse options.
+///
+/// # Errors
+///
+/// Returns an error when `options.limits` is invalid, the input is invalid, contains
+/// trailing documents, or exceeds a configured limit.
+pub fn parse_tape_with<'a>(input: &'a str, options: &ParseOptions) -> Result<Tape<'a>, Error> {
+    Tape::parse_with(input, options)
+}
+
+/// Parse one YAML document into a [`Tape`], reusing internal scratch buffers from `buf`.
+///
+/// # Errors
+///
+/// Returns the same errors as [`parse_tape`].
+pub fn parse_tape_in<'a>(input: &'a str, buf: &mut ParserBuf) -> Result<Tape<'a>, Error> {
+    Tape::parse_in(input, buf)
+}
+
+/// Parse one YAML document into a [`Tape`] with explicit options, reusing internal
+/// scratch buffers from `buf`.
+///
+/// # Errors
+///
+/// Returns the same errors as [`parse_tape_with`].
+pub fn parse_tape_with_in<'a>(
+    input: &'a str,
+    options: &ParseOptions,
+    buf: &mut ParserBuf,
+) -> Result<Tape<'a>, Error> {
+    Tape::parse_with_in(input, options, buf)
+}
+
+/// Parse every YAML document in a stream into a zero-copy flat-array [`TapeDocuments`].
+///
+/// # Errors
+///
+/// Returns an error when the input is invalid or exceeds a configured limit.
+pub fn parse_tape_documents(input: &str) -> Result<TapeDocuments<'_>, Error> {
+    TapeDocuments::parse(input)
+}
+
+/// Parse every YAML document in a stream into [`TapeDocuments`] with explicit parse options.
+///
+/// # Errors
+///
+/// Returns an error when `options.limits` is invalid, the input is invalid, or a
+/// configured limit is exceeded.
+pub fn parse_tape_documents_with<'a>(
+    input: &'a str,
+    options: &ParseOptions,
+) -> Result<TapeDocuments<'a>, Error> {
+    TapeDocuments::parse_with(input, options)
+}
+
+/// Parse every YAML document in a stream into [`TapeDocuments`], reusing internal
+/// scratch buffers from `buf`.
+///
+/// # Errors
+///
+/// Returns the same errors as [`parse_tape_documents`].
+pub fn parse_tape_documents_in<'a>(
+    input: &'a str,
+    buf: &mut ParserBuf,
+) -> Result<TapeDocuments<'a>, Error> {
+    TapeDocuments::parse_in(input, buf)
+}
+
+/// Parse every YAML document in a stream into [`TapeDocuments`] with explicit options,
+/// reusing internal scratch buffers from `buf`.
+///
+/// # Errors
+///
+/// Returns the same errors as [`parse_tape_documents_with`].
+pub fn parse_tape_documents_with_in<'a>(
+    input: &'a str,
+    options: &ParseOptions,
+    buf: &mut ParserBuf,
+) -> Result<TapeDocuments<'a>, Error> {
+    TapeDocuments::parse_with_in(input, options, buf)
+}
+
+/// Parse one YAML document into a generic [`Value`], reusing internal scratch buffers from `buf`.
+///
+/// # Errors
+///
+/// Returns the same errors as [`parse_value`].
+pub fn parse_value_in(input: &str, buf: &mut ParserBuf) -> Result<Value, Error> {
+    parse_value_with_in(input, &ParseOptions::new(), buf)
+}
+
+/// Parse one YAML document into a generic [`Value`] with explicit parse options,
+/// reusing internal scratch buffers from `buf`.
+///
+/// # Errors
+///
+/// Returns the same errors as [`parse_value_with`].
+pub fn parse_value_with_in(
+    input: &str,
+    options: &ParseOptions,
+    buf: &mut ParserBuf,
+) -> Result<Value, Error> {
+    if options.merge_keys {
+        return parse_value_with(input, options);
+    }
+    options.limits.validate()?;
+    options.limits.check_input(input.len()).map_err(|error| {
+        Error::from(error)
+            .with_span(Span::empty(0))
+            .with_location(Location::new(1, 1))
+    })?;
+    parser::parse_value_in(input, &options.limits, buf)
+}
+
+/// Parse every YAML document in a stream into `Vec<Value>`, reusing internal scratch
+/// buffers from `buf`.
+///
+/// # Errors
+///
+/// Returns the same errors as [`parse_documents`].
+pub fn parse_documents_in(input: &str, buf: &mut ParserBuf) -> Result<Vec<Value>, Error> {
+    parse_documents_with_in(input, &ParseOptions::new(), buf)
+}
+
+/// Parse every YAML document in a stream into `Vec<Value>` with explicit parse options,
+/// reusing internal scratch buffers from `buf`.
+///
+/// # Errors
+///
+/// Returns the same errors as [`parse_documents_with`].
+pub fn parse_documents_with_in(
+    input: &str,
+    options: &ParseOptions,
+    buf: &mut ParserBuf,
+) -> Result<Vec<Value>, Error> {
+    if options.merge_keys {
+        return parse_documents_with(input, options);
+    }
+    options.limits.validate()?;
+    options.limits.check_input(input.len()).map_err(|error| {
+        Error::from(error)
+            .with_span(Span::empty(0))
+            .with_location(Location::new(1, 1))
+    })?;
+    parser::parse_documents_in(input, &options.limits, false, buf)
+}
+
+/// Deserialize one YAML document into `T`, reusing internal scratch buffers from `buf`.
+///
+/// Accepts both owned (`DeserializeOwned`) and borrowed (`Deserialize<'de>`) targets.
+///
+/// # Errors
+///
+/// Returns the same errors as [`from_str`].
+pub fn from_str_in<'de, T: serde::Deserialize<'de>>(
+    input: &'de str,
+    buf: &mut ParserBuf,
+) -> Result<T, Error> {
+    typed::from_str_in(input, &Limits::default_profile(), buf)
+}
+
+/// Deserialize one YAML document into `T` with explicit parse options, reusing internal
+/// scratch buffers from `buf`.
+///
+/// # Errors
+///
+/// Returns the same errors as [`from_str_with`].
+pub fn from_str_with_in<'de, T: serde::Deserialize<'de>>(
+    input: &'de str,
+    options: &ParseOptions,
+    buf: &mut ParserBuf,
+) -> Result<T, Error> {
+    if options.merge_keys {
+        return typed::from_str_with_merged(input, &options.limits, std::marker::PhantomData::<T>);
+    }
+    typed::from_str_in(input, &options.limits, buf)
+}
+
+/// Deserialize one YAML document with a caller-supplied seed, reusing internal scratch
+/// buffers from `buf`.
+///
+/// # Errors
+///
+/// Returns the same errors as [`from_str_seed`].
+pub fn from_str_seed_in<'de, T: serde::de::DeserializeSeed<'de>>(
+    input: &'de str,
+    seed: T,
+    buf: &mut ParserBuf,
+) -> Result<T::Value, Error> {
+    from_str_seed_with_in(input, &ParseOptions::new(), seed, buf)
+}
+
+/// Deserialize one YAML document with a caller-supplied seed and explicit parse options,
+/// reusing internal scratch buffers from `buf`.
+///
+/// # Errors
+///
+/// Returns the same errors as [`from_str_seed_with`].
+pub fn from_str_seed_with_in<'de, T: serde::de::DeserializeSeed<'de>>(
+    input: &'de str,
+    options: &ParseOptions,
+    seed: T,
+    buf: &mut ParserBuf,
+) -> Result<T::Value, Error> {
+    if options.merge_keys {
+        return typed::from_str_with_merged(input, &options.limits, seed);
+    }
+    typed::from_str_seed_with_options_in(
+        input,
+        &options.limits,
+        typed::NodeOptions::default(),
+        seed,
+        buf,
+    )
 }
 
 /// The crate version.

@@ -48,6 +48,10 @@ fn cursor(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "exhaustive registry of all public entry points checked for limit parity"
+)]
 fn readers() -> Vec<Reader> {
     #[cfg_attr(
         not(any(feature = "libyaml-compat", feature = "bench-internals")),
@@ -72,9 +76,60 @@ fn readers() -> Vec<Reader> {
             stream: false,
         },
         Reader {
+            name: "parse_value_with_in",
+            read: |input, limits| {
+                let mut buf = ayaml::ParserBuf::new();
+                ayaml::parse_value_with_in(input, &parse_options(limits), &mut buf).map(drop)
+            },
+            values: true,
+            stream: false,
+        },
+        Reader {
             name: "parse_documents_with",
             read: |input, limits| {
                 ayaml::parse_documents_with(input, &parse_options(limits)).map(drop)
+            },
+            values: true,
+            stream: true,
+        },
+        Reader {
+            name: "parse_documents_with_in",
+            read: |input, limits| {
+                let mut buf = ayaml::ParserBuf::new();
+                ayaml::parse_documents_with_in(input, &parse_options(limits), &mut buf).map(drop)
+            },
+            values: true,
+            stream: true,
+        },
+        Reader {
+            name: "Tape::parse_with",
+            read: |input, limits| ayaml::Tape::parse_with(input, &parse_options(limits)).map(drop),
+            values: true,
+            stream: false,
+        },
+        Reader {
+            name: "Tape::parse_with_in",
+            read: |input, limits| {
+                let mut buf = ayaml::ParserBuf::new();
+                ayaml::Tape::parse_with_in(input, &parse_options(limits), &mut buf).map(drop)
+            },
+            values: true,
+            stream: false,
+        },
+        Reader {
+            name: "TapeDocuments::parse_with",
+            read: |input, limits| {
+                ayaml::TapeDocuments::parse_with(input, &parse_options(limits)).map(drop)
+            },
+            values: true,
+            stream: true,
+        },
+        Reader {
+            name: "TapeDocuments::parse_with_in",
+            read: |input, limits| {
+                let mut buf = ayaml::ParserBuf::new();
+                ayaml::TapeDocuments::parse_with_in(input, &parse_options(limits), &mut buf)
+                    .map(drop)
             },
             values: true,
             stream: true,
@@ -88,9 +143,28 @@ fn readers() -> Vec<Reader> {
             stream: false,
         },
         Reader {
+            name: "from_str_with_in (Value)",
+            read: |input, limits| {
+                let mut buf = ayaml::ParserBuf::new();
+                ayaml::from_str_with_in::<Value>(input, &parse_options(limits), &mut buf).map(drop)
+            },
+            values: true,
+            stream: false,
+        },
+        Reader {
             name: "from_str_with (IgnoredAny)",
             read: |input, limits| {
                 ayaml::from_str_with::<IgnoredAny>(input, &parse_options(limits)).map(drop)
+            },
+            values: true,
+            stream: false,
+        },
+        Reader {
+            name: "from_str_with_in (IgnoredAny)",
+            read: |input, limits| {
+                let mut buf = ayaml::ParserBuf::new();
+                ayaml::from_str_with_in::<IgnoredAny>(input, &parse_options(limits), &mut buf)
+                    .map(drop)
             },
             values: true,
             stream: false,

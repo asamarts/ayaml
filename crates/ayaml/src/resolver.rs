@@ -118,8 +118,13 @@ fn resolution_error(code: ErrorCode, message: &str) -> Error {
     Error::coded(ErrorKind::Resolution, code, message)
 }
 
-fn is_null(text: &str) -> bool {
+pub(crate) fn is_null(text: &str) -> bool {
     matches!(text, "" | "~" | "null" | "Null" | "NULL")
+}
+
+pub(crate) fn is_radix_int(text: &str) -> bool {
+    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+    digits.starts_with("0x") || digits.starts_with("0o") || digits.starts_with("0b")
 }
 
 pub(crate) fn parse_bool(text: &str) -> Option<bool> {
@@ -134,7 +139,7 @@ pub(crate) fn parse_int(text: &str) -> Option<Number> {
     parse_int_with(text, false)
 }
 
-fn parse_int_with(text: &str, allow_leading_zero: bool) -> Option<Number> {
+pub(crate) fn parse_int_with(text: &str, allow_leading_zero: bool) -> Option<Number> {
     let bytes = text.as_bytes();
     let (negative, rest) = match bytes.first() {
         Some(b'-') => (true, &bytes[1..]),
@@ -236,7 +241,7 @@ pub(crate) fn float_from_text(text: &str) -> Option<f64> {
     parse_float_with(text, true).and_then(|number| number.as_f64())
 }
 
-fn parse_float_with(text: &str, allow_leading_zero: bool) -> Option<Number> {
+pub(crate) fn parse_float_with(text: &str, allow_leading_zero: bool) -> Option<Number> {
     match text {
         ".inf" | ".Inf" | ".INF" | "+.inf" | "+.Inf" | "+.INF" => {
             return Some(Number::from_f64(f64::INFINITY));

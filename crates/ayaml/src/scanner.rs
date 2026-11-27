@@ -33,9 +33,71 @@ use self::line::{
 
 /// A lexical token.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Token<'a> {
-    pub kind: TokenKind<'a>,
+pub(crate) struct Token {
+    pub kind: TokenKind,
     pub span: Span,
+}
+
+/// Owned or input-sliced text carried inside internal `'static` tokens and queues.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TokenText {
+    Slice(Span),
+    Owned(String),
+}
+
+impl TokenText {
+    pub(crate) const EMPTY: Self = Self::Slice(Span::empty(0));
+
+    #[inline]
+    pub(crate) fn from_decoded(decoded: String, slice: Span, input: &str) -> Self {
+        if let Some(raw) = slice.slice(input)
+            && raw == decoded
+        {
+            return Self::Slice(slice);
+        }
+        Self::Owned(decoded)
+    }
+
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Slice(span) => span.len(),
+            Self::Owned(text) => text.len(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn as_str<'a>(&'a self, input: &'a str) -> &'a str {
+        match self {
+            Self::Slice(span) => span.slice(input).unwrap_or(""),
+            Self::Owned(text) => text.as_str(),
+        }
+    }
+
+    /// Raw UTF-8 bytes of this text without re-running `str::is_char_boundary` checks.
+    #[inline]
+    pub(crate) fn as_bytes<'a>(&'a self, input: &'a str) -> &'a [u8] {
+        match self {
+            Self::Slice(span) => span.bytes(input),
+            Self::Owned(text) => text.as_bytes(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn into_cow(self, input: &str) -> Cow<'_, str> {
+        match self {
+            Self::Slice(span) => Cow::Borrowed(span.slice(input).unwrap_or("")),
+            Self::Owned(text) => Cow::Owned(text),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_owned(self, input: &str) -> String {
+        match self {
+            Self::Slice(span) => span.slice(input).unwrap_or("").to_owned(),
+            Self::Owned(text) => text,
+        }
+    }
 }
 
 /// The prefix the built-in handle `!!` stands for.
@@ -52,12 +114,12 @@ pub(crate) const UNMATCHED_FLOW: u32 = u32::MAX;
 
 /// The token vocabulary the scanner currently produces.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TokenKind<'a> {
+pub(crate) enum TokenKind {
     StreamStart,
     StreamEnd,
     DocumentStart { explicit: bool },
     DocumentEnd,
-    Directive(Box<Directive<'a>>),
+    Directive(Box<Directive>),
     BlockEntry,
     Key,
     Value,
@@ -70,28 +132,28 @@ pub(crate) enum TokenKind<'a> {
     PlainScalar,
     SingleQuotedScalar,
     DoubleQuotedScalar,
-    Scalar(Box<ScalarToken<'a>>),
+    Scalar(Box<ScalarToken>),
     Anchor,
     Alias,
     Tag(Tag),
 }
 
-/// A `%YAML` or `%TAG` directive's name and value.
+/// A `%YAML` or `%TAG` directive's name and value spans in the source input.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Directive<'a> {
-    pub(crate) name: Cow<'a, str>,
-    pub(crate) value: Cow<'a, str>,
+pub(crate) struct Directive {
+    pub(crate) name: Span,
+    pub(crate) value: Span,
 }
 
 /// A scalar token's decoded value and presentation, boxed because most tokens are plain
 /// or unescaped single-line quoted scalars, whose value is sliced directly from their source span.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ScalarToken<'a> {
-    pub(crate) value: Cow<'a, str>,
+pub(crate) struct ScalarToken {
+    pub(crate) value: TokenText,
     pub(crate) style: ScalarStyle,
 }
 
-impl TokenKind<'_> {
+impl TokenKind {
     /// The style of a scalar token, or `None` for any other token.
     pub(crate) fn scalar_style(&self) -> Option<ScalarStyle> {
         match self {
@@ -104,7 +166,7 @@ impl TokenKind<'_> {
     }
 }
 
-impl fmt::Display for TokenKind<'_> {
+impl fmt::Display for TokenKind {
     #[allow(
         clippy::struct_excessive_bools,
         reason = "the flags are independent scanner or emitter options, not a state enum"
@@ -117,7 +179,7 @@ impl fmt::Display for TokenKind<'_> {
                 write!(formatter, "document start ({explicit})")
             }
             Self::DocumentEnd => formatter.write_str("document end"),
-            Self::Directive(directive) => write!(formatter, "directive %{}", directive.name),
+            Self::Directive(_) => formatter.write_str("directive"),
             Self::BlockEntry => formatter.write_str("block entry"),
             Self::Key => formatter.write_str("key indicator"),
             Self::Value => formatter.write_str("value indicator"),
@@ -140,9 +202,43 @@ impl fmt::Display for TokenKind<'_> {
 
 /// Active and pending `%TAG` handle tables, allocated lazily only when a document defines `%TAG`.
 #[derive(Debug, Default)]
-struct TagHandles {
+pub(crate) struct TagHandles {
     active: HashMap<String, String, GlobalHasher>,
     pending: HashMap<String, String, GlobalHasher>,
+}
+
+/// Reusable `'static` scanner scratch buffers checked out from [`crate::ParserBuf`].
+#[derive(Debug, Default)]
+pub(crate) struct ScannerScratch {
+    pub(crate) flow_stack: Vec<(char, usize, bool)>,
+    pub(crate) flow_allow_zero_indent: Vec<bool>,
+    pub(crate) tag_handles: Option<Box<TagHandles>>,
+}
+
+impl ScannerScratch {
+    pub(crate) fn clear_and_clamp(&mut self) {
+        self.flow_stack.clear();
+        if self.flow_stack.capacity() > 128 {
+            self.flow_stack = Vec::new();
+        }
+        self.flow_allow_zero_indent.clear();
+        if self.flow_allow_zero_indent.capacity() > 128 {
+            self.flow_allow_zero_indent = Vec::new();
+        }
+        if let Some(ref mut handles) = self.tag_handles {
+            handles.active.clear();
+            handles.pending.clear();
+            if handles.active.capacity() > 64 || handles.pending.capacity() > 64 {
+                self.tag_handles = None;
+            }
+        }
+    }
+
+    pub(crate) fn release_all(&mut self) {
+        self.flow_stack = Vec::new();
+        self.flow_allow_zero_indent = Vec::new();
+        self.tag_handles = None;
+    }
 }
 
 /// An iterative scanner over a UTF-8 YAML input.
@@ -251,6 +347,15 @@ impl<'a> Scanner<'a> {
         limits: &Limits,
         compat_flow: bool,
     ) -> Result<Self, Box<Error>> {
+        Self::with_compat_and_scratch(input, limits, compat_flow, ScannerScratch::default())
+    }
+
+    pub(crate) fn with_compat_and_scratch(
+        input: &'a str,
+        limits: &Limits,
+        compat_flow: bool,
+        mut scratch: ScannerScratch,
+    ) -> Result<Self, Box<Error>> {
         limits.validate().map_err(Box::new)?;
         limits.check_input(input.len()).map_err(|error| {
             Box::new(
@@ -259,6 +364,12 @@ impl<'a> Scanner<'a> {
                     .with_location(crate::span::Location::new(1, 1)),
             )
         })?;
+        scratch.flow_stack.clear();
+        scratch.flow_allow_zero_indent.clear();
+        if let Some(ref mut handles) = scratch.tag_handles {
+            handles.active.clear();
+            handles.pending.clear();
+        }
         let initial_bom_end = input.len() - input.trim_start_matches('\u{feff}').len();
         let initial_bom = initial_bom_end > 0;
         let pos = initial_bom_end;
@@ -271,13 +382,13 @@ impl<'a> Scanner<'a> {
             tokens: 0,
             anchors: 0,
             flow_level: 0,
-            flow_stack: Vec::new(),
+            flow_stack: scratch.flow_stack,
             short_flow_scalar: None,
             last_token_end: 0,
-            flow_allow_zero_indent: Vec::new(),
+            flow_allow_zero_indent: scratch.flow_allow_zero_indent,
             previous_flow_end: false,
             yaml_directive_seen: false,
-            tag_handles: None,
+            tag_handles: scratch.tag_handles,
             tag_expansion_bytes: 0,
             started: false,
             finished: false,
@@ -334,7 +445,7 @@ impl<'a> Scanner<'a> {
 
     #[cold]
     #[inline(never)]
-    fn finish_depth_stop(&mut self, limits: &Limits) -> Result<Option<Token<'a>>, Box<Error>> {
+    fn finish_depth_stop(&mut self, limits: &Limits) -> Result<Option<Token>, Box<Error>> {
         self.stop_after = false;
         self.finished = true;
         match limits.check_depth(self.flow_level) {
@@ -348,7 +459,21 @@ impl<'a> Scanner<'a> {
         clippy::too_many_lines,
         reason = "the routine is one linear state machine; splitting it would obscure its state"
     )]
-    pub(crate) fn next_token(&mut self, limits: &Limits) -> Result<Option<Token<'a>>, Box<Error>> {
+    pub(crate) fn take_scratch(&mut self) -> ScannerScratch {
+        let mut scratch = ScannerScratch {
+            flow_stack: std::mem::take(&mut self.flow_stack),
+            flow_allow_zero_indent: std::mem::take(&mut self.flow_allow_zero_indent),
+            tag_handles: self.tag_handles.take(),
+        };
+        scratch.clear_and_clamp();
+        scratch
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the token dispatch keeps every YAML indicator arm inline for branch locality"
+    )]
+    pub(crate) fn next_token(&mut self, limits: &Limits) -> Result<Option<Token>, Box<Error>> {
         if !self.started {
             self.started = true;
             return self.make(TokenKind::StreamStart, self.pos, self.pos, limits);
@@ -680,11 +805,11 @@ impl<'a> Scanner<'a> {
     /// mark the document open, and clear flow adjacency.
     fn make_indicator(
         &mut self,
-        kind: TokenKind<'a>,
+        kind: TokenKind,
         start: usize,
         end: usize,
         limits: &Limits,
-    ) -> Result<Option<Token<'a>>, Box<Error>> {
+    ) -> Result<Option<Token>, Box<Error>> {
         self.count_token(start, limits)?;
         if matches!(kind, TokenKind::BlockEntry) {
             self.block_run += 1;
@@ -710,11 +835,7 @@ impl<'a> Scanner<'a> {
     /// belongs to the token for diagnostics and event consumers. No reader
     /// keeps a line break, so it doesn't count against `max_events`, and a
     /// blank or comment line costs nothing there.
-    fn make_line_break(
-        &mut self,
-        start: usize,
-        end: usize,
-    ) -> Result<Option<Token<'a>>, Box<Error>> {
+    fn make_line_break(&mut self, start: usize, end: usize) -> Result<Option<Token>, Box<Error>> {
         self.block_run = 0;
         self.previous_flow_end = false;
         let span = self.span(start, end)?;
@@ -727,11 +848,11 @@ impl<'a> Scanner<'a> {
     #[inline]
     fn make(
         &mut self,
-        kind: TokenKind<'a>,
+        kind: TokenKind,
         start: usize,
         end: usize,
         limits: &Limits,
-    ) -> Result<Option<Token<'a>>, Box<Error>> {
+    ) -> Result<Option<Token>, Box<Error>> {
         // No reader keeps the stream's start and end tokens: they become its
         // stream events, which count as events.
         if !matches!(
@@ -1121,7 +1242,7 @@ impl<'a> Scanner<'a> {
         self.current_line_indent = None;
     }
 
-    fn scan_document_marker(&mut self, limits: &Limits) -> Result<Option<Token<'a>>, Box<Error>> {
+    fn scan_document_marker(&mut self, limits: &Limits) -> Result<Option<Token>, Box<Error>> {
         let start = self.pos;
         // In compat, a stream-start BOM is content for marker detection, so
         // `BOM---` is a plain scalar rather than an explicit document start.
@@ -1177,7 +1298,7 @@ impl<'a> Scanner<'a> {
             && self.marker_follows(position, 3)
     }
 
-    fn scan_directive(&mut self, limits: &Limits) -> Result<Option<Token<'a>>, Box<Error>> {
+    fn scan_directive(&mut self, limits: &Limits) -> Result<Option<Token>, Box<Error>> {
         let start = self.pos;
         self.pos += 1;
         let name_start = self.pos;
@@ -1194,7 +1315,8 @@ impl<'a> Scanner<'a> {
                 "a directive needs a name",
             ));
         }
-        let name = Cow::Borrowed(&self.input[name_start..self.pos]);
+        let name_span = Span::new(name_start, self.pos);
+        let name = &self.input[name_start..self.pos];
         while matches!(self.peek(), Some(' ' | '\t')) {
             self.pos += 1;
         }
@@ -1206,7 +1328,8 @@ impl<'a> Scanner<'a> {
             self.pos += ch.len_utf8();
         }
         self.check_non_printable_slice(name_start, self.pos)?;
-        let value = Cow::Borrowed(self.input[value_start..self.pos].trim_end_matches(is_blank));
+        let value = self.input[value_start..self.pos].trim_end_matches(is_blank);
+        let value_span = Span::new(value_start, value_start + value.len());
         // Directive names and parameters are `ns-char`s, which exclude the
         // byte order mark; libyaml rejects it too. A comment after them may hold one in compat,
         // as any comment may there, and as in libyaml.
@@ -1336,18 +1459,17 @@ impl<'a> Scanner<'a> {
                 .insert(handle.to_owned(), prefix);
         }
         self.make(
-            TokenKind::Directive(Box::new(Directive { name, value })),
+            TokenKind::Directive(Box::new(Directive {
+                name: name_span,
+                value: value_span,
+            })),
             start,
             self.pos,
             limits,
         )
     }
 
-    fn scan_anchor(
-        &mut self,
-        alias: bool,
-        limits: &Limits,
-    ) -> Result<Option<Token<'a>>, Box<Error>> {
+    fn scan_anchor(&mut self, alias: bool, limits: &Limits) -> Result<Option<Token>, Box<Error>> {
         let start = self.pos;
         self.pos += 1;
         let name_start = self.pos;
@@ -1484,7 +1606,7 @@ impl<'a> Scanner<'a> {
         Tag::new("", full)
     }
 
-    fn scan_tag(&mut self, limits: &Limits) -> Result<Option<Token<'a>>, Box<Error>> {
+    fn scan_tag(&mut self, limits: &Limits) -> Result<Option<Token>, Box<Error>> {
         let start = self.pos;
         self.pos += 1;
         // A shorthand's handle needs a suffix after it (YAML 1.2.2 production 99), so `!!` and

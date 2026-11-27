@@ -58,7 +58,7 @@ pub(super) enum FlowLack {
 /// Every token slice the grammar works on is one; a flow collection is
 /// always on one logical line.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Run {
+pub(crate) struct Run {
     pub(super) line: u32,
     pub(super) start: u32,
     pub(super) end: u32,
@@ -121,7 +121,7 @@ impl Run {
 
 /// A block collection between entries.
 #[derive(Debug)]
-pub(super) struct BlockState {
+pub(crate) struct BlockState {
     pub(super) indent: u32,
     pub(super) depth: u32,
     pub(super) entries: u32,
@@ -134,7 +134,7 @@ pub(super) struct BlockState {
 
 /// A flow collection between entries.
 #[derive(Debug)]
-pub(super) struct FlowState {
+pub(crate) struct FlowState {
     pub(super) tokens: Run,
     pub(super) start_span: Span,
     /// The next token to parse, relative to `tokens`.
@@ -238,7 +238,7 @@ pub(super) enum Call<'a> {
 
 /// The rest of a grammar function, waiting for a nested call's result.
 #[derive(Debug)]
-pub(super) enum Cont {
+pub(crate) enum Cont {
     /// A node's inline content must consume the rest of line `index`.
     NodeInline {
         rest: Run,

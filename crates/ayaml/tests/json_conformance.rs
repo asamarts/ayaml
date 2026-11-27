@@ -175,6 +175,30 @@ fn assert_valid_json_matches_oracle(label: &str, input: &str) {
         0,
     );
 
+    let tape = ayaml::parse_tape(input)
+        .unwrap_or_else(|error| panic!("{label}: ayaml::parse_tape failed on {input:?}: {error}"));
+    assert_eq!(tape.to_value(), parsed, "{label}: tape.to_value vs parsed");
+    let tape_json = <serde_json::Value as serde::Deserialize>::deserialize(&tape)
+        .unwrap_or_else(|error| panic!("{label}: serde_json::Value::deserialize(&tape): {error}"));
+    assert_json_values_match(&tape_json, &oracle, &format!("{label}::tape_de"), input, 0);
+    let mut buf = ayaml::ParserBuf::new();
+    tape.recycle_into(&mut buf);
+    let buf_tape = buf
+        .parse_tape(input)
+        .unwrap_or_else(|error| panic!("{label}: ParserBuf::parse_tape failed: {error}"));
+    assert_eq!(buf_tape.to_value(), parsed, "{label}: buf_tape.to_value");
+    buf_tape.recycle_into(&mut buf);
+    let buf_from_str: serde_json::Value = buf
+        .from_str(input)
+        .unwrap_or_else(|error| panic!("{label}: ParserBuf::from_str failed: {error}"));
+    assert_json_values_match(
+        &buf_from_str,
+        &oracle,
+        &format!("{label}::buf_from_str"),
+        input,
+        0,
+    );
+
     let mut cursor = ayaml::Deserializer::from_str(input)
         .unwrap_or_else(|error| panic!("{label}: Deserializer failed on {input:?}: {error}"));
     let first = cursor

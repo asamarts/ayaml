@@ -13,7 +13,7 @@ use crate::limits::Limits;
 use crate::tag::Tag;
 use proptest::prelude::*;
 
-fn tokens(input: &str) -> Vec<TokenKind<'_>> {
+fn tokens(input: &str) -> Vec<TokenKind> {
     let limits = Limits::default();
     let mut scanner = Scanner::new(input, &limits).expect("scanner");
     let mut tokens = Vec::new();
@@ -44,7 +44,9 @@ fn scalar(input: &str) -> (String, ScalarStyle, String) {
                     raw,
                 );
             }
-            TokenKind::Scalar(scalar) => return (scalar.value.into_owned(), scalar.style, raw),
+            TokenKind::Scalar(scalar) => {
+                return (scalar.value.into_owned(input), scalar.style, raw);
+            }
             _ => {}
         }
     }
@@ -517,12 +519,12 @@ fn escaped_line_break_in_double_quotes_is_a_continuation() {
 
 #[test]
 fn anchors_aliases_tags_and_directives() {
-    let kinds = tokens("%YAML 1.2\n---\na: &b !Custom {x: 1}\nc: *b\n");
-    assert!(
-        kinds.iter().any(
-            |kind| matches!(kind, TokenKind::Directive(directive) if directive.name == "YAML")
-        )
-    );
+    let input = "%YAML 1.2\n---\na: &b !Custom {x: 1}\nc: *b\n";
+    let kinds = tokens(input);
+    assert!(kinds.iter().any(|kind| matches!(
+        kind,
+        TokenKind::Directive(directive) if directive.name.slice(input) == Some("YAML")
+    )));
     assert!(
         kinds
             .iter()
@@ -548,7 +550,7 @@ fn comments_are_skipped_and_line_breaks_are_tokens() {
             TokenKind::PlainScalar => {
                 values.push(input[token.span.start()..token.span.end()].to_owned());
             }
-            TokenKind::Scalar(scalar) => values.push(scalar.value.into_owned()),
+            TokenKind::Scalar(scalar) => values.push(scalar.value.into_owned(input)),
             _ => {}
         }
     }
@@ -575,7 +577,7 @@ fn unicode_span_is_byte_based() {
     while let Some(token) = scanner.next_token(&limits).expect("token") {
         let value = match &token.kind {
             TokenKind::PlainScalar => Some(&"é: 1"[token.span.start()..token.span.end()]),
-            TokenKind::Scalar(scalar) => Some(scalar.value.as_ref()),
+            TokenKind::Scalar(scalar) => Some(scalar.value.as_str("é: 1")),
             _ => None,
         };
         if value == Some("é") {
@@ -641,8 +643,8 @@ fn quoted_scalars_borrow_without_escapes_and_decode_escapes_and_breaks() {
             TokenKind::Scalar(scalar) => {
                 scalars.push((
                     scalar.style,
-                    matches!(scalar.value, std::borrow::Cow::Borrowed(_)),
-                    scalar.value.into_owned(),
+                    matches!(scalar.value, super::TokenText::Slice(_)),
+                    scalar.value.into_owned(input),
                 ));
             }
             _ => {}
@@ -665,7 +667,7 @@ fn quoted_scalars_borrow_without_escapes_and_decode_escapes_and_breaks() {
     }
 }
 
-fn scan_all(input: &str, fast: bool) -> Result<Vec<Token<'_>>, String> {
+fn scan_all(input: &str, fast: bool) -> Result<Vec<Token>, String> {
     let limits = Limits::default();
     let mut scanner = Scanner::new(input, &limits).map_err(|error| error.to_string())?;
     scanner.fast_continuation = fast;

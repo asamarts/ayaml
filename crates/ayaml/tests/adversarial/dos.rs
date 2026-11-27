@@ -1099,3 +1099,110 @@ fn value_emitter_handles_max_depth_cap_on_tiny_stack() {
             .expect("512 KiB stack emission succeeded");
     });
 }
+
+/// Flat-array `Tape` and reusable `ParserBuf` enforce alias, depth, scalar, `HashDoS`, and
+/// outlier-retention limits inside a 1 GiB bounded child process (AY-177).
+#[test]
+fn tape_and_parser_buf_enforce_limits_and_clamp_outliers() {
+    in_child!(|| {
+        use ayaml::{MAX_DEPTH_CAP, ParserBuf, Tape};
+        use std::fmt::Write as _;
+        use std::time::{Duration, Instant};
+
+        // 1. Billion-laughs alias bomb must fail BEFORE copying into the flat tape.
+        let bomb = concat!(
+            "a: &a [1, 2, 3, 4, 5, 6, 7, 8]\n",
+            "b: &b [*a, *a, *a, *a, *a, *a, *a, *a]\n",
+            "c: &c [*b, *b, *b, *b, *b, *b, *b, *b]\n",
+            "d: &d [*c, *c, *c, *c, *c, *c, *c, *c]\n",
+            "e: &e [*d, *d, *d, *d, *d, *d, *d, *d]\n",
+            "f: &f [*e, *e, *e, *e, *e, *e, *e, *e]\n",
+            "g: &g [*f, *f, *f, *f, *f, *f, *f, *f]\n",
+            "h: [*g, *g, *g, *g, *g, *g, *g, *g]\n",
+        );
+        let mut buf = ParserBuf::new();
+        let bomb_err = buf.parse_tape(bomb).expect_err("billion laughs rejected");
+        assert_eq!(bomb_err.kind(), ErrorKind::Limit);
+        assert!(matches!(
+            bomb_err.limit().map(ayaml::LimitExceeded::kind),
+            Some(LimitKind::AliasExpansion | LimitKind::AliasDereferences)
+        ));
+
+        // 2. Depth boundary: MAX_DEPTH_CAP (128) succeeds, 129 fails (both direct and via alias).
+        let cap_limits = Limits::default().with_max_depth(MAX_DEPTH_CAP);
+        let cap_opts = ParseOptions::new().with_limits(cap_limits);
+        let at_cap = super::nested("flow sequence", MAX_DEPTH_CAP);
+        let ok_tape = Tape::parse_with_in(&at_cap, &cap_opts, &mut buf).expect("depth 128 ok");
+        assert_eq!(ok_tape.root().kind(), ayaml::TapeKind::Sequence);
+        ok_tape.recycle_into(&mut buf);
+
+        let over_cap = super::nested("flow sequence", MAX_DEPTH_CAP + 1);
+        let over_err = Tape::parse_with_in(&over_cap, &cap_opts, &mut buf).expect_err("depth 129");
+        assert_eq!(over_err.kind(), ErrorKind::Limit);
+        assert_eq!(
+            over_err.limit().map(ayaml::LimitExceeded::kind),
+            Some(LimitKind::Depth)
+        );
+
+        // Nested alias depth must also enforce max_depth before copying.
+        let alias_depth_opts = ParseOptions::new().with_limits(Limits::default().with_max_depth(4));
+        let alias_deep = "base: &b [[[1]]]\nwrap: [[*b]]\n";
+        let alias_err = Tape::parse_with_in(alias_deep, &alias_depth_opts, &mut buf)
+            .expect_err("alias depth limit");
+        assert_eq!(
+            alias_err.limit().map(ayaml::LimitExceeded::kind),
+            Some(LimitKind::Depth)
+        );
+
+        // 3. Wide mapping duplicate detection stays linear (SipHash-1-3 promotion).
+        let count = if cfg!(debug_assertions) {
+            8_000_usize
+        } else {
+            20_000_usize
+        };
+        let mut wide = String::with_capacity(count * 16);
+        for i in 0..count {
+            let _ = writeln!(wide, "key_{i:06}: {i}");
+        }
+        let started = Instant::now();
+        let wide_tape = buf.parse_tape(&wide).expect("wide tape parses");
+        assert_eq!(wide_tape.root().len(), Some(count));
+        wide_tape.recycle_into(&mut buf);
+        wide.push_str("key_000000: 999\n");
+        let dup_err = buf.parse_tape(&wide).expect_err("wide duplicate rejected");
+        assert_eq!(dup_err.code(), ErrorCode::DuplicateKey);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "wide mapping took {:?}",
+            started.elapsed()
+        );
+
+        // 4. Giant scalar rejected at max_scalar_bytes.
+        let scalar_opts =
+            ParseOptions::new().with_limits(Limits::default().with_max_scalar_bytes(1024));
+        let giant = format!("k: \"{}\"\n", "a".repeat(4096));
+        let scalar_err =
+            Tape::parse_with_in(&giant, &scalar_opts, &mut buf).expect_err("giant scalar");
+        assert_eq!(
+            scalar_err.limit().map(ayaml::LimitExceeded::kind),
+            Some(LimitKind::ScalarBytes)
+        );
+
+        // 5. Outlier document followed by small docs does not retain unbounded memory in ParserBuf.
+        let outlier_entries = 12_000_usize;
+        let mut outlier = String::with_capacity(outlier_entries * 64);
+        for i in 0..outlier_entries {
+            let _ = writeln!(outlier, "field_{i}: \"escaped\\nvalue_{i}_padding\"");
+        }
+        let big = buf.parse_tape(&outlier).expect("outlier tape");
+        big.recycle_into(&mut buf);
+        for _ in 0..10 {
+            let small = buf
+                .parse_tape("a: 1\nb: two\n")
+                .expect("small after outlier");
+            assert_eq!(small.get("a").and_then(|n| n.as_u64()), Some(1));
+            small.recycle_into(&mut buf);
+        }
+        buf.shrink_to_fit();
+    });
+}

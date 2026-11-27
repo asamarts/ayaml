@@ -231,9 +231,16 @@ impl Span {
     ///
     /// Returns `None` if the span is not on a UTF-8 boundary or is out of
     /// bounds.
+    #[inline]
     #[must_use]
     pub fn slice(self, source: &str) -> Option<&str> {
         source.get(self.start..self.end)
+    }
+
+    /// Slice `source`'s raw UTF-8 bytes without re-checking char boundaries.
+    #[inline]
+    pub(crate) fn bytes(self, source: &str) -> &[u8] {
+        source.as_bytes().get(self.start..self.end).unwrap_or(b"")
     }
 }
 
@@ -255,6 +262,7 @@ impl From<Range<usize>> for Span {
 /// [`from_str_with`](crate::from_str_with), [`from_str_borrowed`](crate::from_str_borrowed),
 /// [`from_slice`](crate::from_slice), [`from_reader`](crate::from_reader),
 /// [`Deserializer`](crate::Deserializer), [`DocumentDeserializer`](crate::DocumentDeserializer),
+/// [`Tape`](crate::Tape) / [`TapeRef`](crate::TapeRef),
 /// [`parse_frontmatter`](crate::parse_frontmatter), and
 /// `ayaml::compat`), `Spanned<T>` captures the node's byte [`Span`] alongside the decoded value
 /// `T` on both the small-tree and event-stream paths.

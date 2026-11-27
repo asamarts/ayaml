@@ -50,11 +50,12 @@ const MODE: &str = "default";
 #[cfg(feature = "compat")]
 const MODE: &str = "compat";
 
-const CHECKS: [&str; 7] = [
+const CHECKS: [&str; 8] = [
     "class",
     "tree",
     "tree-eager",
     "json",
+    "tape",
     "emit-events",
     "emit-stream",
     "emit-value",
@@ -81,6 +82,7 @@ const EXPECTED: Seen<'_> = Seen {
         ("tree", 311),
         ("tree-eager", 311),
         ("json", 282),
+        ("tape", 309),
         ("emit-events", 311),
         ("emit-stream", 311),
         ("emit-value", 309),
@@ -560,6 +562,37 @@ fn check_emit_stream(input: &str, events: &[Event<'_>]) -> Result<(), String> {
     }
 }
 
+fn check_tape(
+    input: &str,
+    expected: &[ayaml::Value],
+    buf: &mut ayaml::ParserBuf,
+) -> Result<(), String> {
+    let options = ayaml::ParseOptions::new().with_limits(suite_limits());
+    let docs = ayaml::TapeDocuments::parse_with_in(input, &options, buf)
+        .map_err(|error| format!("TapeDocuments::parse_with_in failed: {error}"))?;
+    let actual = docs.to_values();
+    if actual != expected {
+        return Err(format!(
+            "TapeDocuments mismatch: got {actual:?}, want {expected:?}"
+        ));
+    }
+    docs.recycle_into(buf);
+
+    if expected.len() <= 1 {
+        let tape = ayaml::Tape::parse_with_in(input, &options, buf)
+            .map_err(|error| format!("Tape::parse_with_in failed: {error}"))?;
+        let want = expected.first().cloned().unwrap_or(ayaml::Value::Null);
+        let got = tape.to_value();
+        if got != want {
+            return Err(format!(
+                "Tape::to_value mismatch: got {got:?}, want {want:?}"
+            ));
+        }
+        tape.recycle_into(buf);
+    }
+    Ok(())
+}
+
 fn check_emit_value(documents: &[ayaml::Value]) -> Result<(), String> {
     let limits = suite_limits();
     let parse_options = ayaml::ParseOptions::new().with_limits(limits.clone());
@@ -749,6 +782,7 @@ fn main() {
     }
     let (mut cases, mut expected_errors) = (0_u32, 0_u32);
     let mut known_cases = BTreeSet::new();
+    let mut tape_buf = ayaml::ParserBuf::new();
     for path in &suite_paths {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
@@ -853,6 +887,7 @@ fn main() {
                 report.record(&id, "emit-events", check_emit_events(&parsed));
                 report.record(&id, "emit-stream", check_emit_stream(&input, &parsed));
                 if let Some(Ok(values)) = documents(&input) {
+                    report.record(&id, "tape", check_tape(&input, &values, &mut tape_buf));
                     report.record(&id, "emit-value", check_emit_value(&values));
                 }
             }

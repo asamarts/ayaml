@@ -105,6 +105,25 @@ pub fn run_structured(data: &[u8]) {
     let _unused = ayaml::parse_frontmatter_value_with(&rendered, &parse_opts);
 
     if let Ok(docs) = ayaml::parse_documents_with(&rendered, &parse_opts) {
+        let mut tape_buf = ayaml::ParserBuf::new();
+        let tape_docs = ayaml::parse_tape_documents_with_in(&rendered, &parse_opts, &mut tape_buf)
+            .expect("parse_tape_documents_with_in must match parse_documents_with");
+        assert_eq!(
+            tape_docs.to_values(),
+            docs,
+            "TapeDocuments mismatch on structured stream"
+        );
+        tape_docs.recycle_into(&mut tape_buf);
+        if docs.len() <= 1 {
+            let tape = ayaml::parse_tape_with_in(&rendered, &parse_opts, &mut tape_buf)
+                .expect("parse_tape_with_in must match single-document stream");
+            let want = docs.first().cloned().unwrap_or(Value::Null);
+            assert_eq!(tape.to_value(), want, "Tape::to_value mismatch");
+            let from_tape: Value = serde::Deserialize::deserialize(&tape)
+                .expect("Value::deserialize(&tape) must match");
+            assert_eq!(from_tape, want, "Tape Serde Value mismatch");
+            tape.recycle_into(&mut tape_buf);
+        }
         if docs.len() <= 1
             && let Ok(doc_de) = ayaml::DocumentDeserializer::from_str_with(&rendered, &parse_opts)
         {
@@ -445,6 +464,7 @@ pub fn run_merge_keys(data: &[u8]) {
             let _unused = ayaml::parse_events_with(&rendered, &merge_opts)
                 .and_then(Iterator::collect::<Result<Vec<_>, _>>);
             let _unused = ayaml::parse_value_with(&rendered, &merge_opts);
+            let _unused = ayaml::parse_tape_with(&rendered, &merge_opts);
             let _unused = ayaml::from_str_with::<Value>(&rendered, &merge_opts);
             if let Ok(doc_de) = ayaml::DocumentDeserializer::from_str_with(&rendered, &merge_opts) {
                 let _unused: Result<Value, _> = serde::Deserialize::deserialize(doc_de);
@@ -487,7 +507,7 @@ pub fn run_masked_errors(data: &[u8]) {
         return;
     };
     let s = &case.secret;
-    let err: Option<Error> = match case.scenario % 25 {
+    let err: Option<Error> = match case.scenario % 27 {
         0 => ayaml::parse_value(&format!("k: \"{s}")).err(),
         1 => ayaml::parse_value(&format!("k: \"{s}\\q\"")).err(),
         2 => ayaml::parse_value(&format!("@{s}\n")).err(),
@@ -554,12 +574,16 @@ pub fn run_masked_errors(data: &[u8]) {
             &ParseOptions::new().with_merge_keys(true),
         )
         .err(),
+        24 => ayaml::parse_tape(&format!("{s}: 1\n{s}: 2\n")).err(),
+        25 => ayaml::parse_tape(&format!("{s}: {s}\n"))
+            .and_then(|t| <StrictConfig as serde::Deserialize>::deserialize(&t))
+            .err(),
         _ => ayaml::from_value::<ayaml::Spanned<String>>(Value::from(s.clone())).err(),
     };
     let error = err.unwrap_or_else(|| {
         panic!(
             "masked_errors scenario {} unexpectedly succeeded",
-            case.scenario % 25
+            case.scenario % 27
         )
     });
     assert_masked_clean(&error, s);
@@ -708,6 +732,26 @@ pub fn run_typed_equiv(data: &[u8]) {
         "IgnoredAny",
         &input,
     );
+    if !compat {
+        let mut buf = ayaml::ParserBuf::new();
+        let opts = ParseOptions::new().with_limits(limits.clone());
+        assert_tree_events_same(
+            ayaml::internals::from_str_by_tree_with::<Value>(&input, &limits, false, false),
+            ayaml::from_str_with_in::<Value>(&input, &opts, &mut buf),
+            "ParserBuf::from_str_with_in Value",
+            &input,
+        );
+        assert_tree_events_same(
+            ayaml::parse_value_with(&input, &opts),
+            ayaml::parse_tape_with_in(&input, &opts, &mut buf).map(|t| {
+                let v = t.to_value();
+                t.recycle_into(&mut buf);
+                v
+            }),
+            "Tape vs parse_value",
+            &input,
+        );
+    }
 }
 
 fn collect_edit_paths(
