@@ -225,7 +225,11 @@ impl TagDirectives {
             .as_ref()
             .and_then(|added| added.by_prefix.get(prefix).copied())
         {
-            return Ok(&self.added.as_ref().expect("added").handles[index].0);
+            return Ok(self
+                .added
+                .as_ref()
+                .and_then(|added| added.handles.get(index))
+                .map_or("", |(handle, _)| handle.as_str()));
         }
         let existing_bytes = self.lines_byte_len();
         let mut next = self.added.as_ref().map_or(0, |added| added.next);
@@ -485,8 +489,9 @@ impl TagDirectives {
             }
             let mut next_node = None;
             while len > 0 {
-                let frame = small[len - 1].as_mut().expect("active scan frame");
-                if let Some(child) = advance_scan_frame(frame) {
+                if let Some(frame) = small[len - 1].as_mut()
+                    && let Some(child) = advance_scan_frame(frame)
+                {
                     next_node = Some(child);
                     break;
                 }
