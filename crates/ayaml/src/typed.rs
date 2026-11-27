@@ -39,8 +39,10 @@ mod doc_de;
 mod key_text;
 mod node_de;
 mod stream;
+mod stream_scratch;
 
 pub use doc_de::DocumentDeserializer;
+pub(crate) use stream_scratch::{PrehashedMap, StreamScratch};
 
 use key_text::{SeenNodeIndices, SeenNodeKeys, SeenScalarKeys, node_key_text, scalar_key_text};
 use node_de::{NodeDeserializer, check_consumed, inside_key, with_span};
@@ -298,6 +300,34 @@ pub(crate) fn from_str_seed_with_options<'de, T: DeserializeSeed<'de>>(
     seed: T,
 ) -> Result<T::Value, Error> {
     stream::read(input, limits, options, seed)
+}
+
+/// Decode one document into a typed value reusing pooled scratch buffers from [`crate::ParserBuf`].
+pub(crate) fn from_str_in<'de, T: Deserialize<'de>>(
+    input: &'de str,
+    limits: &Limits,
+    buf: &mut crate::ParserBuf,
+) -> Result<T, Error> {
+    from_str_with_options_in(input, limits, NodeOptions::default(), buf)
+}
+
+pub(crate) fn from_str_with_options_in<'de, T: Deserialize<'de>>(
+    input: &'de str,
+    limits: &Limits,
+    options: NodeOptions,
+    buf: &mut crate::ParserBuf,
+) -> Result<T, Error> {
+    from_str_seed_with_options_in(input, limits, options, std::marker::PhantomData::<T>, buf)
+}
+
+pub(crate) fn from_str_seed_with_options_in<'de, T: DeserializeSeed<'de>>(
+    input: &'de str,
+    limits: &Limits,
+    options: NodeOptions,
+    seed: T,
+    buf: &mut crate::ParserBuf,
+) -> Result<T::Value, Error> {
+    stream::read_in(input, limits, options, seed, buf)
 }
 
 /// Decode one document by building its whole tree first.
@@ -690,6 +720,128 @@ impl<'de> Builder<'de> {
             .document
             .take()
             .unwrap_or_else(|| Node::null(Span::empty(self.input_len))))
+    }
+
+    /// Feed one queued node event directly into the builder without converting to a 104-byte
+    /// [`Event`] on the hot path.
+    pub(super) fn push_queued_node(
+        &mut self,
+        event: parser::QueuedEvent,
+        input: &'de str,
+    ) -> Result<(), Error> {
+        use crate::scanner::TokenText;
+        use parser::QueuedEvent;
+
+        match event {
+            QueuedEvent::Scalar {
+                value,
+                style,
+                tag,
+                anchor,
+                span,
+            } => {
+                self.pending_capacity = None;
+                if self.root.is_some() && self.stack.is_empty() {
+                    return Err(self.error_at(span, "expected document end"));
+                }
+                let raw_str = span.slice(input).unwrap_or("");
+                let value_cow = match value {
+                    TokenText::Slice(s) if s == span => Cow::Borrowed(raw_str),
+                    other => other.into_cow(input),
+                };
+                let raw = Cow::Borrowed(raw_str);
+                let node = plain_scalar(
+                    value_cow,
+                    &raw,
+                    style,
+                    tag.as_ref(),
+                    span,
+                    self.options.drop_global_tags,
+                )?;
+                let size = estimate_size(&node, self.limits.node_cost_bytes);
+                let anchor_val = anchor.map(|a| Anchor::new(a.into_cow(input)));
+                let built = self.anchored(anchor_val.as_ref(), node, size, 0, Anchors::define);
+                self.attach_built(built)
+            }
+            QueuedEvent::Alias { anchor, span } => {
+                self.pending_capacity = None;
+                if self.root.is_some() && self.stack.is_empty() {
+                    return Err(self.error_at(span, "expected document end"));
+                }
+                let target = self
+                    .anchors
+                    .resolve(anchor.as_str(input))
+                    .cloned()
+                    .map_err(|(code, message)| self.error_at(span, message).with_code(code))?;
+                self.budget
+                    .charge(&self.limits, self.input_len, target.size)
+                    .map_err(|error| error.with_span(span))?;
+                if target.height > 0 {
+                    self.limits
+                        .check_depth(self.base + self.stack.len() + target.height)
+                        .map_err(|error| Error::from(error).with_span(span))?;
+                }
+                self.attach_built(Built {
+                    node: Node::new(NodeKind::Alias(target.node), span),
+                    size: target.size,
+                    height: target.height,
+                })
+            }
+            QueuedEvent::SequenceStart {
+                tag, anchor, span, ..
+            } => {
+                let capacity = self.pending_capacity.take().unwrap_or(0);
+                if self.root.is_some() && self.stack.is_empty() {
+                    return Err(self.error_at(span, "expected document end"));
+                }
+                self.limits
+                    .check_depth(self.base + self.stack.len() + 1)
+                    .map_err(|error| Error::from(error).with_span(span))?;
+                let anchor = anchor.map(|a| Anchor::new(a.into_cow(input)));
+                if let Some(a) = &anchor {
+                    self.anchors.open(a.as_str());
+                }
+                self.stack.push(Frame::Sequence {
+                    tag,
+                    anchor,
+                    span,
+                    items: Vec::with_capacity(capacity),
+                    size: self.limits.node_cost_bytes,
+                    height: 0,
+                });
+                Ok(())
+            }
+            QueuedEvent::MappingStart {
+                tag, anchor, span, ..
+            } => {
+                let capacity = self.pending_capacity.take().unwrap_or(0);
+                if self.root.is_some() && self.stack.is_empty() {
+                    return Err(self.error_at(span, "expected document end"));
+                }
+                self.limits
+                    .check_depth(self.base + self.stack.len() + 1)
+                    .map_err(|error| Error::from(error).with_span(span))?;
+                let anchor = anchor.map(|a| Anchor::new(a.into_cow(input)));
+                if let Some(a) = &anchor {
+                    self.anchors.open(a.as_str());
+                }
+                self.stack.push(Frame::Mapping {
+                    tag,
+                    anchor,
+                    span,
+                    entries: Vec::with_capacity(capacity),
+                    seen: SeenScalarKeys::new(),
+                    seen_nodes: None,
+                    key: None,
+                    size: self.limits.node_cost_bytes,
+                    height: 0,
+                });
+                Ok(())
+            }
+            QueuedEvent::SequenceEnd { span } => self.push_node(Event::SequenceEnd { span }),
+            QueuedEvent::MappingEnd { span } => self.push_node(Event::MappingEnd { span }),
+            other => self.push_node(other.into_event(input)),
+        }
     }
 
     /// Feed one node event to the open document. A node that completes the root is kept until

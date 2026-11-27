@@ -720,3 +720,66 @@ fn internals_compose_events_key_without_value_is_masked() {
         ayaml::internals::compose_events(&events, SECRET.len(), &Limits::default()).unwrap_err();
     assert_masked_redacts(&err, ErrorCode::MalformedEventStream, &[SECRET]);
 }
+
+#[test]
+fn tape_and_parser_buf_errors_are_masked() {
+    let mut buf = ayaml::ParserBuf::new();
+
+    // Duplicate key via parse_tape, parse_tape_in, parse_tape_documents.
+    let dup = format!("{SECRET}: 1\n{SECRET}: 2\n");
+    assert_masked_redacts(
+        &ayaml::parse_tape(&dup).unwrap_err(),
+        ErrorCode::DuplicateKey,
+        &[SECRET],
+    );
+    assert_masked_redacts(
+        &buf.parse_tape(&dup).unwrap_err(),
+        ErrorCode::DuplicateKey,
+        &[SECRET],
+    );
+    assert_masked_redacts(
+        &buf.parse_tape_documents(&dup).unwrap_err(),
+        ErrorCode::DuplicateKey,
+        &[SECRET],
+    );
+
+    // Serde errors deserializing directly from `&Tape` and `TapeRef`.
+    let unknown_field = format!("host: ok\n{SECRET}: 1\n");
+    let tape = buf.parse_tape(&unknown_field).expect("valid yaml");
+    assert_masked_redacts(
+        &StrictConfig::deserialize(&tape).unwrap_err(),
+        ErrorCode::UnknownField,
+        &[SECRET],
+    );
+    tape.recycle_into(&mut buf);
+
+    let unknown_var = format!("{SECRET}\n");
+    let var_tape = buf.parse_tape(&unknown_var).expect("valid yaml");
+    assert_masked_redacts(
+        &Mode::deserialize(&var_tape).unwrap_err(),
+        ErrorCode::UnknownVariant,
+        &[SECRET],
+    );
+    var_tape.recycle_into(&mut buf);
+
+    let tagged_secret = format!("!{SECRET} {SECRET_VAL}\n");
+    let tag_tape = buf.parse_tape(&tagged_secret).expect("valid yaml");
+    assert_masked_redacts(
+        &CustomTagReject::deserialize(&tag_tape).unwrap_err(),
+        ErrorCode::SerdeCustom,
+        &[SECRET_VAL],
+    );
+    tag_tape.recycle_into(&mut buf);
+
+    // ParserBuf::from_str and parse_value_in errors remain masked identically.
+    assert_masked_redacts(
+        &buf.from_str::<StrictConfig>(&unknown_field).unwrap_err(),
+        ErrorCode::UnknownField,
+        &[SECRET],
+    );
+    assert_masked_redacts(
+        &buf.parse_value(&dup).unwrap_err(),
+        ErrorCode::DuplicateKey,
+        &[SECRET],
+    );
+}

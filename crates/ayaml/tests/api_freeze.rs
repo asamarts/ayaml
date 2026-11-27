@@ -3,31 +3,36 @@
 use std::error::Error as StdError;
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
-use std::panic::UnwindSafe;
+use std::panic::{RefUnwindSafe, UnwindSafe};
 
 use ayaml::{
     Anchor, Chomping, CollectionStyle, ColumnEncoding, Deserializer, DocumentDeserializer,
     EmitOptions, EmitterOptions, EmitterStyles, Error, ErrorCode, ErrorKind, Event, EventStream,
     Frontmatter, FrontmatterDelimiter, LimitExceeded, LimitKind, Limits, LineIndex, Location,
-    Mapping, MaskedError, NodeStyle, Number, ParseOptions, ParsedFrontmatter, PathSegment,
-    Position, PositionError, ScalarStyle, Span, Spanned, SpannedNode, SpannedTree, Tag,
-    TaggedValue, Value,
+    Mapping, MaskedError, NodeStyle, Number, ParseOptions, ParsedFrontmatter, ParserBuf,
+    PathSegment, Position, PositionError, ScalarStyle, Span, Spanned, SpannedNode, SpannedTree,
+    Tag, TaggedValue, Tape, TapeDocuments, TapeDocumentsIter, TapeKind, TapeMapIter, TapeRef,
+    TapeSeqIter, Value,
 };
 
 fn assert_send<T: Send>() {}
 fn assert_send_sync<T: Send + Sync>() {}
 fn assert_unpin<T: Unpin>() {}
 fn assert_unwind_safe<T: UnwindSafe>() {}
+fn assert_ref_unwind_safe<T: RefUnwindSafe>() {}
 fn assert_copy<T: Copy>() {}
 fn assert_default<T: Default>() {}
 fn assert_ord<T: Ord>() {}
+fn assert_debug<T: Debug>() {}
 fn assert_debug_clone<T: Clone + Debug>() {}
 fn assert_value_traits<T: Clone + Debug + PartialEq + Eq>() {}
 fn assert_hash_traits<T: Clone + Debug + PartialEq + Eq + Hash>() {}
 fn assert_error_traits<T: StdError + Send + Sync + Clone + Debug + Display + PartialEq + Eq>() {}
 fn assert_deserializer<'de, D: serde::Deserializer<'de>>() {}
+fn assert_exact_fused_iter<I: ExactSizeIterator + std::iter::FusedIterator>() {}
 fn assert_value_index<I: ayaml::value::Index>() {}
 fn assert_mapping_index<I: ayaml::mapping::Index>() {}
+fn assert_tape_index<I: ayaml::tape::Index>() {}
 
 #[test]
 fn public_api_auto_traits_and_standard_derives_are_frozen_for_v1() {
@@ -155,6 +160,70 @@ fn public_api_auto_traits_and_standard_derives_are_frozen_for_v1() {
     assert_send::<ayaml::Emitter<'_>>();
     assert_unpin::<ayaml::Emitter<'_>>();
     assert_unwind_safe::<ayaml::Emitter<'_>>();
+
+    // Tape DOM and reusable ParserBuf contracts (AY-177).
+    assert_send_sync::<Tape<'_>>();
+    assert_unpin::<Tape<'_>>();
+    assert_unwind_safe::<Tape<'_>>();
+    assert_ref_unwind_safe::<Tape<'_>>();
+    assert_debug_clone::<Tape<'_>>();
+    assert_deserializer::<Tape<'_>>();
+    assert_deserializer::<&Tape<'_>>();
+
+    assert_send_sync::<TapeDocuments<'_>>();
+    assert_unpin::<TapeDocuments<'_>>();
+    assert_unwind_safe::<TapeDocuments<'_>>();
+    assert_ref_unwind_safe::<TapeDocuments<'_>>();
+    assert_debug_clone::<TapeDocuments<'_>>();
+
+    assert_send_sync::<TapeRef<'_, '_>>();
+    assert_unpin::<TapeRef<'_, '_>>();
+    assert_unwind_safe::<TapeRef<'_, '_>>();
+    assert_ref_unwind_safe::<TapeRef<'_, '_>>();
+    assert_copy::<TapeRef<'_, '_>>();
+    assert_debug_clone::<TapeRef<'_, '_>>();
+    assert_deserializer::<TapeRef<'_, '_>>();
+
+    assert_send_sync::<TapeKind>();
+    assert_unpin::<TapeKind>();
+    assert_unwind_safe::<TapeKind>();
+    assert_ref_unwind_safe::<TapeKind>();
+    assert_copy::<TapeKind>();
+    assert_hash_traits::<TapeKind>();
+
+    assert_send_sync::<TapeSeqIter<'_, '_>>();
+    assert_unpin::<TapeSeqIter<'_, '_>>();
+    assert_unwind_safe::<TapeSeqIter<'_, '_>>();
+    assert_ref_unwind_safe::<TapeSeqIter<'_, '_>>();
+    assert_debug_clone::<TapeSeqIter<'_, '_>>();
+    assert_exact_fused_iter::<TapeSeqIter<'_, '_>>();
+
+    assert_send_sync::<TapeMapIter<'_, '_>>();
+    assert_unpin::<TapeMapIter<'_, '_>>();
+    assert_unwind_safe::<TapeMapIter<'_, '_>>();
+    assert_ref_unwind_safe::<TapeMapIter<'_, '_>>();
+    assert_debug_clone::<TapeMapIter<'_, '_>>();
+    assert_exact_fused_iter::<TapeMapIter<'_, '_>>();
+
+    assert_send_sync::<TapeDocumentsIter<'_, '_>>();
+    assert_unpin::<TapeDocumentsIter<'_, '_>>();
+    assert_unwind_safe::<TapeDocumentsIter<'_, '_>>();
+    assert_ref_unwind_safe::<TapeDocumentsIter<'_, '_>>();
+    assert_debug_clone::<TapeDocumentsIter<'_, '_>>();
+    assert_exact_fused_iter::<TapeDocumentsIter<'_, '_>>();
+
+    assert_send_sync::<ParserBuf>();
+    assert_unpin::<ParserBuf>();
+    assert_unwind_safe::<ParserBuf>();
+    assert_ref_unwind_safe::<ParserBuf>();
+    assert_default::<ParserBuf>();
+    assert_debug::<ParserBuf>();
+
+    assert_tape_index::<usize>();
+    assert_tape_index::<&str>();
+    assert_tape_index::<String>();
+    assert_tape_index::<Value>();
+    assert_tape_index::<&Value>();
 
     // Spanned<T> supports DerefMut as well as Deref/AsRef/AsMut.
     let mut spanned = Spanned::new(Span::new(0, 1), 10_u32);

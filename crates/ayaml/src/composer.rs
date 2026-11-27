@@ -117,6 +117,12 @@ impl<T> Anchors<T> {
         self.nodes.clear();
     }
 
+    /// Current table capacity for retention-clamping checks.
+    #[inline]
+    pub(crate) fn capacity(&self) -> usize {
+        self.nodes.capacity()
+    }
+
     fn set(&mut self, anchor: &str, node: AnchorNode<T>) {
         match self.nodes.get_mut(anchor) {
             Some(entry) => *entry = node,
@@ -172,10 +178,49 @@ enum Step {
 /// Where an anchored node sits in the document being built, from the root
 /// collection down, with its size estimate and nesting height.
 #[derive(Clone, Debug)]
-struct AnchorDef {
+pub(crate) struct AnchorDef {
     path: Vec<Step>,
     size: usize,
     height: usize,
+}
+
+/// Reusable `'static` scratch buffers for [`StreamingComposer`] checked out from [`crate::ParserBuf`].
+#[derive(Default)]
+pub(crate) struct ComposerScratch {
+    stack: Vec<Frame>,
+    scratch_items: Vec<Value>,
+    scratch_entries: Vec<(Value, Value)>,
+    anchors: Option<Anchors<AnchorDef>>,
+}
+
+impl ComposerScratch {
+    pub(crate) fn clear_and_clamp(&mut self) {
+        self.stack.clear();
+        if self.stack.capacity() > 128 {
+            self.stack = Vec::new();
+        }
+        self.scratch_items.clear();
+        if self.scratch_items.capacity() > 256 {
+            self.scratch_items = Vec::new();
+        }
+        self.scratch_entries.clear();
+        if self.scratch_entries.capacity() > 128 {
+            self.scratch_entries = Vec::new();
+        }
+        if let Some(ref mut anchors) = self.anchors {
+            anchors.clear();
+            if anchors.capacity() > 256 {
+                self.anchors = None;
+            }
+        }
+    }
+
+    pub(crate) fn release_all(&mut self) {
+        self.stack = Vec::new();
+        self.scratch_items = Vec::new();
+        self.scratch_entries = Vec::new();
+        self.anchors = None;
+    }
 }
 
 /// Maximum number of sequence items buffered in `StreamingComposer::scratch_items` before
@@ -213,10 +258,10 @@ impl MapBuf {
     }
 }
 
-enum Frame<'a> {
+enum Frame {
     Sequence {
         tag: Option<Tag>,
-        anchor: Option<Anchor<'a>>,
+        anchor: Option<String>,
         items: SeqBuf,
         span: Span,
         size: usize,
@@ -224,7 +269,7 @@ enum Frame<'a> {
     },
     Mapping {
         tag: Option<Tag>,
-        anchor: Option<Anchor<'a>>,
+        anchor: Option<String>,
         mapping: MapBuf,
         pending_key: Option<(Value, Span)>,
         span: Span,
@@ -233,7 +278,7 @@ enum Frame<'a> {
     },
 }
 
-impl Frame<'_> {
+impl Frame {
     /// Where the next finished child goes.
     fn position(&self) -> Step {
         match self {
@@ -314,7 +359,7 @@ fn child_of(mut value: &Value, step: Step) -> Option<&Value> {
 /// Resolve an anchor path against the active composer stack and scratch buffers without borrowing
 /// `self.anchors`.
 fn anchored_value<'b>(
-    stack: &'b [Frame<'_>],
+    stack: &'b [Frame],
     scratch_items: &'b [Value],
     scratch_entries: &'b [(Value, Value)],
     path: &[Step],
@@ -353,7 +398,7 @@ fn shrink_root_value(mut value: &mut Value) {
 
 /// Event-driven composer behind `parse_value`, `parse_documents`, and the
 /// document cursor.
-pub(crate) struct StreamingComposer<'a> {
+pub(crate) struct StreamingComposer {
     limits: Limits,
     input_len: usize,
     anchors: Anchors<AnchorDef>,
@@ -364,13 +409,13 @@ pub(crate) struct StreamingComposer<'a> {
     single_completed: bool,
     /// Optional entry-count hint from the parser for the next root flow collection.
     next_capacity: usize,
-    stack: Vec<Frame<'a>>,
+    stack: Vec<Frame>,
     scratch_items: Vec<Value>,
     scratch_entries: Vec<(Value, Value)>,
     budget: AliasBudget,
 }
 
-impl<'a> StreamingComposer<'a> {
+impl StreamingComposer {
     pub(crate) fn new(limits: Limits, input_len: usize) -> Self {
         Self::with_budget(limits, input_len, AliasBudget::default())
     }
@@ -379,6 +424,44 @@ impl<'a> StreamingComposer<'a> {
         let mut composer = Self::with_budget(limits, input_len, AliasBudget::default());
         composer.single_document = true;
         composer
+    }
+
+    pub(crate) fn with_scratch(
+        limits: Limits,
+        input_len: usize,
+        single_document: bool,
+        mut scratch: ComposerScratch,
+    ) -> Self {
+        scratch.stack.clear();
+        scratch.scratch_items.clear();
+        scratch.scratch_entries.clear();
+        let mut anchors = scratch.anchors.unwrap_or_else(Anchors::new);
+        anchors.clear();
+        Self {
+            limits,
+            input_len,
+            anchors,
+            documents: Vec::new(),
+            document: None,
+            single_document,
+            single_completed: false,
+            next_capacity: 0,
+            stack: scratch.stack,
+            scratch_items: scratch.scratch_items,
+            scratch_entries: scratch.scratch_entries,
+            budget: AliasBudget::default(),
+        }
+    }
+
+    pub(crate) fn take_scratch(&mut self) -> ComposerScratch {
+        let mut scratch = ComposerScratch {
+            stack: std::mem::take(&mut self.stack),
+            scratch_items: std::mem::take(&mut self.scratch_items),
+            scratch_entries: std::mem::take(&mut self.scratch_entries),
+            anchors: Some(std::mem::replace(&mut self.anchors, Anchors::new())),
+        };
+        scratch.clear_and_clamp();
+        scratch
     }
 
     pub(crate) fn with_budget(limits: Limits, input_len: usize, budget: AliasBudget) -> Self {
@@ -420,10 +503,10 @@ impl<'a> StreamingComposer<'a> {
     #[inline]
     pub(crate) fn scalar(
         &mut self,
-        value: Cow<'a, str>,
+        value: Cow<'_, str>,
         style: ScalarStyle,
         tag: Option<&Tag>,
-        anchor: Option<&Anchor<'a>>,
+        anchor: Option<&Anchor<'_>>,
         span: Span,
     ) -> Result<(), Box<Error>> {
         self.next_capacity = 0;
@@ -436,11 +519,11 @@ impl<'a> StreamingComposer<'a> {
         } else {
             0
         };
-        self.record_anchor(anchor, size, 0, Anchors::define);
+        self.record_anchor(anchor.map(Anchor::as_str), size, 0, Anchors::define);
         self.feed(resolved, span, size, 0)
     }
 
-    pub(crate) fn event(&mut self, event: Event<'a>) -> Result<(), Box<Error>> {
+    pub(crate) fn event(&mut self, event: Event<'_>) -> Result<(), Box<Error>> {
         let reserved = std::mem::take(&mut self.next_capacity);
         match event {
             Event::StreamStart { .. } | Event::StreamEnd { .. } | Event::Directive { .. } => {}
@@ -535,9 +618,13 @@ impl<'a> StreamingComposer<'a> {
                 self.limits
                     .check_depth(self.stack.len() + 1)
                     .map_err(|error| Box::new(Error::from(error).with_span(span)))?;
-                if let Some(anchor) = &anchor {
-                    self.anchors.open(anchor.as_str());
-                }
+                let anchor_name = if let Some(anchor) = anchor {
+                    let owned = anchor.as_str().to_owned();
+                    self.anchors.open(&owned);
+                    Some(owned)
+                } else {
+                    None
+                };
                 let items = if reserved > SEQ_SCRATCH_LIMIT {
                     SeqBuf::Owned(Vec::with_capacity(reserved))
                 } else {
@@ -548,7 +635,7 @@ impl<'a> StreamingComposer<'a> {
                 };
                 self.stack.push(Frame::Sequence {
                     tag,
-                    anchor,
+                    anchor: anchor_name,
                     items,
                     span,
                     size: self.limits.node_cost_bytes,
@@ -562,9 +649,13 @@ impl<'a> StreamingComposer<'a> {
                 self.limits
                     .check_depth(self.stack.len() + 1)
                     .map_err(|error| Box::new(Error::from(error).with_span(span)))?;
-                if let Some(anchor) = &anchor {
-                    self.anchors.open(anchor.as_str());
-                }
+                let anchor_name = if let Some(anchor) = anchor {
+                    let owned = anchor.as_str().to_owned();
+                    self.anchors.open(&owned);
+                    Some(owned)
+                } else {
+                    None
+                };
                 let mapping = if reserved > SMALL_LIMIT {
                     MapBuf::Large(Mapping::with_capacity(reserved))
                 } else {
@@ -575,7 +666,7 @@ impl<'a> StreamingComposer<'a> {
                 };
                 self.stack.push(Frame::Mapping {
                     tag,
-                    anchor,
+                    anchor: anchor_name,
                     mapping,
                     pending_key: None,
                     span,
@@ -619,7 +710,7 @@ impl<'a> StreamingComposer<'a> {
             }
         };
         let (value, size) = self.finish_collection(tag.as_ref(), Value::Sequence(items), size);
-        self.record_anchor(anchor.as_ref(), size, height + 1, Anchors::close);
+        self.record_anchor(anchor.as_deref(), size, height + 1, Anchors::close);
         self.feed(value, start_span, size, height + 1)
     }
 
@@ -659,12 +750,52 @@ impl<'a> StreamingComposer<'a> {
             }
         };
         let (value, size) = self.finish_collection(tag.as_ref(), Value::Mapping(mapping), size);
-        self.record_anchor(anchor.as_ref(), size, height + 1, Anchors::close);
+        self.record_anchor(anchor.as_deref(), size, height + 1, Anchors::close);
         self.feed(value, start_span, size, height + 1)
     }
 
     pub(crate) fn finish(self) -> Result<Vec<Value>, Error> {
         self.finish_with_budget().map(|(documents, _)| documents)
+    }
+
+    /// Finish a single-document parse and return reusable scratch buffers even on error,
+    /// checking open-frame termination before clearing the stack.
+    pub(crate) fn finish_single_with_scratch(mut self) -> (Result<Value, Error>, ComposerScratch) {
+        let unterminated = !self.stack.is_empty();
+        let scratch = self.take_scratch();
+        if unterminated {
+            return (
+                Err(Error::new(
+                    ErrorKind::Composition,
+                    "unterminated collection at end of stream",
+                )),
+                scratch,
+            );
+        }
+        let mut value = self.document.take().unwrap_or(Value::Null);
+        shrink_root_value(&mut value);
+        (Ok(value), scratch)
+    }
+
+    /// Finish a multi-document parse and return reusable scratch buffers even on error,
+    /// checking open-frame termination before clearing the stack.
+    pub(crate) fn finish_with_scratch(mut self) -> (Result<Vec<Value>, Error>, ComposerScratch) {
+        let unterminated = !self.stack.is_empty();
+        let scratch = self.take_scratch();
+        if unterminated {
+            return (
+                Err(Error::new(
+                    ErrorKind::Composition,
+                    "unterminated collection at end of stream",
+                )),
+                scratch,
+            );
+        }
+        let mut documents = std::mem::take(&mut self.documents);
+        for doc in &mut documents {
+            shrink_root_value(doc);
+        }
+        (Ok(documents), scratch)
     }
 
     /// Finish a single-document parse without wrapping the root value in a `Vec`.
@@ -843,7 +974,7 @@ impl<'a> StreamingComposer<'a> {
     /// will put its next child.
     fn record_anchor(
         &mut self,
-        anchor: Option<&Anchor<'a>>,
+        anchor: Option<&str>,
         size: usize,
         height: usize,
         record: fn(&mut Anchors<AnchorDef>, &str, AnchorDef),
@@ -851,7 +982,7 @@ impl<'a> StreamingComposer<'a> {
         if let Some(anchor) = anchor {
             let path = self.stack.iter().map(Frame::position).collect();
             let definition = AnchorDef { path, size, height };
-            record(&mut self.anchors, anchor.as_str(), definition);
+            record(&mut self.anchors, anchor, definition);
         }
     }
 

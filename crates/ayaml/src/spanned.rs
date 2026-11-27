@@ -128,6 +128,12 @@ impl<'a> SpannedTree<'a> {
     /// Returns an error for the same syntax and limit failures as
     /// [`crate::parse_events_with`].
     pub fn parse_with(input: &'a str, options: &ParseOptions) -> Result<Self, Error> {
+        options.limits.validate()?;
+        options.limits.check_input(input.len()).map_err(|error| {
+            Error::from(error)
+                .with_span(Span::empty(0))
+                .with_location(crate::Location::new(1, 1))
+        })?;
         if options.merge_keys {
             let events = crate::parse_events_with(input, options)?;
             return build(input, events, true);

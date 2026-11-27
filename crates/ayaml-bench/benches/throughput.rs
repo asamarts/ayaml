@@ -105,20 +105,56 @@ fn bench_domains(c: &mut Criterion) {
         }
     }
 
-    if item_selected("domains/bulk_32/automation-playbooks") {
+    if item_selected("domains/bulk_32/automation-playbooks")
+        || item_selected("domains/bulk_32_value_buf/automation-playbooks")
+        || item_selected("domains/bulk_32_tape_buf/automation-playbooks")
+    {
         let bulk = bulk_automation_files(32);
         let total_bulk_bytes: usize = bulk.iter().map(|f| f.bytes).sum();
         group.throughput(Throughput::Bytes(total_bulk_bytes as u64));
-        group.bench_function("bulk_32/automation-playbooks", |b| {
-            b.iter(|| {
-                let mut count = 0_usize;
-                for file in &bulk {
-                    let v = ayaml::parse_value(black_box(&file.content)).expect("bulk parse");
-                    count += usize::from(v.is_sequence());
-                }
-                black_box(count)
+        if item_selected("domains/bulk_32/automation-playbooks") {
+            group.bench_function("bulk_32/automation-playbooks", |b| {
+                b.iter(|| {
+                    let mut count = 0_usize;
+                    for file in &bulk {
+                        let v = ayaml::parse_value(black_box(&file.content)).expect("bulk parse");
+                        count += usize::from(v.is_sequence());
+                    }
+                    black_box(count)
+                });
             });
-        });
+        }
+        if item_selected("domains/bulk_32_value_buf/automation-playbooks") {
+            let mut buf = ayaml::ParserBuf::new();
+            group.bench_function("bulk_32_value_buf/automation-playbooks", |b| {
+                b.iter(|| {
+                    let mut count = 0_usize;
+                    for file in &bulk {
+                        let v = buf
+                            .parse_value(black_box(&file.content))
+                            .expect("bulk value buf");
+                        count += usize::from(v.is_sequence());
+                    }
+                    black_box(count)
+                });
+            });
+        }
+        if item_selected("domains/bulk_32_tape_buf/automation-playbooks") {
+            let mut buf = ayaml::ParserBuf::new();
+            group.bench_function("bulk_32_tape_buf/automation-playbooks", |b| {
+                b.iter(|| {
+                    let mut count = 0_usize;
+                    for file in &bulk {
+                        let tape = buf
+                            .parse_tape(black_box(&file.content))
+                            .expect("bulk tape buf");
+                        count += usize::from(tape.root().is_sequence());
+                        tape.recycle_into(&mut buf);
+                    }
+                    black_box(count)
+                });
+            });
+        }
     }
     group.finish();
 }
@@ -136,6 +172,8 @@ fn bench_layers(c: &mut Criterion) {
         "layers/events/openapi-spec",
         "layers/compose/openapi-spec",
         "layers/parse_value/openapi-spec",
+        "layers/parse_tape/openapi-spec",
+        "layers/parse_tape_buf/openapi-spec",
         "layers/from_str_value/openapi-spec",
         "layers/emit_events/openapi-spec",
         "layers/emit_value/openapi-spec",
@@ -194,6 +232,24 @@ fn bench_layers(c: &mut Criterion) {
                 });
             });
         }
+        if item_selected("layers/parse_tape/openapi-spec") {
+            group.bench_function("parse_tape/openapi-spec", |b| {
+                b.iter(|| black_box(ayaml::parse_tape(black_box(&openapi.content)).expect("tape")));
+            });
+        }
+        if item_selected("layers/parse_tape_buf/openapi-spec") {
+            let mut buf = ayaml::ParserBuf::new();
+            group.bench_function("parse_tape_buf/openapi-spec", |b| {
+                b.iter(|| {
+                    let tape = buf
+                        .parse_tape(black_box(&openapi.content))
+                        .expect("tape buf");
+                    let k = black_box(tape.root().kind());
+                    tape.recycle_into(&mut buf);
+                    k
+                });
+            });
+        }
         if item_selected("layers/from_str_value/openapi-spec") {
             group.bench_function("from_str_value/openapi-spec", |b| {
                 b.iter(|| {
@@ -214,6 +270,7 @@ fn bench_layers(c: &mut Criterion) {
     let need_front = [
         "layers/from_str_typed_owned/frontmatter-tiny",
         "layers/from_str_typed_borrowed/frontmatter-tiny",
+        "layers/from_str_buf_borrowed/frontmatter-tiny",
         "layers/to_string_serde/frontmatter-tiny",
     ]
     .into_iter()
@@ -240,6 +297,17 @@ fn bench_layers(c: &mut Criterion) {
                             &front.content,
                         ))
                         .expect("borrowed"),
+                    )
+                });
+            });
+        }
+        if item_selected("layers/from_str_buf_borrowed/frontmatter-tiny") {
+            let mut buf = ayaml::ParserBuf::new();
+            group.bench_function("from_str_buf_borrowed/frontmatter-tiny", |b| {
+                b.iter(|| {
+                    black_box(
+                        buf.from_str::<FrontmatterBorrowed<'_>>(black_box(&front.content))
+                            .expect("buf borrowed"),
                     )
                 });
             });

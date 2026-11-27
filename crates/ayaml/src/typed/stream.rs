@@ -21,23 +21,25 @@
 //! reads, the stream is read to its end, and the tokens are freed, so the target's value is
 //! built beside the tree alone, as the tree reader builds it.
 
-use std::borrow::Cow;
-use std::collections::HashSet;
-
 use serde::Deserializer;
 use serde::de::{Deserialize, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
+use super::stream_scratch::{
+    StreamScratch, StreamSeenLarge, cow_to_key_text, insert_large_key_map, pop_seen_large,
+    promote_seen_large,
+};
 use super::{
-    Builder, Node, NodeDeserializer, NodeKind, NodeOptions, SeenNodeKeys, borrowed_or_owned,
-    check_consumed, collection_drops, inside_key, node_key_text, parse_document, plain_scalar,
-    scalar_key_text, with_span,
+    Builder, Node, NodeDeserializer, NodeKind, NodeOptions, SeenNodeKeys, check_consumed,
+    collection_drops, inside_key, node_key_text, parse_document, plain_scalar, scalar_key_text,
+    with_span,
 };
 use crate::error::{Error, ErrorCode, ErrorKind};
-use crate::event::{Event, ScalarStyle};
+use crate::event::ScalarStyle;
 use crate::limits::Limits;
-use crate::mapping::GlobalHasher;
-use crate::parser::DocumentEvents;
+use crate::parser::{DocumentEvents, QueuedEvent};
 use crate::resolver::{float_from_text, resolve_plain};
+use crate::scanner::TokenText;
+use crate::scratch::ParserBuf;
 use crate::span::{Location, SPANNED_FIELDS, SPANNED_TOKEN, Span};
 use crate::value::{Value, push_quoted_key};
 
@@ -45,6 +47,19 @@ use crate::value::{Value, push_quoted_key};
 /// promoting to a cryptographic SipHash-1-3 hash map. Covers typical small structs and frontmatter
 /// objects (up to 12 fields) in one compact reusable flat buffer with zero per-map hash allocation.
 const STREAM_SEEN_SMALL_LIMIT: usize = 12;
+
+/// Panic-safe guard returning [`StreamScratch`] to [`ParserBuf`] even on error or unwind from
+/// a caller's [`Deserialize`] / [`DeserializeSeed`] implementation.
+struct StreamScratchGuard<'de, 'b> {
+    stream: Stream<'de>,
+    buf: &'b mut ParserBuf,
+}
+
+impl Drop for StreamScratchGuard<'_, '_> {
+    fn drop(&mut self) {
+        self.buf.put_stream_scratch(self.stream.take_scratch());
+    }
+}
 
 /// Read one document into what `seed` makes of it.
 pub(super) fn read<'de, T: DeserializeSeed<'de>>(
@@ -55,33 +70,25 @@ pub(super) fn read<'de, T: DeserializeSeed<'de>>(
 ) -> Result<T::Value, Error> {
     limits.validate()?;
     let located = |error: Error| error.with_input_location(input, options.compat_flow);
-    // An input over the limit is refused here as `parse_document` refuses it, before any work.
     limits.check_input(input.len()).map_err(|error| {
         Error::from(error)
             .with_span(Span::empty(0))
             .with_location(Location::new(1, 1))
     })?;
-    // Both `DocumentEvents` and `parse_document` stream lazily through the same bounded
-    // `LineWindow`, so scanner and parser errors occur in identical document order.
     let events = DocumentEvents::new(input, limits, options.compat_flow).map_err(located)?;
     let mut stream = Stream::new(events, input.len(), limits, options);
     let result = stream.document(|document| seed.deserialize(document));
     let fault = stream.fault.take();
     let error = match (result, fault) {
         (Ok(value), None) => return Ok(value),
-        // A fault in the document stands, whatever the target made of the error it was given.
         (_, Some(fault)) => fault,
         (Err(error), None) => {
-            // The target failed while reading; `read_with_target` already settled and checked the
-            // rest of the root node. Validate the document/stream end incrementally so valid YAML
-            // with a Serde mismatch skips a full second parse.
             if stream.validate_end().is_ok() && stream.fault.is_none() {
                 return Err(located(error));
             }
             error
         }
     };
-    // The tokens are freed before a tree is built to confirm exact document-order error precedence.
     drop(stream);
     Err(located(
         parse_document(input, limits, options)
@@ -90,14 +97,67 @@ pub(super) fn read<'de, T: DeserializeSeed<'de>>(
     ))
 }
 
-/// Promoted duplicate-key set paired with its owning `Stream::open` depth.
-type SeenLarge<'de> = (usize, HashSet<Cow<'de, str>, GlobalHasher>);
+/// Read one document into what `seed` makes of it, reusing pooled scratch from `buf`.
+pub(super) fn read_in<'de, T: DeserializeSeed<'de>>(
+    input: &'de str,
+    limits: &Limits,
+    options: NodeOptions,
+    seed: T,
+    buf: &mut ParserBuf,
+) -> Result<T::Value, Error> {
+    limits.validate()?;
+    let located = |error: Error| error.with_input_location(input, options.compat_flow);
+    limits.check_input(input.len()).map_err(|error| {
+        Error::from(error)
+            .with_span(Span::empty(0))
+            .with_location(Location::new(1, 1))
+    })?;
+    let scratch = buf.take_stream_scratch();
+    let events = DocumentEvents::new_with_scratch(
+        input,
+        limits,
+        options.compat_flow,
+        scratch.window,
+        scratch.queue,
+        scratch.cont_overflow,
+    )
+    .map_err(located)?;
+    let mut guard = StreamScratchGuard {
+        stream: Stream::with_scratch(
+            events,
+            input.len(),
+            limits,
+            options,
+            scratch.seen_keys,
+            scratch.seen_large_top,
+            scratch.seen_large_rest,
+        ),
+        buf,
+    };
+    let result = guard.stream.document(|document| seed.deserialize(document));
+    let fault = guard.stream.fault.take();
+    let error = match (result, fault) {
+        (Ok(value), None) => return Ok(value),
+        (_, Some(fault)) => fault,
+        (Err(error), None) => {
+            if guard.stream.validate_end().is_ok() && guard.stream.fault.is_none() {
+                return Err(located(error));
+            }
+            error
+        }
+    };
+    drop(guard);
+    Err(located(
+        parse_document(input, limits, options)
+            .err()
+            .unwrap_or(error),
+    ))
+}
 
 /// An unanchored, untagged scalar event popped directly from `DocumentEvents` without constructing
-/// an 80-byte `Node<'de>`.
-struct UntaggedScalar<'de> {
-    value: Cow<'de, str>,
-    raw: Cow<'de, str>,
+/// an 80-byte `Node<'de>` or converting to `Event<'de>`.
+struct UntaggedScalar {
+    value: TokenText,
     style: ScalarStyle,
     span: Span,
 }
@@ -113,15 +173,15 @@ pub(super) struct Stream<'de> {
     /// The collections that are open here and read entry by entry, the innermost last. The
     /// builder doesn't see them, and counts them as its base depth.
     open: Vec<Open<'de>>,
-    /// Shared flat stack of scalar keys for open small mappings (`<= STREAM_SEEN_SMALL_LIMIT`
-    /// entries), eliminating per-mapping heap allocations and keeping `Open` frames compact.
-    seen_keys: Vec<Cow<'de, str>>,
-    /// Active promoted duplicate-key table for the innermost large open mapping (`(depth, set)`),
+    /// Shared flat stack of `'static` scalar keys for open small mappings (`<= STREAM_SEEN_SMALL_LIMIT`
+    /// entries), eliminating per-mapping heap allocations and enabling `ParserBuf` reuse.
+    seen_keys: Vec<TokenText>,
+    /// Active promoted duplicate-key table for the innermost large open mapping (`(depth, map)`),
     /// kept inline on `Stream` to avoid both a `Box` allocation and widening `Open`.
-    seen_large_top: Option<SeenLarge<'de>>,
+    seen_large_top: Option<StreamSeenLarge>,
     /// Overflow stack of promoted duplicate-key tables when two or more nested mappings exceed
     /// `STREAM_SEEN_SMALL_LIMIT` simultaneously.
-    seen_large_rest: Vec<SeenLarge<'de>>,
+    seen_large_rest: Vec<StreamSeenLarge>,
     /// What the event that waits is, once a read has looked at it.
     ahead: Ahead,
     /// Whether the node that a seed was given is still unread. A seed may read nothing.
@@ -175,9 +235,9 @@ impl Ahead {
 
 /// A mapping key held between `next_key_seed` and `next_value_seed` (or skipped value).
 enum PendingStreamKey<'de> {
-    /// An unanchored, untagged scalar guaranteed to resolve as a YAML string (`String(text)`),
-    /// bypassing `Node<'de>` construction and cloning when recorded into the seen-key set.
-    String { text: Cow<'de, str>, span: Span },
+    /// An unanchored, untagged scalar guaranteed to resolve as a YAML string, bypassing `Node<'de>`
+    /// construction, `Event` conversion, and cloning when recorded into the seen-key set.
+    String { text: TokenText, span: Span },
     /// Any other key (numbers, bools, nulls, tagged, anchored, or collection keys).
     Node(Box<Node<'de>>),
 }
@@ -219,15 +279,15 @@ enum Open<'de> {
     },
 }
 
-/// Whether an untagged, non-empty plain scalar is guaranteed to resolve as a YAML string and
-/// cannot match `resolve_plain` or `float_from_text`.
+/// Whether an untagged, non-empty plain scalar's UTF-8 bytes are guaranteed to resolve as a YAML
+/// string and cannot match `resolve_plain` or `float_from_text`.
 #[inline]
-fn is_unambiguous_plain_string(text: &str) -> bool {
-    match text.as_bytes().first() {
+fn is_unambiguous_plain_string_bytes(bytes: &[u8]) -> bool {
+    match bytes.first() {
         None | Some(b'0'..=b'9' | b'+' | b'-' | b'.' | b'~') => false,
-        Some(b'n' | b'N') => !matches!(text, "null" | "Null" | "NULL"),
-        Some(b't' | b'T') => !matches!(text, "true" | "True" | "TRUE"),
-        Some(b'f' | b'F') => !matches!(text, "false" | "False" | "FALSE"),
+        Some(b'n' | b'N') => !matches!(bytes, b"null" | b"Null" | b"NULL"),
+        Some(b't' | b'T') => !matches!(bytes, b"true" | b"True" | b"TRUE"),
+        Some(b'f' | b'F') => !matches!(bytes, b"false" | b"False" | b"FALSE"),
         _ => true,
     }
 }
@@ -239,13 +299,35 @@ impl<'de> Stream<'de> {
         limits: &Limits,
         options: NodeOptions,
     ) -> Self {
+        Self::with_scratch(
+            events,
+            input_len,
+            limits,
+            options,
+            Vec::new(),
+            None,
+            Vec::new(),
+        )
+    }
+
+    fn with_scratch(
+        events: DocumentEvents<'de>,
+        input_len: usize,
+        limits: &Limits,
+        options: NodeOptions,
+        mut seen_keys: Vec<TokenText>,
+        seen_large_top: Option<StreamSeenLarge>,
+        mut seen_large_rest: Vec<StreamSeenLarge>,
+    ) -> Self {
+        seen_keys.clear();
+        seen_large_rest.clear();
         Self {
             events,
             builder: Builder::streaming(input_len, limits, options),
             open: Vec::new(),
-            seen_keys: Vec::new(),
-            seen_large_top: None,
-            seen_large_rest: Vec::new(),
+            seen_keys,
+            seen_large_top,
+            seen_large_rest,
             ahead: Ahead::Unknown,
             due: false,
             ended: false,
@@ -253,28 +335,42 @@ impl<'de> Stream<'de> {
         }
     }
 
+    fn take_scratch(&mut self) -> StreamScratch {
+        let (window, queue, cont_overflow) = self.events.take_scratch();
+        let mut scratch = StreamScratch {
+            window,
+            queue,
+            cont_overflow,
+            seen_keys: std::mem::take(&mut self.seen_keys),
+            seen_large_top: self.seen_large_top.take(),
+            seen_large_rest: std::mem::take(&mut self.seen_large_rest),
+        };
+        scratch.clear_and_clamp();
+        scratch
+    }
+
     fn document<R>(
         &mut self,
         target: impl for<'s> FnOnce(StreamDeserializer<'de, 's>) -> Result<R, Error>,
     ) -> Result<R, Error> {
         loop {
-            let next = match self.events.next_event() {
+            let next = match self.events.next_queued() {
                 Ok(event) => event,
                 Err(error) => return Err(self.faulted(error)),
             };
             match next {
-                Some(Event::StreamStart { .. } | Event::Directive { .. }) => {}
-                Some(Event::DocumentStart { .. }) => break,
+                Some(QueuedEvent::StreamStart { .. } | QueuedEvent::Directive { .. }) => {}
+                Some(QueuedEvent::DocumentStart { .. }) => break,
                 // A stream with no document reads as an empty one, which the tree gives as a
                 // null that the source doesn't write.
-                Some(Event::StreamEnd { .. }) | None => {
+                Some(QueuedEvent::StreamEnd { .. }) | None => {
                     let end = Span::empty(self.builder.input_len);
                     self.builder.root = Some(Node::null(end));
                     self.ahead = Ahead::Whole(end);
                     self.ended = true;
                     return target(StreamDeserializer { stream: self });
                 }
-                Some(event) => return Err(self.faulted(misplaced(&event))),
+                Some(event) => return Err(self.faulted(misplaced_span(event.span()))),
             }
         }
         let ahead = self.ahead()?;
@@ -333,15 +429,15 @@ impl<'de> Stream<'de> {
         if std::mem::replace(&mut self.ended, true) {
             return Ok(());
         }
-        match self.pull()? {
-            Event::DocumentEnd { .. } => {}
-            event => return Err(misplaced(&event)),
+        match self.pull_queued()? {
+            QueuedEvent::DocumentEnd { .. } => {}
+            event => return Err(misplaced_span(event.span())),
         }
         loop {
-            match self.events.next_event()? {
-                Some(Event::StreamEnd { .. }) | None => return Ok(()),
-                Some(Event::Directive { .. }) => {}
-                Some(Event::DocumentStart { span, .. }) => {
+            match self.events.next_queued()? {
+                Some(QueuedEvent::StreamEnd { .. }) | None => return Ok(()),
+                Some(QueuedEvent::Directive { .. }) => {}
+                Some(QueuedEvent::DocumentStart { span, .. }) => {
                     return Err(Error::coded(
                         ErrorKind::Parser,
                         ErrorCode::TrailingDocuments,
@@ -349,7 +445,7 @@ impl<'de> Stream<'de> {
                     )
                     .with_span(span));
                 }
-                Some(event) => return Err(misplaced(&event)),
+                Some(event) => return Err(misplaced_span(event.span())),
             }
         }
     }
@@ -421,11 +517,12 @@ impl<'de> Stream<'de> {
         }
     }
 
-    /// Take the next event.
-    fn pull(&mut self) -> Result<Event<'de>, Error> {
+    /// Take the next raw `'static` queued event.
+    #[inline]
+    fn pull_queued(&mut self) -> Result<QueuedEvent, Error> {
         self.ready()?;
         self.ahead = Ahead::Unknown;
-        self.events.pop().ok_or_else(unreadable)
+        self.events.pop_queued().ok_or_else(unreadable)
     }
 
     /// What the next event starts or ends. The event stays where it is.
@@ -442,7 +539,7 @@ impl<'de> Stream<'de> {
             self.ready()?;
         }
         let ahead = match self.events.front() {
-            Some(Event::SequenceStart {
+            Some(QueuedEvent::SequenceStart {
                 tag,
                 anchor: None,
                 span,
@@ -453,7 +550,7 @@ impl<'de> Stream<'de> {
             {
                 Ahead::Sequence(*span)
             }
-            Some(Event::MappingStart {
+            Some(QueuedEvent::MappingStart {
                 tag,
                 anchor: None,
                 span,
@@ -464,11 +561,11 @@ impl<'de> Stream<'de> {
             {
                 Ahead::Mapping(*span)
             }
-            Some(Event::SequenceEnd { span }) => Ahead::End {
+            Some(QueuedEvent::SequenceEnd { span }) => Ahead::End {
                 sequence: true,
                 span: *span,
             },
-            Some(Event::MappingEnd { span }) => Ahead::End {
+            Some(QueuedEvent::MappingEnd { span }) => Ahead::End {
                 sequence: false,
                 span: *span,
             },
@@ -496,7 +593,11 @@ impl<'de> Stream<'de> {
     /// Open the collection whose start waits.
     fn open(&mut self, span: Span, sequence: bool) -> Result<Taken, Error> {
         self.due = false;
-        self.pull()?;
+        self.ready()?;
+        self.ahead = Ahead::Unknown;
+        if self.events.pop_queued().is_none() {
+            return Err(unreadable());
+        }
         if let Err(error) = self.builder.limits.check_depth(self.open.len() + 1) {
             return Err(self.faulted(Error::from(error).with_span(span)));
         }
@@ -546,21 +647,27 @@ impl<'de> Stream<'de> {
             self.ready()?;
         }
         // A scalar with no anchor is most of what is read. Pop it by value so an owned decoded
-        // string moves straight into the `Node` without cloning.
+        // string moves straight into the `Node` without cloning or `Event` conversion.
         if matches!(
             self.events.front(),
-            Some(Event::Scalar { anchor: None, .. })
-        ) && let Some(Event::Scalar {
+            Some(QueuedEvent::Scalar { anchor: None, .. })
+        ) && let Some(QueuedEvent::Scalar {
             value,
-            raw,
             style,
             tag,
             anchor: None,
             span,
-        }) = self.events.pop()
+        }) = self.events.pop_queued()
         {
+            let input = self.events.input();
+            let raw_str = span.slice(input).unwrap_or("");
+            let value_cow = match value {
+                TokenText::Slice(s) if s == span => std::borrow::Cow::Borrowed(raw_str),
+                other => other.into_cow(input),
+            };
+            let raw = std::borrow::Cow::Borrowed(raw_str);
             let node = plain_scalar(
-                value,
+                value_cow,
                 &raw,
                 style,
                 tag.as_ref(),
@@ -576,9 +683,10 @@ impl<'de> Stream<'de> {
             };
         }
         self.builder.base = self.open.len();
+        let input = self.events.input();
         loop {
-            let event = self.pull()?;
-            if let Err(error) = self.builder.push_node(event) {
+            let event = self.pull_queued()?;
+            if let Err(error) = self.builder.push_queued_node(event, input) {
                 return Err(self.faulted(error));
             }
             if self.builder.stack.is_empty() {
@@ -616,9 +724,9 @@ impl<'de> Stream<'de> {
     }
 
     /// Pop the next event directly when it is an unanchored, untagged scalar and no built root
-    /// node waits, bypassing `Node<'de>` construction on the scalar hot path.
+    /// node waits, bypassing `Node<'de>` and `Event<'de>` construction on the scalar hot path.
     #[inline]
-    fn take_untagged_scalar(&mut self) -> Result<Option<UntaggedScalar<'de>>, Error> {
+    fn take_untagged_scalar(&mut self) -> Result<Option<UntaggedScalar>, Error> {
         if self.builder.root.is_some() {
             return Ok(None);
         }
@@ -627,27 +735,18 @@ impl<'de> Stream<'de> {
         }
         if matches!(
             self.events.front(),
-            Some(Event::Scalar {
+            Some(QueuedEvent::Scalar {
                 anchor: None,
                 tag: None,
                 ..
             })
-        ) && let Some(Event::Scalar {
-            value,
-            raw,
-            style,
-            span,
-            ..
-        }) = self.events.pop()
+        ) && let Some(QueuedEvent::Scalar {
+            value, style, span, ..
+        }) = self.events.pop_queued()
         {
             self.due = false;
             self.ahead = Ahead::Unknown;
-            return Ok(Some(UntaggedScalar {
-                value,
-                raw,
-                style,
-                span,
-            }));
+            return Ok(Some(UntaggedScalar { value, style, span }));
         }
         Ok(None)
     }
@@ -664,17 +763,8 @@ impl<'de> Stream<'de> {
             self.seen_keys.truncate(seen_start);
             if has_large {
                 let depth = self.open.len();
-                debug_assert!(matches!(self.seen_large_top, Some((d, _)) if d == depth));
-                self.seen_large_top = self.seen_large_rest.pop();
+                pop_seen_large(&mut self.seen_large_top, &mut self.seen_large_rest, depth);
             }
-        }
-    }
-
-    /// Push a newly promoted large duplicate-key table for the innermost open mapping.
-    #[cold]
-    fn push_seen_large(&mut self, depth: usize, set: HashSet<Cow<'de, str>, GlobalHasher>) {
-        if let Some(prev) = self.seen_large_top.replace((depth, set)) {
-            self.seen_large_rest.push(prev);
         }
     }
 
@@ -686,7 +776,7 @@ impl<'de> Stream<'de> {
         match self.ahead()? {
             Ahead::End { sequence, .. } if sequence == within => {
                 self.ahead = Ahead::Unknown;
-                self.events.pop();
+                self.events.pop_queued();
                 self.pop_open();
                 Ok(None)
             }
@@ -696,6 +786,7 @@ impl<'de> Stream<'de> {
 
     /// Count one more entry that a visitor asked the innermost open collection for, and give
     /// its position.
+    #[inline]
     fn count(&mut self) -> usize {
         match self.open.last_mut() {
             Some(Open::Sequence { read, .. } | Open::Mapping { read, .. }) => {
@@ -707,6 +798,7 @@ impl<'de> Stream<'de> {
     }
 
     /// The key of the innermost open mapping whose value is still to be read.
+    #[inline]
     fn key_slot(&mut self) -> Option<&mut Option<PendingStreamKey<'de>>> {
         match self.open.last_mut() {
             Some(Open::Mapping { key, .. }) => Some(key),
@@ -727,7 +819,10 @@ impl<'de> Stream<'de> {
         if self.fault.is_some() || self.events.front().is_none() {
             self.ready()?;
         }
-        self.events.front().map(Event::span).ok_or_else(unreadable)
+        self.events
+            .front()
+            .map(QueuedEvent::span)
+            .ok_or_else(unreadable)
     }
 
     /// The next key of the innermost open mapping, or `None` at the mapping's end, where it
@@ -741,35 +836,29 @@ impl<'de> Stream<'de> {
             if self.events.front().is_none() {
                 self.ready()?;
             }
+            let input = self.events.input();
             match self.events.front() {
-                Some(Event::MappingEnd { .. }) => {
+                Some(QueuedEvent::MappingEnd { .. }) => {
                     self.ahead = Ahead::Unknown;
-                    self.events.pop();
+                    self.events.pop_queued();
                     self.pop_open();
                     return Ok(None);
                 }
-                Some(Event::Scalar {
+                Some(QueuedEvent::Scalar {
                     value,
-                    raw,
                     style,
                     tag: None,
                     anchor: None,
-                    ..
+                    span,
                 }) if *style != ScalarStyle::Plain
-                    || (!raw.is_empty() && is_unambiguous_plain_string(value)) =>
+                    || (!span.is_empty()
+                        && is_unambiguous_plain_string_bytes(value.as_bytes(input))) =>
                 {
-                    if let Some(Event::Scalar {
-                        value,
-                        raw,
-                        style,
-                        span,
-                        ..
-                    }) = self.events.pop()
+                    if let Some(QueuedEvent::Scalar { value, span, .. }) = self.events.pop_queued()
                     {
                         self.due = false;
                         self.ahead = Ahead::Unknown;
-                        let text = borrowed_or_owned(value, &raw, style);
-                        return Ok(Some(PendingStreamKey::String { text, span }));
+                        return Ok(Some(PendingStreamKey::String { text: value, span }));
                     }
                 }
                 _ => {}
@@ -789,6 +878,7 @@ impl<'de> Stream<'de> {
             return Ok(());
         }
         let depth = self.open.len().saturating_sub(1);
+        let input = self.events.input();
         let Some(Open::Mapping {
             seen_start,
             seen_nodes,
@@ -810,84 +900,89 @@ impl<'de> Stream<'de> {
         let is_large = *has_large;
         match key {
             PendingStreamKey::String { text, span } => {
-                if is_large {
-                    let Some((_, set)) = self.seen_large_top.as_mut() else {
-                        unreachable!("has_large mapping must have active seen_large_top");
-                    };
-                    if let Some(existing) = set.replace(text) {
-                        let mut formatted = String::new();
-                        push_quoted_key(&existing, &mut formatted);
-                        return Err(self.faulted(
-                            Error::new(
-                                ErrorKind::DuplicateKey,
-                                format!("duplicate mapping key: {formatted}"),
-                            )
-                            .with_span(span),
-                        ));
+                let duplicate = if is_large {
+                    match self.seen_large_top.as_mut() {
+                        Some((_, map)) => insert_large_key_map(map, text, input).err(),
+                        None => None,
                     }
-                    return Ok(());
-                }
-                let slice = &self.seen_keys[seen_start..];
-                if slice
-                    .iter()
-                    .any(|existing| existing.as_ref() == text.as_ref())
-                {
-                    let mut formatted = String::new();
-                    push_quoted_key(&text, &mut formatted);
-                    return Err(self.faulted(
-                        Error::new(
-                            ErrorKind::DuplicateKey,
-                            format!("duplicate mapping key: {formatted}"),
+                } else {
+                    let needle = text.as_bytes(input);
+                    let slice = &self.seen_keys[seen_start..];
+                    if slice
+                        .iter()
+                        .any(|existing| existing.as_bytes(input) == needle)
+                    {
+                        Some(text)
+                    } else if slice.len() < STREAM_SEEN_SMALL_LIMIT {
+                        if self.seen_keys.capacity() == 0 {
+                            self.seen_keys.reserve_exact(initial_small_cap);
+                        }
+                        self.seen_keys.push(text);
+                        return Ok(());
+                    } else {
+                        *has_large = true;
+                        promote_seen_large(
+                            &mut self.seen_keys,
+                            seen_start,
+                            &mut self.seen_large_top,
+                            &mut self.seen_large_rest,
+                            depth,
+                            promoted_cap,
+                            text,
+                            input,
                         )
-                        .with_span(span),
-                    ));
-                }
-                if slice.len() < STREAM_SEEN_SMALL_LIMIT {
-                    if self.seen_keys.capacity() == 0 {
-                        self.seen_keys.reserve_exact(initial_small_cap);
+                        .err()
                     }
-                    self.seen_keys.push(text);
+                };
+                let Some(dup_text) = duplicate else {
                     return Ok(());
-                }
-                *has_large = true;
-                let mut set = HashSet::with_capacity_and_hasher(promoted_cap, GlobalHasher);
-                for existing in self.seen_keys.drain(seen_start..) {
-                    set.insert(existing);
-                }
-                set.insert(text);
-                self.push_seen_large(depth, set);
-                Ok(())
+                };
+                let mut formatted = String::new();
+                push_quoted_key(dup_text.as_str(input), &mut formatted);
+                Err(self.faulted(
+                    Error::new(
+                        ErrorKind::DuplicateKey,
+                        format!("duplicate mapping key: {formatted}"),
+                    )
+                    .with_span(span),
+                ))
             }
             PendingStreamKey::Node(key) => {
                 let duplicate = if let Some(text) = scalar_key_text(&key) {
                     let inserted = if is_large {
-                        let Some((_, set)) = self.seen_large_top.as_mut() else {
-                            unreachable!("has_large mapping must have active seen_large_top");
-                        };
-                        set.insert(text)
+                        let key_text = cow_to_key_text(text, key.span, input);
+                        match self.seen_large_top.as_mut() {
+                            Some((_, map)) => insert_large_key_map(map, key_text, input).is_ok(),
+                            None => true,
+                        }
                     } else {
+                        let needle = text.as_bytes();
                         let slice = &self.seen_keys[seen_start..];
                         if slice
                             .iter()
-                            .any(|existing| existing.as_ref() == text.as_ref())
+                            .any(|existing| existing.as_bytes(input) == needle)
                         {
                             false
                         } else if slice.len() < STREAM_SEEN_SMALL_LIMIT {
                             if self.seen_keys.capacity() == 0 {
                                 self.seen_keys.reserve_exact(initial_small_cap);
                             }
-                            self.seen_keys.push(text);
+                            self.seen_keys.push(cow_to_key_text(text, key.span, input));
                             true
                         } else {
                             *has_large = true;
-                            let mut set =
-                                HashSet::with_capacity_and_hasher(promoted_cap, GlobalHasher);
-                            for existing in self.seen_keys.drain(seen_start..) {
-                                set.insert(existing);
-                            }
-                            let ok = set.insert(text);
-                            self.push_seen_large(depth, set);
-                            ok
+                            let key_text = cow_to_key_text(text, key.span, input);
+                            promote_seen_large(
+                                &mut self.seen_keys,
+                                seen_start,
+                                &mut self.seen_large_top,
+                                &mut self.seen_large_rest,
+                                depth,
+                                promoted_cap,
+                                key_text,
+                                input,
+                            )
+                            .is_ok()
                         }
                     };
                     if inserted {
@@ -983,6 +1078,7 @@ impl<'de> Stream<'de> {
 
     /// Whether the collection that was opened as number `level` still has entries to give. After
     /// a fault it has none, so a visitor that reads on past an error comes to an end.
+    #[inline]
     fn gives(&self, level: usize) -> bool {
         self.fault.is_none() && self.open.len() > level
     }
@@ -990,6 +1086,7 @@ impl<'de> Stream<'de> {
     /// How many entries the collection that was opened as number `level` has left, where that is
     /// known before they are read: for a root flow collection (counted by the parser) or any
     /// collection whose end is already among the events waiting in the lookahead queue.
+    #[inline]
     fn left(&self, level: usize) -> Option<usize> {
         if self.fault.is_some() {
             return None;
@@ -1005,8 +1102,8 @@ impl<'de> Stream<'de> {
 
 /// An event where a node or a document's boundary has to stand. The parser doesn't emit one;
 /// the tree's builder refuses it too.
-fn misplaced(event: &Event<'_>) -> Error {
-    Error::new(ErrorKind::Composition, "unexpected event in node position").with_span(event.span())
+fn misplaced_span(span: Span) -> Error {
+    Error::new(ErrorKind::Composition, "unexpected event in node position").with_span(span)
 }
 
 /// What a target is told once the document is at fault. `read` reports the fault itself.
@@ -1043,34 +1140,41 @@ macro_rules! as_the_tree_reads {
 }
 
 /// Visit an unanchored, untagged scalar event directly with `deserialize_any` semantics, bypassing
-/// `Node<'de>` construction.
+/// `Node<'de>` and `Event<'de>` construction.
 #[inline]
 fn visit_untagged_scalar_any<'de, V: Visitor<'de>>(
-    scalar: UntaggedScalar<'de>,
+    scalar: UntaggedScalar,
+    input: &'de str,
     visitor: V,
 ) -> Result<V::Value, Error> {
-    let UntaggedScalar {
-        value,
-        raw,
-        style,
-        span,
-    } = scalar;
-    let text = borrowed_or_owned(value, &raw, style);
-    let result = if style != ScalarStyle::Plain || is_unambiguous_plain_string(&text) {
-        match text {
-            Cow::Borrowed(s) => visitor.visit_borrowed_str(s),
-            Cow::Owned(s) => visitor.visit_string(s),
+    let UntaggedScalar { value, style, span } = scalar;
+    let result = match value {
+        TokenText::Slice(s) => {
+            let text = s.slice(input).unwrap_or("");
+            if style != ScalarStyle::Plain || is_unambiguous_plain_string_bytes(text.as_bytes()) {
+                visitor.visit_borrowed_str(text)
+            } else {
+                match resolve_plain(text) {
+                    None => visitor.visit_borrowed_str(text),
+                    Some(Value::Null) => visitor.visit_unit(),
+                    Some(Value::Bool(b)) => visitor.visit_bool(b),
+                    Some(Value::Number(n)) => n.visit(visitor),
+                    Some(_) => unreachable!("resolve_plain only returns Null, Bool, or Number"),
+                }
+            }
         }
-    } else {
-        match resolve_plain(&text) {
-            None => match text {
-                Cow::Borrowed(s) => visitor.visit_borrowed_str(s),
-                Cow::Owned(s) => visitor.visit_string(s),
-            },
-            Some(Value::Null) => visitor.visit_unit(),
-            Some(Value::Bool(b)) => visitor.visit_bool(b),
-            Some(Value::Number(n)) => n.visit(visitor),
-            Some(_) => unreachable!("resolve_plain only returns Null, Bool, or Number"),
+        TokenText::Owned(s) => {
+            if style != ScalarStyle::Plain || is_unambiguous_plain_string_bytes(s.as_bytes()) {
+                visitor.visit_string(s)
+            } else {
+                match resolve_plain(&s) {
+                    None => visitor.visit_string(s),
+                    Some(Value::Null) => visitor.visit_unit(),
+                    Some(Value::Bool(b)) => visitor.visit_bool(b),
+                    Some(Value::Number(n)) => n.visit(visitor),
+                    Some(_) => unreachable!("resolve_plain only returns Null, Bool, or Number"),
+                }
+            }
         }
     };
     result.map_err(|error| with_span(error, span))
@@ -1080,19 +1184,14 @@ fn visit_untagged_scalar_any<'de, V: Visitor<'de>>(
 /// `deserialize_str` / `deserialize_identifier` / `deserialize_char` semantics.
 #[inline]
 fn visit_untagged_scalar_str<'de, V: Visitor<'de>>(
-    scalar: UntaggedScalar<'de>,
+    scalar: UntaggedScalar,
+    input: &'de str,
     visitor: V,
 ) -> Result<V::Value, Error> {
-    let UntaggedScalar {
-        value,
-        raw,
-        style,
-        span,
-    } = scalar;
-    let text = borrowed_or_owned(value, &raw, style);
-    let result = match text {
-        Cow::Borrowed(s) => visitor.visit_borrowed_str(s),
-        Cow::Owned(s) => visitor.visit_string(s),
+    let UntaggedScalar { value, span, .. } = scalar;
+    let result = match value {
+        TokenText::Slice(s) => visitor.visit_borrowed_str(s.slice(input).unwrap_or("")),
+        TokenText::Owned(s) => visitor.visit_string(s),
     };
     result.map_err(|error| with_span(error, span))
 }
@@ -1100,52 +1199,42 @@ fn visit_untagged_scalar_str<'de, V: Visitor<'de>>(
 /// Visit an unanchored, untagged scalar event directly with `deserialize_f64` / `deserialize_f32`
 /// semantics (matching `NodeDeserializer::deserialize_f64`).
 fn visit_untagged_scalar_f64<'de, V: Visitor<'de>>(
-    scalar: UntaggedScalar<'de>,
+    scalar: UntaggedScalar,
+    input: &'de str,
     visitor: V,
 ) -> Result<V::Value, Error> {
     if scalar.style != ScalarStyle::Plain {
-        return visit_untagged_scalar_any(scalar, visitor);
+        return visit_untagged_scalar_any(scalar, input, visitor);
     }
-    let UntaggedScalar {
-        value,
-        raw,
-        style,
-        span,
-    } = scalar;
-    let text = borrowed_or_owned(value, &raw, style);
-    match resolve_plain(&text) {
+    let UntaggedScalar { value, span, .. } = scalar;
+    let text = value.as_str(input);
+    let raw_text = span.slice(input).unwrap_or("");
+    match resolve_plain(text) {
         Some(Value::Number(number)) if number.is_f64() => visitor
             .visit_f64(number.as_f64().unwrap_or(f64::NAN))
             .map_err(|error| with_span(error, span)),
-        Some(Value::Number(number)) => {
-            if let Cow::Borrowed(raw_text) = &raw {
-                if let Ok(float) = raw_text.parse::<f64>() {
-                    return visitor
-                        .visit_f64(float)
-                        .map_err(|error| with_span(error, span));
-                }
-                return Err(Error::coded(
-                    ErrorKind::Serde,
-                    ErrorCode::InvalidType,
-                    format!("invalid type: integer `{raw_text}`, expected f64"),
-                )
-                .with_span(span));
-            }
-            number
-                .visit(visitor)
-                .map_err(|error| with_span(error, span))
-        }
-        None => {
-            if let Cow::Borrowed(raw_text) = &raw
-                && let Some(float) = float_from_text(raw_text)
-            {
+        Some(Value::Number(_)) => {
+            if let Ok(float) = raw_text.parse::<f64>() {
                 return visitor
                     .visit_f64(float)
                     .map_err(|error| with_span(error, span));
             }
-            let result = match text {
-                Cow::Borrowed(s) => visitor.visit_borrowed_str(s),
-                Cow::Owned(s) => visitor.visit_string(s),
+            Err(Error::coded(
+                ErrorKind::Serde,
+                ErrorCode::InvalidType,
+                format!("invalid type: integer `{raw_text}`, expected f64"),
+            )
+            .with_span(span))
+        }
+        None => {
+            if let Some(float) = float_from_text(raw_text) {
+                return visitor
+                    .visit_f64(float)
+                    .map_err(|error| with_span(error, span));
+            }
+            let result = match value {
+                TokenText::Slice(s) => visitor.visit_borrowed_str(s.slice(input).unwrap_or("")),
+                TokenText::Owned(s) => visitor.visit_string(s),
             };
             result.map_err(|error| with_span(error, span))
         }
@@ -1164,7 +1253,7 @@ macro_rules! fast_any_scalar_reads {
         $(
             fn $method<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
                 if let Some(scalar) = self.stream.take_untagged_scalar()? {
-                    return visit_untagged_scalar_any(scalar, visitor);
+                    return visit_untagged_scalar_any(scalar, self.stream.events.input(), visitor);
                 }
                 match self.stream.take()? {
                     Taken::Built => self.stream.read_built(|node| node.$method(visitor)),
@@ -1183,7 +1272,7 @@ macro_rules! fast_str_scalar_reads {
         $(
             fn $method<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
                 if let Some(scalar) = self.stream.take_untagged_scalar()? {
-                    return visit_untagged_scalar_str(scalar, visitor);
+                    return visit_untagged_scalar_str(scalar, self.stream.events.input(), visitor);
                 }
                 match self.stream.take()? {
                     Taken::Built => self.stream.read_built(|node| node.$method(visitor)),
@@ -1217,7 +1306,7 @@ impl<'de> Deserializer<'de> for StreamDeserializer<'de, '_> {
 
     fn deserialize_f64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         if let Some(scalar) = self.stream.take_untagged_scalar()? {
-            return visit_untagged_scalar_f64(scalar, visitor);
+            return visit_untagged_scalar_f64(scalar, self.stream.events.input(), visitor);
         }
         match self.stream.take()? {
             Taken::Built => self.stream.read_built(|node| node.deserialize_f64(visitor)),
@@ -1250,20 +1339,20 @@ impl<'de> Deserializer<'de> for StreamDeserializer<'de, '_> {
             if self.stream.fault.is_some() || self.stream.events.front().is_none() {
                 self.stream.ready()?;
             }
-            if let Some(Event::Scalar {
+            let input = self.stream.events.input();
+            if let Some(QueuedEvent::Scalar {
                 value,
                 style,
                 tag: None,
                 anchor: None,
                 span,
-                ..
             }) = self.stream.events.front()
             {
                 let span = *span;
                 let is_null = *style == ScalarStyle::Plain
-                    && matches!(resolve_plain(value), Some(Value::Null));
+                    && matches!(resolve_plain(value.as_str(input)), Some(Value::Null));
                 if is_null {
-                    self.stream.events.pop();
+                    self.stream.events.pop_queued();
                     self.stream.due = false;
                     self.stream.ahead = Ahead::Unknown;
                     return visitor.visit_none();
@@ -1389,7 +1478,8 @@ struct MappingAccess<'de, 's> {
 /// constructing an 80 B `Node<'de>` on every mapping entry.
 #[derive(Clone, Copy)]
 struct StringKeyDeserializer<'de, 'a> {
-    text: &'a Cow<'de, str>,
+    text: &'a TokenText,
+    input: &'de str,
     span: Span,
 }
 
@@ -1397,24 +1487,34 @@ impl<'de> StringKeyDeserializer<'de, '_> {
     #[inline]
     fn visit_str_like<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
         let result = match self.text {
-            Cow::Borrowed(s) => visitor.visit_borrowed_str(s),
-            Cow::Owned(s) => visitor.visit_str(s),
+            TokenText::Slice(s) => visitor.visit_borrowed_str(s.slice(self.input).unwrap_or("")),
+            TokenText::Owned(s) => visitor.visit_str(s),
         };
         result.map_err(|error| with_span(error, self.span))
+    }
+
+    fn into_cow(self) -> std::borrow::Cow<'de, str> {
+        match self.text {
+            TokenText::Slice(s) => std::borrow::Cow::Borrowed(s.slice(self.input).unwrap_or("")),
+            TokenText::Owned(s) => std::borrow::Cow::Owned(s.clone()),
+        }
     }
 }
 
 impl<'de> Deserializer<'de> for StringKeyDeserializer<'de, '_> {
     type Error = Error;
 
+    #[inline]
     fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         self.visit_str_like(visitor)
     }
 
     fn deserialize_bytes<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         let result = match self.text {
-            Cow::Borrowed(s) => visitor.visit_borrowed_bytes(s.as_bytes()),
-            Cow::Owned(s) => visitor.visit_bytes(s.as_bytes()),
+            TokenText::Slice(s) => {
+                visitor.visit_borrowed_bytes(s.slice(self.input).unwrap_or("").as_bytes())
+            }
+            TokenText::Owned(s) => visitor.visit_bytes(s.as_bytes()),
         };
         result.map_err(|error| with_span(error, self.span))
     }
@@ -1446,12 +1546,12 @@ impl<'de> Deserializer<'de> for StringKeyDeserializer<'de, '_> {
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
         if name == SPANNED_TOKEN && fields == SPANNED_FIELDS {
-            let node = Node::new(NodeKind::String(self.text.clone()), self.span);
+            let node = Node::new(NodeKind::String(self.into_cow()), self.span);
             return NodeDeserializer::from_owned(node).deserialize_struct(name, fields, visitor);
         }
         Err(with_span(
             serde::de::Error::invalid_type(
-                serde::de::Unexpected::Str(self.text.as_ref()),
+                serde::de::Unexpected::Str(self.text.as_str(self.input)),
                 &visitor,
             ),
             self.span,
@@ -1464,7 +1564,7 @@ impl<'de> Deserializer<'de> for StringKeyDeserializer<'de, '_> {
         variants: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        let node = Node::new(NodeKind::String(self.text.clone()), self.span);
+        let node = Node::new(NodeKind::String(self.into_cow()), self.span);
         NodeDeserializer::new(&node).deserialize_enum(name, variants, visitor)
     }
 
@@ -1489,9 +1589,14 @@ impl<'de> MapAccess<'de> for MappingAccess<'de, '_> {
         };
         self.stream.count();
         let span = key.span();
+        let input = self.stream.events.input();
         let read = match &key {
             PendingStreamKey::String { text, span } => seed
-                .deserialize(StringKeyDeserializer { text, span: *span })
+                .deserialize(StringKeyDeserializer {
+                    text,
+                    input,
+                    span: *span,
+                })
                 .map_err(|error| with_span(error, *span)),
             PendingStreamKey::Node(node) => seed
                 .deserialize(NodeDeserializer::new(node))
@@ -1521,10 +1626,11 @@ impl<'de> MapAccess<'de> for MappingAccess<'de, '_> {
                 )
             })?;
         let span = self.stream.peek_span()?;
+        let input = self.stream.events.input();
         let value = self.stream.read_with(seed).map_err(|error| {
             let error = with_span(error, span);
             match &key {
-                PendingStreamKey::String { text, .. } => error.inside_key(text),
+                PendingStreamKey::String { text, .. } => error.inside_key(text.as_str(input)),
                 PendingStreamKey::Node(node) => inside_key(error, node),
             }
         });

@@ -16,10 +16,12 @@ key caveats across `ayaml` and `ayaml-edit`.
 | Zero-copy `&str` struct decode | `from_str_borrowed`, `from_slice_borrowed`, `from_str_with`, `from_slice_with` | Borrows unescaped scalars straight from the input slice; use `Cow<'a, str>` or `String` when escapes or folding may occur. |
 | Bounded I/O stream decode | `from_reader`, `from_reader_with` | Stops reading after `max_input_bytes + 1` bytes before UTF-8 validation. |
 | In-memory `Value` <-> Serde conversion | `from_value`, `from_value_seed`, `to_value` | Converts between `ayaml::Value` and typed Rust structs without re-parsing text (`from_value` rejects `Spanned<T>` and treats `Value::Null` as explicit null). |
-| Decode with field-level byte spans | `Spanned<T>` with `from_str*`, `DocumentDeserializer`, `Deserializer`, or `parse_frontmatter*` | Attaches exact byte `Span` to each wrapped field; refuses untrusted or buffered deserializers. |
+| Decode with field-level byte spans | `Spanned<T>` with `from_str*`, `Tape` / `TapeRef`, `DocumentDeserializer`, `Deserializer`, or `parse_frontmatter*` | Attaches exact byte `Span` to each wrapped field; refuses untrusted or buffered deserializers. |
 | Multi-document typed stream | `Deserializer::from_str`, `Deserializer::from_str_with` + `next` / `next_borrowed` / `next_seed` / `next_seed_borrowed` | Lazy one-document-at-a-time streaming with a shared alias expansion budget across documents. |
 | Serde middleware integration | `DocumentDeserializer::from_str`, `from_str_with`, `from_str_compat`, `from_str_compat_with` | Implements `serde::Deserializer<'de>` by value and `&mut` for wrappers like `serde_path_to_error` or `serde_ignored`. |
 | Generic dynamic DOM | `parse_value`, `parse_value_with`, `parse_documents`, `parse_documents_with` | Insertion-ordered `Mapping`, exact `i64`/`u64`/`i128`/`u128` + IEEE-754 `f64` `Number`, `Value::Tagged`. |
+| Read-only zero-copy flat-array DOM | `parse_tape`, `parse_tape_with`, `parse_tape_documents`, `parse_tape_documents_with`, `Tape`, `TapeDocuments`, `TapeRef` | Compact flat-array DOM borrowing unmodified strings directly from `&str` with source spans, `serde::Deserializer<'de>` on `Tape`, `&Tape`, and `TapeRef`, and `to_value()` conversion. |
+| Bulk high-throughput buffer reuse | `ParserBuf`, `parse_tape_in`, `parse_tape_documents_in`, `parse_value_in`, `parse_documents_in`, `from_str_in`, `from_str_seed_in`, `Tape::recycle_into` | Reuses scanner, line-window, continuation, duplicate-key, and recycled tape buffers across repeated parses; automatically releases outlier capacities and stays clean across errors or unwinds. |
 | Pull-based spanned event stream | `parse_events`, `parse_events_with`, `EventStream` | Preserves raw duplicate mapping pairs, anchors, aliases, and spans. |
 | Path-based span lookup | `SpannedTree::parse`, `SpannedTree::parse_with`, `LineIndex` | Look up value (`span_at`, `lookup`) and entry (`entry_span_at`) byte spans by `PathSegment`; convert to UTF-8/scalar/UTF-16 `Position` and `Location`. |
 | Markdown / static-site frontmatter | `split_frontmatter`, `split_frontmatter_with`, `parse_frontmatter`, `parse_frontmatter_with`, `parse_frontmatter_value`, `parse_frontmatter_value_with` | Bounded closing delimiter scan; preserves original file byte offsets for spans and body. |
@@ -61,6 +63,48 @@ assert_eq!(from_str_with::<Job>(&rendered, &PARSE)?, job);
 # }
 ```
 
+## Flat-array `Tape` and bulk `ParserBuf` reuse
+
+For read-only inspection, query indexing, or bulk document loops, pair
+[`ParserBuf`](https://docs.rs/ayaml/latest/ayaml/struct.ParserBuf.html) with
+[`Tape`](https://docs.rs/ayaml/latest/ayaml/struct.Tape.html) and
+`Tape::recycle_into`. Unmodified scalars are borrowed zero-copy from the input
+slice, and sub-nodes (`TapeRef<'t, 'a>`) can deserialize borrowed `&'a str`
+values via Serde that outlive the `Tape`:
+
+```rust
+use ayaml::{ParserBuf, TapeKind};
+use serde::Deserialize;
+
+#[derive(Debug, PartialEq, Deserialize)]
+struct Record<'a> {
+    name: &'a str,
+    port: u16,
+}
+
+# fn main() -> Result<(), ayaml::Error> {
+let mut buf = ParserBuf::new();
+let docs = [
+    "service:\n  name: api\n  port: 8080\n",
+    "service:\n  name: worker\n  port: 9090\n",
+];
+
+for input in docs {
+    let record: Record<'_> = {
+        let tape = buf.parse_tape(input)?;
+        let svc = tape.get("service").expect("service mapping");
+        assert_eq!(svc.kind(), TapeKind::Mapping);
+        assert!(svc.get("name").and_then(|n| n.as_borrowed_str()).is_some());
+        let decoded = Record::deserialize(svc)?;
+        tape.recycle_into(&mut buf);
+        decoded
+    };
+    assert!(record.port >= 8080);
+}
+# Ok(())
+# }
+```
+
 ## Important caveats
 
 - **UTF-8 only:** `ayaml` accepts valid UTF-8 (`&str` or UTF-8 `&[u8]` / `Read`).
@@ -82,6 +126,10 @@ assert_eq!(from_str_with::<Job>(&rendered, &PARSE)?, job);
   of `*_with(..., &ParseOptions)`, `*_with(..., &EmitOptions)`, and byte `Span`
   with `LineIndex` (see [Stability and versioning](stability.md)).
   `Value::apply_merge_keys_with_limits` remains stable in `1.0`.
+- **`Tape::deserialize` scalar typing:** `Tape` and `TapeRef` deserialize resolved
+  YAML types strictly (rejecting non-string scalars such as `42`, `true`, or explicit
+  `null` for `String` targets, matching `from_value`) while preserving source spans
+  for `Spanned<T>`, zero-copy `&'a str` borrowing, and empty-scalar defaults.
 - **Error text on untrusted inputs:** Always log `err.masked()` rather than
   `err.to_string()` when YAML inputs may contain secrets or PII (see
   [Security and untrusted input](security.md) and [Error codes](error-codes.md)).

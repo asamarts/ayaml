@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use super::ScalarToken;
 use super::line::{
     Continuation, LineShape, Owner, is_blank, is_line_break, leading_spaces, line_shape,
@@ -7,11 +5,12 @@ use super::line::{
 };
 use super::{
     BOM_FIRST_BYTE, EMPTY_LINE_TAB, Error, ErrorCode, Limits, ScalarStyle, Scanner, Token,
-    TokenKind, starts_with_document_marker,
+    TokenKind, TokenText, starts_with_document_marker,
 };
 use crate::position::{
     is_forbidden_control_byte, is_quoted_only_non_printable, line_start_of, location_at,
 };
+use crate::span::Span;
 
 const LO_BYTES: u64 = 0x0101_0101_0101_0101;
 const HI_BYTES: u64 = 0x8080_8080_8080_8080;
@@ -203,7 +202,7 @@ impl<'a> Scanner<'a> {
     pub(super) fn scan_single_quoted(
         &mut self,
         limits: &Limits,
-    ) -> Result<Option<Token<'a>>, Box<Error>> {
+    ) -> Result<Option<Token>, Box<Error>> {
         let start = self.pos;
         self.pos += 1;
         let content_start = self.pos;
@@ -294,13 +293,8 @@ impl<'a> Scanner<'a> {
                 _ => return Err(self.non_printable_error_at(self.pos)),
             }
         }
-        let raw_text = &self.input[start..self.pos];
-        let value = scalar_cow(
-            value,
-            raw_text
-                .get(1..raw_text.len().saturating_sub(1))
-                .unwrap_or(""),
-        );
+        let inner = Span::new(start + 1, self.pos.saturating_sub(1).max(start + 1));
+        let value = TokenText::from_decoded(value, inner, self.input);
         self.make(
             TokenKind::Scalar(Box::new(ScalarToken {
                 value,
@@ -575,7 +569,7 @@ impl<'a> Scanner<'a> {
     pub(super) fn scan_double_quoted(
         &mut self,
         limits: &Limits,
-    ) -> Result<Option<Token<'a>>, Box<Error>> {
+    ) -> Result<Option<Token>, Box<Error>> {
         let start = self.pos;
         self.pos += 1;
         let content_start = self.pos;
@@ -738,13 +732,8 @@ impl<'a> Scanner<'a> {
                 _ => return Err(self.non_printable_error_at(self.pos)),
             }
         }
-        let raw_text = &self.input[start..self.pos];
-        let value = scalar_cow(
-            value,
-            raw_text
-                .get(1..raw_text.len().saturating_sub(1))
-                .unwrap_or(""),
-        );
+        let inner = Span::new(start + 1, self.pos.saturating_sub(1).max(start + 1));
+        let value = TokenText::from_decoded(value, inner, self.input);
         self.make(
             TokenKind::Scalar(Box::new(ScalarToken {
                 value,
@@ -801,7 +790,7 @@ impl<'a> Scanner<'a> {
         start: usize,
         literal: bool,
         limits: &Limits,
-    ) -> Result<Option<Token<'a>>, Box<Error>> {
+    ) -> Result<Option<Token>, Box<Error>> {
         self.pos += 1;
         // At most one chomping and one indentation indicator, in either order, right after the
         // `|` or `>` (YAML 1.2.2 production 162). Only blanks and a comment may follow them.
@@ -1180,7 +1169,7 @@ impl<'a> Scanner<'a> {
         let value = build_block_scalar(text, final_break, literal, chomping);
         self.make(
             TokenKind::Scalar(Box::new(ScalarToken {
-                value: Cow::Owned(value),
+                value: TokenText::Owned(value),
                 style: if literal {
                     ScalarStyle::Literal
                 } else {
@@ -1402,7 +1391,7 @@ impl<'a> Scanner<'a> {
         Ok(base_indent + 1)
     }
 
-    pub(super) fn scan_plain(&mut self, limits: &Limits) -> Result<Option<Token<'a>>, Box<Error>> {
+    pub(super) fn scan_plain(&mut self, limits: &Limits) -> Result<Option<Token>, Box<Error>> {
         let start = self.pos;
         let start_line_start = self.current_line_start;
         let start_has_block_prefix =
@@ -1583,7 +1572,7 @@ impl<'a> Scanner<'a> {
         }
         let kind = match value {
             Some(value) => TokenKind::Scalar(Box::new(ScalarToken {
-                value: Cow::Owned(value),
+                value: TokenText::Owned(value),
                 style: ScalarStyle::Plain,
             })),
             None => TokenKind::PlainScalar,
@@ -1848,13 +1837,6 @@ impl<'a> Scanner<'a> {
             trimmed -= 1;
         }
         trimmed
-    }
-}
-fn scalar_cow(value: String, candidate: &str) -> Cow<'_, str> {
-    if value == candidate {
-        Cow::Borrowed(candidate)
-    } else {
-        Cow::Owned(value)
     }
 }
 

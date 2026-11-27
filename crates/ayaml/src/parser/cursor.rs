@@ -32,7 +32,7 @@ enum State {
 /// A streaming pull cursor used by the public event traversal, `Deserializer`,
 /// and merge-key expansion (including `SpannedTree` when merge keys are enabled).
 pub(crate) struct EventCursor<'a> {
-    parser: Parser<'a>,
+    parser: Parser<'a, 'a>,
     state: State,
     step: Option<Step<'a>>,
     stack: Vec<Cont>,

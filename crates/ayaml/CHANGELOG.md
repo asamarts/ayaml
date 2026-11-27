@@ -42,6 +42,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Pre-1.0 additive trait and `const fn` polish: `DerefMut` on `Spanned<T>`, `Hash` on `Chomping`,
   `Frontmatter`, `ParsedFrontmatter`, `ayaml_edit::TextEdit`, and `ayaml_edit::EditErrorKind`,
   and `PartialEq`/`Eq` + `const fn` constructors on `ayaml_edit::EditOptions`.
+- Future-proof flat-array read-only Tape DOM (`Tape`, `TapeDocuments`, `TapeRef`, `TapeKind`,
+  `TapeSeqIter`, `TapeMapIter`, `TapeDocumentsIter`, `tape::Index`, `parse_tape`,
+  `parse_tape_with`, `parse_tape_documents`, `parse_tape_documents_with`) with zero per-string
+  allocations, opaque structs, `#[non_exhaustive]` `TapeKind`, `serde::Deserializer<'de>`
+  supporting zero-copy `&'de str` and `Spanned<T>`, and full `Limits` / `merge_keys` /
+  `Error::masked()` parity (D108).
+- Opaque reusable scratch pool `ParserBuf` (`ParserBuf::new`, `shrink_to_fit`, `parse_tape*`,
+  `parse_value*`, `parse_documents*`, `from_str*`, `Tape::recycle_into`,
+  `TapeDocuments::recycle_into`) plus top-level `*_in` and `ayaml::compat::from_str*_in` entry
+  points with bounded outlier-capacity clamping and panic-safe scratch return.
 
 ### Changed
 
@@ -109,6 +119,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   converted `ValueWriter` and `TagDirectives::scan` to explicit two-tier inline-plus-heap stacks
   eliminating native recursion and cutting Callgrind `emit` instructions by 1.3% to 13.1% and
   `serialize` instructions by 0.5% to 5.9% across all steady-state workloads.
+- Added flat-array `Tape` DOM and reusable `ParserBuf` scratch pooling (`AY-177`, 100% safe Rust
+  under `#![forbid(unsafe_code)]`): cold `Tape::parse` reduces `frontmatter-tiny` from 39
+  allocations (5,396 B peak) to 4 allocations (1,696 B peak), `cluster-manifests` (49 documents)
+  from 2,726 to 17 allocations, and `openapi-spec` from 15,197 allocations (704 KiB peak) to 19
+  allocations (599 KiB peak); warm `ParserBuf` + `recycle_into` reaches 0 allocations (0 B peak)
+  on `frontmatter-tiny` and `cluster-manifests` and 3 allocations (201 B peak) on `openapi-spec`,
+  while direct `QueuedEvent` scalar/builder paths cut Callgrind `typed` / `borrowed` instructions
+  by up to 3.3% (`boundary-4kb`) and 5.2% (`late_typed_err`).
 
 ## [0.2.3] — 2026-11-21
 

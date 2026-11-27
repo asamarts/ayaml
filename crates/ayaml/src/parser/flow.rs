@@ -5,7 +5,7 @@ use super::{
 };
 
 #[inline]
-fn is_scalar_kind(kind: &TokenKind<'_>) -> bool {
+fn is_scalar_kind(kind: &TokenKind) -> bool {
     matches!(
         kind,
         TokenKind::PlainScalar
@@ -15,7 +15,7 @@ fn is_scalar_kind(kind: &TokenKind<'_>) -> bool {
     )
 }
 
-impl<'a> Parser<'a> {
+impl<'a> Parser<'a, '_> {
     pub(super) fn flow_sequence(
         &mut self,
         tokens: Run,
@@ -901,12 +901,12 @@ impl<'a> Parser<'a> {
 
     /// The first surviving token of line `index`, if present in the active window.
     #[inline]
-    pub(super) fn line_first(&self, index: usize) -> Option<&Token<'a>> {
+    pub(super) fn line_first(&self, index: usize) -> Option<&Token> {
         self.window.line_first(index)
     }
 
     #[inline]
-    pub(super) fn line_tokens(&self, index: usize) -> &[Token<'a>] {
+    pub(super) fn line_tokens(&self, index: usize) -> &[Token] {
         self.window.line_tokens(index)
     }
 
@@ -924,18 +924,18 @@ impl<'a> Parser<'a> {
     }
 
     #[inline]
-    pub(super) fn tokens(&self, run: Run) -> &[Token<'a>] {
+    pub(super) fn tokens(&self, run: Run) -> &[Token] {
         self.window.run_tokens(run)
     }
 
     /// The token at `index` within `run`, which must exist.
     #[inline]
-    pub(super) fn token(&self, run: Run, index: usize) -> &Token<'a> {
+    pub(super) fn token(&self, run: Run, index: usize) -> &Token {
         &self.tokens(run)[index]
     }
 
     #[inline]
-    pub(super) fn token_at(&self, run: Run, index: usize) -> Option<&Token<'a>> {
+    pub(super) fn token_at(&self, run: Run, index: usize) -> Option<&Token> {
         self.tokens(run).get(index)
     }
 
@@ -996,26 +996,18 @@ impl<'a> Parser<'a> {
                     )
                 }
             }
-            TokenKind::SingleQuotedScalar => self.emit_scalar(
-                Cow::Borrowed(&self.input[span.start() + 1..span.end() - 1]),
-                &self.input[span.start()..span.end()],
-                ScalarStyle::SingleQuoted,
-                tag,
-                anchor,
-                span,
-            ),
-            TokenKind::DoubleQuotedScalar => self.emit_scalar(
-                Cow::Borrowed(&self.input[span.start() + 1..span.end() - 1]),
-                &self.input[span.start()..span.end()],
-                ScalarStyle::DoubleQuoted,
-                tag,
-                anchor,
-                span,
-            ),
+            TokenKind::SingleQuotedScalar => {
+                let inner = Span::new(span.start() + 1, span.end() - 1);
+                self.emit_quoted_scalar(inner, ScalarStyle::SingleQuoted, tag, anchor, span)
+            }
+            TokenKind::DoubleQuotedScalar => {
+                let inner = Span::new(span.start() + 1, span.end() - 1);
+                self.emit_quoted_scalar(inner, ScalarStyle::DoubleQuoted, tag, anchor, span)
+            }
             TokenKind::Scalar(scalar) => {
-                let value = std::mem::replace(&mut scalar.value, Cow::Borrowed(""));
+                let value = std::mem::replace(&mut scalar.value, crate::scanner::TokenText::EMPTY);
                 let style = scalar.style;
-                self.emit_scalar(
+                self.emit_scalar_token_text(
                     value,
                     &self.input[span.start()..span.end()],
                     style,
@@ -1026,6 +1018,70 @@ impl<'a> Parser<'a> {
             }
             _ => unreachable!("emit_scalar_token called on non-scalar token"),
         }
+    }
+
+    #[inline]
+    pub(super) fn emit_quoted_scalar(
+        &mut self,
+        inner: Span,
+        style: ScalarStyle,
+        mut tag: Option<Tag>,
+        anchor: Option<Anchor<'a>>,
+        span: Span,
+    ) -> Result<(), Box<Error>> {
+        if tag.as_ref().is_some_and(Tag::is_core_collection) {
+            tag = None;
+        }
+        self.emitted = self.emitted.saturating_add(1);
+        self.limits
+            .check_events(self.emitted)
+            .map_err(|error| self.limit_at(span, error))?;
+        if let super::EventSink::StaticQueue { events, .. } = &mut self.sink {
+            let value = if inner.is_empty() {
+                crate::scanner::TokenText::EMPTY
+            } else {
+                crate::scanner::TokenText::Slice(inner)
+            };
+            events.push_back(crate::parser::QueuedEvent::from_token_text(
+                value,
+                style,
+                tag,
+                anchor.as_ref(),
+                span,
+                self.input,
+            ));
+            return Ok(());
+        }
+        self.sink.scalar(
+            Cow::Borrowed(&self.input[inner.start()..inner.end()]),
+            &self.input[span.start()..span.end()],
+            style,
+            tag,
+            anchor,
+            span,
+            self.input,
+        )
+    }
+
+    #[inline]
+    pub(super) fn emit_scalar_token_text(
+        &mut self,
+        value: crate::scanner::TokenText,
+        raw: &'a str,
+        style: ScalarStyle,
+        mut tag: Option<Tag>,
+        anchor: Option<Anchor<'a>>,
+        span: Span,
+    ) -> Result<(), Box<Error>> {
+        if tag.as_ref().is_some_and(Tag::is_core_collection) {
+            tag = None;
+        }
+        self.emitted = self.emitted.saturating_add(1);
+        self.limits
+            .check_events(self.emitted)
+            .map_err(|error| self.limit_at(span, error))?;
+        self.sink
+            .scalar_token_text(value, raw, style, tag, anchor, span, self.input)
     }
 
     #[inline]
@@ -1058,7 +1114,8 @@ impl<'a> Parser<'a> {
         self.limits
             .check_events(self.emitted)
             .map_err(|error| self.limit_at(span, error))?;
-        self.sink.scalar(value, raw, style, tag, anchor, span)
+        self.sink
+            .scalar(value, raw, style, tag, anchor, span, self.input)
     }
 
     /// Count one event against `max_events` without pushing it into the sink (used when
@@ -1104,13 +1161,13 @@ impl<'a> Parser<'a> {
         self.limits
             .check_events(self.emitted)
             .map_err(|error| self.limit_at(span, error))?;
-        self.sink.event(event)
+        self.sink.event(event, self.input)
     }
 
     pub(super) fn line_starts_with(
         &self,
         index: usize,
-        predicate: impl Fn(&TokenKind<'a>) -> bool,
+        predicate: impl Fn(&TokenKind) -> bool,
     ) -> bool {
         self.line_first(index)
             .is_some_and(|token| predicate(&token.kind))

@@ -8,7 +8,6 @@
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
-#[cfg(test)]
 use std::panic::AssertUnwindSafe;
 
 use crate::composer::StreamingComposer;
@@ -22,7 +21,9 @@ use crate::tag::Tag;
 use crate::value::Value;
 
 pub(crate) use cursor::EventCursor;
-pub(crate) use pull::DocumentEvents;
+pub(crate) use pull::{DocumentEvents, QueuedEvent};
+pub(crate) use state::Cont;
+pub(crate) use window::WindowScratch;
 
 mod cursor;
 mod flow;
@@ -36,7 +37,7 @@ mod tests;
 mod window;
 
 use state::{
-    BlockState, Call, Cont, DUPLICATE_PROPERTIES, FlowLack, FlowState, NO_VALUE_INDEX, NodeBounds,
+    BlockState, Call, DUPLICATE_PROPERTIES, FlowLack, FlowState, NO_VALUE_INDEX, NodeBounds,
     Opening, Properties, Run, Step,
 };
 use window::LineWindow;
@@ -92,24 +93,31 @@ pub(crate) trait EventConsumer<'a> {
     fn finish(&mut self) -> Result<(), Error>;
 }
 
-enum EventSink<'a> {
+enum EventSink<'a, 's> {
     Events(Vec<Event<'a>>),
-    Streaming(Box<StreamingComposer<'a>>),
+    Streaming(AssertUnwindSafe<&'s mut StreamingComposer>),
+    Tape(AssertUnwindSafe<&'s mut crate::tape::TapeBuilder<'a>>),
     Typed(Box<crate::typed::Builder<'a>>),
     Spanned(Box<crate::spanned::Builder<'a>>),
     #[cfg(test)]
     Consumer(AssertUnwindSafe<Box<dyn EventConsumer<'a> + 'a>>),
-    /// Events that wait for a reader to take them (see [`DocumentEvents`] and [`EventCursor`]),
-    /// and how many entries the root holds, where the grammar counts them before it reads them.
+    /// Events that wait for a reader to take them (see [`EventCursor`]).
     Queue {
         events: VecDeque<Event<'a>>,
         root_entries: Option<usize>,
         room: usize,
         want_root_entries: bool,
     },
+    /// `'static` queued events for [`DocumentEvents`] so [`crate::ParserBuf`] can reuse the queue.
+    StaticQueue {
+        events: VecDeque<QueuedEvent>,
+        root_entries: Option<usize>,
+        room: usize,
+        want_root_entries: bool,
+    },
 }
 
-impl<'a> EventSink<'a> {
+impl<'a> EventSink<'a, '_> {
     /// Default queue watermark for `DocumentEvents` (typed streaming). A step of the grammar
     /// emits a few events, and a run of scalar entries or directives stops when this many wait.
     const QUEUE_ROOM: usize = 16;
@@ -122,13 +130,25 @@ impl<'a> EventSink<'a> {
     /// Whether a reader should take the waiting events before more are emitted.
     #[inline]
     fn is_full(&self) -> bool {
-        matches!(self, Self::Queue { events, room, .. } if events.len() >= *room)
+        match self {
+            Self::Queue { events, room, .. } => events.len() >= *room,
+            Self::StaticQueue { events, room, .. } => events.len() >= *room,
+            _ => false,
+        }
     }
 
     /// The events that wait for a reader, if this sink keeps them for one.
     fn waiting(&mut self) -> Option<&mut VecDeque<Event<'a>>> {
         match self {
             Self::Queue { events, .. } => Some(events),
+            _ => None,
+        }
+    }
+
+    /// The `'static` queued events waiting for `DocumentEvents`.
+    fn waiting_static(&mut self) -> Option<&mut VecDeque<QueuedEvent>> {
+        match self {
+            Self::StaticQueue { events, .. } => Some(events),
             _ => None,
         }
     }
@@ -140,6 +160,9 @@ impl<'a> EventSink<'a> {
             Self::Events(_) => false,
             Self::Queue {
                 want_root_entries, ..
+            }
+            | Self::StaticQueue {
+                want_root_entries, ..
             } => *want_root_entries,
             _ => true,
         }
@@ -148,24 +171,32 @@ impl<'a> EventSink<'a> {
     /// Say how many entries the root flow collection holds, before its start event.
     fn reserve_collection(&mut self, entries: usize) {
         match self {
-            Self::Streaming(composer) => composer.reserve_collection(entries),
+            Self::Streaming(composer) => composer.0.reserve_collection(entries),
+            Self::Tape(builder) => builder.0.reserve_collection(entries),
             Self::Typed(builder) => builder.reserve_collection(entries),
             Self::Spanned(builder) => builder.reserve_collection(entries),
             #[cfg(test)]
             Self::Consumer(consumer) => consumer.0.reserve_collection(entries),
-            Self::Queue { root_entries, .. } => *root_entries = Some(entries),
+            Self::Queue { root_entries, .. } | Self::StaticQueue { root_entries, .. } => {
+                *root_entries = Some(entries);
+            }
             Self::Events(_) => {}
         }
     }
 
     #[inline]
-    fn event(&mut self, event: Event<'a>) -> Result<(), Box<Error>> {
+    fn event(&mut self, event: Event<'a>, input: &'a str) -> Result<(), Box<Error>> {
         match self {
             Self::Queue { events, .. } => {
                 events.push_back(event);
                 Ok(())
             }
-            Self::Streaming(composer) => composer.event(event),
+            Self::StaticQueue { events, .. } => {
+                events.push_back(QueuedEvent::from_event(event, input));
+                Ok(())
+            }
+            Self::Streaming(composer) => composer.0.event(event),
+            Self::Tape(builder) => builder.0.event(event),
             Self::Spanned(builder) => builder.event(event).map_err(Box::new),
             _ => self.event_slow(event),
         }
@@ -189,15 +220,23 @@ impl<'a> EventSink<'a> {
             Self::Typed(builder) => builder.push_event(event),
             #[cfg(test)]
             Self::Consumer(consumer) => consumer.0.event(event).map_err(Box::new),
-            Self::Queue { .. } | Self::Streaming(_) | Self::Spanned(_) => {
+            Self::Queue { .. }
+            | Self::StaticQueue { .. }
+            | Self::Streaming(_)
+            | Self::Tape(_)
+            | Self::Spanned(_) => {
                 unreachable!("hot event sinks handled inline")
             }
         }
     }
 
-    /// Specialized scalar callback so internal composers, typed builders, and spanned builders
+    /// Specialized scalar callback so internal composers, tape/typed/spanned builders
     /// bypass constructing `Event::Scalar` values on the hot path.
     #[inline]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "internal hot-path callback unpacks scalar fields without constructing Event::Scalar"
+    )]
     fn scalar(
         &mut self,
         value: Cow<'a, str>,
@@ -206,11 +245,22 @@ impl<'a> EventSink<'a> {
         tag: Option<Tag>,
         anchor: Option<Anchor<'a>>,
         span: Span,
+        input: &'a str,
     ) -> Result<(), Box<Error>> {
         match self {
             Self::Streaming(composer) => {
-                composer.scalar(value, style, tag.as_ref(), anchor.as_ref(), span)
+                composer
+                    .0
+                    .scalar(value, style, tag.as_ref(), anchor.as_ref(), span)
             }
+            Self::Tape(builder) => builder.0.scalar(
+                value.as_ref(),
+                matches!(value, Cow::Borrowed(_)),
+                style,
+                tag,
+                anchor.as_ref(),
+                span,
+            ),
             Self::Spanned(builder) => {
                 builder.push_scalar(value, raw, style, tag, anchor.is_some(), span);
                 Ok(())
@@ -224,6 +274,17 @@ impl<'a> EventSink<'a> {
                     anchor,
                     span,
                 });
+                Ok(())
+            }
+            Self::StaticQueue { events, .. } => {
+                events.push_back(QueuedEvent::from_scalar(
+                    value,
+                    style,
+                    tag,
+                    anchor.as_ref(),
+                    span,
+                    input,
+                ));
                 Ok(())
             }
             _ => self.scalar_slow(value, raw, style, tag, anchor, span),
@@ -256,11 +317,44 @@ impl<'a> EventSink<'a> {
         }
     }
 
+    /// Specialized scalar callback when the caller already holds a `'static` [`TokenText`]
+    /// (quoted and boxed scalar tokens), avoiding `TokenText -> Cow -> memcmp -> TokenText`
+    /// round-trips on [`EventSink::StaticQueue`].
+    #[inline]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "internal hot-path callback unpacks scalar fields without constructing Event::Scalar"
+    )]
+    fn scalar_token_text(
+        &mut self,
+        value: crate::scanner::TokenText,
+        raw: &'a str,
+        style: ScalarStyle,
+        tag: Option<Tag>,
+        anchor: Option<Anchor<'a>>,
+        span: Span,
+        input: &'a str,
+    ) -> Result<(), Box<Error>> {
+        if let Self::StaticQueue { events, .. } = self {
+            events.push_back(QueuedEvent::from_token_text(
+                value,
+                style,
+                tag,
+                anchor.as_ref(),
+                span,
+                input,
+            ));
+            return Ok(());
+        }
+        self.scalar(value.into_cow(input), raw, style, tag, anchor, span, input)
+    }
+
     /// Specialized callback for untagged, unanchored single-line plain scalars.
     #[inline]
     fn plain_scalar(&mut self, value: &'a str, span: Span) -> Result<(), Box<Error>> {
         match self {
-            Self::Streaming(composer) => composer.plain_scalar(value, span),
+            Self::Streaming(composer) => composer.0.plain_scalar(value, span),
+            Self::Tape(builder) => builder.0.plain_scalar(value, span),
             Self::Spanned(builder) => {
                 builder.push_plain_scalar(value, span);
                 Ok(())
@@ -276,6 +370,10 @@ impl<'a> EventSink<'a> {
                 });
                 Ok(())
             }
+            Self::StaticQueue { events, .. } => {
+                events.push_back(QueuedEvent::plain_scalar(value.is_empty(), span));
+                Ok(())
+            }
             _ => self.scalar_slow(
                 Cow::Borrowed(value),
                 value,
@@ -288,9 +386,9 @@ impl<'a> EventSink<'a> {
     }
 }
 
-struct Parser<'a> {
+struct Parser<'a, 's> {
     window: LineWindow<'a>,
-    sink: EventSink<'a>,
+    sink: EventSink<'a, 's>,
     limits: Limits,
     input: &'a str,
     /// Word a malformed flow collection's error as libyaml does, and count positions as compat's
@@ -309,20 +407,50 @@ struct Parser<'a> {
     /// Last computed `(line_index, byte_offset, 1-based column)` for incremental compact-block
     /// column lookup without rescanning from line start at each nesting level.
     column_cache: (u32, u32, u32),
+    /// Reusable continuation stack inside [`Parser::run`].
+    cont_overflow: Vec<Cont>,
 }
 
-impl<'a> Parser<'a> {
+impl<'a, 's> Parser<'a, 's> {
     fn new(
         scanner: Scanner<'a>,
-        sink: EventSink<'a>,
+        sink: EventSink<'a, 's>,
         limits: &Limits,
         input: &'a str,
         compat: bool,
         single_document: bool,
         stop_at_second: bool,
     ) -> Self {
+        Self::with_scratch(
+            scanner,
+            sink,
+            limits,
+            input,
+            compat,
+            single_document,
+            stop_at_second,
+            WindowScratch::default(),
+            Vec::new(),
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "internal parser constructor threads optional ParserBuf scratch buffers directly"
+    )]
+    fn with_scratch(
+        scanner: Scanner<'a>,
+        sink: EventSink<'a, 's>,
+        limits: &Limits,
+        input: &'a str,
+        compat: bool,
+        single_document: bool,
+        stop_at_second: bool,
+        window_scratch: WindowScratch,
+        cont_overflow: Vec<Cont>,
+    ) -> Self {
         Self {
-            window: LineWindow::new(scanner, input, compat),
+            window: LineWindow::with_scratch(scanner, input, compat, window_scratch),
             sink,
             limits: limits.clone(),
             input,
@@ -332,13 +460,14 @@ impl<'a> Parser<'a> {
             single_document,
             stop_at_second,
             column_cache: (u32::MAX, 0, 0),
+            cont_overflow,
         }
     }
 }
 
 /// The number of top-level entries between a flow collection's opening and closing tokens. An
 /// entry counts once it has content, so separators alone reserve nothing.
-fn flow_entry_count(tokens: &[Token<'_>], open: usize, close: usize) -> usize {
+fn flow_entry_count(tokens: &[Token], open: usize, close: usize) -> usize {
     let mut depth = 0_usize;
     let mut entries = 0_usize;
     let mut content = false;
@@ -387,7 +516,7 @@ fn initial_event_capacity(input: &str, max_events: usize) -> usize {
 }
 
 #[cfg(test)]
-fn event_capacity(lines: &[Line], tokens: &[Token<'_>]) -> usize {
+fn event_capacity(lines: &[Line], tokens: &[Token]) -> usize {
     let base_headroom = if lines.iter().any(|line| line.indent() > 0) {
         256
     } else {
@@ -596,13 +725,11 @@ pub(crate) fn parse_spanned<'a>(
 /// Compose a single document directly from the parser without allocating an event vector or
 /// single-element document `Vec`. A second document is an error at its start.
 pub(crate) fn parse_value(input: &str, limits: &Limits) -> Result<Value, Error> {
-    let scanner = Scanner::new(input, limits).map_err(|error| *error)?;
+    let scanner = Scanner::with_compat(input, limits, false).map_err(|error| *error)?;
+    let mut composer = StreamingComposer::new_single(limits.clone(), input.len());
     let mut parser = Parser::new(
         scanner,
-        EventSink::Streaming(Box::new(StreamingComposer::new_single(
-            limits.clone(),
-            input.len(),
-        ))),
+        EventSink::Streaming(AssertUnwindSafe(&mut composer)),
         limits,
         input,
         false,
@@ -612,10 +739,10 @@ pub(crate) fn parse_value(input: &str, limits: &Limits) -> Result<Value, Error> 
     let stream_start = parser
         .window
         .ensure_started(&parser.limits)
-        .map_err(|error| *error)?;
+        .map_err(|error| (*error).with_input_location(input, false))?;
     parser
         .emit(Event::StreamStart { span: stream_start })
-        .map_err(|error| *error)?;
+        .map_err(|error| (*error).with_input_location(input, false))?;
     parser
         .parse_stream()
         .map_err(|error| (*error).with_input_location(input, false))?;
@@ -625,14 +752,96 @@ pub(crate) fn parse_value(input: &str, limits: &Limits) -> Result<Value, Error> 
         .unwrap_or_else(|| Span::empty(input.len()));
     parser
         .emit(Event::StreamEnd { span: stream_end })
-        .map_err(|error| *error)?;
-    let Parser { window, sink, .. } = parser;
-    drop(window);
-    match sink {
-        EventSink::Streaming(composer) => composer
-            .finish_single()
-            .map_err(|error| error.with_input_location(input, false)),
-        _ => unreachable!("event sink kind changed during parsing"),
+        .map_err(|error| (*error).with_input_location(input, false))?;
+    drop(parser);
+    composer
+        .finish_single()
+        .map_err(|error| error.with_input_location(input, false))
+}
+
+/// Compose a single document reusing internal scratch buffers from `buf`.
+pub(crate) fn parse_value_in(
+    input: &str,
+    limits: &Limits,
+    buf: &mut crate::scratch::ParserBuf,
+) -> Result<Value, Error> {
+    let window_scratch = buf.take_window_scratch();
+    let cont_overflow = buf.take_cont_overflow();
+    let composer_scratch = buf.take_composer_scratch();
+    let mut composer =
+        StreamingComposer::with_scratch(limits.clone(), input.len(), true, composer_scratch);
+    let (res, ws, co) = drive_stream(
+        input,
+        limits,
+        true,
+        EventSink::Streaming(AssertUnwindSafe(&mut composer)),
+        window_scratch,
+        cont_overflow,
+        true,
+    );
+    buf.put_window_scratch(ws);
+    buf.put_cont_overflow(co);
+    if let Err(err) = res {
+        buf.put_composer_scratch(composer.take_scratch());
+        return Err(err);
+    }
+    let (value, cs) = composer.finish_single_with_scratch();
+    buf.put_composer_scratch(cs);
+    value.map_err(|error| error.with_input_location(input, false))
+}
+
+/// Drive a streaming parser with optional [`crate::scratch::ParserBuf`] window/continuation reuse.
+fn drive_stream<'a>(
+    input: &'a str,
+    limits: &Limits,
+    single_document: bool,
+    sink: EventSink<'a, '_>,
+    mut window_scratch: WindowScratch,
+    cont_overflow: Vec<Cont>,
+    save_scratch: bool,
+) -> (Result<(), Error>, WindowScratch, Vec<Cont>) {
+    let scanner_scratch = std::mem::take(&mut window_scratch.scanner);
+    let scanner = match Scanner::with_compat_and_scratch(input, limits, false, scanner_scratch) {
+        Ok(s) => s,
+        Err(error) => return (Err(*error), window_scratch, cont_overflow),
+    };
+    let mut parser = Parser::with_scratch(
+        scanner,
+        sink,
+        limits,
+        input,
+        false,
+        single_document,
+        false,
+        window_scratch,
+        cont_overflow,
+    );
+    let result = (|| -> Result<(), Error> {
+        let stream_start = parser
+            .window
+            .ensure_started(&parser.limits)
+            .map_err(|error| (*error).with_input_location(input, false))?;
+        parser
+            .emit(Event::StreamStart { span: stream_start })
+            .map_err(|error| (*error).with_input_location(input, false))?;
+        parser
+            .parse_stream()
+            .map_err(|error| (*error).with_input_location(input, false))?;
+        let stream_end = parser
+            .window
+            .stream_end()
+            .unwrap_or_else(|| Span::empty(input.len()));
+        parser
+            .emit(Event::StreamEnd { span: stream_end })
+            .map_err(|error| (*error).with_input_location(input, false))?;
+        Ok(())
+    })();
+    if save_scratch {
+        let ws = parser.window.take_scratch();
+        let co = std::mem::take(&mut parser.cont_overflow);
+        (result, ws, co)
+    } else {
+        (result, WindowScratch::default(), Vec::new())
     }
 }
 
@@ -643,48 +852,195 @@ pub(crate) fn parse_documents(
     limits: &Limits,
     single_document: bool,
 ) -> Result<Vec<Value>, Error> {
-    let scanner = Scanner::new(input, limits).map_err(|error| *error)?;
-    let mut parser = Parser::new(
-        scanner,
-        EventSink::Streaming(Box::new(StreamingComposer::new(
-            limits.clone(),
-            input.len(),
-        ))),
-        limits,
-        input,
-        false,
-        single_document,
-        false,
-    );
-    // The composer ignores the stream events, but they count as an event parse counts them.
-    let stream_start = parser
-        .window
-        .ensure_started(&parser.limits)
-        .map_err(|error| *error)?;
-    parser
-        .emit(Event::StreamStart { span: stream_start })
-        .map_err(|error| *error)?;
-    parser
-        .parse_stream()
-        .map_err(|error| (*error).with_input_location(input, false))?;
-    let stream_end = parser
-        .window
-        .stream_end()
-        .unwrap_or_else(|| Span::empty(input.len()));
-    parser
-        .emit(Event::StreamEnd { span: stream_end })
-        .map_err(|error| *error)?;
-    let Parser { window, sink, .. } = parser;
-    drop(window);
-    match sink {
-        EventSink::Streaming(composer) => composer
-            .finish()
-            .map_err(|error| error.with_input_location(input, false)),
-        _ => unreachable!("event sink kind changed during parsing"),
-    }
+    parse_documents_with_scratch(input, limits, single_document, None)
 }
 
-impl<'a> Parser<'a> {
+/// Compose values reusing internal scratch buffers from `buf`.
+pub(crate) fn parse_documents_in(
+    input: &str,
+    limits: &Limits,
+    single_document: bool,
+    buf: &mut crate::scratch::ParserBuf,
+) -> Result<Vec<Value>, Error> {
+    parse_documents_with_scratch(input, limits, single_document, Some(buf))
+}
+
+fn parse_documents_with_scratch(
+    input: &str,
+    limits: &Limits,
+    single_document: bool,
+    buf: Option<&mut crate::scratch::ParserBuf>,
+) -> Result<Vec<Value>, Error> {
+    let (window_scratch, cont_overflow, composer_scratch, buf_slot) = match buf {
+        Some(b) => (
+            b.take_window_scratch(),
+            b.take_cont_overflow(),
+            b.take_composer_scratch(),
+            Some(b),
+        ),
+        None => (
+            WindowScratch::default(),
+            Vec::new(),
+            crate::composer::ComposerScratch::default(),
+            None,
+        ),
+    };
+    let mut composer = StreamingComposer::with_scratch(
+        limits.clone(),
+        input.len(),
+        single_document,
+        composer_scratch,
+    );
+    let save = buf_slot.is_some();
+    let (res, ws, co) = drive_stream(
+        input,
+        limits,
+        single_document,
+        EventSink::Streaming(AssertUnwindSafe(&mut composer)),
+        window_scratch,
+        cont_overflow,
+        save,
+    );
+    if let Some(b) = buf_slot {
+        b.put_window_scratch(ws);
+        b.put_cont_overflow(co);
+        if let Err(err) = res {
+            b.put_composer_scratch(composer.take_scratch());
+            return Err(err);
+        }
+        let (docs, cs) = composer.finish_with_scratch();
+        b.put_composer_scratch(cs);
+        return docs.map_err(|error| error.with_input_location(input, false));
+    }
+    res?;
+    composer
+        .finish()
+        .map_err(|error| error.with_input_location(input, false))
+}
+
+/// Stream a single document directly into a flat-array [`crate::Tape`].
+pub(crate) fn parse_tape<'a>(
+    input: &'a str,
+    limits: &Limits,
+    buf: Option<&mut crate::scratch::ParserBuf>,
+) -> Result<crate::tape::Tape<'a>, Error> {
+    limits.check_input(input.len()).map_err(|error| {
+        Error::from(error)
+            .with_span(Span::empty(0))
+            .with_location(Location::new(1, 1))
+    })?;
+    let (window_scratch, cont_overflow, tape_scratch, recycled, buf_slot) = match buf {
+        Some(b) => (
+            b.take_window_scratch(),
+            b.take_cont_overflow(),
+            b.take_tape_scratch(),
+            b.take_recycled_tape(),
+            Some(b),
+        ),
+        None => (
+            WindowScratch::default(),
+            Vec::new(),
+            crate::tape::TapeScratch::default(),
+            crate::tape::RecycledTape::default(),
+            None,
+        ),
+    };
+    let mut builder = crate::tape::TapeBuilder::new(
+        input,
+        limits,
+        true,
+        crate::limits::AliasBudget::default(),
+        tape_scratch,
+        recycled,
+    );
+    let save = buf_slot.is_some();
+    let (res, ws, co) = drive_stream(
+        input,
+        limits,
+        true,
+        EventSink::Tape(AssertUnwindSafe(&mut builder)),
+        window_scratch,
+        cont_overflow,
+        save,
+    );
+    if let Some(b) = buf_slot {
+        b.put_window_scratch(ws);
+        b.put_cont_overflow(co);
+        if let Err(err) = res {
+            b.put_tape_scratch(builder.take_scratch());
+            return Err(err);
+        }
+        let (tape, ts) = builder.finish_single();
+        b.put_tape_scratch(ts);
+        return tape.map_err(|error| error.with_input_location(input, false));
+    }
+    res?;
+    let (tape, _) = builder.finish_single();
+    tape.map_err(|error| error.with_input_location(input, false))
+}
+
+/// Stream every document in a YAML stream directly into a flat-array [`crate::TapeDocuments`].
+pub(crate) fn parse_tape_documents<'a>(
+    input: &'a str,
+    limits: &Limits,
+    buf: Option<&mut crate::scratch::ParserBuf>,
+) -> Result<crate::tape::TapeDocuments<'a>, Error> {
+    limits.check_input(input.len()).map_err(|error| {
+        Error::from(error)
+            .with_span(Span::empty(0))
+            .with_location(Location::new(1, 1))
+    })?;
+    let (window_scratch, cont_overflow, tape_scratch, recycled, buf_slot) = match buf {
+        Some(b) => (
+            b.take_window_scratch(),
+            b.take_cont_overflow(),
+            b.take_tape_scratch(),
+            b.take_recycled_tape(),
+            Some(b),
+        ),
+        None => (
+            WindowScratch::default(),
+            Vec::new(),
+            crate::tape::TapeScratch::default(),
+            crate::tape::RecycledTape::default(),
+            None,
+        ),
+    };
+    let mut builder = crate::tape::TapeBuilder::new(
+        input,
+        limits,
+        false,
+        crate::limits::AliasBudget::default(),
+        tape_scratch,
+        recycled,
+    );
+    let save = buf_slot.is_some();
+    let (res, ws, co) = drive_stream(
+        input,
+        limits,
+        false,
+        EventSink::Tape(AssertUnwindSafe(&mut builder)),
+        window_scratch,
+        cont_overflow,
+        save,
+    );
+    if let Some(b) = buf_slot {
+        b.put_window_scratch(ws);
+        b.put_cont_overflow(co);
+        if let Err(err) = res {
+            b.put_tape_scratch(builder.take_scratch());
+            return Err(err);
+        }
+        let (docs, ts) = builder.finish_documents();
+        b.put_tape_scratch(ts);
+        return docs.map_err(|error| error.with_input_location(input, false));
+    }
+    res?;
+    let (docs, _) = builder.finish_documents();
+    docs.map_err(|error| error.with_input_location(input, false))
+}
+
+impl<'a> Parser<'a, '_> {
     /// A compatibility-mode explanation for a line that does not fit the indentation of the
     /// collection before it. Real trailing content returns `None`.
     fn compat_indentation_message(&self, index: usize) -> Option<String> {
@@ -884,8 +1240,8 @@ impl<'a> Parser<'a> {
                 break;
             };
             let event = Event::Directive {
-                name: directive.name.clone(),
-                value: directive.value.clone(),
+                name: Cow::Borrowed(directive.name.slice(self.input).unwrap_or("")),
+                value: Cow::Borrowed(directive.value.slice(self.input).unwrap_or("")),
                 span,
             };
             self.emit(event)?;
@@ -1152,17 +1508,23 @@ impl<'a> Parser<'a> {
     /// that can lead back to its caller nests a native frame per entry or
     /// level. Every loop over entries goes through this driver.
     fn run(&mut self, call: Call<'a>) -> Result<usize, Box<Error>> {
-        let mut stack: Vec<Cont> = Vec::new();
-        let mut step = self.call(call, &mut stack)?;
-        loop {
-            step = match step {
-                Step::Call(call) => self.call(call, &mut stack)?,
-                Step::Return(value) => match stack.pop() {
-                    None => return Ok(value),
-                    Some(cont) => self.resume(cont, value, &mut stack)?,
-                },
-            };
-        }
+        let mut stack = std::mem::take(&mut self.cont_overflow);
+        stack.clear();
+        let result = (|| -> Result<usize, Box<Error>> {
+            let mut step = self.call(call, &mut stack)?;
+            loop {
+                step = match step {
+                    Step::Call(call) => self.call(call, &mut stack)?,
+                    Step::Return(value) => match stack.pop() {
+                        None => return Ok(value),
+                        Some(cont) => self.resume(cont, value, &mut stack)?,
+                    },
+                };
+            }
+        })();
+        stack.clear();
+        self.cont_overflow = stack;
+        result
     }
 
     fn call(&mut self, call: Call<'a>, stack: &mut Vec<Cont>) -> Result<Step<'a>, Box<Error>> {
@@ -1451,7 +1813,7 @@ fn tab_leads_line(input: &str, offset: usize) -> bool {
     (rest.is_empty() || rest.ends_with(['\n', '\r'])) && before[rest.len()..].contains('\t')
 }
 
-fn value_indicator_index(tokens: &[Token<'_>]) -> Option<usize> {
+fn value_indicator_index(tokens: &[Token]) -> Option<usize> {
     let mut depth = 0usize;
     for (index, token) in tokens.iter().enumerate() {
         match token.kind {
@@ -1469,7 +1831,7 @@ fn value_indicator_index(tokens: &[Token<'_>]) -> Option<usize> {
 /// Whether each closing bracket among these tokens closes the last one opened. When one doesn't,
 /// the parse of the key reports it, which says more than where the key began.
 #[cold]
-fn flow_brackets_match(tokens: &[Token<'_>]) -> bool {
+fn flow_brackets_match(tokens: &[Token]) -> bool {
     let mut open = Vec::new();
     tokens.iter().all(|token| match token.kind {
         TokenKind::FlowSequenceStart { .. } => {
@@ -1492,11 +1854,11 @@ fn flow_brackets_match(tokens: &[Token<'_>]) -> bool {
 /// the same limit).
 const MAX_IMPLICIT_KEY_CHARS: usize = 1024;
 
-fn has_value_indicator(tokens: &[Token<'_>]) -> bool {
+fn has_value_indicator(tokens: &[Token]) -> bool {
     value_indicator_index(tokens).is_some()
 }
 
-fn is_mapping_line(tokens: &[Token<'_>]) -> bool {
+fn is_mapping_line(tokens: &[Token]) -> bool {
     match tokens.first().map(|token| &token.kind) {
         Some(TokenKind::Key | TokenKind::Value) => true,
         // A document marker ends the collection, whatever follows it on its line.
