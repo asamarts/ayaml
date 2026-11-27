@@ -96,6 +96,7 @@ enum EventSink<'a> {
     Events(Vec<Event<'a>>),
     Streaming(Box<StreamingComposer<'a>>),
     Typed(Box<crate::typed::Builder<'a>>),
+    Spanned(Box<crate::spanned::Builder<'a>>),
     #[cfg(test)]
     Consumer(AssertUnwindSafe<Box<dyn EventConsumer<'a> + 'a>>),
     /// Events that wait for a reader to take them (see [`DocumentEvents`] and [`EventCursor`]),
@@ -113,9 +114,9 @@ impl<'a> EventSink<'a> {
     /// emits a few events, and a run of scalar entries or directives stops when this many wait.
     const QUEUE_ROOM: usize = 16;
 
-    /// Larger queue watermark for `EventCursor` (`parse_events` / `SpannedTree::parse`), keeping
-    /// the parser loop hot in instruction cache across batches while staying inside one 256-slot
-    /// `VecDeque` allocation (~26 KiB).
+    /// Larger queue watermark for `EventCursor` (`parse_events`, `Deserializer`, and merge-key
+    /// expansion), keeping the parser loop hot in instruction cache across batches while staying
+    /// inside one 256-slot `VecDeque` allocation (~26 KiB).
     const CURSOR_QUEUE_ROOM: usize = 250;
 
     /// Whether a reader should take the waiting events before more are emitted.
@@ -149,6 +150,7 @@ impl<'a> EventSink<'a> {
         match self {
             Self::Streaming(composer) => composer.reserve_collection(entries),
             Self::Typed(builder) => builder.reserve_collection(entries),
+            Self::Spanned(builder) => builder.reserve_collection(entries),
             #[cfg(test)]
             Self::Consumer(consumer) => consumer.0.reserve_collection(entries),
             Self::Queue { root_entries, .. } => *root_entries = Some(entries),
@@ -158,6 +160,20 @@ impl<'a> EventSink<'a> {
 
     #[inline]
     fn event(&mut self, event: Event<'a>) -> Result<(), Box<Error>> {
+        match self {
+            Self::Queue { events, .. } => {
+                events.push_back(event);
+                Ok(())
+            }
+            Self::Streaming(composer) => composer.event(event),
+            Self::Spanned(builder) => builder.event(event).map_err(Box::new),
+            _ => self.event_slow(event),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn event_slow(&mut self, event: Event<'a>) -> Result<(), Box<Error>> {
         match self {
             Self::Events(events) => {
                 // Double while small, then grow by half to avoid reserving twice the events that
@@ -170,19 +186,17 @@ impl<'a> EventSink<'a> {
                 events.push(event);
                 Ok(())
             }
-            Self::Streaming(composer) => composer.event(event),
             Self::Typed(builder) => builder.push_event(event),
             #[cfg(test)]
             Self::Consumer(consumer) => consumer.0.event(event).map_err(Box::new),
-            Self::Queue { events, .. } => {
-                events.push_back(event);
-                Ok(())
+            Self::Queue { .. } | Self::Streaming(_) | Self::Spanned(_) => {
+                unreachable!("hot event sinks handled inline")
             }
         }
     }
 
-    /// Specialized scalar callback so internal composers and typed builders bypass constructing
-    /// `Event::Scalar` values on the hot path.
+    /// Specialized scalar callback so internal composers, typed builders, and spanned builders
+    /// bypass constructing `Event::Scalar` values on the hot path.
     #[inline]
     fn scalar(
         &mut self,
@@ -197,10 +211,41 @@ impl<'a> EventSink<'a> {
             Self::Streaming(composer) => {
                 composer.scalar(value, style, tag.as_ref(), anchor.as_ref(), span)
             }
+            Self::Spanned(builder) => {
+                builder.push_scalar(value, raw, style, tag, anchor.is_some(), span);
+                Ok(())
+            }
+            Self::Queue { events, .. } => {
+                events.push_back(Event::Scalar {
+                    value,
+                    raw: Cow::Borrowed(raw),
+                    style,
+                    tag,
+                    anchor,
+                    span,
+                });
+                Ok(())
+            }
+            _ => self.scalar_slow(value, raw, style, tag, anchor, span),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn scalar_slow(
+        &mut self,
+        value: Cow<'a, str>,
+        raw: &'a str,
+        style: ScalarStyle,
+        tag: Option<Tag>,
+        anchor: Option<Anchor<'a>>,
+        span: Span,
+    ) -> Result<(), Box<Error>> {
+        match self {
             Self::Typed(builder) => {
                 builder.push_scalar(value, raw, style, tag.as_ref(), anchor.as_ref(), span)
             }
-            _ => self.event(Event::Scalar {
+            _ => self.event_slow(Event::Scalar {
                 value,
                 raw: Cow::Borrowed(raw),
                 style,
@@ -216,7 +261,22 @@ impl<'a> EventSink<'a> {
     fn plain_scalar(&mut self, value: &'a str, span: Span) -> Result<(), Box<Error>> {
         match self {
             Self::Streaming(composer) => composer.plain_scalar(value, span),
-            Self::Typed(builder) => builder.push_scalar(
+            Self::Spanned(builder) => {
+                builder.push_plain_scalar(value, span);
+                Ok(())
+            }
+            Self::Queue { events, .. } => {
+                events.push_back(Event::Scalar {
+                    value: Cow::Borrowed(value),
+                    raw: Cow::Borrowed(value),
+                    style: ScalarStyle::Plain,
+                    tag: None,
+                    anchor: None,
+                    span,
+                });
+                Ok(())
+            }
+            _ => self.scalar_slow(
                 Cow::Borrowed(value),
                 value,
                 ScalarStyle::Plain,
@@ -224,14 +284,6 @@ impl<'a> EventSink<'a> {
                 None,
                 span,
             ),
-            _ => self.event(Event::Scalar {
-                value: Cow::Borrowed(value),
-                raw: Cow::Borrowed(value),
-                style: ScalarStyle::Plain,
-                tag: None,
-                anchor: None,
-                span,
-            }),
         }
     }
 }
@@ -496,6 +548,47 @@ fn parse_events_with_compat<'a>(
         .map_err(|error| *error)?;
     match parser.sink {
         EventSink::Events(events) => Ok(events),
+        _ => unreachable!("event sink kind changed during parsing"),
+    }
+}
+
+/// Parse a stream directly into a [`crate::SpannedTree`] without `EventCursor` queue buffering.
+pub(crate) fn parse_spanned<'a>(
+    input: &'a str,
+    limits: &Limits,
+    compat: bool,
+) -> Result<crate::spanned::SpannedTree<'a>, Error> {
+    let scanner = Scanner::with_compat(input, limits, compat).map_err(|error| *error)?;
+    let mut parser = Parser::new(
+        scanner,
+        EventSink::Spanned(Box::new(crate::spanned::Builder::new(input, false))),
+        limits,
+        input,
+        compat,
+        false,
+        false,
+    );
+    let stream_start = parser
+        .window
+        .ensure_started(&parser.limits)
+        .map_err(|error| (*error).with_input_location(input, compat))?;
+    parser
+        .emit(Event::StreamStart { span: stream_start })
+        .map_err(|error| (*error).with_input_location(input, compat))?;
+    parser
+        .parse_stream()
+        .map_err(|error| (*error).with_input_location(input, compat))?;
+    let stream_end = parser
+        .window
+        .stream_end()
+        .unwrap_or_else(|| Span::empty(input.len()));
+    parser
+        .emit(Event::StreamEnd { span: stream_end })
+        .map_err(|error| (*error).with_input_location(input, compat))?;
+    let Parser { window, sink, .. } = parser;
+    drop(window);
+    match sink {
+        EventSink::Spanned(builder) => Ok(builder.finish()),
         _ => unreachable!("event sink kind changed during parsing"),
     }
 }

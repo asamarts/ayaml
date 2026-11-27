@@ -288,26 +288,20 @@ pub(crate) fn from_str_visitor<'de, V: Visitor<'de>>(
     from_str_seed_with_options(input, limits, options, Any(visitor))
 }
 
-/// Decode one document with a seed. A small input is built as a tree and read from it, which
-/// costs a document of a few bytes the least; a larger one is read from its events, so that no
-/// tree of it is kept beside its tokens and its value (see `stream`). Both give the same value
-/// or error. What a target can see of the difference is that a collection read from events
-/// tells it no size, and that it has read the start of a document that is then refused. A build
-/// with `--cfg ayaml_typed_from_events` reads every input from its events, which is how the
-/// tests run on that reader at every size.
+/// Decode one document with a seed directly from the streaming event reader at every input size,
+/// keeping no intermediate `Node` tree of the document in memory. A refused input falls back to
+/// [`parse_document`] to preserve exact document-order error precedence (see `stream`).
 pub(crate) fn from_str_seed_with_options<'de, T: DeserializeSeed<'de>>(
     input: &'de str,
     limits: &Limits,
     options: NodeOptions,
     seed: T,
 ) -> Result<T::Value, Error> {
-    if input.len() <= SMALL_INPUT_BYTES && !cfg!(ayaml_typed_from_events) {
-        return from_str_by_tree(input, limits, options, seed);
-    }
     stream::read(input, limits, options, seed)
 }
 
 /// Decode one document by building its whole tree first.
+#[cfg(any(test, feature = "bench-internals"))]
 pub(crate) fn from_str_by_tree<'de, T: DeserializeSeed<'de>>(
     input: &'de str,
     limits: &Limits,
@@ -367,11 +361,6 @@ pub(crate) fn from_events_seed_owned<'a, 'de, T: DeserializeSeed<'de>>(
     let node = build(events, input_len, limits, NodeOptions::default(), budget)?;
     seed.deserialize(NodeDeserializer::owned_from_owned(node))
 }
-
-/// Inputs above this size are read from their events, and built as a tree only to report an
-/// error. Smaller reads build the tree directly from the parser without collecting an intermediate
-/// event vector.
-const SMALL_INPUT_BYTES: usize = 4 * 1024;
 
 /// Parse one document and build its node tree directly as events arrive.
 fn parse_document<'de>(

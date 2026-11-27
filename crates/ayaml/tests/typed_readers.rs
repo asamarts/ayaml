@@ -1254,36 +1254,26 @@ fn every_size_hint_matches_the_entries_given() {
     assert!(ok_docs > 100, "checked {ok_docs} valid documents");
 }
 
-/// A build with `--cfg ayaml_typed_from_events` reads a small input from its events too, which
-/// is how CI runs the whole suite on that reader. A block sequence longer than the lookahead
-/// queue tells its visitor its size only where it is read from a tree, so what it tells shows
-/// which reader read it.
+/// Typed reads stream directly from parser events at every input size (no 4 KiB tree-fallback
+/// cliff), so a block sequence longer than the bounded lookahead queue reports `None` for
+/// `size_hint` in both default and `--cfg ayaml_typed_from_events` builds.
 #[test]
 fn the_build_that_reads_every_input_from_its_events_does() {
     let long = "- 1\n".repeat(100);
     let hinted: Hinted = ayaml::from_str(&long).expect("a sequence");
     assert_eq!(hinted.entries, 100);
-    assert_eq!(
-        hinted.before.is_none(),
-        cfg!(ayaml_typed_from_events),
-        "{hinted:?}"
-    );
+    assert!(hinted.before.is_none(), "{hinted:?}");
 }
 
-/// The public reader builds a tree of an input of 4 KiB, and reads one a byte longer from its
-/// events: "more than 4 KiB" is 4,097 bytes. A block sequence shows which, as above.
+/// Both sides of the former 4 KiB boundary (`4,096` and `4,097` bytes) stream directly from
+/// parser events with identical behavior and no tree-fallback cliff.
 #[test]
-fn an_input_of_exactly_4_kib_is_read_from_a_tree() {
+fn an_input_of_exactly_4_kib_streams_from_events() {
     let at = format!("{}# x\n", "- a\n".repeat(1_023));
     let over = format!("{}# xx\n", "- a\n".repeat(1_023));
     assert_eq!((at.len(), over.len()), (4_096, 4_097));
     let hinted: Hinted = ayaml::from_str(&at).expect("a sequence");
-    assert_eq!(hinted.entries, 1_023);
-    assert_eq!(
-        hinted.before,
-        (!cfg!(ayaml_typed_from_events)).then_some(1_023),
-        "an input of 4,096 bytes"
-    );
+    assert_eq!((hinted.before, hinted.entries), (None, 1_023));
     let hinted: Hinted = ayaml::from_str(&over).expect("a sequence");
     assert_eq!((hinted.before, hinted.entries), (None, 1_023));
 }
@@ -1483,4 +1473,54 @@ fn deserializer_methods_match_from_str_on_values_and_error_spans() {
         .next_borrowed::<Record>()
         .expect_err("second fails with span");
     assert_eq!(format!("{err:?} {err}"), format!("{err_b:?} {err_b}"));
+}
+
+/// Unified streaming at every size (`<= 512 B`, `513..=8192 B` straddling 4 KiB, and `> 8 KiB`)
+/// matches the whole-document tree oracle on values, structs, and error metadata.
+#[test]
+fn unified_streaming_matches_tree_oracle_across_input_size_tiers() {
+    use std::collections::BTreeMap;
+    use std::fmt::Write as _;
+
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct EntryDoc<'a> {
+        service: &'a str,
+        #[serde(borrow)]
+        entries: BTreeMap<&'a str, &'a str>,
+    }
+
+    fn make_doc(count: usize) -> String {
+        let mut out = String::from("service: probe\nentries:\n");
+        for i in 0..count {
+            let _ = writeln!(out, "  k_{i:04}: \"val_{i:04}\"");
+        }
+        out
+    }
+
+    let limits = Limits::default();
+    for count in [10_usize, 180, 210, 420] {
+        let doc = make_doc(count);
+        let stream_val: Value = ayaml::from_str(&doc).expect("stream value");
+        let tree_val: Value = from_str_by_tree(&doc, &limits, false).expect("tree value");
+        assert_eq!(stream_val, tree_val, "value mismatch at count={count}");
+
+        let stream_typed: EntryDoc<'_> =
+            ayaml::from_str_borrowed(&doc).expect("stream borrowed struct");
+        let tree_typed: EntryDoc<'_> =
+            from_str_by_tree(&doc, &limits, false).expect("tree borrowed struct");
+        assert_eq!(stream_typed, tree_typed, "typed mismatch at count={count}");
+
+        // Append a duplicate key near the end and confirm identical DuplicateKey code and span.
+        let mut dup_doc = doc.clone();
+        dup_doc.push_str("  k_0000: \"dup\"\n");
+        let stream_err = ayaml::from_str::<Value>(&dup_doc).expect_err("stream dup");
+        let tree_err = from_str_by_tree::<Value>(&dup_doc, &limits, false).expect_err("tree dup");
+        assert_eq!(stream_err.code(), tree_err.code(), "code count={count}");
+        assert_eq!(stream_err.span(), tree_err.span(), "span count={count}");
+        assert_eq!(
+            stream_err.location(),
+            tree_err.location(),
+            "location count={count}"
+        );
+    }
 }

@@ -21,19 +21,30 @@
 //! reads, the stream is read to its end, and the tokens are freed, so the target's value is
 //! built beside the tree alone, as the tree reader builds it.
 
+use std::borrow::Cow;
+use std::collections::HashSet;
+
 use serde::Deserializer;
 use serde::de::{Deserialize, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
 use super::{
-    Builder, Node, NodeDeserializer, NodeOptions, SeenNodeKeys, SeenScalarKeys, check_consumed,
-    collection_drops, inside_key, node_key_text, parse_document, plain_scalar, scalar_key_text,
-    with_span,
+    Builder, Node, NodeDeserializer, NodeKind, NodeOptions, SeenNodeKeys, borrowed_or_owned,
+    check_consumed, collection_drops, inside_key, node_key_text, parse_document, plain_scalar,
+    scalar_key_text, with_span,
 };
 use crate::error::{Error, ErrorCode, ErrorKind};
-use crate::event::Event;
+use crate::event::{Event, ScalarStyle};
 use crate::limits::Limits;
+use crate::mapping::GlobalHasher;
 use crate::parser::DocumentEvents;
+use crate::resolver::{float_from_text, resolve_plain};
 use crate::span::{Location, SPANNED_FIELDS, SPANNED_TOKEN, Span};
+use crate::value::{Value, push_quoted_key};
+
+/// Maximum scalar keys per streaming mapping kept on `Stream::seen_keys` with linear scan before
+/// promoting to a cryptographic SipHash-1-3 hash map. Covers typical small structs and frontmatter
+/// objects (up to 12 fields) in one compact reusable flat buffer with zero per-map hash allocation.
+const STREAM_SEEN_SMALL_LIMIT: usize = 12;
 
 /// Read one document into what `seed` makes of it.
 pub(super) fn read<'de, T: DeserializeSeed<'de>>(
@@ -79,6 +90,18 @@ pub(super) fn read<'de, T: DeserializeSeed<'de>>(
     ))
 }
 
+/// Promoted duplicate-key set paired with its owning `Stream::open` depth.
+type SeenLarge<'de> = (usize, HashSet<Cow<'de, str>, GlobalHasher>);
+
+/// An unanchored, untagged scalar event popped directly from `DocumentEvents` without constructing
+/// an 80-byte `Node<'de>`.
+struct UntaggedScalar<'de> {
+    value: Cow<'de, str>,
+    raw: Cow<'de, str>,
+    style: ScalarStyle,
+    span: Span,
+}
+
 /// A document's events, and what reading them has to keep.
 ///
 /// The builder's root is the one node that is built and not yet read. It is empty between
@@ -90,6 +113,15 @@ pub(super) struct Stream<'de> {
     /// The collections that are open here and read entry by entry, the innermost last. The
     /// builder doesn't see them, and counts them as its base depth.
     open: Vec<Open<'de>>,
+    /// Shared flat stack of scalar keys for open small mappings (`<= STREAM_SEEN_SMALL_LIMIT`
+    /// entries), eliminating per-mapping heap allocations and keeping `Open` frames compact.
+    seen_keys: Vec<Cow<'de, str>>,
+    /// Active promoted duplicate-key table for the innermost large open mapping (`(depth, set)`),
+    /// kept inline on `Stream` to avoid both a `Box` allocation and widening `Open`.
+    seen_large_top: Option<SeenLarge<'de>>,
+    /// Overflow stack of promoted duplicate-key tables when two or more nested mappings exceed
+    /// `STREAM_SEEN_SMALL_LIMIT` simultaneously.
+    seen_large_rest: Vec<SeenLarge<'de>>,
     /// What the event that waits is, once a read has looked at it.
     ahead: Ahead,
     /// Whether the node that a seed was given is still unread. A seed may read nothing.
@@ -141,30 +173,63 @@ impl Ahead {
     }
 }
 
+/// A mapping key held between `next_key_seed` and `next_value_seed` (or skipped value).
+enum PendingStreamKey<'de> {
+    /// An unanchored, untagged scalar guaranteed to resolve as a YAML string (`String(text)`),
+    /// bypassing `Node<'de>` construction and cloning when recorded into the seen-key set.
+    String { text: Cow<'de, str>, span: Span },
+    /// Any other key (numbers, bools, nulls, tagged, anchored, or collection keys).
+    Node(Box<Node<'de>>),
+}
+
+impl PendingStreamKey<'_> {
+    #[inline]
+    fn span(&self) -> Span {
+        match self {
+            Self::String { span, .. } => *span,
+            Self::Node(node) => node.span,
+        }
+    }
+}
+
+/// Sentinel for `Open::{Sequence, Mapping}::known` when total entry count is unknown.
+const UNKNOWN_ENTRIES: usize = usize::MAX;
+
 /// A collection that is read entry by entry.
-#[allow(
-    clippy::large_enum_variant,
-    reason = "Open lives only on the per-depth parser stack and keeps small mapping seen-key sets inline without heap allocation"
-)]
 enum Open<'de> {
     Sequence {
         /// The items that a visitor has asked for.
         read: usize,
-        /// Total items known when the sequence opened, from root flow counting or lookahead.
-        known: Option<usize>,
+        /// Total items known when the sequence opened, or `UNKNOWN_ENTRIES`.
+        known: usize,
     },
     Mapping {
-        /// The scalar keys of the entries read so far, where a duplicate is refused.
-        seen: SeenScalarKeys<'de>,
+        /// Start offset of this mapping's inline scalar keys in `Stream::seen_keys`.
+        seen_start: usize,
         /// Non-scalar keys of the entries read so far, moved in by cached node hash without cloning.
         seen_nodes: Option<Box<SeenNodeKeys<'de>>>,
         /// The key whose value is still to be read.
-        key: Option<Node<'de>>,
+        key: Option<PendingStreamKey<'de>>,
         /// The entries whose keys a visitor has asked for.
         read: usize,
-        /// Total entries known when the mapping opened, from root flow counting or lookahead.
-        known: Option<usize>,
+        /// Total entries known when the mapping opened, or `UNKNOWN_ENTRIES`.
+        known: usize,
+        /// Whether this mapping promoted its scalar keys into `Stream::seen_large_top`/`rest`.
+        has_large: bool,
     },
+}
+
+/// Whether an untagged, non-empty plain scalar is guaranteed to resolve as a YAML string and
+/// cannot match `resolve_plain` or `float_from_text`.
+#[inline]
+fn is_unambiguous_plain_string(text: &str) -> bool {
+    match text.as_bytes().first() {
+        None | Some(b'0'..=b'9' | b'+' | b'-' | b'.' | b'~') => false,
+        Some(b'n' | b'N') => !matches!(text, "null" | "Null" | "NULL"),
+        Some(b't' | b'T') => !matches!(text, "true" | "True" | "TRUE"),
+        Some(b'f' | b'F') => !matches!(text, "false" | "False" | "FALSE"),
+        _ => true,
+    }
 }
 
 impl<'de> Stream<'de> {
@@ -178,6 +243,9 @@ impl<'de> Stream<'de> {
             events,
             builder: Builder::streaming(input_len, limits, options),
             open: Vec::new(),
+            seen_keys: Vec::new(),
+            seen_large_top: None,
+            seen_large_rest: Vec::new(),
             ahead: Ahead::Unknown,
             due: false,
             ended: false,
@@ -438,15 +506,26 @@ impl<'de> Stream<'de> {
             None
         }
         .or_else(|| self.events.queued_entries(sequence));
+        let known = match known {
+            Some(entries) => Some(entries),
+            None => match self.events.refill_for_hint() {
+                Ok(true) => self.events.queued_entries(sequence),
+                Ok(false) => None,
+                Err(error) => return Err(self.faulted(error)),
+            },
+        };
+        let known = known.unwrap_or(UNKNOWN_ENTRIES);
+        let seen_start = self.seen_keys.len();
         self.open.push(if sequence {
             Open::Sequence { read: 0, known }
         } else {
             Open::Mapping {
-                seen: SeenScalarKeys::new(),
+                seen_start,
                 seen_nodes: None,
                 key: None,
                 read: 0,
                 known,
+                has_large: false,
             }
         });
         Ok(if sequence {
@@ -536,6 +615,69 @@ impl<'de> Stream<'de> {
         })
     }
 
+    /// Pop the next event directly when it is an unanchored, untagged scalar and no built root
+    /// node waits, bypassing `Node<'de>` construction on the scalar hot path.
+    #[inline]
+    fn take_untagged_scalar(&mut self) -> Result<Option<UntaggedScalar<'de>>, Error> {
+        if self.builder.root.is_some() {
+            return Ok(None);
+        }
+        if self.fault.is_some() || self.events.front().is_none() {
+            self.ready()?;
+        }
+        if matches!(
+            self.events.front(),
+            Some(Event::Scalar {
+                anchor: None,
+                tag: None,
+                ..
+            })
+        ) && let Some(Event::Scalar {
+            value,
+            raw,
+            style,
+            span,
+            ..
+        }) = self.events.pop()
+        {
+            self.due = false;
+            self.ahead = Ahead::Unknown;
+            return Ok(Some(UntaggedScalar {
+                value,
+                raw,
+                style,
+                span,
+            }));
+        }
+        Ok(None)
+    }
+
+    /// Pop the innermost open collection and release any inline or promoted duplicate-key state.
+    #[inline]
+    fn pop_open(&mut self) {
+        if let Some(Open::Mapping {
+            seen_start,
+            has_large,
+            ..
+        }) = self.open.pop()
+        {
+            self.seen_keys.truncate(seen_start);
+            if has_large {
+                let depth = self.open.len();
+                debug_assert!(matches!(self.seen_large_top, Some((d, _)) if d == depth));
+                self.seen_large_top = self.seen_large_rest.pop();
+            }
+        }
+    }
+
+    /// Push a newly promoted large duplicate-key table for the innermost open mapping.
+    #[cold]
+    fn push_seen_large(&mut self, depth: usize, set: HashSet<Cow<'de, str>, GlobalHasher>) {
+        if let Some(prev) = self.seen_large_top.replace((depth, set)) {
+            self.seen_large_rest.push(prev);
+        }
+    }
+
     /// The span of the next node in the innermost open collection, which stays for the next
     /// read, or `None` at the collection's end, where it closes.
     #[inline]
@@ -545,7 +687,7 @@ impl<'de> Stream<'de> {
             Ahead::End { sequence, .. } if sequence == within => {
                 self.ahead = Ahead::Unknown;
                 self.events.pop();
-                self.open.pop();
+                self.pop_open();
                 Ok(None)
             }
             ahead => Ok(Some(ahead.span())),
@@ -565,56 +707,208 @@ impl<'de> Stream<'de> {
     }
 
     /// The key of the innermost open mapping whose value is still to be read.
-    fn key_slot(&mut self) -> Option<&mut Option<Node<'de>>> {
+    fn key_slot(&mut self) -> Option<&mut Option<PendingStreamKey<'de>>> {
         match self.open.last_mut() {
             Some(Open::Mapping { key, .. }) => Some(key),
             _ => None,
         }
     }
 
+    /// Span of the next waiting event without computing/storing the full `Ahead` classification.
+    #[inline]
+    fn peek_span(&mut self) -> Result<Span, Error> {
+        match self.ahead {
+            Ahead::Sequence(span)
+            | Ahead::Mapping(span)
+            | Ahead::Whole(span)
+            | Ahead::End { span, .. } => return Ok(span),
+            Ahead::Unknown => {}
+        }
+        if self.fault.is_some() || self.events.front().is_none() {
+            self.ready()?;
+        }
+        self.events.front().map(Event::span).ok_or_else(unreadable)
+    }
+
     /// The next key of the innermost open mapping, or `None` at the mapping's end, where it
     /// closes. If a visitor left the value of the entry before it, that value is passed over.
-    fn key(&mut self) -> Result<Option<Node<'de>>, Error> {
+    fn key(&mut self) -> Result<Option<PendingStreamKey<'de>>, Error> {
         if let Some(key) = self.key_slot().and_then(Option::take) {
             self.skip()?;
             self.entered(key)?;
         }
+        if self.fault.is_none() && self.builder.root.is_none() {
+            if self.events.front().is_none() {
+                self.ready()?;
+            }
+            match self.events.front() {
+                Some(Event::MappingEnd { .. }) => {
+                    self.ahead = Ahead::Unknown;
+                    self.events.pop();
+                    self.pop_open();
+                    return Ok(None);
+                }
+                Some(Event::Scalar {
+                    value,
+                    raw,
+                    style,
+                    tag: None,
+                    anchor: None,
+                    ..
+                }) if *style != ScalarStyle::Plain
+                    || (!raw.is_empty() && is_unambiguous_plain_string(value)) =>
+                {
+                    if let Some(Event::Scalar {
+                        value,
+                        raw,
+                        style,
+                        span,
+                        ..
+                    }) = self.events.pop()
+                    {
+                        self.due = false;
+                        self.ahead = Ahead::Unknown;
+                        let text = borrowed_or_owned(value, &raw, style);
+                        return Ok(Some(PendingStreamKey::String { text, span }));
+                    }
+                }
+                _ => {}
+            }
+        }
         if self.entry()?.is_none() {
             return Ok(None);
         }
-        self.whole().map(Some)
+        self.whole()
+            .map(|node| Some(PendingStreamKey::Node(Box::new(node))))
     }
 
     /// Record a complete entry of the innermost open mapping. The tree's builder refuses a
     /// duplicate key once the entry's value is built, and this does at the same point.
-    fn entered(&mut self, key: Node<'de>) -> Result<(), Error> {
+    fn entered(&mut self, key: PendingStreamKey<'de>) -> Result<(), Error> {
         if self.builder.options.allow_duplicates || self.fault.is_some() {
             return Ok(());
         }
+        let depth = self.open.len().saturating_sub(1);
         let Some(Open::Mapping {
-            seen, seen_nodes, ..
+            seen_start,
+            seen_nodes,
+            known,
+            has_large,
+            ..
         }) = self.open.last_mut()
         else {
             return Ok(());
         };
-        let duplicate = if let Some(text) = scalar_key_text(&key) {
-            if seen.insert(text) {
-                return Ok(());
-            }
-            key
+        let seen_start = *seen_start;
+        let known_entries = (*known != UNKNOWN_ENTRIES).then_some(*known);
+        let promoted_cap = known_entries.unwrap_or(64).max(STREAM_SEEN_SMALL_LIMIT * 2);
+        let initial_small_cap = if self.builder.input_len <= 512 {
+            STREAM_SEEN_SMALL_LIMIT
         } else {
-            match seen_nodes.get_or_insert_with(Box::default).insert(key) {
-                Ok(()) => return Ok(()),
-                Err(duplicate) => duplicate,
-            }
+            16
         };
-        Err(self.faulted(
-            Error::new(
-                ErrorKind::DuplicateKey,
-                format!("duplicate mapping key: {}", node_key_text(&duplicate)),
-            )
-            .with_span(duplicate.span),
-        ))
+        let is_large = *has_large;
+        match key {
+            PendingStreamKey::String { text, span } => {
+                if is_large {
+                    let Some((_, set)) = self.seen_large_top.as_mut() else {
+                        unreachable!("has_large mapping must have active seen_large_top");
+                    };
+                    if let Some(existing) = set.replace(text) {
+                        let mut formatted = String::new();
+                        push_quoted_key(&existing, &mut formatted);
+                        return Err(self.faulted(
+                            Error::new(
+                                ErrorKind::DuplicateKey,
+                                format!("duplicate mapping key: {formatted}"),
+                            )
+                            .with_span(span),
+                        ));
+                    }
+                    return Ok(());
+                }
+                let slice = &self.seen_keys[seen_start..];
+                if slice
+                    .iter()
+                    .any(|existing| existing.as_ref() == text.as_ref())
+                {
+                    let mut formatted = String::new();
+                    push_quoted_key(&text, &mut formatted);
+                    return Err(self.faulted(
+                        Error::new(
+                            ErrorKind::DuplicateKey,
+                            format!("duplicate mapping key: {formatted}"),
+                        )
+                        .with_span(span),
+                    ));
+                }
+                if slice.len() < STREAM_SEEN_SMALL_LIMIT {
+                    if self.seen_keys.capacity() == 0 {
+                        self.seen_keys.reserve_exact(initial_small_cap);
+                    }
+                    self.seen_keys.push(text);
+                    return Ok(());
+                }
+                *has_large = true;
+                let mut set = HashSet::with_capacity_and_hasher(promoted_cap, GlobalHasher);
+                for existing in self.seen_keys.drain(seen_start..) {
+                    set.insert(existing);
+                }
+                set.insert(text);
+                self.push_seen_large(depth, set);
+                Ok(())
+            }
+            PendingStreamKey::Node(key) => {
+                let duplicate = if let Some(text) = scalar_key_text(&key) {
+                    let inserted = if is_large {
+                        let Some((_, set)) = self.seen_large_top.as_mut() else {
+                            unreachable!("has_large mapping must have active seen_large_top");
+                        };
+                        set.insert(text)
+                    } else {
+                        let slice = &self.seen_keys[seen_start..];
+                        if slice
+                            .iter()
+                            .any(|existing| existing.as_ref() == text.as_ref())
+                        {
+                            false
+                        } else if slice.len() < STREAM_SEEN_SMALL_LIMIT {
+                            if self.seen_keys.capacity() == 0 {
+                                self.seen_keys.reserve_exact(initial_small_cap);
+                            }
+                            self.seen_keys.push(text);
+                            true
+                        } else {
+                            *has_large = true;
+                            let mut set =
+                                HashSet::with_capacity_and_hasher(promoted_cap, GlobalHasher);
+                            for existing in self.seen_keys.drain(seen_start..) {
+                                set.insert(existing);
+                            }
+                            let ok = set.insert(text);
+                            self.push_seen_large(depth, set);
+                            ok
+                        }
+                    };
+                    if inserted {
+                        return Ok(());
+                    }
+                    *key
+                } else {
+                    match seen_nodes.get_or_insert_with(Box::default).insert(*key) {
+                        Ok(()) => return Ok(()),
+                        Err(duplicate) => duplicate,
+                    }
+                };
+                Err(self.faulted(
+                    Error::new(
+                        ErrorKind::DuplicateKey,
+                        format!("duplicate mapping key: {}", node_key_text(&duplicate)),
+                    )
+                    .with_span(duplicate.span),
+                ))
+            }
+        }
     }
 
     /// Read the innermost open collection to its end, and give how many entries a visitor asked
@@ -703,7 +997,7 @@ impl<'de> Stream<'de> {
         match self.open.get(level) {
             None => Some(0),
             Some(Open::Sequence { read, known } | Open::Mapping { read, known, .. }) => {
-                known.map(|total| total.saturating_sub(*read))
+                (*known != UNKNOWN_ENTRIES).then(|| known.saturating_sub(*read))
             }
         }
     }
@@ -748,22 +1042,237 @@ macro_rules! as_the_tree_reads {
     };
 }
 
+/// Visit an unanchored, untagged scalar event directly with `deserialize_any` semantics, bypassing
+/// `Node<'de>` construction.
+#[inline]
+fn visit_untagged_scalar_any<'de, V: Visitor<'de>>(
+    scalar: UntaggedScalar<'de>,
+    visitor: V,
+) -> Result<V::Value, Error> {
+    let UntaggedScalar {
+        value,
+        raw,
+        style,
+        span,
+    } = scalar;
+    let text = borrowed_or_owned(value, &raw, style);
+    let result = if style != ScalarStyle::Plain || is_unambiguous_plain_string(&text) {
+        match text {
+            Cow::Borrowed(s) => visitor.visit_borrowed_str(s),
+            Cow::Owned(s) => visitor.visit_string(s),
+        }
+    } else {
+        match resolve_plain(&text) {
+            None => match text {
+                Cow::Borrowed(s) => visitor.visit_borrowed_str(s),
+                Cow::Owned(s) => visitor.visit_string(s),
+            },
+            Some(Value::Null) => visitor.visit_unit(),
+            Some(Value::Bool(b)) => visitor.visit_bool(b),
+            Some(Value::Number(n)) => n.visit(visitor),
+            Some(_) => unreachable!("resolve_plain only returns Null, Bool, or Number"),
+        }
+    };
+    result.map_err(|error| with_span(error, span))
+}
+
+/// Visit an unanchored, untagged scalar event directly with `deserialize_string` /
+/// `deserialize_str` / `deserialize_identifier` / `deserialize_char` semantics.
+#[inline]
+fn visit_untagged_scalar_str<'de, V: Visitor<'de>>(
+    scalar: UntaggedScalar<'de>,
+    visitor: V,
+) -> Result<V::Value, Error> {
+    let UntaggedScalar {
+        value,
+        raw,
+        style,
+        span,
+    } = scalar;
+    let text = borrowed_or_owned(value, &raw, style);
+    let result = match text {
+        Cow::Borrowed(s) => visitor.visit_borrowed_str(s),
+        Cow::Owned(s) => visitor.visit_string(s),
+    };
+    result.map_err(|error| with_span(error, span))
+}
+
+/// Visit an unanchored, untagged scalar event directly with `deserialize_f64` / `deserialize_f32`
+/// semantics (matching `NodeDeserializer::deserialize_f64`).
+fn visit_untagged_scalar_f64<'de, V: Visitor<'de>>(
+    scalar: UntaggedScalar<'de>,
+    visitor: V,
+) -> Result<V::Value, Error> {
+    if scalar.style != ScalarStyle::Plain {
+        return visit_untagged_scalar_any(scalar, visitor);
+    }
+    let UntaggedScalar {
+        value,
+        raw,
+        style,
+        span,
+    } = scalar;
+    let text = borrowed_or_owned(value, &raw, style);
+    match resolve_plain(&text) {
+        Some(Value::Number(number)) if number.is_f64() => visitor
+            .visit_f64(number.as_f64().unwrap_or(f64::NAN))
+            .map_err(|error| with_span(error, span)),
+        Some(Value::Number(number)) => {
+            if let Cow::Borrowed(raw_text) = &raw {
+                if let Ok(float) = raw_text.parse::<f64>() {
+                    return visitor
+                        .visit_f64(float)
+                        .map_err(|error| with_span(error, span));
+                }
+                return Err(Error::coded(
+                    ErrorKind::Serde,
+                    ErrorCode::InvalidType,
+                    format!("invalid type: integer `{raw_text}`, expected f64"),
+                )
+                .with_span(span));
+            }
+            number
+                .visit(visitor)
+                .map_err(|error| with_span(error, span))
+        }
+        None => {
+            if let Cow::Borrowed(raw_text) = &raw
+                && let Some(float) = float_from_text(raw_text)
+            {
+                return visitor
+                    .visit_f64(float)
+                    .map_err(|error| with_span(error, span));
+            }
+            let result = match text {
+                Cow::Borrowed(s) => visitor.visit_borrowed_str(s),
+                Cow::Owned(s) => visitor.visit_string(s),
+            };
+            result.map_err(|error| with_span(error, span))
+        }
+        Some(Value::Null) => visitor.visit_unit().map_err(|error| with_span(error, span)),
+        Some(Value::Bool(b)) => visitor
+            .visit_bool(b)
+            .map_err(|error| with_span(error, span)),
+        Some(_) => unreachable!("resolve_plain only returns Null, Bool, or Number"),
+    }
+}
+
+/// Deserializer methods for plain scalar targets (bools and integers) that bypass `Node<'de>` on
+/// unanchored, untagged scalars and fall back to the tree/collection paths otherwise.
+macro_rules! fast_any_scalar_reads {
+    ($($method:ident)*) => {
+        $(
+            fn $method<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+                if let Some(scalar) = self.stream.take_untagged_scalar()? {
+                    return visit_untagged_scalar_any(scalar, visitor);
+                }
+                match self.stream.take()? {
+                    Taken::Built => self.stream.read_built(|node| node.$method(visitor)),
+                    Taken::Sequence(span) => self.stream.sequence(span, visitor),
+                    Taken::Mapping(span) => self.stream.mapping(span, visitor),
+                }
+            }
+        )*
+    };
+}
+
+/// Deserializer methods for string-like scalar targets (`str`, `string`, `identifier`, `char`) that
+/// bypass `Node<'de>` on unanchored, untagged scalars.
+macro_rules! fast_str_scalar_reads {
+    ($($method:ident)*) => {
+        $(
+            fn $method<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+                if let Some(scalar) = self.stream.take_untagged_scalar()? {
+                    return visit_untagged_scalar_str(scalar, visitor);
+                }
+                match self.stream.take()? {
+                    Taken::Built => self.stream.read_built(|node| node.$method(visitor)),
+                    Taken::Sequence(span) => self.stream.sequence(span, visitor),
+                    Taken::Mapping(span) => self.stream.mapping(span, visitor),
+                }
+            }
+        )*
+    };
+}
+
 impl<'de> Deserializer<'de> for StreamDeserializer<'de, '_> {
     type Error = Error;
 
+    fast_any_scalar_reads! {
+        deserialize_any deserialize_bool deserialize_i8 deserialize_i16
+        deserialize_i32 deserialize_i64 deserialize_i128 deserialize_u8
+        deserialize_u16 deserialize_u32 deserialize_u64 deserialize_u128
+    }
+
+    fast_str_scalar_reads! {
+        deserialize_str deserialize_string deserialize_identifier deserialize_char
+    }
+
     as_the_tree_reads! {
-        deserialize_any() deserialize_bool() deserialize_i8() deserialize_i16()
-        deserialize_i32() deserialize_i64() deserialize_i128() deserialize_u8()
-        deserialize_u16() deserialize_u32() deserialize_u64() deserialize_u128()
-        deserialize_f32() deserialize_f64() deserialize_char() deserialize_str()
-        deserialize_string() deserialize_bytes() deserialize_byte_buf() deserialize_unit()
+        deserialize_bytes() deserialize_byte_buf() deserialize_unit()
         deserialize_unit_struct(name: &'static str) deserialize_seq()
         deserialize_tuple(length: usize)
         deserialize_tuple_struct(name: &'static str, length: usize) deserialize_map()
-        deserialize_identifier() deserialize_ignored_any()
+    }
+
+    fn deserialize_f64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        if let Some(scalar) = self.stream.take_untagged_scalar()? {
+            return visit_untagged_scalar_f64(scalar, visitor);
+        }
+        match self.stream.take()? {
+            Taken::Built => self.stream.read_built(|node| node.deserialize_f64(visitor)),
+            Taken::Sequence(span) => self.stream.sequence(span, visitor),
+            Taken::Mapping(span) => self.stream.mapping(span, visitor),
+        }
+    }
+
+    fn deserialize_f32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.deserialize_f64(visitor)
+    }
+
+    fn deserialize_ignored_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        if let Some(scalar) = self.stream.take_untagged_scalar()? {
+            return visitor
+                .visit_unit()
+                .map_err(|error| with_span(error, scalar.span));
+        }
+        match self.stream.take()? {
+            Taken::Built => self
+                .stream
+                .read_built(|node| node.deserialize_ignored_any(visitor)),
+            Taken::Sequence(span) => self.stream.sequence(span, visitor),
+            Taken::Mapping(span) => self.stream.mapping(span, visitor),
+        }
     }
 
     fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        if self.stream.builder.root.is_none() {
+            if self.stream.fault.is_some() || self.stream.events.front().is_none() {
+                self.stream.ready()?;
+            }
+            if let Some(Event::Scalar {
+                value,
+                style,
+                tag: None,
+                anchor: None,
+                span,
+                ..
+            }) = self.stream.events.front()
+            {
+                let span = *span;
+                let is_null = *style == ScalarStyle::Plain
+                    && matches!(resolve_plain(value), Some(Value::Null));
+                if is_null {
+                    self.stream.events.pop();
+                    self.stream.due = false;
+                    self.stream.ahead = Ahead::Unknown;
+                    return visitor.visit_none();
+                }
+                return visitor
+                    .visit_some(self)
+                    .map_err(|error| with_span(error, span));
+            }
+        }
         // A collection is not a null, so it is some value, read from here.
         if let Some(span) = self.stream.streamed()? {
             return visitor
@@ -876,6 +1385,95 @@ struct MappingAccess<'de, 's> {
     level: usize,
 }
 
+/// Lightweight deserializer for a mapping key known to be an unambiguous YAML string, avoiding
+/// constructing an 80 B `Node<'de>` on every mapping entry.
+#[derive(Clone, Copy)]
+struct StringKeyDeserializer<'de, 'a> {
+    text: &'a Cow<'de, str>,
+    span: Span,
+}
+
+impl<'de> StringKeyDeserializer<'de, '_> {
+    #[inline]
+    fn visit_str_like<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+        let result = match self.text {
+            Cow::Borrowed(s) => visitor.visit_borrowed_str(s),
+            Cow::Owned(s) => visitor.visit_str(s),
+        };
+        result.map_err(|error| with_span(error, self.span))
+    }
+}
+
+impl<'de> Deserializer<'de> for StringKeyDeserializer<'de, '_> {
+    type Error = Error;
+
+    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.visit_str_like(visitor)
+    }
+
+    fn deserialize_bytes<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        let result = match self.text {
+            Cow::Borrowed(s) => visitor.visit_borrowed_bytes(s.as_bytes()),
+            Cow::Owned(s) => visitor.visit_bytes(s.as_bytes()),
+        };
+        result.map_err(|error| with_span(error, self.span))
+    }
+
+    fn deserialize_byte_buf<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.deserialize_bytes(visitor)
+    }
+
+    fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        visitor
+            .visit_some(self)
+            .map_err(|error| with_span(error, self.span))
+    }
+
+    fn deserialize_newtype_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        visitor
+            .visit_newtype_struct(self)
+            .map_err(|error| with_span(error, self.span))
+    }
+
+    fn deserialize_struct<V: Visitor<'de>>(
+        self,
+        name: &'static str,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        if name == SPANNED_TOKEN && fields == SPANNED_FIELDS {
+            let node = Node::new(NodeKind::String(self.text.clone()), self.span);
+            return NodeDeserializer::from_owned(node).deserialize_struct(name, fields, visitor);
+        }
+        Err(with_span(
+            serde::de::Error::invalid_type(
+                serde::de::Unexpected::Str(self.text.as_ref()),
+                &visitor,
+            ),
+            self.span,
+        ))
+    }
+
+    fn deserialize_enum<V: Visitor<'de>>(
+        self,
+        name: &'static str,
+        variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        let node = Node::new(NodeKind::String(self.text.clone()), self.span);
+        NodeDeserializer::new(&node).deserialize_enum(name, variants, visitor)
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        unit unit_struct seq tuple tuple_struct map identifier ignored_any
+    }
+}
+
 impl<'de> MapAccess<'de> for MappingAccess<'de, '_> {
     type Error = Error;
 
@@ -890,10 +1488,15 @@ impl<'de> MapAccess<'de> for MappingAccess<'de, '_> {
             return Ok(None);
         };
         self.stream.count();
-        let span = key.span;
-        let read = seed
-            .deserialize(NodeDeserializer::new(&key))
-            .map_err(|error| with_span(error, span));
+        let span = key.span();
+        let read = match &key {
+            PendingStreamKey::String { text, span } => seed
+                .deserialize(StringKeyDeserializer { text, span: *span })
+                .map_err(|error| with_span(error, *span)),
+            PendingStreamKey::Node(node) => seed
+                .deserialize(NodeDeserializer::new(node))
+                .map_err(|error| with_span(error, span)),
+        };
         // The key stays with the mapping whether or not it suited the target, so that its
         // value is read or passed over, and the entry is checked.
         if let Some(slot) = self.stream.key_slot() {
@@ -917,11 +1520,14 @@ impl<'de> MapAccess<'de> for MappingAccess<'de, '_> {
                     "map value requested before key",
                 )
             })?;
-        let span = self.stream.ahead()?.span();
-        let value = self
-            .stream
-            .read_with(seed)
-            .map_err(|error| inside_key(with_span(error, span), &key));
+        let span = self.stream.peek_span()?;
+        let value = self.stream.read_with(seed).map_err(|error| {
+            let error = with_span(error, span);
+            match &key {
+                PendingStreamKey::String { text, .. } => error.inside_key(text),
+                PendingStreamKey::Node(node) => inside_key(error, node),
+            }
+        });
         self.stream.entered(key)?;
         value
     }
@@ -1059,5 +1665,216 @@ mod tests {
         let big_enum = format!("k:\n  V: {big_seq}\n");
         let (_, after_enum) = tokens::<Wrap>(&big_enum);
         assert_eq!(after_enum, 0, "large non-root enum releases tokens");
+    }
+
+    #[test]
+    fn flat_seen_keys_stack_and_nested_large_mappings_enforce_duplicates_accurately() {
+        use crate::error::ErrorCode;
+        use std::fmt::Write as _;
+
+        // 1. Exactly STREAM_SEEN_SMALL_LIMIT (12) keys succeed, and a duplicate at index 0 or 11 fails.
+        let mut small = String::new();
+        for i in 0..12 {
+            let _ = writeln!(small, "k{i}: {i}");
+        }
+        assert!(crate::from_str::<crate::Value>(&small).is_ok());
+        for dup_key in ["k0", "k11", "\"k0\""] {
+            let mut doc = small.clone();
+            let _ = writeln!(doc, "{dup_key}: 99");
+            let err = crate::from_str::<crate::Value>(&doc).expect_err("dup in small map");
+            assert_eq!(err.code(), ErrorCode::DuplicateKey);
+        }
+
+        // 2. Nested large mappings (> 12 keys inside > 12 keys) plus a nested small mapping sharing
+        //    key names with the outer mapping exercise `seen_large_top`, `seen_large_rest`, and
+        //    `seen_keys.truncate(seen_start)` without cross-level contamination.
+        let mut nested = String::new();
+        for i in 0..14 {
+            let _ = writeln!(nested, "outer_{i}: {i}");
+        }
+        nested.push_str("inner_large:\n");
+        for i in 0..15 {
+            let _ = writeln!(nested, "  outer_{i}: {i}");
+        }
+        nested.push_str("inner_small:\n");
+        for i in 0..4 {
+            let _ = writeln!(nested, "  outer_{i}: {i}");
+        }
+        nested.push_str("outer_tail: 100\n");
+        let val: crate::Value = crate::from_str(&nested).expect("valid nested large/small maps");
+        assert_eq!(val["outer_tail"].as_u64(), Some(100));
+        assert_eq!(val["inner_large"]["outer_14"].as_u64(), Some(14));
+        assert_eq!(val["inner_small"]["outer_3"].as_u64(), Some(3));
+
+        // Duplicate in outer mapping AFTER closing nested large and small mappings must still fail.
+        let mut outer_dup = nested.clone();
+        outer_dup.push_str("outer_0: 999\n");
+        let err = crate::from_str::<crate::Value>(&outer_dup).expect_err("outer dup after inner");
+        assert_eq!(err.code(), ErrorCode::DuplicateKey);
+
+        // Duplicate inside the nested large mapping itself must fail.
+        let inner_dup = nested.replace("  outer_14: 14\n", "  outer_14: 14\n  outer_0: 77\n");
+        let err = crate::from_str::<crate::Value>(&inner_dup).expect_err("inner large dup");
+        assert_eq!(err.code(), ErrorCode::DuplicateKey);
+    }
+
+    #[test]
+    fn direct_untagged_scalar_fast_paths_match_tree_oracle() {
+        use std::collections::{BTreeMap, HashMap};
+
+        #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize)]
+        enum KeyKind {
+            Alpha,
+            Beta,
+        }
+
+        #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize)]
+        enum NonUnitKey {
+            Wrapped(u32),
+        }
+
+        #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+        struct RawBytesKey(Vec<u8>);
+
+        impl<'de> Deserialize<'de> for RawBytesKey {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                struct BytesVisitor;
+                impl serde::de::Visitor<'_> for BytesVisitor {
+                    type Value = RawBytesKey;
+                    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        f.write_str("raw bytes")
+                    }
+                    fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
+                        Ok(RawBytesKey(v.to_vec()))
+                    }
+                }
+                deserializer.deserialize_byte_buf(BytesVisitor)
+            }
+        }
+
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct ScalarBag<'a> {
+            b_true: bool,
+            b_false: bool,
+            i_small: i8,
+            i_big: i128,
+            u_big: u128,
+            f_plain: f64,
+            f_lead_zero: f64,
+            f_int: f32,
+            s_borrowed: &'a str,
+            s_owned: String,
+            empty_str: String,
+            empty_opt: Option<String>,
+            ch: char,
+            opt_none: Option<u32>,
+            opt_some: Option<u32>,
+            opt_spanned: Option<crate::Spanned<u32>>,
+            ignored_seq: IgnoredAny,
+            ignored_scalar: IgnoredAny,
+            spanned_key_map: HashMap<crate::Spanned<String>, u32>,
+            #[serde(borrow)]
+            spanned_borrowed_key_map: HashMap<crate::Spanned<&'a str>, u32>,
+            byte_key_map: BTreeMap<RawBytesKey, u32>,
+        }
+
+        let yaml = concat!(
+            "b_true: true\n",
+            "b_false: false\n",
+            "i_small: -42\n",
+            "i_big: -170141183460469231731687303715884105728\n",
+            "u_big: 340282366920938463463374607431768211455\n",
+            "f_plain: 3.5\n",
+            "f_lead_zero: 01\n",
+            "f_int: 7\n",
+            "s_borrowed: hello\n",
+            "s_owned: \"escaped\\nline\"\n",
+            "empty_str:\n",
+            "empty_opt:\n",
+            "ch: z\n",
+            "opt_none: null\n",
+            "opt_some: 19\n",
+            "opt_spanned: 77\n",
+            "ignored_seq: [1, 2, 3]\n",
+            "ignored_scalar: plain_value\n",
+            "spanned_key_map:\n",
+            "  alpha: 1\n",
+            "  \"beta\": 2\n",
+            "  \"esc\\nkey\": 3\n",
+            "spanned_borrowed_key_map:\n",
+            "  plain_k: 10\n",
+            "  \"quoted_k\": 20\n",
+            "byte_key_map:\n",
+            "  rawkey: 5\n",
+        );
+
+        let limits = Limits::default();
+        let streamed: ScalarBag<'_> = crate::from_str_borrowed(yaml).expect("streamed");
+        let tree: ScalarBag<'_> = crate::typed::from_str_by_tree(
+            yaml,
+            &limits,
+            NodeOptions::default(),
+            std::marker::PhantomData::<ScalarBag<'_>>,
+        )
+        .expect("tree");
+        assert_eq!(streamed, tree);
+
+        // Streamed non-root radix integers (`0x1F`, `0o7`, `0b1`) into `f64` exercise
+        // `visit_untagged_scalar_f64` directly and fail identically to `NodeDeserializer`.
+        for radix_yaml in ["x: 0x1F\n", "x: 0o7\n", "x: 0b1\n"] {
+            let s_err = crate::from_str::<BTreeMap<String, f64>>(radix_yaml)
+                .expect_err("stream radix float");
+            let t_err = crate::typed::from_str_by_tree(
+                radix_yaml,
+                &limits,
+                NodeOptions::default(),
+                std::marker::PhantomData::<BTreeMap<String, f64>>,
+            )
+            .expect_err("tree radix float");
+            assert_eq!(s_err.code(), t_err.code(), "{radix_yaml:?}");
+            assert_eq!(s_err.span(), t_err.span(), "{radix_yaml:?}");
+            assert_eq!(s_err.to_string(), t_err.to_string(), "{radix_yaml:?}");
+        }
+
+        // Non-unit enum key via `StringKeyDeserializer::deserialize_enum` fails identically.
+        let non_unit_yaml = "Wrapped: 1\n";
+        let s_nu = crate::from_str::<BTreeMap<NonUnitKey, u32>>(non_unit_yaml)
+            .expect_err("stream non-unit enum key");
+        let t_nu = crate::typed::from_str_by_tree(
+            non_unit_yaml,
+            &limits,
+            NodeOptions::default(),
+            std::marker::PhantomData::<BTreeMap<NonUnitKey, u32>>,
+        )
+        .expect_err("tree non-unit enum key");
+        assert_eq!(s_nu.code(), t_nu.code());
+        assert_eq!(s_nu.span(), t_nu.span());
+        assert_eq!(s_nu.to_string(), t_nu.to_string());
+
+        // Unit enum key via `StringKeyDeserializer::deserialize_enum`.
+        let enum_yaml = "Alpha: 1\nBeta: 2\n";
+        let s_map: BTreeMap<KeyKind, u32> = crate::from_str(enum_yaml).expect("stream enum key");
+        let t_map: BTreeMap<KeyKind, u32> = crate::typed::from_str_by_tree(
+            enum_yaml,
+            &limits,
+            NodeOptions::default(),
+            std::marker::PhantomData::<BTreeMap<KeyKind, u32>>,
+        )
+        .expect("tree enum key");
+        assert_eq!(s_map, t_map);
+
+        // String key rejected when target expects an integer key.
+        let bad_key_yaml = "alpha: 1\n";
+        let s_bad =
+            crate::from_str::<BTreeMap<u32, u32>>(bad_key_yaml).expect_err("stream bad key");
+        let t_bad = crate::typed::from_str_by_tree(
+            bad_key_yaml,
+            &limits,
+            NodeOptions::default(),
+            std::marker::PhantomData::<BTreeMap<u32, u32>>,
+        )
+        .expect_err("tree bad key");
+        assert_eq!(s_bad.code(), t_bad.code());
+        assert_eq!(s_bad.span(), t_bad.span());
     }
 }

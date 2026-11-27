@@ -49,8 +49,8 @@ fn a_medium_document_is_built_as_its_events_arrive() {
     for index in 0..500 {
         writeln!(input, "- value-{index}").expect("write");
     }
-    assert!(input.len() > SMALL_INPUT_BYTES);
-    assert!(input.len() <= 2 * SMALL_INPUT_BYTES);
+    assert!(input.len() > 4 * 1024);
+    assert!(input.len() <= 8 * 1024);
 
     let limits = Limits::for_max_input();
     let node = parse_document(&input, &limits, NodeOptions::default()).expect("node");
@@ -75,7 +75,7 @@ fn a_larger_document_streams_events_into_the_builder() {
     for _ in 0..6_000 {
         input.push_str("- *base\n");
     }
-    assert!(input.len() > 2 * SMALL_INPUT_BYTES);
+    assert!(input.len() > 8 * 1024);
 
     let limits = Limits::for_max_input();
     let node = parse_document(&input, &limits, NodeOptions::default()).expect("node");
@@ -108,7 +108,7 @@ fn a_large_stream_reports_trailing_documents() {
         writeln!(input, "- {index}").expect("write");
     }
     input.push_str("---\nother: 1\n");
-    assert!(input.len() > 2 * SMALL_INPUT_BYTES);
+    assert!(input.len() > 8 * 1024);
 
     let limits = Limits::for_max_input();
     let error = parse_document(&input, &limits, NodeOptions::default()).expect_err("error");

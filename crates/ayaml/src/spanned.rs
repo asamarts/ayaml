@@ -11,12 +11,59 @@ use crate::PathSegment;
 use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::{Event, ScalarStyle};
 use crate::limits::Limits;
-use crate::mapping::{GlobalHasher, Mapping};
+use crate::mapping::{GlobalHasher, Mapping, SMALL_LIMIT};
 use crate::options::ParseOptions;
-use crate::resolver::resolve_scalar;
+use crate::resolver::{resolve_plain, resolve_scalar};
 use crate::span::Span;
 use crate::tag::Tag;
 use crate::value::Value;
+
+mod span_scan;
+
+use span_scan::{
+    Lead, block_entry_span, compact_first_entry_span, compute_entry_end, is_merge_key,
+    missing_value_place, pair_end, scan_blank_run,
+};
+
+/// Compact `Option<Span>` encoding using `usize::MAX` as `None` sentinel (no valid byte offset in
+/// any Rust slice can reach `usize::MAX`), saving 8 bytes per [`SpannedNode`].
+#[derive(Clone, Copy, Debug)]
+struct PackedOptionSpan {
+    start: usize,
+    end: usize,
+}
+
+impl PackedOptionSpan {
+    const NONE: Self = Self {
+        start: usize::MAX,
+        end: 0,
+    };
+
+    #[inline]
+    const fn from_option(span: Option<Span>) -> Self {
+        match span {
+            Some(span) => Self {
+                start: span.start(),
+                end: span.end(),
+            },
+            None => Self::NONE,
+        }
+    }
+
+    #[inline]
+    const fn get(self) -> Option<Span> {
+        if self.start == usize::MAX {
+            None
+        } else {
+            Some(Span::new(self.start, self.end))
+        }
+    }
+
+    #[inline]
+    const fn is_none(self) -> bool {
+        self.start == usize::MAX
+    }
+}
 
 /// A parsed YAML stream with source spans.
 #[derive(Clone, Debug)]
@@ -28,26 +75,27 @@ pub struct SpannedTree<'a> {
 #[derive(Clone, Debug)]
 pub struct SpannedNode<'a> {
     span: Span,
-    entry_span: Option<Span>,
-    /// Where the node's last character ends, when its span says. A block collection's is its
-    /// last entry's, which its span can pass. A scalar with no text has none: the parser places
-    /// it at the token after it, which can be lines away.
-    content_end: Option<usize>,
-    /// The node, or a node inside it, defines an anchor.
-    anchored: bool,
+    entry_span: PackedOptionSpan,
     kind: Kind<'a>,
+}
+
+/// Full metadata for quoted, block, multi-line folded, owned, or tagged scalars.
+#[derive(Clone, Debug)]
+struct ScalarData<'a> {
+    value: Cow<'a, str>,
+    raw: Cow<'a, str>,
+    style: ScalarStyle,
+    tag: Option<Tag>,
 }
 
 #[derive(Clone, Debug)]
 enum Kind<'a> {
-    Scalar {
-        value: Cow<'a, str>,
-        raw: Cow<'a, str>,
-        style: ScalarStyle,
-        tag: Option<Tag>,
-    },
-    Sequence(Vec<SpannedNode<'a>>),
-    Mapping(Vec<Entry<'a>>),
+    /// Unquoted, untagged single-line plain scalar borrowed directly from input (`value == raw`).
+    PlainScalar(&'a str),
+    /// Quoted, block, multi-line folded, owned, or tagged scalar.
+    Scalar(Box<ScalarData<'a>>),
+    Sequence(Box<[SpannedNode<'a>]>),
+    Mapping(Box<[Entry<'a>]>),
     Alias,
 }
 
@@ -80,8 +128,11 @@ impl<'a> SpannedTree<'a> {
     /// Returns an error for the same syntax and limit failures as
     /// [`crate::parse_events_with`].
     pub fn parse_with(input: &'a str, options: &ParseOptions) -> Result<Self, Error> {
-        let events = crate::parse_events_with(input, options)?;
-        build(input, events, options.merge_keys)
+        if options.merge_keys {
+            let events = crate::parse_events_with(input, options)?;
+            return build(input, events, true);
+        }
+        crate::parser::parse_spanned(input, &options.limits, false)
     }
 
     /// Parse one default-profile stream with explicit limits.
@@ -124,8 +175,7 @@ impl<'a> SpannedTree<'a> {
         input: &'a str,
         options: &crate::compat::ParseOptions,
     ) -> Result<Self, Error> {
-        let events = crate::compat::parse_events_with(input, options)?;
-        build(input, events, false)
+        crate::parser::parse_spanned(input, &options.limits, true)
     }
 
     /// Parse one compatibility-profile stream with explicit limits.
@@ -265,13 +315,13 @@ impl SpannedNode<'_> {
     /// the merged one back.
     #[must_use]
     pub const fn entry_span(&self) -> Option<Span> {
-        self.entry_span
+        self.entry_span.get()
     }
 
     /// Whether this is a scalar node.
     #[must_use]
     pub const fn is_scalar(&self) -> bool {
-        matches!(self.kind, Kind::Scalar { .. })
+        matches!(self.kind, Kind::PlainScalar(_) | Kind::Scalar(_))
     }
 
     /// Whether this is a sequence node.
@@ -296,7 +346,8 @@ impl SpannedNode<'_> {
     #[must_use]
     pub fn scalar_text(&self) -> Option<&str> {
         match &self.kind {
-            Kind::Scalar { raw, .. } => Some(raw),
+            Kind::PlainScalar(raw) => Some(raw),
+            Kind::Scalar(data) => Some(&data.raw),
             _ => None,
         }
     }
@@ -317,7 +368,7 @@ fn find<'a, 'b>(node: &'b SpannedNode<'a>, path: &[PathSegment]) -> Option<&'b S
                 if entry.ambiguous || entry.key.is_alias() {
                     continue;
                 }
-                if entry.key.resolved_value().as_ref() == Some(key) {
+                if entry.key.matches_key(key) {
                     if found.is_some() {
                         return None;
                     }
@@ -330,12 +381,58 @@ fn find<'a, 'b>(node: &'b SpannedNode<'a>, path: &[PathSegment]) -> Option<&'b S
     }
 }
 
-impl SpannedNode<'_> {
+impl<'a> SpannedNode<'a> {
+    /// Zero-allocation fast path for checking whether a mapping key node equals `target`.
+    fn matches_key(&self, target: &Value) -> bool {
+        if let Value::String(target_str) = target {
+            match &self.kind {
+                Kind::PlainScalar(text) => {
+                    return *text == target_str.as_str() && resolve_plain(text).is_none();
+                }
+                Kind::Scalar(data) if data.tag.is_none() => {
+                    return if data.style == ScalarStyle::Plain {
+                        data.value.as_ref() == target_str.as_str()
+                            && resolve_plain(&data.value).is_none()
+                    } else {
+                        data.value.as_ref() == target_str.as_str()
+                    };
+                }
+                _ => {}
+            }
+        }
+        self.resolved_value().as_ref() == Some(target)
+    }
+
+    /// Resolve a scalar key into a [`SpannedKey`] without allocating a `Value::String` for
+    /// borrowed plain, quoted, or block string keys.
+    fn spanned_scalar_key(&self) -> Option<SpannedKey<'a>> {
+        match &self.kind {
+            Kind::PlainScalar(text) => Some(match resolve_plain(text) {
+                None => SpannedKey::Str(Cow::Borrowed(text)),
+                Some(value) => SpannedKey::Other(value),
+            }),
+            Kind::Scalar(data) => match &data.tag {
+                None if data.style != ScalarStyle::Plain => {
+                    Some(SpannedKey::Str(data.value.clone()))
+                }
+                None => Some(match resolve_plain(&data.value) {
+                    None => SpannedKey::Str(data.value.clone()),
+                    Some(value) => SpannedKey::Other(value),
+                }),
+                Some(tag) => resolve_scalar(&data.value, data.style, Some(tag))
+                    .ok()
+                    .map(SpannedKey::from_value),
+            },
+            _ => None,
+        }
+    }
+
     fn resolved_value(&self) -> Option<Value> {
         match &self.kind {
-            Kind::Scalar {
-                value, style, tag, ..
-            } => resolve_scalar(value, *style, tag.as_ref()).ok(),
+            Kind::PlainScalar(text) => {
+                Some(resolve_plain(text).unwrap_or_else(|| Value::String((*text).to_owned())))
+            }
+            Kind::Scalar(data) => resolve_scalar(&data.value, data.style, data.tag.as_ref()).ok(),
             Kind::Sequence(items) => Some(Value::Sequence(
                 items
                     .iter()
@@ -431,24 +528,11 @@ fn build<'a>(
     events: impl Iterator<Item = Result<Event<'a>, Error>>,
     suppress_entry_spans: bool,
 ) -> Result<SpannedTree<'a>, Error> {
-    let mut builder = Builder {
-        scan_cache: LineScanCache::new(input),
-        documents: Vec::new(),
-        stack: Vec::new(),
-        root: None,
-        after_block_scalar: AfterBlockScalar::NONE,
-        anchored_depth: 0,
-        // A run of marks opens the input as one mark does.
-        marked: input.trim_start_matches('\u{feff}').contains('\u{feff}'),
-        suppress_entry_spans,
-        merged_missing_places: suppress_entry_spans.then(|| HashMap::with_hasher(GlobalHasher)),
-    };
+    let mut builder = Builder::new(input, suppress_entry_spans);
     for event in events {
         builder.event(event?)?;
     }
-    Ok(SpannedTree {
-        documents: builder.documents,
-    })
+    Ok(builder.finish())
 }
 
 /// Memoized summary of a contiguous run of blank and comment lines starting at line boundary
@@ -558,10 +642,97 @@ impl<'a> LineScanCache<'a> {
     }
 }
 
-struct Builder<'a> {
+/// Maximum items/entries buffered in `Builder`'s shared scratch stacks before spilling to an owned
+/// `Vec`, keeping small collections exact-sized (`Box<[_]>`, zero slack) without doubling peak
+/// memory on huge flat collections.
+const SCRATCH_LIMIT: usize = 64;
+
+/// Build-time metadata for a completed node; never stored in the final [`SpannedTree`].
+#[derive(Clone, Copy)]
+struct NodeMeta {
+    content_end: Option<usize>,
+    anchored: bool,
+}
+
+/// Borrowed-first duplicate-key representation so plain, quoted, block, and `!!str` mapping keys
+/// never allocate a `Value::String`.
+///
+/// Invariant: `Other` never wraps `Value::String(_)`, so `Str` and `Other` are disjoint.
+#[derive(PartialEq, Eq, Hash)]
+enum SpannedKey<'a> {
+    Str(Cow<'a, str>),
+    Other(Value),
+}
+
+impl SpannedKey<'_> {
+    fn from_value(value: Value) -> Self {
+        match value {
+            Value::String(text) => Self::Str(Cow::Owned(text)),
+            other => Self::Other(other),
+        }
+    }
+}
+
+enum SeqStorage<'a> {
+    Scratch { start: usize, len: usize },
+    Owned(Vec<SpannedNode<'a>>),
+}
+
+enum EntryStorage<'a> {
+    Scratch { start: usize, len: usize },
+    Owned(Vec<Entry<'a>>),
+}
+
+impl<'a> EntryStorage<'a> {
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            Self::Scratch { len, .. } => *len,
+            Self::Owned(entries) => entries.len(),
+        }
+    }
+
+    #[inline]
+    fn get_mut<'b>(
+        &'b mut self,
+        scratch: &'b mut [Entry<'a>],
+        index: usize,
+    ) -> Option<&'b mut Entry<'a>> {
+        match self {
+            Self::Scratch { start, len } if index < *len => scratch.get_mut(*start + index),
+            Self::Scratch { .. } => None,
+            Self::Owned(entries) => entries.get_mut(index),
+        }
+    }
+}
+
+/// Build-time metadata for the first two and last entries of an open mapping, supplying
+/// `compact_first_entry_span`, `pair_end`, and parent `content_end` without keeping build-only
+/// fields on every [`SpannedNode`].
+#[derive(Clone, Copy, Default)]
+struct MappingMeta {
+    first_key_end: Option<usize>,
+    first_val_end: Option<usize>,
+    first_anchored: bool,
+    second_key_end: Option<usize>,
+    last_key_end: Option<usize>,
+    last_val_end: Option<usize>,
+    any_anchored: bool,
+}
+
+pub(crate) struct Builder<'a> {
     scan_cache: LineScanCache<'a>,
     documents: Vec<SpannedNode<'a>>,
     stack: Vec<Frame<'a>>,
+    /// Reusable stack for pending mapping keys (1:1 LIFO with open mappings that have a key),
+    /// eliminating a `Box<PendingKey>` heap allocation on every mapping entry.
+    pending_keys: Vec<PendingKey<'a>>,
+    /// Reusable flat stack of seen `(key, entry_index)` pairs for small mappings (`<= SMALL_LIMIT`).
+    seen_keys: Vec<(SpannedKey<'a>, usize)>,
+    /// Reusable scratch stacks for small sequences and mappings (`<= SCRATCH_LIMIT`).
+    scratch_items: Vec<SpannedNode<'a>>,
+    scratch_entries: Vec<Entry<'a>>,
+    pending_capacity: Option<usize>,
     root: Option<SpannedNode<'a>>,
     /// The last scalar or alias that the source writes was a block scalar. One takes the blank
     /// and more indented lines after it as its own, until other content ends it.
@@ -596,9 +767,12 @@ struct Frame<'a> {
     kind: FrameKind<'a>,
 }
 
-enum KeyTracker {
-    /// Duplicate-key table for regular mappings or complex-key mappings that became unresolvable.
-    Seen(HashMap<Value, usize, GlobalHasher>),
+enum KeyTracker<'a> {
+    /// Zero-allocation linear scan on `Builder::seen_keys[start..]` for mappings with `<= SMALL_LIMIT` keys.
+    Small { start: usize },
+    /// Promoted SipHash-1-3 duplicate-key table for mappings exceeding `SMALL_LIMIT` keys or
+    /// complex-key mappings that became unresolvable.
+    Large(HashMap<SpannedKey<'a>, usize, GlobalHasher>),
     /// Bottom-up resolved mapping for an `in_key` mapping whose entries are all unique and
     /// resolvable so far; entries align 1:1 with `FrameKind::Mapping::entries`.
     Resolved(Box<Mapping>),
@@ -606,22 +780,24 @@ enum KeyTracker {
 
 struct PendingKey<'a> {
     node: SpannedNode<'a>,
+    meta: NodeMeta,
     resolved: Option<Box<Value>>,
     after_block_scalar: AfterBlockScalar,
 }
 
 enum FrameKind<'a> {
     Sequence {
-        items: Vec<SpannedNode<'a>>,
+        items: SeqStorage<'a>,
+        last_content_end: Option<usize>,
+        any_anchored: bool,
         resolved: Option<Vec<Value>>,
     },
     Mapping {
-        entries: Vec<Entry<'a>>,
-        /// The key that waits for its value, its bottom-up resolved value (when the key was a
-        /// collection), and what [`Builder::after_block_scalar`] was when the key began. Boxed,
-        /// so a sequence's frame isn't as large.
-        key: Option<Box<PendingKey<'a>>>,
-        keys: KeyTracker,
+        entries: EntryStorage<'a>,
+        /// Whether this mapping has a pending key waiting on top of `Builder::pending_keys`.
+        has_key: bool,
+        keys: KeyTracker<'a>,
+        meta: MappingMeta,
         /// Cached starting column of this block mapping, computed lazily on the first empty-value
         /// entry instead of rescanning from line start on every entry.
         column: Option<usize>,
@@ -632,11 +808,41 @@ enum FrameKind<'a> {
 }
 
 impl<'a> Builder<'a> {
+    pub(crate) fn new(input: &'a str, suppress_entry_spans: bool) -> Self {
+        Self {
+            scan_cache: LineScanCache::new(input),
+            documents: Vec::new(),
+            stack: Vec::new(),
+            pending_keys: Vec::new(),
+            seen_keys: Vec::new(),
+            scratch_items: Vec::new(),
+            scratch_entries: Vec::new(),
+            pending_capacity: None,
+            root: None,
+            after_block_scalar: AfterBlockScalar::NONE,
+            anchored_depth: 0,
+            // A run of marks opens the input as one mark does.
+            marked: input.trim_start_matches('\u{feff}').contains('\u{feff}'),
+            suppress_entry_spans,
+            merged_missing_places: suppress_entry_spans.then(|| HashMap::with_hasher(GlobalHasher)),
+        }
+    }
+
+    pub(crate) fn reserve_collection(&mut self, entries: usize) {
+        self.pending_capacity = Some(entries);
+    }
+
+    pub(crate) fn finish(self) -> SpannedTree<'a> {
+        SpannedTree {
+            documents: self.documents,
+        }
+    }
+
     /// Whether a new collection at the current position belongs to a mapping key (or is nested
     /// inside one).
     fn in_key_position(&self) -> bool {
         self.stack.last().is_some_and(|frame| {
-            frame.in_key || matches!(frame.kind, FrameKind::Mapping { key: None, .. })
+            frame.in_key || matches!(frame.kind, FrameKind::Mapping { has_key: false, .. })
         })
     }
 
@@ -645,11 +851,101 @@ impl<'a> Builder<'a> {
         self.stack.last().is_some_and(|frame| frame.in_key)
     }
 
-    fn event(&mut self, event: Event<'a>) -> Result<(), Error> {
+    /// Specialized hot-path entry point for untagged, unanchored single-line plain scalars.
+    #[inline]
+    pub(crate) fn push_plain_scalar(&mut self, value: &'a str, span: Span) {
+        self.pending_capacity = None;
+        let before = self.after_block_scalar;
+        if !self.suppress_entry_spans && !self.marked && !span.is_empty() {
+            self.after_block_scalar = AfterBlockScalar::NONE;
+        }
+        let resolved = self.tracking_resolved().then(|| {
+            Box::new(resolve_plain(value).unwrap_or_else(|| Value::String(value.to_owned())))
+        });
+        let node = SpannedNode {
+            span,
+            entry_span: PackedOptionSpan::NONE,
+            kind: Kind::PlainScalar(value),
+        };
+        let meta = NodeMeta {
+            content_end: (!span.is_empty()).then(|| span.end()),
+            anchored: false,
+        };
+        self.add(node, meta, resolved, before);
+    }
+
+    /// Specialized hot-path entry point for general scalars directly from [`crate::parser`].
+    #[inline]
+    pub(crate) fn push_scalar(
+        &mut self,
+        value: Cow<'a, str>,
+        raw: &'a str,
+        style: ScalarStyle,
+        tag: Option<Tag>,
+        anchored: bool,
+        span: Span,
+    ) {
+        self.push_scalar_inner(value, Cow::Borrowed(raw), style, tag, anchored, span);
+    }
+
+    fn push_scalar_inner(
+        &mut self,
+        value: Cow<'a, str>,
+        raw: Cow<'a, str>,
+        style: ScalarStyle,
+        tag: Option<Tag>,
+        anchored: bool,
+        span: Span,
+    ) {
+        self.pending_capacity = None;
+        let before = self.after_block_scalar;
+        // A scalar with no text isn't written, so it ends no block scalar before it.
+        // Skip scanning block-scalar raw headers when entry spans are suppressed or marked.
+        if !self.suppress_entry_spans && !self.marked && !span.is_empty() {
+            self.after_block_scalar = if matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
+            {
+                AfterBlockScalar::from_raw(&raw)
+            } else {
+                AfterBlockScalar::NONE
+            };
+        }
+        let resolved = self
+            .tracking_resolved()
+            .then(|| {
+                resolve_scalar(&value, style, tag.as_ref())
+                    .ok()
+                    .map(Box::new)
+            })
+            .flatten();
+        let kind = match (style, tag, value, raw) {
+            (ScalarStyle::Plain, None, Cow::Borrowed(v), Cow::Borrowed(r)) if v == r => {
+                Kind::PlainScalar(v)
+            }
+            (style, tag, value, raw) => Kind::Scalar(Box::new(ScalarData {
+                value,
+                raw,
+                style,
+                tag,
+            })),
+        };
+        let node = SpannedNode {
+            span,
+            entry_span: PackedOptionSpan::NONE,
+            kind,
+        };
+        let meta = NodeMeta {
+            content_end: (!span.is_empty()).then(|| span.end()),
+            anchored,
+        };
+        self.add(node, meta, resolved, before);
+    }
+
+    pub(crate) fn event(&mut self, event: Event<'a>) -> Result<(), Error> {
         match event {
             Event::StreamStart { .. } | Event::StreamEnd { .. } | Event::Directive { .. } => {}
             Event::DocumentStart { .. } => {
                 self.root = None;
+                self.pending_capacity = None;
                 if let Some(cache) = self.merged_missing_places.as_mut() {
                     cache.clear();
                 }
@@ -667,50 +963,22 @@ impl<'a> Builder<'a> {
                 anchor,
                 span,
             } => {
-                let before = self.after_block_scalar;
-                // A scalar with no text isn't written, so it ends no block scalar before it.
-                // Skip scanning block-scalar raw headers when entry spans are suppressed or marked.
-                if !self.suppress_entry_spans && !self.marked && !span.is_empty() {
-                    self.after_block_scalar =
-                        if matches!(style, ScalarStyle::Literal | ScalarStyle::Folded) {
-                            AfterBlockScalar::from_raw(&raw)
-                        } else {
-                            AfterBlockScalar::NONE
-                        };
-                }
-                let resolved = self
-                    .tracking_resolved()
-                    .then(|| {
-                        resolve_scalar(&value, style, tag.as_ref())
-                            .ok()
-                            .map(Box::new)
-                    })
-                    .flatten();
-                let node = SpannedNode {
-                    span,
-                    entry_span: None,
-                    content_end: (!span.is_empty()).then(|| span.end()),
-                    anchored: anchor.is_some(),
-                    kind: Kind::Scalar {
-                        value,
-                        raw,
-                        style,
-                        tag,
-                    },
-                };
-                self.add(node, resolved, before);
+                self.push_scalar_inner(value, raw, style, tag, anchor.is_some(), span);
             }
             Event::Alias { span, .. } => {
+                self.pending_capacity = None;
                 let before =
                     std::mem::replace(&mut self.after_block_scalar, AfterBlockScalar::NONE);
                 let node = SpannedNode {
                     span,
-                    entry_span: None,
-                    content_end: Some(span.end()),
-                    anchored: false,
+                    entry_span: PackedOptionSpan::NONE,
                     kind: Kind::Alias,
                 };
-                self.add(node, None, before);
+                let meta = NodeMeta {
+                    content_end: Some(span.end()),
+                    anchored: false,
+                };
+                self.add(node, meta, None, before);
             }
             Event::SequenceStart {
                 span,
@@ -718,11 +986,20 @@ impl<'a> Builder<'a> {
                 anchor,
                 ..
             } => {
+                let capacity = self.pending_capacity.take().unwrap_or(0);
                 let in_key = self.in_key_position();
                 let anchored = anchor.is_some();
                 if anchored {
                     self.anchored_depth += 1;
                 }
+                let items = if capacity > SCRATCH_LIMIT {
+                    SeqStorage::Owned(Vec::with_capacity(capacity))
+                } else {
+                    SeqStorage::Scratch {
+                        start: self.scratch_items.len(),
+                        len: 0,
+                    }
+                };
                 self.stack.push(Frame {
                     open: span,
                     style,
@@ -730,7 +1007,9 @@ impl<'a> Builder<'a> {
                     after_block_scalar: self.after_block_scalar,
                     in_key,
                     kind: FrameKind::Sequence {
-                        items: Vec::new(),
+                        items,
+                        last_content_end: None,
+                        any_anchored: false,
                         resolved: in_key.then(Vec::new),
                     },
                 });
@@ -742,15 +1021,26 @@ impl<'a> Builder<'a> {
                 anchor,
                 ..
             } => {
+                let capacity = self.pending_capacity.take().unwrap_or(0);
                 let in_key = self.in_key_position();
                 let anchored = anchor.is_some();
                 if anchored {
                     self.anchored_depth += 1;
                 }
+                let entries = if capacity > SCRATCH_LIMIT {
+                    EntryStorage::Owned(Vec::with_capacity(capacity))
+                } else {
+                    EntryStorage::Scratch {
+                        start: self.scratch_entries.len(),
+                        len: 0,
+                    }
+                };
                 let keys = if in_key {
                     KeyTracker::Resolved(Box::new(Mapping::new()))
                 } else {
-                    KeyTracker::Seen(HashMap::with_hasher(GlobalHasher))
+                    KeyTracker::Small {
+                        start: self.seen_keys.len(),
+                    }
                 };
                 self.stack.push(Frame {
                     open: span,
@@ -759,9 +1049,10 @@ impl<'a> Builder<'a> {
                     after_block_scalar: self.after_block_scalar,
                     in_key,
                     kind: FrameKind::Mapping {
-                        entries: Vec::new(),
-                        key: None,
+                        entries,
+                        has_key: false,
                         keys,
+                        meta: MappingMeta::default(),
                         column: None,
                         guess: false,
                     },
@@ -784,7 +1075,9 @@ impl<'a> Builder<'a> {
             self.anchored_depth -= 1;
         }
         let FrameKind::Sequence {
-            mut items,
+            items,
+            last_content_end,
+            any_anchored,
             resolved,
         } = frame.kind
         else {
@@ -794,27 +1087,41 @@ impl<'a> Builder<'a> {
                 "sequence end for a mapping",
             ));
         };
+        let mut items: Box<[SpannedNode<'a>]> = match items {
+            SeqStorage::Scratch { start, len } => {
+                if len == 0 {
+                    Box::default()
+                } else {
+                    self.scratch_items.drain(start..).collect()
+                }
+            }
+            SeqStorage::Owned(items) => items.into_boxed_slice(),
+        };
         let flow = frame.style == crate::event::CollectionStyle::Flow;
         // Without its only item a collection is no collection: what is left of it reads
         // as an empty value, under whatever tag stood before it.
-        if let [only] = items.as_mut_slice() {
-            only.entry_span = None;
+        if let [only] = items.as_mut() {
+            only.entry_span = PackedOptionSpan::NONE;
         }
+        let content_end = if !flow && !items.is_empty() {
+            last_content_end
+        } else {
+            Some(span.end())
+        };
         let node = SpannedNode {
             span: Span::new(frame.open.start(), span.end()),
-            entry_span: None,
-            content_end: match items.last() {
-                Some(last) if !flow => last.content_end,
-                _ => Some(span.end()),
-            },
-            anchored: frame.anchored || items.iter().any(|item| item.anchored),
+            entry_span: PackedOptionSpan::NONE,
             kind: Kind::Sequence(items),
+        };
+        let meta = NodeMeta {
+            content_end,
+            anchored: frame.anchored || any_anchored,
         };
         if flow {
             self.after_block_scalar = AfterBlockScalar::NONE;
         }
         let resolved_val = resolved.map(|vals| Box::new(Value::Sequence(vals)));
-        self.add(node, resolved_val, frame.after_block_scalar);
+        self.add(node, meta, resolved_val, frame.after_block_scalar);
         Ok(())
     }
 
@@ -830,8 +1137,10 @@ impl<'a> Builder<'a> {
             self.anchored_depth -= 1;
         }
         let FrameKind::Mapping {
-            mut entries,
+            entries,
+            has_key,
             keys,
+            meta: map_meta,
             guess,
             ..
         } = frame.kind
@@ -842,14 +1151,40 @@ impl<'a> Builder<'a> {
                 "mapping end for a sequence",
             ));
         };
+        if has_key {
+            self.pending_keys.pop();
+        }
+        // Release the duplicate-key HashMap before shrinking `entries` into a boxed slice so both
+        // buffers are not simultaneously live on large flat mappings.
+        let resolved_value = match keys {
+            KeyTracker::Small { start } => {
+                self.seen_keys.truncate(start);
+                None
+            }
+            KeyTracker::Large(seen) => {
+                drop(seen);
+                None
+            }
+            KeyTracker::Resolved(map) => (!guess).then(|| Box::new(Value::Mapping(*map))),
+        };
+        let mut entries: Box<[Entry<'a>]> = match entries {
+            EntryStorage::Scratch { start, len } => {
+                if len == 0 {
+                    Box::default()
+                } else {
+                    self.scratch_entries.drain(start..).collect()
+                }
+            }
+            EntryStorage::Owned(entries) => entries.into_boxed_slice(),
+        };
         let flow = frame.style == crate::event::CollectionStyle::Flow;
-        if let [only] = entries.as_mut_slice() {
-            only.value.entry_span = None;
+        if let [only] = entries.as_mut() {
+            only.value.entry_span = PackedOptionSpan::NONE;
         }
         if guess {
             for entry in &mut entries {
                 entry.ambiguous = true;
-                entry.value.entry_span = None;
+                entry.value.entry_span = PackedOptionSpan::NONE;
             }
         } else if !flow
             && !self.marked
@@ -859,11 +1194,16 @@ impl<'a> Builder<'a> {
             && entries.len() >= 2
             && !entries[0].ambiguous
             && entries[0].value.entry_span.is_none()
-            && !entries[0].key.anchored
-            && !entries[0].value.anchored
+            && !map_meta.first_anchored
         {
-            entries[0].value.entry_span =
-                compact_first_entry_span(self.scan_cache.input, &entries[0], &entries[1]);
+            entries[0].value.entry_span = PackedOptionSpan::from_option(compact_first_entry_span(
+                self.scan_cache.input,
+                &entries[0],
+                &entries[1],
+                map_meta.first_key_end,
+                map_meta.first_val_end,
+                map_meta.second_key_end,
+            ));
         }
         // A pair in a flow sequence, as in `[a: b]`, is a mapping with no braces. Its
         // end event stands at the token after it, past blanks and a comment, where a
@@ -873,36 +1213,35 @@ impl<'a> Builder<'a> {
             .input
             .get(span.start()..)
             .is_some_and(|text| text.starts_with('}'));
-        let end = match entries.last() {
-            Some(last) if flow && !braced => pair_end(
+        let end = if !entries.is_empty() && flow && !braced {
+            pair_end(
                 self.scan_cache.input,
                 frame.open.start(),
-                last,
+                map_meta.last_key_end,
+                map_meta.last_val_end,
                 span.start(),
-            ),
-            _ => span.end(),
+            )
+        } else {
+            span.end()
+        };
+        let content_end = if !flow && !entries.is_empty() {
+            map_meta.last_val_end
+        } else {
+            Some(end)
         };
         let node = SpannedNode {
             span: Span::new(frame.open.start(), end),
-            entry_span: None,
-            content_end: match entries.last() {
-                Some(last) if !flow => last.value.content_end,
-                _ => Some(end),
-            },
-            anchored: frame.anchored
-                || entries
-                    .iter()
-                    .any(|entry| entry.key.anchored || entry.value.anchored),
+            entry_span: PackedOptionSpan::NONE,
             kind: Kind::Mapping(entries),
+        };
+        let node_meta = NodeMeta {
+            content_end,
+            anchored: frame.anchored || map_meta.any_anchored,
         };
         if flow {
             self.after_block_scalar = AfterBlockScalar::NONE;
         }
-        let resolved_value = match keys {
-            KeyTracker::Resolved(map) if !guess => Some(Box::new(Value::Mapping(*map))),
-            _ => None,
-        };
-        self.add(node, resolved_value, frame.after_block_scalar);
+        self.add(node, node_meta, resolved_value, frame.after_block_scalar);
         Ok(())
     }
 
@@ -911,6 +1250,7 @@ impl<'a> Builder<'a> {
     fn add(
         &mut self,
         mut node: SpannedNode<'a>,
+        mut meta: NodeMeta,
         node_resolved: Option<Box<Value>>,
         after_block_scalar: AfterBlockScalar,
     ) {
@@ -923,7 +1263,12 @@ impl<'a> Builder<'a> {
             return;
         };
         match &mut frame.kind {
-            FrameKind::Sequence { items, resolved } => {
+            FrameKind::Sequence {
+                items,
+                last_content_end,
+                any_anchored,
+                resolved,
+            } => {
                 if let Some(values) = resolved {
                     if let Some(value) = node_resolved {
                         values.push(*value);
@@ -931,47 +1276,70 @@ impl<'a> Builder<'a> {
                         *resolved = None;
                     }
                 }
-                node.entry_span = block_entry_span(
+                node.entry_span = PackedOptionSpan::from_option(block_entry_span(
                     &mut self.scan_cache,
                     frame.style,
                     Lead::Item,
                     node.span.start(),
-                    node.content_end,
-                    aliased || node.anchored,
+                    meta.content_end,
+                    aliased || meta.anchored,
                     after_block_scalar,
-                );
-                items.push(node);
+                ));
+                *last_content_end = meta.content_end;
+                *any_anchored |= meta.anchored;
+                match items {
+                    SeqStorage::Scratch { start, len } => {
+                        if *len < SCRATCH_LIMIT {
+                            self.scratch_items.push(node);
+                            *len += 1;
+                        } else {
+                            let mut owned = Vec::with_capacity(SCRATCH_LIMIT * 2);
+                            owned.extend(self.scratch_items.drain(*start..));
+                            owned.push(node);
+                            *items = SeqStorage::Owned(owned);
+                        }
+                    }
+                    SeqStorage::Owned(vec) => vec.push(node),
+                }
             }
             FrameKind::Mapping {
                 entries,
-                key,
+                has_key,
                 keys,
+                meta: map_meta,
                 column,
                 guess,
             } => {
-                let Some(waiting) = key.take() else {
-                    node.entry_span = None;
-                    *key = Some(Box::new(PendingKey {
+                if !*has_key {
+                    node.entry_span = PackedOptionSpan::NONE;
+                    self.pending_keys.push(PendingKey {
                         node,
+                        meta,
                         resolved: node_resolved,
                         after_block_scalar,
-                    }));
+                    });
+                    *has_key = true;
                     return;
-                };
-                let PendingKey {
+                }
+                *has_key = false;
+                let Some(PendingKey {
                     node: mut key_node,
+                    meta: key_meta,
                     resolved: key_resolved,
                     after_block_scalar,
-                } = *waiting;
-                key_node.entry_span = None;
+                }) = self.pending_keys.pop()
+                else {
+                    return;
+                };
+                key_node.entry_span = PackedOptionSpan::NONE;
                 // In an input with a byte-order mark past its start, what a line's indentation
                 // is depends on the reader, so the value stays where the parser places it.
                 // Under merge-key expansion (`merged_missing_places.is_some()`), memoize each
                 // originating `(key_start, key_end)` placement once so sibling and ancestor merge
                 // replays reuse the originating span in O(1) without rescanning blank runs.
-                if node.is_missing_value()
+                if node.is_missing_value(meta.anchored)
                     && !marked
-                    && let Some(key_end) = key_node.content_end
+                    && let Some(key_end) = key_meta.content_end
                 {
                     let place = if let Some(cache) = self.merged_missing_places.as_mut() {
                         let key_id = (key_node.span.start(), key_end);
@@ -1003,795 +1371,205 @@ impl<'a> Builder<'a> {
                         // The parser places a value that isn't there at the next token. It stands
                         // after its key's `:`, where a value would be written.
                         node.span = Span::empty(at);
-                        node.content_end = Some(at);
+                        meta.content_end = Some(at);
                     }
                 }
                 let span = block_entry_span(
                     &mut self.scan_cache,
                     frame.style,
                     Lead::Key {
-                        end: key_node.content_end,
+                        end: key_meta.content_end,
                     },
                     key_node.span.start(),
-                    node.content_end,
-                    aliased || key_node.anchored || node.anchored,
+                    meta.content_end,
+                    aliased || key_meta.anchored || meta.anchored,
                     after_block_scalar,
                 );
-                // Nodes inside `in_key` and collection keys already built their resolved value
-                // bottom-up; scalar keys outside `in_key` resolve in O(1) directly from the node.
-                let key_value = if frame.in_key {
-                    key_resolved.map(|val| *val)
-                } else if key_node.is_scalar() {
-                    key_node.resolved_value()
-                } else {
-                    key_resolved.map(|val| *val)
-                };
-                *guess |= key_value.is_none();
-                let mut ambiguous = is_merge_key(&key_node);
-                match keys {
-                    KeyTracker::Resolved(map) => {
-                        if let Some(kv) = key_value {
-                            if let Some(previous) = map.get_index_of(&kv) {
-                                if let Some(entry) = entries.get_mut(previous) {
-                                    entry.ambiguous = true;
-                                }
-                                ambiguous = true;
-                                if let KeyTracker::Resolved(existing) = std::mem::replace(
-                                    keys,
-                                    KeyTracker::Seen(HashMap::with_hasher(GlobalHasher)),
-                                ) && let KeyTracker::Seen(seen) = keys
-                                {
-                                    for (idx, (k, _)) in existing.into_iter().enumerate() {
-                                        seen.insert(k, idx);
-                                    }
-                                }
-                            } else if !ambiguous && let Some(vv) = node_resolved {
-                                map.insert(kv, *vv);
-                            } else if let KeyTracker::Resolved(existing) = std::mem::replace(
-                                keys,
-                                KeyTracker::Seen(HashMap::with_hasher(GlobalHasher)),
-                            ) && let KeyTracker::Seen(seen) = keys
-                            {
-                                for (idx, (k, _)) in existing.into_iter().enumerate() {
-                                    seen.insert(k, idx);
-                                }
-                                let index = entries.len();
-                                seen.entry(kv).or_insert(index);
-                            }
-                        } else {
-                            *keys = KeyTracker::Seen(HashMap::with_hasher(GlobalHasher));
-                        }
-                    }
-                    KeyTracker::Seen(seen) => {
-                        if let Some(value) = &key_value
-                            && let Some(previous) = seen.get(value)
-                        {
-                            if let Some(entry) = entries.get_mut(*previous) {
-                                entry.ambiguous = true;
-                            }
-                            ambiguous = true;
-                        }
-                        if let Some(value) = key_value {
-                            let index = entries.len();
-                            seen.entry(value).or_insert(index);
-                        }
-                    }
+                let entry_index = entries.len();
+                let ambiguous = record_mapping_key(
+                    keys,
+                    entries,
+                    &mut self.seen_keys,
+                    &mut self.scratch_entries,
+                    guess,
+                    MappingKeyInput {
+                        in_key: frame.in_key,
+                        key_node: &key_node,
+                        key_resolved,
+                        node_resolved,
+                        entry_index,
+                    },
+                );
+                if entry_index == 0 {
+                    map_meta.first_key_end = key_meta.content_end;
+                    map_meta.first_val_end = meta.content_end;
+                    map_meta.first_anchored = key_meta.anchored || meta.anchored;
+                } else if entry_index == 1 {
+                    map_meta.second_key_end = key_meta.content_end;
                 }
-                node.entry_span = span;
-                entries.push(Entry {
+                map_meta.last_key_end = key_meta.content_end;
+                map_meta.last_val_end = meta.content_end;
+                map_meta.any_anchored |= key_meta.anchored || meta.anchored;
+                node.entry_span = PackedOptionSpan::from_option(span);
+                let entry = Entry {
                     key: key_node,
                     value: node,
                     ambiguous,
-                });
+                };
+                match entries {
+                    EntryStorage::Scratch { start, len } => {
+                        if *len < SCRATCH_LIMIT {
+                            self.scratch_entries.push(entry);
+                            *len += 1;
+                        } else {
+                            let mut owned = Vec::with_capacity(SCRATCH_LIMIT * 2);
+                            owned.extend(self.scratch_entries.drain(*start..));
+                            owned.push(entry);
+                            *entries = EntryStorage::Owned(owned);
+                        }
+                    }
+                    EntryStorage::Owned(vec) => vec.push(entry),
+                }
             }
         }
     }
+}
+
+struct MappingKeyInput<'a, 'k> {
+    in_key: bool,
+    key_node: &'k SpannedNode<'a>,
+    key_resolved: Option<Box<Value>>,
+    node_resolved: Option<Box<Value>>,
+    entry_index: usize,
+}
+
+#[allow(
+    clippy::mutable_key_type,
+    reason = "SpannedKey is immutable after insertion; Mapping's cached hash never changes equality"
+)]
+fn record_mapping_key<'a>(
+    keys: &mut KeyTracker<'a>,
+    entries: &mut EntryStorage<'a>,
+    seen_keys: &mut Vec<(SpannedKey<'a>, usize)>,
+    scratch_entries: &mut [Entry<'a>],
+    guess: &mut bool,
+    input: MappingKeyInput<'a, '_>,
+) -> bool {
+    let MappingKeyInput {
+        in_key,
+        key_node,
+        key_resolved,
+        node_resolved,
+        entry_index,
+    } = input;
+    let mut ambiguous = is_merge_key(key_node);
+    match keys {
+        KeyTracker::Small { start } => {
+            let key_val = if key_node.is_scalar() {
+                key_node.spanned_scalar_key()
+            } else {
+                key_resolved.map(|val| SpannedKey::from_value(*val))
+            };
+            *guess |= key_val.is_none();
+            if let Some(kv) = key_val {
+                let slice = &seen_keys[*start..];
+                if let Some(&(_, previous)) = slice.iter().find(|(k, _)| k == &kv) {
+                    if let Some(entry) = entries.get_mut(scratch_entries, previous) {
+                        entry.ambiguous = true;
+                    }
+                    ambiguous = true;
+                } else if slice.len() < SMALL_LIMIT {
+                    seen_keys.push((kv, entry_index));
+                } else {
+                    let mut map = HashMap::with_capacity_and_hasher(SMALL_LIMIT * 2, GlobalHasher);
+                    for (k, idx) in seen_keys.drain(*start..) {
+                        map.entry(k).or_insert(idx);
+                    }
+                    map.entry(kv).or_insert(entry_index);
+                    *keys = KeyTracker::Large(map);
+                }
+            }
+        }
+        KeyTracker::Large(seen) => {
+            let key_val = if in_key {
+                key_resolved.map(|val| SpannedKey::from_value(*val))
+            } else if key_node.is_scalar() {
+                key_node.spanned_scalar_key()
+            } else {
+                key_resolved.map(|val| SpannedKey::from_value(*val))
+            };
+            *guess |= key_val.is_none();
+            if let Some(kv) = key_val {
+                if let Some(&previous) = seen.get(&kv) {
+                    if let Some(entry) = entries.get_mut(scratch_entries, previous) {
+                        entry.ambiguous = true;
+                    }
+                    ambiguous = true;
+                } else {
+                    seen.insert(kv, entry_index);
+                }
+            }
+        }
+        KeyTracker::Resolved(map) => {
+            let key_value = key_resolved.map(|val| *val);
+            *guess |= key_value.is_none();
+            if let Some(kv) = key_value {
+                if let Some(previous) = map.get_index_of(&kv) {
+                    if let Some(entry) = entries.get_mut(scratch_entries, previous) {
+                        entry.ambiguous = true;
+                    }
+                    ambiguous = true;
+                    let placeholder = KeyTracker::Small {
+                        start: seen_keys.len(),
+                    };
+                    if let KeyTracker::Resolved(existing) = std::mem::replace(keys, placeholder) {
+                        let mut seen =
+                            HashMap::with_capacity_and_hasher(existing.len(), GlobalHasher);
+                        for (idx, (k, _)) in existing.into_iter().enumerate() {
+                            seen.insert(SpannedKey::from_value(k), idx);
+                        }
+                        *keys = KeyTracker::Large(seen);
+                    }
+                } else if !ambiguous && let Some(vv) = node_resolved {
+                    map.insert(kv, *vv);
+                } else {
+                    let placeholder = KeyTracker::Small {
+                        start: seen_keys.len(),
+                    };
+                    if let KeyTracker::Resolved(existing) = std::mem::replace(keys, placeholder) {
+                        let mut seen =
+                            HashMap::with_capacity_and_hasher(existing.len() + 1, GlobalHasher);
+                        for (idx, (k, _)) in existing.into_iter().enumerate() {
+                            seen.insert(SpannedKey::from_value(k), idx);
+                        }
+                        seen.entry(SpannedKey::from_value(kv))
+                            .or_insert(entry_index);
+                        *keys = KeyTracker::Large(seen);
+                    }
+                }
+            } else {
+                *keys = KeyTracker::Large(HashMap::with_hasher(GlobalHasher));
+            }
+        }
+    }
+    ambiguous
 }
 
 impl SpannedNode<'_> {
     /// Whether this is the empty scalar that stands for a value the source doesn't write.
-    fn is_missing_value(&self) -> bool {
+    fn is_missing_value(&self, anchored: bool) -> bool {
         self.span.is_empty()
-            && !self.anchored
-            && matches!(
-                &self.kind,
-                Kind::Scalar {
-                    raw,
-                    style: ScalarStyle::Plain,
-                    tag: None,
-                    ..
-                } if raw.is_empty()
-            )
+            && !anchored
+            && (matches!(&self.kind, Kind::PlainScalar(""))
+                || matches!(
+                    &self.kind,
+                    Kind::Scalar(data)
+                        if data.style == ScalarStyle::Plain
+                            && data.tag.is_none()
+                            && data.raw.is_empty()
+                ))
     }
-}
-
-/// Where a pair with no braces ends, which starts at `start` and has the token after it at
-/// `next`: with its value, where the source writes one. Where it doesn't, the pair ends with the
-/// last thing written before `next`: its key, a `?` or `:`, a tag, or an anchor. Blanks, line
-/// breaks, and comments after that are not the pair's.
-fn pair_end(input: &str, start: usize, entry: &Entry<'_>, next: usize) -> usize {
-    if let Some(end) = entry.value.content_end {
-        return end;
-    }
-    let from = entry.key.content_end.unwrap_or(start).min(next);
-    let bytes = input.as_bytes();
-    let blank = |at: usize| matches!(bytes.get(at), Some(b' ' | b'\t' | b'\n' | b'\r'));
-    // The compatibility reader reads past a byte-order mark that begins a line, so one is no
-    // more written text than the line's spaces are, and a comment may follow it. A mark
-    // anywhere else is text to it, which would be the pair's value, so one that stands here,
-    // in a pair with no value, begins its line, after the break that separates what follows.
-    let mark = '\u{feff}';
-    // Whether a `#` here would start a comment: something separates it from the pair's text.
-    let (mut end, mut at, mut separated) = (from, from, false);
-    while at < next {
-        if blank(at) {
-            at += 1;
-            separated = true;
-        } else if input[at..].starts_with(mark) {
-            at += mark.len_utf8();
-        } else if bytes[at] == b'#' && separated {
-            while at < next && !matches!(bytes[at], b'\n' | b'\r') {
-                at += 1;
-            }
-        } else {
-            while at < next && !blank(at) {
-                at += 1;
-            }
-            end = at;
-            separated = false;
-        }
-    }
-    end
-}
-
-fn is_merge_key(node: &SpannedNode<'_>) -> bool {
-    matches!(
-        &node.kind,
-        Kind::Scalar {
-            value,
-            style: ScalarStyle::Plain,
-            ..
-        } if value == "<<"
-    )
-}
-
-/// What stands before a block entry on its first line.
-#[derive(Clone, Copy)]
-enum Lead {
-    /// A mapping's key, which ends at `end`: indentation alone before it, and the key and its
-    /// `:` on that one line. A key that follows a `?`, on that line or an earlier one, has its
-    /// `:` on a later line or has none. A key with no text has no known end, whether a `?`
-    /// came before it or not.
-    Key { end: Option<usize> },
-    /// A sequence's item: indentation, its `-`, and spaces.
-    Item,
-}
-
-/// The span whose removal removes one block entry and nothing else, or `None` when the entry
-/// has no such span (see [`SpannedNode::entry_span`]). The entry begins at `first`, its last
-/// character ends at `content_end`, when that is known, `anchored` says whether it defines an
-/// anchor, stands inside a collection that has one, or is in an input with a byte-order mark
-/// past the marks that open it, and `after_block_scalar` whether the last thing written before
-/// it is a block scalar.
-/// Whether `before` is indentation followed by one or more block-sequence `- ` indicators, as
-/// precedes the first key of a compact mapping (`- a: 1` or `- - a: 1`).
-fn is_compact_item_prefix(before: &str) -> bool {
-    let mut rest = before.trim_start_matches(' ');
-    let mut seen = false;
-    while let Some(after) = rest.strip_prefix('-') {
-        let spaces = after.len() - after.trim_start_matches(' ').len();
-        if spaces == 0 {
-            return false;
-        }
-        rest = &after[spaces..];
-        seen = true;
-    }
-    seen && rest.is_empty()
-}
-
-/// The span that removes the first entry of a block mapping starting on a sequence's `-` line
-/// (`- a: 1\n  b: 2\n`), leaving `- ` and shifting `next` into `first`'s column (`- b: 2\n`).
-fn compact_first_entry_span(
-    input: &str,
-    first_entry: &Entry<'_>,
-    next_entry: &Entry<'_>,
-) -> Option<Span> {
-    let first = first_entry.key.span.start();
-    let key_end = first_entry.key.content_end?;
-    let content_end = first_entry.value.content_end?;
-    let mut line0 = line_start(input, first);
-    if line0 == 0 {
-        line0 = input.len() - input.trim_start_matches('\u{feff}').len();
-    }
-    let before = input.get(line0..first)?;
-    if !is_compact_item_prefix(before) {
-        return None;
-    }
-    let colon = after_key(input, key_end);
-    if colon <= key_end || input.get(first..colon)?.contains(['\n', '\r']) {
-        return None;
-    }
-    let end = compute_entry_end(input, content_end)?;
-    let next_first = next_entry.key.span.start();
-    let next_key_end = next_entry.key.content_end?;
-    let next_line = line_start(input, next_first);
-    if end > next_line {
-        return None;
-    }
-    let next_before = input.get(next_line..next_first)?;
-    if !next_before.bytes().all(|byte| byte == b' ') || next_before.len() != before.len() {
-        return None;
-    }
-    let next_colon = after_key(input, next_key_end);
-    if next_colon <= next_key_end || input.get(next_first..next_colon)?.contains(['\n', '\r']) {
-        return None;
-    }
-    if end < next_line {
-        let between = input.get(end..next_line)?;
-        // Refuse if any comment or non-whitespace line stands between the first entry and the
-        // next key; deleting up to `next_first` would silently delete that intervening comment.
-        if !between
-            .bytes()
-            .all(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
-        {
-            return None;
-        }
-        // `between` is purely whitespace and `next_before` is purely spaces, so the first
-        // non-blank line after `end` is guaranteed to begin at `next_first`.
-        if input
-            .get(next_first..)
-            .and_then(|rest| rest.strip_prefix(':'))
-            .is_some_and(|after| after.is_empty() || after.starts_with([' ', '\t', '\n', '\r']))
-        {
-            return None;
-        }
-    }
-    (next_first > first).then(|| Span::new(first, next_first))
-}
-
-fn block_entry_span(
-    cache: &mut LineScanCache<'_>,
-    style: crate::event::CollectionStyle,
-    lead: Lead,
-    first: usize,
-    content_end: Option<usize>,
-    anchored: bool,
-    after_block_scalar: AfterBlockScalar,
-) -> Option<Span> {
-    if style == crate::event::CollectionStyle::Flow || anchored {
-        return None;
-    }
-    let input = cache.input;
-    let content_end = content_end?;
-    let mut start = line_start(input, first);
-    // The byte-order marks that open the input are no part of the first entry.
-    if start == 0 {
-        start = input.len() - input.trim_start_matches('\u{feff}').len();
-    }
-    let before = input.get(start..first)?;
-    let begins_its_line = match lead {
-        Lead::Key { end } => {
-            let end = end?;
-            let colon = after_key(input, end);
-            before.bytes().all(|byte| byte == b' ')
-                && colon > end
-                && !input.get(first..colon)?.contains(['\n', '\r'])
-        }
-        Lead::Item => before
-            .trim_start_matches(' ')
-            .strip_prefix('-')
-            .is_some_and(|blanks| !blanks.is_empty() && blanks.bytes().all(|byte| byte == b' ')),
-    };
-    if !begins_its_line {
-        return None;
-    }
-    let end = cache.entry_end(content_end)?;
-    // A line that begins with `:` gives a value to the key before it. With this entry gone,
-    // that could be an explicit key from before the entry.
-    if cache.value_indicator_follows(end) {
-        return None;
-    }
-    // A block scalar that is the last thing written before this entry ends where the entry
-    // begins. With the entry gone it could absorb blank or comment lines that follow unless
-    // content follows or every intervening blank/comment line is outside the scalar.
-    if after_block_scalar.is_some() && !cache.block_scalar_ignores_after(end, after_block_scalar) {
-        return None;
-    }
-    (end > start).then(|| Span::new(start, end))
-}
-
-/// Scan a contiguous run of blank and comment lines beginning at line boundary `from` in a single
-/// pass, summarizing all properties needed by `value_indicator_follows`,
-/// `block_scalar_ignores_after`, and block-mode `missing_value_place`.
-fn scan_blank_run(input: &str, from: usize) -> BlankRunSummary {
-    let from = from.min(input.len());
-    let mut offset = from;
-    let mut blocks_any_scalar = false;
-    let mut has_blank_before_comment = false;
-    let mut seen_comment = false;
-    let mut max_comment_indent: Option<usize> = None;
-    #[cfg(test)]
-    let mut lines_scanned = 0usize;
-
-    while offset < input.len() {
-        #[cfg(test)]
-        {
-            lines_scanned += 1;
-        }
-        let rest = &input[offset..];
-        let (line, next_rest) = split_first_line(rest);
-        let spaces = line.len() - line.trim_start_matches(' ').len();
-        let after = &line[spaces..];
-        if after.is_empty() {
-            if spaces > 0 {
-                blocks_any_scalar = true;
-            }
-            if !seen_comment {
-                has_blank_before_comment = true;
-            }
-        } else if after.starts_with('\t') {
-            let trimmed = after.trim_start_matches([' ', '\t']);
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                blocks_any_scalar = true;
-            } else {
-                let next_is_value_indicator = trimmed
-                    .strip_prefix(':')
-                    .is_some_and(|tail| tail.is_empty() || tail.starts_with([' ', '\t']));
-                return BlankRunSummary {
-                    from,
-                    next_content: offset,
-                    next_is_value_indicator,
-                    next_content_indent: spaces,
-                    blocks_any_scalar,
-                    has_blank_before_comment,
-                    max_comment_indent,
-                    #[cfg(test)]
-                    lines_scanned,
-                };
-            }
-        } else if after.starts_with('#') {
-            seen_comment = true;
-            max_comment_indent = Some(max_comment_indent.map_or(spaces, |prev| prev.max(spaces)));
-        } else {
-            let next_is_value_indicator = after
-                .strip_prefix(':')
-                .is_some_and(|tail| tail.is_empty() || tail.starts_with([' ', '\t']));
-            return BlankRunSummary {
-                from,
-                next_content: offset,
-                next_is_value_indicator,
-                next_content_indent: spaces,
-                blocks_any_scalar,
-                has_blank_before_comment,
-                max_comment_indent,
-                #[cfg(test)]
-                lines_scanned,
-            };
-        }
-        offset = input.len() - next_rest.len();
-    }
-
-    BlankRunSummary {
-        from,
-        next_content: input.len(),
-        next_is_value_indicator: false,
-        next_content_indent: 0,
-        blocks_any_scalar,
-        has_blank_before_comment,
-        max_comment_indent,
-        #[cfg(test)]
-        lines_scanned,
-    }
-}
-
-/// Where an entry whose last character ends at `content_end` ends: after its line break, or
-/// `None` when more than a comment follows it on that line.
-fn compute_entry_end(input: &str, content_end: usize) -> Option<usize> {
-    let (before, rest) = input.split_at_checked(content_end)?;
-    // A block scalar's text runs through its last line break.
-    if before.ends_with(['\n', '\r']) {
-        return Some(content_end);
-    }
-    let bytes = rest.as_bytes();
-    let mut pos = 0;
-    while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t') {
-        pos += 1;
-    }
-    let saw_blank = pos > 0;
-    if pos < bytes.len() {
-        // A comment needs a blank before its `#`.
-        if bytes[pos] == b'#' && saw_blank {
-            pos += 1;
-            while pos < bytes.len() && !matches!(bytes[pos], b'\n' | b'\r') {
-                pos += 1;
-            }
-        } else if !matches!(bytes[pos], b'\n' | b'\r') {
-            return None;
-        }
-    }
-    if pos < bytes.len() {
-        if bytes[pos] == b'\r' && bytes.get(pos + 1) == Some(&b'\n') {
-            pos += 2;
-        } else {
-            pos += 1;
-        }
-    }
-    Some(content_end + pos)
-}
-
-/// Where a value that the source doesn't write stands, when the source shows that it wrote
-/// none: after the `:` that follows its key on the key's line. `None` when no `:` follows the
-/// key there, as after an explicit key, and when what comes next could be the value: anything
-/// but a comment on the key's line, or a line indented past the mapping, which begins at
-/// `mapping_start`. A tag that names the kind of a collection stands there with no event to
-/// show for it. The mapping's column is the one to compare with, and not the key's: a tag or an
-/// anchor before a key puts the key itself further right.
-fn missing_value_place(
-    cache: &mut LineScanCache<'_>,
-    mapping_start: usize,
-    cached_column: &mut Option<usize>,
-    key_end: usize,
-    style: crate::event::CollectionStyle,
-) -> Option<usize> {
-    let input = cache.input;
-    let at = after_key(input, key_end);
-    if at == key_end {
-        return None;
-    }
-    let bytes = input.as_bytes();
-    if style == crate::event::CollectionStyle::Flow {
-        // Flow mappings inspect only immediate bytes after `:`, skipping inline blanks/comments
-        // without scanning to the end of a long single-line flow collection, and reuse the
-        // memoized blank-run scanner across multi-line blank/comment runs.
-        let mut pos = at;
-        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t') {
-            pos += 1;
-        }
-        if pos > at && pos < bytes.len() && bytes[pos] == b'#' {
-            pos += 1;
-            while pos < bytes.len() && !matches!(bytes[pos], b'\n' | b'\r') {
-                pos += 1;
-            }
-        }
-        if pos >= bytes.len() {
-            return Some(at);
-        }
-        match bytes[pos] {
-            b',' | b'}' | b']' => return Some(at),
-            b'\n' | b'\r' => {
-                if bytes[pos] == b'\r' && bytes.get(pos + 1) == Some(&b'\n') {
-                    pos += 2;
-                } else {
-                    pos += 1;
-                }
-                let run = cache.blank_run(pos);
-                if run.next_content >= input.len() {
-                    return Some(at);
-                }
-                let next_bytes = input.as_bytes();
-                let mut cur = run.next_content;
-                while cur < next_bytes.len() && matches!(next_bytes[cur], b' ' | b'\t') {
-                    cur += 1;
-                }
-                return next_bytes
-                    .get(cur)
-                    .is_some_and(|b| matches!(b, b',' | b'}' | b']'))
-                    .then_some(at);
-            }
-            _ => return None,
-        }
-    }
-
-    // Block mapping: inspect the remainder of the key's line, then consult the memoized blank-run
-    // scanner for any following blank/comment lines.
-    let mut pos = at;
-    while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t') {
-        pos += 1;
-    }
-    if pos > at && pos < bytes.len() && bytes[pos] == b'#' {
-        pos += 1;
-        while pos < bytes.len() && !matches!(bytes[pos], b'\n' | b'\r') {
-            pos += 1;
-        }
-    }
-    if pos >= bytes.len() {
-        return Some(at);
-    }
-    if !matches!(bytes[pos], b'\n' | b'\r') {
-        return None;
-    }
-    if bytes[pos] == b'\r' && bytes.get(pos + 1) == Some(&b'\n') {
-        pos += 2;
-    } else {
-        pos += 1;
-    }
-
-    // The column counts characters, and a byte-order mark that opens the input is none.
-    let key_column = if let Some(col) = *cached_column {
-        col
-    } else {
-        let col = input
-            .get(line_start(input, mapping_start)..mapping_start)?
-            .chars()
-            .filter(|ch| *ch != '\u{feff}')
-            .count();
-        *cached_column = Some(col);
-        col
-    };
-    let run = cache.blank_run(pos);
-    if run.next_content >= input.len() {
-        return Some(at);
-    }
-    (run.next_content_indent <= key_column).then_some(at)
-}
-
-/// The offset after the `:` that follows a key on the key's line, or the key's end when none
-/// does. A key that is a block scalar ends with its last line, so a `:` after it stands on
-/// another line, and is another entry's.
-fn after_key(input: &str, key_end: usize) -> usize {
-    let Some((before, rest)) = input.split_at_checked(key_end) else {
-        return key_end;
-    };
-    if before.ends_with(['\n', '\r']) {
-        return key_end;
-    }
-    let blanks = rest.len() - rest.trim_start_matches([' ', '\t']).len();
-    if rest[blanks..].starts_with(':') {
-        key_end + blanks + 1
-    } else {
-        key_end
-    }
-}
-
-fn line_start(input: &str, index: usize) -> usize {
-    let bytes = input.as_bytes();
-    let mut i = index;
-    while i > 0 && !matches!(bytes[i - 1], b'\n' | b'\r') {
-        i -= 1;
-    }
-    i
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn complex_keys_detect_duplicates_and_ambiguity_in_linear_time() {
-        // Duplicate mapping keys make lookup return None, while unique complex keys resolve.
-        let unique = "? {a: 1, b: [2, 3]}\n: ok\nother: yes\n";
-        let tree = SpannedTree::parse(unique).expect("parse unique complex key");
-        let mut expected_key = Mapping::new();
-        expected_key.insert(Value::String("a".into()), Value::from(1_i64));
-        expected_key.insert(
-            Value::String("b".into()),
-            Value::Sequence(vec![Value::from(2_i64), Value::from(3_i64)]),
-        );
-        let found = tree
-            .lookup(&[PathSegment::Key(Value::Mapping(expected_key.clone()))])
-            .expect("unique complex key should be found");
-        assert_eq!(found.scalar_text(), Some("ok"));
-        assert_eq!(
-            tree.lookup(&[PathSegment::Key(Value::String("other".into()))])
-                .and_then(SpannedNode::scalar_text),
-            Some("yes")
-        );
-
-        let dup = "? {a: 1, b: [2, 3]}\n: first\n? {b: [2, 3], a: 1}\n: second\nother: yes\n";
-        let dup_tree = SpannedTree::parse(dup).expect("parse duplicate complex keys");
-        assert!(
-            dup_tree
-                .lookup(&[PathSegment::Key(Value::Mapping(expected_key))])
-                .is_none(),
-            "duplicate complex keys must be marked ambiguous"
-        );
-        assert_eq!(
-            dup_tree
-                .lookup(&[PathSegment::Key(Value::String("other".into()))])
-                .and_then(SpannedNode::scalar_text),
-            Some("yes")
-        );
-
-        // An inner duplicate, merge key, or alias inside a complex key marks the enclosing
-        // mapping ambiguous so lookups do not guess.
-        for ambiguous_input in [
-            "? {a: 1, a: 2}\n: v\nother: yes\n",
-            "? {<<: {a: 1}}\n: v\nother: yes\n",
-            "anchor: &x 1\n? {a: *x}\n: v\nother: yes\n",
-            "? [*x]\n: v\nother: yes\n",
-        ] {
-            let t = SpannedTree::parse(ambiguous_input).expect("parse ambiguous complex key");
-            assert!(
-                t.lookup(&[PathSegment::Key(Value::String("other".into()))])
-                    .is_none(),
-                "enclosing mapping must not guess for {ambiguous_input:?}"
-            );
-        }
-
-        // Deeply nested complex keys stay linear.
-        let mut nested = "{k0: 0, k1: 1, k2: 2}".to_owned();
-        for _ in 0..48 {
-            nested = format!("{{? {nested}: null}}");
-        }
-        nested.push('\n');
-        assert!(SpannedTree::parse(&nested).is_ok());
-    }
-
-    #[test]
-    fn spanned_tree_line_scans_stay_linear_deterministically() {
-        use std::fmt::Write as _;
-
-        fn build_and_count(input: &str, merge_keys: bool) -> (SpannedTree<'_>, usize) {
-            let options = ParseOptions::new().with_merge_keys(merge_keys);
-            let events = crate::parse_events_with(input, &options).expect("events");
-            let mut builder = Builder {
-                scan_cache: LineScanCache::new(input),
-                documents: Vec::new(),
-                stack: Vec::new(),
-                root: None,
-                after_block_scalar: AfterBlockScalar::NONE,
-                anchored_depth: 0,
-                marked: input.trim_start_matches('\u{feff}').contains('\u{feff}'),
-                suppress_entry_spans: merge_keys,
-                merged_missing_places: merge_keys.then(|| HashMap::with_hasher(GlobalHasher)),
-            };
-            for event in events {
-                builder.event(event.expect("event")).expect("build");
-            }
-            let scanned = builder.scan_cache.blank_run_lines_scanned;
-            (
-                SpannedTree {
-                    documents: builder.documents,
-                },
-                scanned,
-            )
-        }
-
-        // 1. Dense single-line empty-value flow mapping scans zero blank-run lines.
-        let mut flow = String::from("{");
-        for i in 0..2_000 {
-            if i > 0 {
-                flow.push(',');
-            }
-            let _ = write!(flow, "k{i}:");
-        }
-        flow.push_str("}\n");
-        let (_, scanned) = build_and_count(&flow, false);
-        assert_eq!(scanned, 0, "single-line flow map must scan 0 blank lines");
-
-        // 2. 80-deep block mapping followed by 1,000 blank/comment lines scans each line at most once.
-        let mut block = String::from("hdr: |\n  keep\n");
-        for level in 0..80 {
-            for _ in 0..level {
-                block.push_str("  ");
-            }
-            let _ = writeln!(block, "k{level}:");
-        }
-        for _ in 0..80 {
-            block.push_str("  ");
-        }
-        block.push_str("leaf:\n");
-        for i in 0..1_000 {
-            if i % 2 == 0 {
-                block.push('\n');
-            } else {
-                block.push_str("# comment\n");
-            }
-        }
-        block.push_str("tail: 1\n");
-        let (_, scanned) = build_and_count(&block, false);
-        assert!(
-            scanned <= 1_200,
-            "80-deep block + 1,000 trailing blanks scanned {scanned} lines (expected linear)"
-        );
-
-        // 3. 40-deep nested compact mappings + 1,000 trailing blanks do not evict blank-run cache.
-        let mut compact = String::new();
-        for level in 0..40 {
-            let pad = "    ".repeat(level);
-            let _ = writeln!(compact, "{pad}- a{level}: 1\n\n{pad}  b{level}:");
-        }
-        let leaf_pad = "    ".repeat(40);
-        let _ = writeln!(compact, "{leaf_pad}end: 1");
-        for i in 0..1_000 {
-            if i % 2 == 0 {
-                compact.push('\n');
-            } else {
-                compact.push_str("# trailing\n");
-            }
-        }
-        compact.push_str("- after: 2\n");
-        let (_, scanned) = build_and_count(&compact, false);
-        assert!(
-            scanned <= 1_300,
-            "40-deep compact + 1,000 trailing blanks scanned {scanned} lines (expected linear)"
-        );
-
-        // 4. Ancestor + sibling merge replays over 1,000 blanks scan the blank run once and
-        //    preserve the exact originating missing-value span.
-        let mut anc = String::new();
-        for level in 0..40 {
-            let pad = "  ".repeat(level);
-            let _ = writeln!(anc, "{pad}m{level}:");
-        }
-        let base_pad = "  ".repeat(40);
-        let _ = writeln!(anc, "{base_pad}base: &b");
-        let _ = writeln!(anc, "{base_pad}  k0:");
-        for _ in 0..1_000 {
-            anc.push('\n');
-        }
-        let _ = writeln!(anc, "{base_pad}  k1: 1");
-        for level in (0..40).rev() {
-            let pad = "  ".repeat(level + 1);
-            let _ = writeln!(anc, "{pad}<<: *b");
-            let _ = writeln!(anc, "{pad}x{level}:");
-        }
-        for i in 0..40 {
-            let _ = writeln!(anc, "s{i}: {{ <<: *b }}");
-        }
-        let (tree, scanned) = build_and_count(&anc, true);
-        assert!(
-            scanned <= 1_200,
-            "ancestor + sibling merge replays scanned {scanned} lines (expected linear)"
-        );
-        let mut base_path: Vec<PathSegment> = (0..40)
-            .map(|l| PathSegment::Key(Value::from(format!("m{l}"))))
-            .collect();
-        base_path.push(PathSegment::Key(Value::from("base")));
-        base_path.push(PathSegment::Key(Value::from("k0")));
-        let base_k0 = tree.span_at(&base_path).expect("base k0");
-        let outer_k0 = tree
-            .span_at(&[
-                PathSegment::Key(Value::from("m0")),
-                PathSegment::Key(Value::from("k0")),
-            ])
-            .expect("outer merged k0");
-        let sibling_k0 = tree
-            .span_at(&[
-                PathSegment::Key(Value::from("s0")),
-                PathSegment::Key(Value::from("k0")),
-            ])
-            .expect("sibling merged k0");
-        assert_eq!(outer_k0, base_k0);
-        assert_eq!(sibling_k0, base_k0);
-    }
-
-    #[test]
-    fn compact_first_entry_span_refuses_intervening_comments_and_merge_suppresses_entries() {
-        let with_comment = "- a: 1\n  # comment about b\n  b: 2\n";
-        let tree = SpannedTree::parse(with_comment).expect("tree");
-        assert_eq!(
-            tree.entry_span_at(&[PathSegment::Index(0), PathSegment::Key(Value::from("a"))]),
-            None,
-            "compact first entry followed by comment must not produce an entry_span"
-        );
-        let without_comment = "- a: 1\n  b: 2\n";
-        let clean_tree = SpannedTree::parse(without_comment).expect("clean tree");
-        assert_eq!(
-            clean_tree
-                .entry_span_at(&[PathSegment::Index(0), PathSegment::Key(Value::from("a"))])
-                .and_then(|s| s.slice(without_comment)),
-            Some("a: 1\n  ")
-        );
-
-        let merged = "base: &b\n  k: 1\nout:\n  <<: *b\n  own: 2\n";
-        let opts = ParseOptions::new().with_merge_keys(true);
-        let merged_tree = SpannedTree::parse_with(merged, &opts).expect("merged tree");
-        assert!(
-            merged_tree
-                .span_at(&[
-                    PathSegment::Key(Value::from("out")),
-                    PathSegment::Key(Value::from("k")),
-                ])
-                .is_some()
-        );
-        assert_eq!(
-            merged_tree.entry_span_at(&[
-                PathSegment::Key(Value::from("out")),
-                PathSegment::Key(Value::from("own")),
-            ]),
-            None,
-            "merge_keys=true must suppress entry_span conservatively"
-        );
-    }
-}
+mod tests;

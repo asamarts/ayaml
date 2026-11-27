@@ -121,15 +121,34 @@ pub(super) const TOKEN_ARENA_SMALL_CHUNK: usize = 64;
 #[cfg(any(test, kani))]
 pub(super) const TOKEN_ARENA_MID_CHUNK: usize = 256;
 
-/// Maximum logical lines scanned per bounded refill batch (128 * 12 B = 1.5 KiB).
+/// Maximum logical lines scanned per bounded refill batch for large documents (128 * 12 B = 1.5 KiB).
 const WINDOW_BATCH_LINES: usize = 128;
-/// Soft token target per bounded refill batch (384 * 32 B = 12 KiB).
+/// Soft token target per bounded refill batch for large documents (384 * 32 B = 12 KiB).
 const WINDOW_BATCH_TOKENS: usize = 384;
+/// Smaller bounded batch caps for tiny (`<= 512 B`) and small-to-medium (`<= 8 KiB`) documents so
+/// transient token and line windows scale smoothly down to sub-KiB footprints on small inputs.
+const SMALL_BATCH_LINES: usize = 16;
+const SMALL_BATCH_TOKENS: usize = 20;
+const SMALL_TOKEN_CAP: usize = 24;
+const MEDIUM_BATCH_LINES: usize = 32;
+const MEDIUM_BATCH_TOKENS: usize = 96;
+const MEDIUM_TOKEN_CAP: usize = 112;
 /// Initial token buffer capacity for tiny/single-scalar inputs (512 B).
 const WINDOW_INIT_CHUNK: usize = 16;
 /// Capacity above which an emptied token buffer (e.g. after a large single-line flow collection
 /// retires) is released immediately rather than kept warm across subsequent block lines.
 const WINDOW_SHRINK_CAP: usize = 1_024;
+
+#[inline]
+const fn batch_limits(input_len: usize) -> (usize, usize) {
+    if input_len <= 512 {
+        (SMALL_BATCH_LINES, SMALL_BATCH_TOKENS)
+    } else if input_len <= 8_192 {
+        (MEDIUM_BATCH_LINES, MEDIUM_BATCH_TOKENS)
+    } else {
+        (WINDOW_BATCH_LINES, WINDOW_BATCH_TOKENS)
+    }
+}
 
 pub(super) fn reserve_tokens(
     tokens: &mut Vec<Token<'_>>,
@@ -475,14 +494,15 @@ impl<'a> LineWindow<'a> {
         let compat = self.compat;
 
         // Scan at least through `target`, then fill up to one bounded cache-friendly batch
-        // (`WINDOW_BATCH_LINES` / `WINDOW_BATCH_TOKENS`) in a tight scanner loop.
+        // sized to the input class in a tight scanner loop.
+        let (max_batch_lines, max_batch_tokens) = batch_limits(input_len);
         let mut batch_lines = 0_usize;
         let batch_token_start = self.tokens.len();
         while !self.eof {
             let demanded = self.loaded_end <= target;
             if !demanded
-                && (batch_lines >= WINDOW_BATCH_LINES
-                    || self.tokens.len().saturating_sub(batch_token_start) >= WINDOW_BATCH_TOKENS)
+                && (batch_lines >= max_batch_lines
+                    || self.tokens.len().saturating_sub(batch_token_start) >= max_batch_tokens)
             {
                 break;
             }
@@ -562,13 +582,7 @@ impl<'a> LineWindow<'a> {
                 }
                 let line = Line::new(&self.tokens, line_start, self.tokens.len(), input, compat)?;
                 if self.lines.capacity() == 0 {
-                    let line_cap = if input_len <= 64 {
-                        4
-                    } else if input_len <= 1024 {
-                        32
-                    } else {
-                        WINDOW_BATCH_LINES
-                    };
+                    let line_cap = if input_len <= 64 { 4 } else { max_batch_lines };
                     self.lines.reserve_exact(line_cap);
                 }
                 self.lines.push(line);
@@ -686,15 +700,19 @@ impl<'a> LineWindow<'a> {
         let len = self.tokens.len();
         let room = most.saturating_sub(len).max(1);
         let additional = if len == 0 {
-            let init = if (65..=1024).contains(&input_len) {
-                64
+            let init = if (65..=512).contains(&input_len) {
+                SMALL_TOKEN_CAP
             } else {
                 WINDOW_INIT_CHUNK
             };
             init.min(room)
         } else if len < WINDOW_BATCH_TOKENS {
-            let target = if input_len <= 1024 && len < 64 {
-                64
+            let target = if input_len <= 512 && len < SMALL_TOKEN_CAP {
+                SMALL_TOKEN_CAP
+            } else if input_len <= 512 && len < TOKEN_ARENA_SMALL_CHUNK {
+                TOKEN_ARENA_SMALL_CHUNK
+            } else if input_len <= 8_192 && len < MEDIUM_TOKEN_CAP {
+                MEDIUM_TOKEN_CAP
             } else {
                 WINDOW_BATCH_TOKENS + 64
             };

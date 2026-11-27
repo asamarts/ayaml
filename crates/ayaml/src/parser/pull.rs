@@ -49,13 +49,20 @@ impl<'a> DocumentEvents<'a> {
     /// Prepare a streaming parser over `input` without materializing the full document's tokens.
     pub(crate) fn new(input: &'a str, limits: &Limits, compat_flow: bool) -> Result<Self, Error> {
         let scanner = Scanner::with_compat(input, limits, compat_flow).map_err(|error| *error)?;
+        let (room, cap) = if input.len() <= 512 {
+            (7, 8)
+        } else if input.len() <= 8_192 {
+            (14, 16)
+        } else {
+            (EventSink::QUEUE_ROOM, 2 * EventSink::QUEUE_ROOM)
+        };
         Ok(Self {
             parser: Parser::new(
                 scanner,
                 EventSink::Queue {
-                    events: VecDeque::with_capacity(2 * EventSink::QUEUE_ROOM),
+                    events: VecDeque::with_capacity(cap),
                     root_entries: None,
-                    room: EventSink::QUEUE_ROOM,
+                    room,
                     want_root_entries: true,
                 },
                 limits,
@@ -68,6 +75,17 @@ impl<'a> DocumentEvents<'a> {
             step: None,
             stack: Vec::new(),
         })
+    }
+
+    /// Top up the lookahead queue up to its configured watermark when a collection opens, so small
+    /// collections see their closing event in the queue and supply an exact `size_hint()`.
+    /// Returns `true` when additional events were pulled into the queue.
+    pub(crate) fn refill_for_hint(&mut self) -> Result<bool, Error> {
+        if matches!(self.state, State::Finished) || self.parser.sink.is_full() {
+            return Ok(false);
+        }
+        self.fill()?;
+        Ok(true)
     }
 
     /// The next event, or `None` after the stream's end. After an error there are no more.
