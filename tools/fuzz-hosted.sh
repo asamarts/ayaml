@@ -24,8 +24,13 @@ work="$(mktemp -d)" || exit 2
 trap 'rm -rf "$work"' EXIT
 
 cd "$root" || exit 2
+dict_args=()
+if [[ -f "$root/fuzz/yaml.dict" ]]; then
+    dict_args=(-dict="$root/fuzz/yaml.dict")
+fi
 cargo fuzz run "$target" --target x86_64-unknown-linux-gnu -- \
-    -max_total_time="$seconds" -print_final_stats=1 >"$work/fuzz.log" 2>&1
+    -max_total_time="$seconds" -rss_limit_mb=2048 "${dict_args[@]}" \
+    -print_final_stats=1 >"$work/fuzz.log" 2>&1
 status=$?
 
 runs="$(sed -n 's/^stat::number_of_executed_units: *\([0-9]*\)$/\1/p' "$work/fuzz.log" | tail -n1)"

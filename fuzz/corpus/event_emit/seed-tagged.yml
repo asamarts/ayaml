@@ -1,0 +1,5 @@
+---
+!local
+key: "café \n 🚀"
+nested: {x: 1, y: null}
+...

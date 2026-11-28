@@ -18,7 +18,9 @@ use ayaml::{
 
 pub mod arbitrary_yaml;
 
-use arbitrary_yaml::{FuzzCanary, FuzzDoc, FuzzEventStream, FuzzStream, FuzzValue};
+use arbitrary_yaml::{
+    FuzzCanary, FuzzDoc, FuzzEventStream, FuzzStream, FuzzValue, MASKED_ERROR_SCENARIOS,
+};
 
 /// Structured deserialization target exercising field, sequence, map, and unknown-field errors.
 #[derive(Debug, PartialEq, serde::Deserialize)]
@@ -78,6 +80,126 @@ impl io::Write for FailingWriter {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+/// Target 0 (`parse`): raw-byte parsing across every public entry point without panicking.
+pub fn run_parse(data: &[u8]) {
+    let limits = Limits::default().with_max_documents(16);
+    let parse_opts = ParseOptions::new().with_limits(limits.clone());
+    let merge_opts = ParseOptions::new()
+        .with_limits(limits.clone())
+        .with_merge_keys(true);
+
+    // Raw-byte entry points must handle arbitrary (including non-UTF-8) slices safely.
+    let _unused = ayaml::from_slice_with::<Value>(data, &parse_opts);
+    let _unused = ayaml::from_slice_borrowed::<Value>(data);
+    let _unused = ayaml::from_reader_with::<_, Value>(data, &parse_opts);
+    let _unused = ayaml::from_reader_with::<_, Value>(data, &merge_opts);
+
+    let Ok(input) = std::str::from_utf8(data) else {
+        return;
+    };
+    let _unused = ayaml::parse_value_with(input, &parse_opts);
+    let _unused = ayaml::parse_documents_with(input, &parse_opts);
+    if let Ok(stream) = ayaml::parse_events_with(input, &parse_opts) {
+        let _unused = stream.collect::<Result<Vec<_>, _>>();
+    }
+    let _unused = ayaml::parse_tape_with(input, &parse_opts);
+    let _unused = ayaml::parse_tape_documents_with(input, &parse_opts);
+    let _unused = ayaml::split_frontmatter_with(input, &parse_opts);
+    let _unused = ayaml::parse_frontmatter_with::<Value>(input, &parse_opts);
+    let _unused = ayaml::parse_frontmatter_value_with(input, &parse_opts);
+    let _unused = ayaml::parse_value_with(input, &merge_opts);
+    let _unused = ayaml::from_str_with::<Value>(input, &merge_opts);
+    if let Ok(doc_de) = ayaml::DocumentDeserializer::from_str_with(input, &parse_opts) {
+        let _unused: Result<ayaml::Spanned<Value>, _> = serde::Deserialize::deserialize(doc_de);
+    }
+    let compat_opts = ayaml::compat::ParseOptions::new().with_limits(limits);
+    let _unused = ayaml::compat::from_str_with::<Value>(input, &compat_opts);
+    if let Ok(stream) = ayaml::compat::parse_events_with(input, &compat_opts) {
+        let _unused = stream.collect::<Result<Vec<_>, _>>();
+    }
+}
+
+/// Flow and Serde emission consistency checks invoked by `fuzz/fuzz_targets/emit.rs` and unit tests.
+///
+/// # Panics
+///
+/// Panics if flow emission alters documents or if `to_string_with` / `to_writer_with` disagree or
+/// emit unparseable YAML.
+pub fn check_emit_flow_and_serde(
+    input: &str,
+    documents: &[Value],
+    parse_options: &ParseOptions,
+    emit_options: &EmitOptions,
+) {
+    let is_size_limit = |error: &Error| {
+        error.kind() == ErrorKind::Limit
+            && error.limit().is_some_and(|l| {
+                matches!(
+                    l.kind(),
+                    ayaml::LimitKind::InputBytes | ayaml::LimitKind::OutputBytes
+                )
+            })
+    };
+    let flow_options = emit_options.clone().with_flow(true);
+    let flow_rendered = match ayaml::to_string_documents_with(documents, &flow_options) {
+        Ok(rendered) => rendered,
+        Err(error) if is_size_limit(&error) => return,
+        Err(error) => panic!("flow value emission failed: {error}; input={input:?}"),
+    };
+    let flow_decoded = match ayaml::parse_documents_with(&flow_rendered, parse_options) {
+        Ok(decoded) => decoded,
+        Err(error) if is_size_limit(&error) => return,
+        Err(error) => {
+            panic!(
+                "flow value output does not parse: {error}; input={input:?} rendered={flow_rendered:?}"
+            );
+        }
+    };
+    assert_eq!(
+        flow_decoded, documents,
+        "flow value output changes the documents; input={input:?} rendered={flow_rendered:?}"
+    );
+
+    if let [single] = documents {
+        for (label, opts) in [("serde-block", emit_options), ("serde-flow", &flow_options)] {
+            let as_string = ayaml::to_string_with(single, opts);
+            let mut buf = Vec::new();
+            let as_writer = ayaml::to_writer_with(&mut buf, single, opts);
+            match (as_string, as_writer) {
+                (Ok(rendered), Ok(())) => {
+                    assert_eq!(
+                        buf,
+                        rendered.as_bytes(),
+                        "{label}: to_writer_with disagreed with to_string_with; input={input:?}"
+                    );
+                    let reparsed = match ayaml::parse_value_with(&rendered, parse_options) {
+                        Ok(val) => val,
+                        Err(error) if is_size_limit(&error) => continue,
+                        Err(error) => {
+                            panic!(
+                                "{label} output does not parse: {error}; input={input:?} rendered={rendered:?}"
+                            );
+                        }
+                    };
+                    assert_eq!(
+                        reparsed, *single,
+                        "{label} output changed Value; input={input:?} rendered={rendered:?}"
+                    );
+                }
+                (Err(e1), Err(e2)) => {
+                    assert_eq!(e1.kind(), e2.kind(), "{label}: error kind mismatch");
+                    assert_eq!(e1.code(), e2.code(), "{label}: error code mismatch");
+                }
+                (a, b) => {
+                    panic!(
+                        "{label}: to_string_with={a:?} vs to_writer_with={b:?}; input={input:?}"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -394,12 +516,85 @@ pub fn run_spanned(data: &[u8]) {
     }
 }
 
+fn check_merge_api_consistency(rendered: &str, lim: &Limits) {
+    let merge_opts = ParseOptions::new()
+        .with_limits(lim.clone())
+        .with_merge_keys(true);
+    let _unused = ayaml::parse_events_with(rendered, &merge_opts)
+        .and_then(Iterator::collect::<Result<Vec<_>, _>>);
+    let as_value = ayaml::parse_value_with(rendered, &merge_opts);
+    let as_tape = ayaml::parse_tape_with(rendered, &merge_opts).map(|t| t.to_value());
+    let as_typed = ayaml::from_str_with::<Value>(rendered, &merge_opts);
+    let as_reader = ayaml::from_reader_with::<_, Value>(rendered.as_bytes(), &merge_opts);
+    let as_doc_de: Result<Value, Error> =
+        ayaml::DocumentDeserializer::from_str_with(rendered, &merge_opts)
+            .and_then(serde::Deserialize::deserialize);
+
+    if let Ok(ref expected) = as_value {
+        let tape_val = as_tape.expect("parse_tape_with(merge_keys) must match parse_value_with");
+        assert_eq!(&tape_val, expected, "merge_keys tape vs value mismatch");
+        match &as_typed {
+            Ok(typed_val) => {
+                assert_eq!(typed_val, expected, "merge_keys from_str vs value mismatch");
+            }
+            // Typed maps intentionally reject scalar keys whose rendered text collides.
+            Err(err) if err.kind() == ErrorKind::DuplicateKey => {}
+            Err(err) => {
+                panic!("merge_keys from_str_with failed while parse_value_with succeeded: {err:?}")
+            }
+        }
+    }
+
+    match (&as_typed, &as_reader) {
+        (Ok(a), Ok(b)) => assert_eq!(a, b, "merge_keys from_str vs from_reader mismatch"),
+        (Err(e1), Err(e2)) => {
+            assert_eq!(e1.kind(), e2.kind());
+            assert_eq!(e1.code(), e2.code());
+        }
+        (a, b) => panic!("merge_keys from_str={a:?} vs from_reader={b:?}"),
+    }
+
+    match (&as_typed, &as_doc_de) {
+        (Ok(a), Ok(b)) => assert_eq!(a, b, "merge_keys from_str vs DocumentDeserializer mismatch"),
+        (Err(e1), Err(e2)) => {
+            assert_eq!(e1.kind(), e2.kind());
+            assert_eq!(e1.code(), e2.code());
+        }
+        (a, b) => panic!("merge_keys from_str={a:?} vs DocumentDeserializer={b:?}"),
+    }
+
+    if let Ok(mut cursor) = ayaml::Deserializer::from_str_with(rendered, &merge_opts) {
+        let first = cursor.next_borrowed::<Value>();
+        if let Ok(ref expected) = as_typed {
+            match first.expect("cursor first doc must match from_str_with") {
+                Some(doc) => assert_eq!(&doc, expected, "merge_keys cursor first doc mismatch"),
+                // An empty / comment-only stream yields 0 documents on the stream cursor and
+                // `Value::Null` on single-document `from_str_with`.
+                None => assert_eq!(
+                    expected,
+                    &Value::Null,
+                    "empty cursor stream disagreed with non-null from_str_with"
+                ),
+            }
+            assert_eq!(
+                cursor
+                    .next_borrowed::<Value>()
+                    .expect("cursor EOF after single merged doc"),
+                None
+            );
+        } else {
+            while matches!(cursor.next_borrowed::<Value>(), Ok(Some(_))) {}
+        }
+    }
+}
+
 /// Target 3 (`merge_keys`): `Value::apply_merge_keys` and `apply_merge_keys_with_limits` safety,
-/// limit monotonicity, and idempotence.
+/// limit monotonicity, raw-byte safety, cross-API consistency, and idempotence.
 ///
 /// # Panics
 ///
-/// Panics if `apply_merge_keys_with_limits` violates limit monotonicity or idempotence.
+/// Panics if `apply_merge_keys_with_limits` violates limit monotonicity or idempotence, or if
+/// opt-in `with_merge_keys(true)` deserialization APIs disagree.
 pub fn run_merge_keys(data: &[u8]) {
     let mut u = Unstructured::new(data);
     let depth_lo: usize = u.int_in_range(0..=16).unwrap_or(2);
@@ -447,6 +642,16 @@ pub fn run_merge_keys(data: &[u8]) {
         let _unused = v_default.apply_merge_keys();
     };
 
+    // Feed raw bytes directly (when valid UTF-8) through both Value-level and event-level merges.
+    if let Ok(raw) = std::str::from_utf8(data) {
+        if let Ok(parsed) = ayaml::parse_value(raw) {
+            check_value(&parsed);
+        }
+        for lim in [&limits_lo, &limits_hi] {
+            check_merge_api_consistency(raw, lim);
+        }
+    }
+
     if let Ok(fuzz_val) = FuzzValue::arbitrary(&mut u) {
         check_value(&fuzz_val.value);
     }
@@ -455,23 +660,8 @@ pub fn run_merge_keys(data: &[u8]) {
         if let Ok(parsed) = ayaml::parse_value(&rendered) {
             check_value(&parsed);
         }
-        // Also exercise opt-in event-level merge expansion across all reader paths with tight
-        // and default limits.
         for lim in [&limits_lo, &limits_hi] {
-            let merge_opts = ParseOptions::new()
-                .with_limits(lim.clone())
-                .with_merge_keys(true);
-            let _unused = ayaml::parse_events_with(&rendered, &merge_opts)
-                .and_then(Iterator::collect::<Result<Vec<_>, _>>);
-            let _unused = ayaml::parse_value_with(&rendered, &merge_opts);
-            let _unused = ayaml::parse_tape_with(&rendered, &merge_opts);
-            let _unused = ayaml::from_str_with::<Value>(&rendered, &merge_opts);
-            if let Ok(doc_de) = ayaml::DocumentDeserializer::from_str_with(&rendered, &merge_opts) {
-                let _unused: Result<Value, _> = serde::Deserialize::deserialize(doc_de);
-            }
-            if let Ok(mut cursor) = ayaml::Deserializer::from_str_with(&rendered, &merge_opts) {
-                while matches!(cursor.next_borrowed::<Value>(), Ok(Some(_))) {}
-            }
+            check_merge_api_consistency(&rendered, lim);
         }
     }
 }
@@ -496,18 +686,15 @@ fn assert_masked_clean(error: &Error, secret: &str) {
     );
 }
 
-/// Target 4 (`masked_errors`): `Error::masked()` canary non-leakage across failure classes.
+/// Execute one `Error::masked()` canary scenario in `0..MASKED_ERROR_SCENARIOS`.
 ///
 /// # Panics
 ///
-/// Panics if `Error::masked()` leaks a generated secret canary or alters error metadata.
-pub fn run_masked_errors(data: &[u8]) {
-    let mut u = Unstructured::new(data);
-    let Ok(case) = FuzzCanary::arbitrary(&mut u) else {
-        return;
-    };
-    let s = &case.secret;
-    let err: Option<Error> = match case.scenario % 27 {
+/// Panics if the scenario unexpectedly succeeds or if `Error::masked()` leaks `secret`.
+pub fn run_masked_error_scenario(secret: &str, scenario: u8) {
+    let s = secret;
+    let idx = scenario % MASKED_ERROR_SCENARIOS;
+    let err: Option<Error> = match idx {
         0 => ayaml::parse_value(&format!("k: \"{s}")).err(),
         1 => ayaml::parse_value(&format!("k: \"{s}\\q\"")).err(),
         2 => ayaml::parse_value(&format!("@{s}\n")).err(),
@@ -547,8 +734,8 @@ pub fn run_masked_errors(data: &[u8]) {
         17 => ayaml::compat::from_str::<StrictConfig>(&format!("{s}: {s}\n")).err(),
         18 => {
             let mut merged = Mapping::new();
-            merged.insert(Value::from(format!("{s}_k1")), Value::from(s.clone()));
-            merged.insert(Value::from(format!("{s}_k2")), Value::from(s.clone()));
+            merged.insert(Value::from(format!("{s}_k1")), Value::from(s.to_owned()));
+            merged.insert(Value::from(format!("{s}_k2")), Value::from(s.to_owned()));
             let mut outer = Mapping::new();
             outer.insert(Value::from("<<"), Value::Mapping(merged));
             let mut root = Value::Mapping(outer);
@@ -578,15 +765,24 @@ pub fn run_masked_errors(data: &[u8]) {
         25 => ayaml::parse_tape(&format!("{s}: {s}\n"))
             .and_then(|t| <StrictConfig as serde::Deserialize>::deserialize(&t))
             .err(),
-        _ => ayaml::from_value::<ayaml::Spanned<String>>(Value::from(s.clone())).err(),
+        _ => ayaml::from_value::<ayaml::Spanned<String>>(Value::from(s.to_owned())).err(),
     };
-    let error = err.unwrap_or_else(|| {
-        panic!(
-            "masked_errors scenario {} unexpectedly succeeded",
-            case.scenario % 27
-        )
-    });
+    let error =
+        err.unwrap_or_else(|| panic!("masked_errors scenario {idx} unexpectedly succeeded"));
     assert_masked_clean(&error, s);
+}
+
+/// Target 4 (`masked_errors`): `Error::masked()` canary non-leakage across failure classes.
+///
+/// # Panics
+///
+/// Panics if `Error::masked()` leaks a generated secret canary or alters error metadata.
+pub fn run_masked_errors(data: &[u8]) {
+    let mut u = Unstructured::new(data);
+    let Ok(case) = FuzzCanary::arbitrary(&mut u) else {
+        return;
+    };
+    run_masked_error_scenario(&case.secret, case.scenario);
 }
 
 /// Target 5 (`event_emit`): arbitrary `Event` emission consistency and reparse soundness.
@@ -751,7 +947,138 @@ pub fn run_typed_equiv(data: &[u8]) {
             "Tape vs parse_value",
             &input,
         );
+        // Spanned<T> deserialization must agree with plain typed deserialization and produce
+        // in-bounds UTF-8 spans across both `from_str_with` and `DocumentDeserializer`.
+        let plain_val = ayaml::from_str_with::<Value>(&input, &opts);
+        let spanned_val = ayaml::from_str_with::<ayaml::Spanned<Value>>(&input, &opts);
+        let doc_de_spanned: Result<ayaml::Spanned<Value>, Error> =
+            ayaml::DocumentDeserializer::from_str_with(&input, &opts)
+                .and_then(serde::Deserialize::deserialize);
+        if let Ok(ref sv) = spanned_val {
+            check_span_bounds(&input, sv.span());
+        }
+        assert_tree_events_same(
+            plain_val,
+            spanned_val
+                .as_ref()
+                .map(|s| s.as_ref().clone())
+                .map_err(Clone::clone),
+            "Spanned<Value> vs Value",
+            &input,
+        );
+        assert_tree_events_same(
+            spanned_val,
+            doc_de_spanned,
+            "Spanned<Value> from_str vs DocumentDeserializer",
+            &input,
+        );
+        let plain_typed = ayaml::from_str_with::<TypedTarget>(&input, &opts);
+        let spanned_typed = ayaml::from_str_with::<ayaml::Spanned<TypedTarget>>(&input, &opts);
+        if let Ok(ref st) = spanned_typed {
+            check_span_bounds(&input, st.span());
+        }
+        assert_tree_events_same(
+            plain_typed,
+            spanned_typed.map(ayaml::Spanned::into_inner),
+            "Spanned<TypedTarget> vs TypedTarget",
+            &input,
+        );
+
+        // Nested streaming `Spanned<T>` values and `Spanned<String>` map keys (without wrapping
+        // the root in `Spanned<...>`, which would fall back to `NodeDeserializer`).
+        let map_tree = ayaml::internals::from_str_by_tree_with::<SpannedEntries>(
+            &input, &limits, false, false,
+        );
+        let map_events = ayaml::internals::from_str_by_events_with::<SpannedEntries>(
+            &input, &limits, false, false,
+        );
+        let map_doc_de: Result<SpannedEntries, Error> =
+            ayaml::DocumentDeserializer::from_str_with(&input, &opts)
+                .and_then(serde::Deserialize::deserialize);
+        if let Ok(ref m) = map_events {
+            for (k, v) in &m.0 {
+                check_span_bounds(&input, k.span());
+                check_span_bounds(&input, v.span());
+            }
+        }
+        assert_tree_events_same(
+            map_tree,
+            map_events.clone(),
+            "SpannedEntries tree vs events",
+            &input,
+        );
+        assert_tree_events_same(
+            map_events,
+            map_doc_de,
+            "SpannedEntries events vs DocumentDeserializer",
+            &input,
+        );
+
+        let nested_tree = ayaml::internals::from_str_by_tree_with::<NestedSpannedStruct>(
+            &input, &limits, false, false,
+        );
+        let nested_events = ayaml::internals::from_str_by_events_with::<NestedSpannedStruct>(
+            &input, &limits, false, false,
+        );
+        if let Ok(ref ns) = nested_events {
+            if let Some(ref a) = ns.a {
+                check_span_bounds(&input, a.span());
+            }
+            if let Some(ref b) = ns.b {
+                check_span_bounds(&input, b.span());
+            }
+            for item in &ns.items {
+                check_span_bounds(&input, item.span());
+            }
+        }
+        assert_tree_events_same(
+            nested_tree,
+            nested_events,
+            "NestedSpannedStruct tree vs events",
+            &input,
+        );
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SpannedEntries(Vec<(ayaml::Spanned<String>, ayaml::Spanned<Value>)>);
+
+impl<'de> serde::Deserialize<'de> for SpannedEntries {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct EntriesVisitor;
+        impl<'de> serde::de::Visitor<'de> for EntriesVisitor {
+            type Value = SpannedEntries;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a mapping with spanned string keys and spanned values")
+            }
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut entries = Vec::new();
+                while let Some((k, v)) =
+                    map.next_entry::<ayaml::Spanned<String>, ayaml::Spanned<Value>>()?
+                {
+                    entries.push((k, v));
+                }
+                Ok(SpannedEntries(entries))
+            }
+        }
+        deserializer.deserialize_map(EntriesVisitor)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+struct NestedSpannedStruct {
+    #[serde(default)]
+    a: Option<ayaml::Spanned<Value>>,
+    #[serde(default)]
+    b: Option<ayaml::Spanned<String>>,
+    #[serde(default)]
+    items: Vec<ayaml::Spanned<Value>>,
 }
 
 fn collect_edit_paths(
@@ -904,7 +1231,7 @@ pub fn run_edit(data: &[u8]) {
         let ops = [
             ayaml_edit::EditOp::ReplaceScalar {
                 path: paths[0].clone(),
-                value: replacement,
+                value: replacement.clone(),
             },
             ayaml_edit::EditOp::RemoveEntry {
                 path: paths[1].clone(),
@@ -914,17 +1241,62 @@ pub fn run_edit(data: &[u8]) {
             let applied = ayaml_edit::apply_edits(&input, verified.edits())
                 .expect("verified batch edits must apply cleanly");
             assert_eq!(applied, verified.output());
-            let _reparsed =
+            let reparsed =
                 ayaml::parse_value(verified.output()).expect("verified batch output must parse");
+            if !paths[0].starts_with(&paths[1])
+                && !paths[1].starts_with(&paths[0])
+                && let Some(after_replace) = replace_expected(&original, &paths[0], &replacement)
+                && let Some(expected) = remove_expected(&after_replace, &paths[1])
+            {
+                assert_eq!(
+                    reparsed, expected,
+                    "apply_batch semantic mismatch on {input:?}"
+                );
+            }
         }
+    }
+
+    // Exercise `ayaml_edit::apply_edits` directly on arbitrary fuzzer-generated `TextEdit` slices
+    // (out-of-bounds, inverted, mid-UTF-8, overlapping, unsorted, and valid slices).
+    let edit_count: usize = u.int_in_range(0..=6).unwrap_or(0);
+    let max_off = input.len().saturating_add(4);
+    let mut raw_edits = Vec::with_capacity(edit_count);
+    for _ in 0..edit_count {
+        let start = u.int_in_range(0..=max_off).unwrap_or(0);
+        let end = u.int_in_range(0..=max_off).unwrap_or(0);
+        let repl = match u.int_in_range(0_u8..=4).unwrap_or(0) {
+            0 => "",
+            1 => "x",
+            2 => "café",
+            3 => "🚀\n",
+            _ => "42",
+        };
+        raw_edits.push(ayaml_edit::TextEdit::new(
+            ayaml::Span::new(start, end),
+            repl,
+        ));
+    }
+    if let Ok(spliced) = ayaml_edit::apply_edits(&input, &raw_edits) {
+        let mut expected_len = input.len();
+        for edit in &raw_edits {
+            expected_len = expected_len - edit.span().len() + edit.replacement().len();
+        }
+        assert_eq!(
+            spliced.len(),
+            expected_len,
+            "apply_edits output byte length mismatch"
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use arbitrary::{Arbitrary, Unstructured};
+
     use super::{
-        run_event_emit, run_masked_errors, run_merge_keys, run_spanned, run_structured,
-        run_typed_equiv,
+        arbitrary_yaml::{FuzzCanary, MASKED_ERROR_SCENARIOS},
+        check_emit_flow_and_serde, run_edit, run_event_emit, run_masked_error_scenario,
+        run_masked_errors, run_merge_keys, run_parse, run_spanned, run_structured, run_typed_equiv,
     };
 
     fn deterministic_seeds() -> Vec<Vec<u8>> {
@@ -996,7 +1368,61 @@ mod tests {
     #[test]
     fn edit_harness_runs_on_seeds() {
         for seed in deterministic_seeds() {
-            super::run_edit(&seed);
+            run_edit(&seed);
+        }
+    }
+
+    #[test]
+    fn parse_and_emit_harnesses_run_on_seeds() {
+        let limits = ayaml::Limits::default().with_max_documents(16);
+        let parse_opts = ayaml::ParseOptions::new().with_limits(limits.clone());
+        let emit_opts = ayaml::EmitOptions::new().with_limits(limits);
+        for seed in deterministic_seeds() {
+            run_parse(&seed);
+            if let Ok(text) = std::str::from_utf8(&seed)
+                && let Ok(docs) = ayaml::parse_documents_with(text, &parse_opts)
+            {
+                check_emit_flow_and_serde(text, &docs, &parse_opts, &emit_opts);
+            }
+        }
+        // Invalid UTF-8 bytes must be handled safely by raw-byte entry points.
+        run_parse(b"k: \xff\xfe\n");
+    }
+
+    #[test]
+    fn masked_errors_covers_every_scenario_branch() {
+        let secret = "CANARY_ALL_27_BRANCHES_é_🚀";
+        for scenario in 0..MASKED_ERROR_SCENARIOS {
+            run_masked_error_scenario(secret, scenario);
+        }
+
+        // Verify `FuzzCanary::arbitrary` actually generates every scenario 0..MASKED_ERROR_SCENARIOS
+        // so generator and dispatcher ranges can never drift out of sync again.
+        let mut seen = vec![false; usize::from(MASKED_ERROR_SCENARIOS)];
+        let mut state: u64 = 0xA171_BEEF_CAFE_0001;
+        for _ in 0..2_000 {
+            let mut buf = [0_u8; 40];
+            for byte in &mut buf {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                *byte = (state & 0xFF) as u8;
+            }
+            let mut u = Unstructured::new(&buf);
+            if let Ok(canary) = FuzzCanary::arbitrary(&mut u) {
+                let idx = usize::from(canary.scenario);
+                assert!(
+                    idx < usize::from(MASKED_ERROR_SCENARIOS),
+                    "FuzzCanary scenario {idx} out of range"
+                );
+                seen[idx] = true;
+            }
+        }
+        for (idx, hit) in seen.iter().enumerate() {
+            assert!(
+                *hit,
+                "FuzzCanary::arbitrary never generated masked_errors scenario {idx}"
+            );
         }
     }
 }

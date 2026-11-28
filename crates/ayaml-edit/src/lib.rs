@@ -1766,12 +1766,12 @@ mod kani_proofs {
         let mut spans = [Span::new(0, 0); 3];
         let mut repl_lens = [0usize; 3];
         for i in 0..3 {
-            let start: usize = kani::any();
-            let end: usize = kani::any();
-            let repl_len: usize = kani::any();
+            let start: u8 = kani::any();
+            let end: u8 = kani::any();
+            let repl_len: u8 = kani::any();
             kani::assume(start <= 13 && end <= 13 && repl_len <= 64);
-            spans[i] = Span::new(start, end);
-            repl_lens[i] = repl_len;
+            spans[i] = Span::new(usize::from(start), usize::from(end));
+            repl_lens[i] = usize::from(repl_len);
         }
 
         if validate_edit_spans(input, &spans).is_ok() {
@@ -1788,11 +1788,19 @@ mod kani_proofs {
                 assert!(input.is_char_boundary(cursor));
                 assert!(input.is_char_boundary(span.start()));
                 assert!(input.is_char_boundary(span.end()));
-                expected_len += input[cursor..span.start()].len();
+                // Use `str::get` so CBMC proves `&input[cursor..span.start()]` cannot panic
+                // without symbolically unwinding `core::str::slice_error_fail_rt`.
+                let Some(unchanged) = input.get(cursor..span.start()) else {
+                    panic!("validated edit span must slice input on UTF-8 boundaries");
+                };
+                expected_len += unchanged.len();
                 expected_len += repl_lens[i];
                 cursor = span.end();
             }
-            expected_len += input[cursor..].len();
+            let Some(tail) = input.get(cursor..) else {
+                panic!("validated edit cursor must slice input tail on UTF-8 boundaries");
+            };
+            expected_len += tail.len();
             let pairs = [
                 (spans[0], repl_lens[0]),
                 (spans[1], repl_lens[1]),

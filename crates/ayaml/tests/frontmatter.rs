@@ -310,6 +310,42 @@ fn over_limit_multibyte_utf8_delimiter_comments_never_panic() {
     }
 }
 
+#[test]
+fn frontmatter_bounded_line_scan_exact_limit_and_crlf_edges() {
+    // Non-delimiter line whose `\n` sits at byte `remaining` exceeds `max_input_bytes`.
+    let opts_8 = ParseOptions::new().with_limits(Limits::new().with_max_input_bytes(8));
+    let over_nl = ayaml::split_frontmatter_with("---\nabcd\n---", &opts_8)
+        .expect_err("newline past remaining budget must fail with InputBytes");
+    assert_eq!(over_nl.kind(), ErrorKind::Limit);
+    assert_eq!(
+        over_nl.limit().map(ayaml::LimitExceeded::kind),
+        Some(LimitKind::InputBytes)
+    );
+
+    // Unterminated final line whose length equals `remaining` exactly hits EOF cleanly and
+    // reports missing closing delimiter (`Parser`), not `InputBytes` or a slice panic.
+    let eof_exact = ayaml::split_frontmatter_with("---\nabcd", &opts_8)
+        .expect_err("exact-limit unterminated frontmatter reports missing delimiter");
+    assert_eq!(eof_exact.kind(), ErrorKind::Parser);
+
+    // CRLF line where `i + 2 == remaining < i * 2` (`i = 4`, `remaining = 6`) must succeed the
+    // line scan and reach missing closing delimiter (`Parser`) rather than `InputBytes`.
+    let opts_10 = ParseOptions::new().with_limits(Limits::new().with_max_input_bytes(10));
+    let crlf_exact = ayaml::split_frontmatter_with("---\na: 1\r\n", &opts_10)
+        .expect_err("exact-limit CRLF line reaches missing closing delimiter");
+    assert_eq!(crlf_exact.kind(), ErrorKind::Parser);
+
+    // Same CRLF line with 1 byte less (`remaining = 5 < 6`) must fail with `InputBytes`.
+    let opts_9 = ParseOptions::new().with_limits(Limits::new().with_max_input_bytes(9));
+    let crlf_over = ayaml::split_frontmatter_with("---\na: 1\r\n", &opts_9)
+        .expect_err("CRLF split across remaining budget must fail with InputBytes");
+    assert_eq!(crlf_over.kind(), ErrorKind::Limit);
+    assert_eq!(
+        crlf_over.limit().map(ayaml::LimitExceeded::kind),
+        Some(LimitKind::InputBytes)
+    );
+}
+
 proptest! {
     #![proptest_config(proptest_config())]
 

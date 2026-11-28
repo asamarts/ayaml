@@ -180,4 +180,5 @@ fuzz_target!(|data: &[u8]| {
         decoded, documents,
         "value output changes the documents; input={input:?} rendered={rendered:?}"
     );
+    ayaml_fuzz::check_emit_flow_and_serde(input, &documents, &parse_options, &emit_options);
 });

@@ -21,3 +21,17 @@ __pycache__/
 !/fuzz/corpus/emit/tag-directive.yml
 !/fuzz/corpus/borrowed/
 !/fuzz/corpus/borrowed/basic.yml
+!/fuzz/corpus/edit/
+!/fuzz/corpus/edit/seed-*.yml
+!/fuzz/corpus/event_emit/
+!/fuzz/corpus/event_emit/seed-*.yml
+!/fuzz/corpus/masked_errors/
+!/fuzz/corpus/masked_errors/seed-*.txt
+!/fuzz/corpus/merge_keys/
+!/fuzz/corpus/merge_keys/seed-*.yml
+!/fuzz/corpus/spanned/
+!/fuzz/corpus/spanned/seed-*.yml
+!/fuzz/corpus/structured/
+!/fuzz/corpus/structured/seed-*.yml
+!/fuzz/corpus/typed_equiv/
+!/fuzz/corpus/typed_equiv/seed-*.yml

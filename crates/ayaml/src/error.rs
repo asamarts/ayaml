@@ -786,38 +786,46 @@ const fn format_unicode_escape(ch: char) -> ([u8; 10], usize) {
 }
 
 /// Append `\u{<hex>}` for a Unicode scalar value without allocating an intermediate `String`.
-fn push_unicode_escape(out: &mut String, ch: char) {
+fn write_unicode_escape(out: &mut impl fmt::Write, ch: char) {
     let (buf, len) = format_unicode_escape(ch);
     for &byte in &buf[..len] {
-        out.push(char::from(byte));
+        let _ = out.write_char(char::from(byte));
     }
 }
 
 /// A key in brackets and quotes, with anything that could change how a terminal shows it escaped.
 fn quoted_key(key: &str) -> String {
     let mut quoted = String::with_capacity(key.len().min(MAX_KEY_CHARS * 4) + 8);
-    push_quoted_key(&mut quoted, key, MAX_KEY_CHARS);
+    write_quoted_key(&mut quoted, key, MAX_KEY_CHARS);
     quoted
 }
 
-/// Append `key` in brackets and quotes to `quoted`, keeping at most `max_chars` Unicode scalars.
-fn push_quoted_key(quoted: &mut String, key: &str, max_chars: usize) {
-    quoted.push_str("[\"");
-    let mut chars = key.chars();
-    for next in chars.by_ref().take(max_chars) {
-        match next {
-            '"' | '\\' => {
-                quoted.push('\\');
-                quoted.push(next);
-            }
-            _ if hides_text(next) => push_unicode_escape(quoted, next),
-            _ => quoted.push(next),
+/// Append a single character of a quoted error-path key, escaping quotes, backslashes, and hidden
+/// characters.
+fn write_quoted_key_char(quoted: &mut impl fmt::Write, next: char) {
+    match next {
+        '"' | '\\' => {
+            let _ = quoted.write_char('\\');
+            let _ = quoted.write_char(next);
+        }
+        _ if hides_text(next) => write_unicode_escape(quoted, next),
+        _ => {
+            let _ = quoted.write_char(next);
         }
     }
-    if chars.next().is_some() {
-        quoted.push_str(ELIDED);
+}
+
+/// Append `key` in brackets and quotes to `quoted`, keeping at most `max_chars` Unicode scalars.
+fn write_quoted_key(quoted: &mut impl fmt::Write, key: &str, max_chars: usize) {
+    let _ = quoted.write_str("[\"");
+    let mut chars = key.chars();
+    for next in chars.by_ref().take(max_chars) {
+        write_quoted_key_char(quoted, next);
     }
-    quoted.push_str("\"]");
+    if chars.next().is_some() {
+        let _ = quoted.write_str(ELIDED);
+    }
+    let _ = quoted.write_str("\"]");
 }
 
 /// Control characters, line separators, the byte order mark, and the marks that reorder text.
@@ -1696,7 +1704,7 @@ mod tests {
 mod kani_proofs {
     use super::{
         ELIDED, Error, ErrorKind, MAX_KEY_CHARS, MAX_PATH_BYTES, format_unicode_escape, hides_text,
-        is_short_name, path_bytes, push_quoted_key, resolve_path_step,
+        is_short_name, path_bytes, resolve_path_step, write_quoted_key, write_quoted_key_char,
     };
 
     #[kani::proof]
@@ -1800,30 +1808,105 @@ mod kani_proofs {
         }
     }
 
-    #[kani::proof]
-    #[kani::unwind(24)]
-    fn verify_push_quoted_key_escapes_and_truncates() {
-        // Verify real `push_quoted_key` across 1-, 2-, 3-, and 4-byte UTF-8 scalars, quotes,
-        // backslashes, control chars, BiDi overrides, and BOM across concrete truncation caps.
-        for (sample, cap, expect_elided) in [
-            ("é\u{202e}🚀", 2_usize, true),
-            ("é\u{202e}🚀", 3_usize, false),
-            ("a\"\\\0\u{feff}", 4_usize, true),
-        ] {
-            let mut quoted = String::with_capacity(64);
-            push_quoted_key(&mut quoted, sample, cap);
-            let qbytes = quoted.as_bytes();
-            assert!(qbytes.len() >= 4);
-            assert_eq!(qbytes[0], b'[');
-            assert_eq!(qbytes[1], b'"');
-            assert_eq!(qbytes[qbytes.len() - 2], b'"');
-            assert_eq!(qbytes[qbytes.len() - 1], b']');
-            if expect_elided {
-                let tail = &qbytes[qbytes.len() - 2 - ELIDED.len()..qbytes.len() - 2];
-                assert_eq!(tail, ELIDED.as_bytes());
+    struct StackBuf {
+        bytes: [u8; 64],
+        len: usize,
+    }
+    impl StackBuf {
+        const fn new() -> Self {
+            Self {
+                bytes: [0; 64],
+                len: 0,
             }
-            for out_ch in quoted.chars() {
-                assert!(!hides_text(out_ch));
+        }
+        fn push_byte(&mut self, b: u8) {
+            assert!(self.len < self.bytes.len());
+            self.bytes[self.len] = b;
+            self.len += 1;
+        }
+        fn as_slice(&self) -> &[u8] {
+            &self.bytes[..self.len]
+        }
+    }
+    impl core::fmt::Write for StackBuf {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            for &b in s.as_bytes() {
+                self.push_byte(b);
+            }
+            Ok(())
+        }
+        fn write_char(&mut self, c: char) -> core::fmt::Result {
+            let cp = c as u32;
+            if cp < 0x80 {
+                self.push_byte(cp as u8);
+            } else if cp < 0x800 {
+                self.push_byte((0xC0 | (cp >> 6)) as u8);
+                self.push_byte((0x80 | (cp & 0x3F)) as u8);
+            } else if cp < 0x1_0000 {
+                self.push_byte((0xE0 | (cp >> 12)) as u8);
+                self.push_byte((0x80 | ((cp >> 6) & 0x3F)) as u8);
+                self.push_byte((0x80 | (cp & 0x3F)) as u8);
+            } else {
+                self.push_byte((0xF0 | (cp >> 18)) as u8);
+                self.push_byte((0x80 | ((cp >> 12) & 0x3F)) as u8);
+                self.push_byte((0x80 | ((cp >> 6) & 0x3F)) as u8);
+                self.push_byte((0x80 | (cp & 0x3F)) as u8);
+            }
+            Ok(())
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn verify_write_quoted_key_char_all_unicode() {
+        // Exhaustive symbolic proof over ALL 1,112,064 Unicode scalars through `write_quoted_key_char`.
+        let ch: char = kani::any();
+        let mut single = StackBuf::new();
+        write_quoted_key_char(&mut single, ch);
+        let sbytes = single.as_slice();
+        assert!(!sbytes.is_empty() && sbytes.len() <= 10);
+        if matches!(ch, '"' | '\\') {
+            assert_eq!(sbytes, &[b'\\', ch as u8]);
+        } else if hides_text(ch) {
+            assert!(sbytes.len() >= 5 && sbytes.starts_with(b"\\u{") && sbytes.ends_with(b"}"));
+            for &b in sbytes {
+                assert!((0x20..0x7f).contains(&b));
+            }
+        } else {
+            assert_eq!(sbytes.len(), ch.len_utf8());
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(36)]
+    fn verify_push_quoted_key_escapes_and_truncates() {
+        // Concrete table across empty, ASCII, quotes/backslashes, controls, BiDi, BOM, and
+        // 2-/3-/4-byte UTF-8 at boundary caps `0..=4` keeps write indices concrete (paired with
+        // the exhaustive symbolic `verify_write_quoted_key_char_all_unicode` proof above).
+        for (sample, cap, expect_elided) in [
+            ("", 0_usize, false),
+            ("a\"\\\0", 0, true),
+            ("a\"\\\0", 2, true),
+            ("a\"\\\0", 4, false),
+            ("é\u{202e}🚀", 2, true),
+            ("é\u{202e}🚀", 3, false),
+            ("\u{feff}€\n\x7f", 3, true),
+            ("\u{feff}€\n\x7f", 4, false),
+        ] {
+            let mut out = StackBuf::new();
+            write_quoted_key(&mut out, sample, cap);
+            let qbytes = out.as_slice();
+            assert!(qbytes.len() >= 4 && qbytes.starts_with(b"[\"") && qbytes.ends_with(b"\"]"));
+            if expect_elided {
+                assert_eq!(
+                    &qbytes[qbytes.len() - 2 - ELIDED.len()..qbytes.len() - 2],
+                    ELIDED.as_bytes()
+                );
+            } else {
+                assert!(!qbytes[..qbytes.len() - 2].ends_with(ELIDED.as_bytes()));
+            }
+            for &b in qbytes {
+                assert!(b >= 0x20 && b != 0x7f);
             }
         }
     }

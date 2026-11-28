@@ -391,11 +391,12 @@ mod kani_proofs {
     use super::{FrontmatterDelimiter, match_delimiter_line, next_line_len_bounded};
 
     #[kani::proof]
-    #[kani::unwind(8)]
+    #[kani::unwind(9)]
     fn verify_next_line_len_bounded_invariants() {
-        // Constant-offset symbolic fill with an optional 2-byte UTF-8 `'é'` (`0xC3, 0xA9`)
-        // at any valid interior position so `is_char_boundary` is checked non-vacuously.
-        let mut buf = [0_u8; 6];
+        // Constant-offset symbolic fill (<= 7 bytes to stay below `from_utf8`'s 8-byte SWAR
+        // loop) with optional 2-, 3-, or 4-byte UTF-8 scalars (`'é'`, `'€'`, `'🚀'`) at any valid
+        // interior position so `is_char_boundary` is checked across every UTF-8 sequence width.
+        let mut buf = [0_u8; 7];
         for slot in &mut buf {
             *slot = match kani::any::<u8>() & 3 {
                 0 => b'a',
@@ -406,11 +407,23 @@ mod kani_proofs {
         }
         let len: usize = kani::any();
         kani::assume(len <= buf.len());
-        if kani::any::<bool>() && len >= 2 {
-            let mb_pos: usize = kani::any();
-            kani::assume(mb_pos <= len - 2);
-            buf[mb_pos] = 0xC3;
-            buf[mb_pos + 1] = 0xA9;
+        match kani::any::<u8>() & 3 {
+            1 if len >= 2 => {
+                let mb_pos: usize = kani::any();
+                kani::assume(mb_pos <= len - 2);
+                buf[mb_pos..mb_pos + 2].copy_from_slice(&[0xC3, 0xA9]); // 'é'
+            }
+            2 if len >= 3 => {
+                let mb_pos: usize = kani::any();
+                kani::assume(mb_pos <= len - 3);
+                buf[mb_pos..mb_pos + 3].copy_from_slice(&[0xE2, 0x82, 0xAC]); // '€'
+            }
+            3 if len >= 4 => {
+                let mb_pos: usize = kani::any();
+                kani::assume(mb_pos <= len - 4);
+                buf[mb_pos..mb_pos + 4].copy_from_slice(&[0xF0, 0x9F, 0x9A, 0x80]); // '🚀'
+            }
+            _ => {}
         }
         let max_len: usize = kani::any();
         let Ok(s) = std::str::from_utf8(&buf[..len]) else {
@@ -448,9 +461,9 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::unwind(9)]
     fn verify_match_delimiter_line_bounds() {
-        // Constant-offset symbolic buffer up to 7 bytes with optional 2-byte UTF-8 `'é'`
-        // (`0xC3, 0xA9`) placed at any valid position >= 3, covering `--- #é`, `----\n`,
-        // `...\t#é`, and arbitrary non-delimiter prefixes without nested loop blowup.
+        // Constant-offset symbolic buffer up to 7 bytes (staying below `from_utf8`'s 8-byte SWAR
+        // loop while covering arbitrary prefixes, whitespace, comments, line endings, and
+        // multi-byte UTF-8 sequences `'é'`/`'€'`/`'🚀'`).
         let mut buf = [0_u8; 7];
         match kani::any::<u8>() & 3 {
             0 => buf[0..3].copy_from_slice(b"---"),
@@ -472,11 +485,23 @@ mod kani_proofs {
         }
         let len: usize = kani::any();
         kani::assume(len <= buf.len());
-        if kani::any::<bool>() && len >= 5 {
-            let mb_pos: usize = kani::any();
-            kani::assume((3..=len - 2).contains(&mb_pos));
-            buf[mb_pos] = 0xC3;
-            buf[mb_pos + 1] = 0xA9;
+        match kani::any::<u8>() & 3 {
+            1 if len >= 5 => {
+                let mb_pos: usize = kani::any();
+                kani::assume((3..=len - 2).contains(&mb_pos));
+                buf[mb_pos..mb_pos + 2].copy_from_slice(&[0xC3, 0xA9]); // 'é'
+            }
+            2 if len >= 6 => {
+                let mb_pos: usize = kani::any();
+                kani::assume((3..=len - 3).contains(&mb_pos));
+                buf[mb_pos..mb_pos + 3].copy_from_slice(&[0xE2, 0x82, 0xAC]); // '€'
+            }
+            3 if len >= 7 => {
+                let mb_pos: usize = kani::any();
+                kani::assume((3..=len - 4).contains(&mb_pos));
+                buf[mb_pos..mb_pos + 4].copy_from_slice(&[0xF0, 0x9F, 0x9A, 0x80]); // '🚀'
+            }
+            _ => {}
         }
         let opening_only: bool = kani::any();
         let max_len: Option<usize> = if kani::any() {
@@ -486,10 +511,35 @@ mod kani_proofs {
         } else {
             None
         };
-        let Ok(s) = std::str::from_utf8(&buf[..len]) else {
-            return;
-        };
+        if let Ok(s) = std::str::from_utf8(&buf[..len]) {
+            check_match_delimiter_invariants(s, opening_only, max_len);
+        }
+    }
 
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn verify_match_delimiter_line_multibyte_comments() {
+        // Static 2-, 3-, and 4-byte UTF-8 comment lines (no `from_utf8` SWAR loop) with symbolic
+        // `max_len` spanning every interior continuation byte of `'é'`, `'€'`, and `'🚀'`,
+        // directly proving the comment-truncation continuation-skip loop keeps UTF-8 boundaries.
+        let opening_only: bool = kani::any();
+        let comment_limit: usize = kani::any();
+        kani::assume(comment_limit <= 12);
+        for sample in [
+            "--- #é\n",
+            "... #é\n",
+            "--- #€\n",
+            "... #€\n",
+            "--- #🚀\n",
+            "... #🚀\n",
+        ] {
+            check_match_delimiter_invariants(sample, opening_only, Some(comment_limit));
+        }
+    }
+
+    fn check_match_delimiter_invariants(s: &str, opening_only: bool, max_len: Option<usize>) {
+        let bytes = s.as_bytes();
+        let len = bytes.len();
         if let Some(matched) = match_delimiter_line(s, opening_only, max_len) {
             if opening_only {
                 assert_eq!(matched.kind, FrontmatterDelimiter::DocumentStart);
@@ -497,7 +547,7 @@ mod kani_proofs {
             assert!(matched.next_offset <= len);
             assert!(s.is_char_boundary(matched.next_offset));
             if len > 3 {
-                assert!(matches!(buf[3], b' ' | b'\t' | b'\n' | b'\r'));
+                assert!(matches!(bytes[3], b' ' | b'\t' | b'\n' | b'\r'));
             }
             if !matched.exceeded_limit {
                 assert!(matched.next_offset >= 3);
@@ -508,8 +558,8 @@ mod kani_proofs {
                     assert!(matched.next_offset >= 4);
                     if matched.next_offset < len {
                         assert!(
-                            !(buf[matched.next_offset - 1] == b'\r'
-                                && buf[matched.next_offset] == b'\n')
+                            !(bytes[matched.next_offset - 1] == b'\r'
+                                && bytes[matched.next_offset] == b'\n')
                         );
                     }
                 } else {

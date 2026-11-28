@@ -537,7 +537,7 @@ job_fuzz-smoke() {
   fi
   local TARGET
   for TARGET in parse emit borrowed structured spanned merge_keys masked_errors event_emit typed_equiv edit; do
-    timed_step "fuzz $TARGET (60 s)" cargo +nightly fuzz run "$TARGET" --target x86_64-unknown-linux-gnu -- -max_total_time=60 -rss_limit_mb=2048
+    timed_step "fuzz $TARGET (60 s)" cargo +nightly fuzz run "$TARGET" --target x86_64-unknown-linux-gnu -- -max_total_time=60 -rss_limit_mb=2048 -dict=fuzz/yaml.dict
     # Hosted runs keep this output off the public log, which a local run needn't. See D74.
     # Mirrors: sudo apt-get update -q && sudo apt-get install -y -q age
     # Mirrors: cargo fuzz build TARGET --target x86_64-unknown-linux-gnu
