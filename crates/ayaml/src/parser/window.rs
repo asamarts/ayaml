@@ -583,7 +583,15 @@ impl<'a> LineWindow<'a> {
                         break;
                     }
                     Err(error) => {
-                        if self.scanner.saw_flow_start() {
+                        // Only defer *non-limit* scanner errors mid-line after a flow opener.
+                        // Returning a scanner *limit* error on the demanded line (and parking it
+                        // in `prefetch_error` when prefetched) preserves strict limit monotonicity:
+                        // keeping partial tokens of a limit-truncated line can hide a later `:` or
+                        // line break and swap `Ok` or one non-limit error into a different non-limit
+                        // error.
+                        if error.kind() != crate::error::ErrorKind::Limit
+                            && self.scanner.saw_flow_start()
+                        {
                             self.eof = true;
                             self.truncated_last_line = self.tokens.len() > line_start;
                             self.scanner_error = Some(AssertUnwindSafe(error));
@@ -592,7 +600,7 @@ impl<'a> LineWindow<'a> {
                         if demanded {
                             return Err(error);
                         }
-                        // Speculative prefetch hit a non-flow scanner error on a future line:
+                        // Speculative prefetch hit a scanner or limit error on a future line:
                         // discard partial tokens for this line and park the error until the parser
                         // actually demands `loaded_end()`.
                         self.tokens.truncate(line_start);

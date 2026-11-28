@@ -45,8 +45,10 @@ fn value_writer_stops_looping_immediately_after_first_error() {
     let opts = EmitterOptions::new().with_flow(true);
     let payload = "long-payload-string-forcing-limit";
 
-    // 1. Flow sequence of 2,000 elements stops after at most 2 iterations.
-    let seq = Value::Sequence((0..2_000).map(|_| Value::from(payload)).collect());
+    let count = if cfg!(miri) { 64 } else { 2_000 };
+
+    // 1. Flow sequence stops after at most 2 iterations.
+    let seq = Value::Sequence((0..count).map(|_| Value::from(payload)).collect());
     let mut buf = Vec::new();
     let mut out = Output::direct(&mut buf, &limits);
     let mut writer = ValueWriter::new(&mut out, &limits, opts, None, TagDirectives::default());
@@ -63,9 +65,9 @@ fn value_writer_stops_looping_immediately_after_first_error() {
         Some(LimitKind::OutputBytes)
     );
 
-    // 2. Flow mapping of 2,000 entries stops after at most 2 iterations.
-    let mut map = crate::Mapping::with_capacity(2_000);
-    for i in 0..2_000 {
+    // 2. Flow mapping stops after at most 2 iterations.
+    let mut map = crate::Mapping::with_capacity(count);
+    for i in 0..count {
         map.insert(Value::from(format!("k{i}")), Value::from(payload));
     }
     let map_val = Value::Mapping(map);
@@ -82,7 +84,7 @@ fn value_writer_stops_looping_immediately_after_first_error() {
     assert_eq!(err.kind(), ErrorKind::Limit);
 
     // 3. Multi-line block scalar stops after at most 3 lines when output limit trips.
-    let multiline = Value::String("0123456789abcdef\n".repeat(2_000));
+    let multiline = Value::String("0123456789abcdef\n".repeat(count));
     let mut buf = Vec::new();
     let mut out = Output::direct(&mut buf, &limits);
     let mut writer = ValueWriter::new(
@@ -230,7 +232,10 @@ fn iterative_value_writer_and_tag_scan_handle_deep_nesting_on_small_stack() {
     let handle = std::thread::Builder::new()
         .stack_size(512 << 10)
         .spawn(|| {
-            const DEPTH: usize = 512;
+            // Under Miri, depth 136 still exceeds MAX_DEPTH_CAP (128) and exercises all three
+            // TieredStack tiers (inline 8 -> medium 128 -> heap overflow) without O(DEPTH^2)
+            // indentation formatting taking minutes under interpretation.
+            const DEPTH: usize = if cfg!(miri) { 136 } else { 512 };
             let limits = Limits::default().with_max_depth(DEPTH);
             let tight_limits = Limits::default().with_max_depth(DEPTH - 1);
 
@@ -383,8 +388,9 @@ fn value_writer_enforces_output_limit_incrementally_for_folded_and_tag_directive
     );
 
     // 2. Huge directive-requiring tag prefix fails inside `TagDirectives::scan` before allocating.
+    let huge = if cfg!(miri) { 512 } else { 100_000 };
     let huge_directive_tag = Value::Tagged(Box::new(TaggedValue::new(
-        Tag::new(format!("custom {}:", "p".repeat(100_000)), "s"),
+        Tag::new(format!("custom {}:", "p".repeat(huge)), "s"),
         Value::from("v"),
     )));
     let tight = crate::EmitOptions::new().with_limits(Limits::default().with_max_output_bytes(64));
@@ -398,7 +404,7 @@ fn value_writer_enforces_output_limit_incrementally_for_folded_and_tag_directive
 
     // 3. Huge local tag streams directly through `write_tag` and stops at `max_output_bytes`.
     let huge_local_tag = Value::Tagged(Box::new(TaggedValue::new(
-        Tag::local("x".repeat(100_000)),
+        Tag::local("x".repeat(huge)),
         Value::from("v"),
     )));
     let err =

@@ -1151,18 +1151,32 @@ fn invalid_limits_take_precedence_over_input_size_and_root_size_hint_is_clamped(
 /// (including later scanner *limit* errors such as block-sequence depth or scalar byte limits),
 /// across every default, streaming (> 4 KiB), merge-key, and compat reader.
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "table-driven monotonicity checks across every default, streaming, merge, and compat reader"
+)]
 fn raising_max_depth_keeps_earlier_parser_error_before_later_scanner_error() {
     use serde::Deserialize as _;
 
-    // Inputs where a tighter `max_depth` triggers scanner `stop_after` on a flow opener so an
-    // earlier parser/semantic error fires first; raising `max_depth` must never swap that
-    // non-limit error for a later scanner non-limit or scanner limit error.
-    let small_cases: &[(&str, &str, Limits, Limits, ayaml::ErrorCode)] = &[
+    // Multi-line inputs and non-limit scanner errors (`@`) on a flow line: an earlier line's
+    // non-limit error or an earlier non-limit error before `@` stays identical across `lo` and
+    // `hi`. Single-line inputs whose demanded line itself exceeds a scanner limit (`DepthLimit` /
+    // `ScalarSizeLimit`) enforce the scanner limit directly rather than parsing a truncated prefix
+    // (D110), guaranteeing strict monotonicity without information-theoretic ambiguity.
+    let small_cases: &[(
+        &str,
+        &str,
+        Limits,
+        Limits,
+        ayaml::ErrorCode,
+        ayaml::ErrorCode,
+    )] = &[
         (
             "later non-limit scanner error",
             "}}-x\n{ ![bad }\n",
             Limits::default().with_max_depth(0),
             Limits::default().with_max_depth(2),
+            ayaml::ErrorCode::UnexpectedToken,
             ayaml::ErrorCode::UnexpectedToken,
         ),
         (
@@ -1171,13 +1185,15 @@ fn raising_max_depth_keeps_earlier_parser_error_before_later_scanner_error() {
             Limits::default().with_max_depth(0),
             Limits::default().with_max_depth(1),
             ayaml::ErrorCode::UnexpectedToken,
+            ayaml::ErrorCode::UnexpectedToken,
         ),
         (
-            "later scanner ScalarSizeLimit",
+            "same-line scanner DepthLimit before later ScalarSizeLimit",
             "[ !a !b [ 1234567890 ]",
             Limits::default().with_max_depth(1).with_max_scalar_bytes(5),
             Limits::default().with_max_depth(2).with_max_scalar_bytes(5),
-            ayaml::ErrorCode::DuplicateNodeProperties,
+            ayaml::ErrorCode::DepthLimit,
+            ayaml::ErrorCode::ScalarSizeLimit,
         ),
         (
             "later scanner error after doc boundary",
@@ -1185,45 +1201,51 @@ fn raising_max_depth_keeps_earlier_parser_error_before_later_scanner_error() {
             Limits::default().with_max_depth(0),
             Limits::default().with_max_depth(2),
             ayaml::ErrorCode::UnexpectedToken,
+            ayaml::ErrorCode::UnexpectedToken,
         ),
         (
-            "single-line duplicate props before flow and later block-run depth limit",
+            "same-line flow DepthLimit before later block-run DepthLimit",
             "!a !b [[1]] - - -\n",
             Limits::default().with_max_depth(1),
             Limits::default().with_max_depth(2),
-            ayaml::ErrorCode::DuplicateNodeProperties,
+            ayaml::ErrorCode::DepthLimit,
+            ayaml::ErrorCode::DepthLimit,
         ),
         (
-            "single-line unexpected token before flow and later block-run depth limit",
+            "same-line unexpected token before flow and later block-run DepthLimit",
             "}} [[1]] - - -\n",
             Limits::default().with_max_depth(1),
             Limits::default().with_max_depth(2),
-            ayaml::ErrorCode::UnexpectedToken,
+            ayaml::ErrorCode::DepthLimit,
+            ayaml::ErrorCode::DepthLimit,
         ),
         (
-            "single-line unexpected token before flow and later scanner indicator",
+            "same-line flow DepthLimit lifts to earlier parser error before non-limit @",
             "}} [[1]] @\n",
             Limits::default().with_max_depth(1),
             Limits::default().with_max_depth(2),
+            ayaml::ErrorCode::DepthLimit,
             ayaml::ErrorCode::UnexpectedToken,
         ),
         (
-            "mapping exit with earlier parser error before flow and later scanner error",
+            "mapping exit with earlier parser error before flow and later non-limit scanner error",
             "a: 1\n'foo' [ @ ]\n",
             Limits::default().with_max_depth(1),
             Limits::default().with_max_depth(2),
             ayaml::ErrorCode::UnexpectedToken,
+            ayaml::ErrorCode::UnexpectedToken,
         ),
         (
-            "mapping exit with duplicate props inside truncated flow key",
+            "mapping exit with duplicate props inside truncated flow key before non-limit @",
             "a: 1\n[ !a !b @ ]\n",
             Limits::default().with_max_depth(2),
             Limits::default().with_max_depth(3),
             ayaml::ErrorCode::DuplicateNodeProperties,
+            ayaml::ErrorCode::DuplicateNodeProperties,
         ),
     ];
 
-    for (name, raw_input, lo_limits, hi_limits, expected_code) in small_cases {
+    for (name, raw_input, lo_limits, hi_limits, expected_lo, expected_hi) in small_cases {
         // Check both the small-input path and the >4 KiB streaming `DocumentEvents` (`pull.rs`) path.
         let large_input = after_comments(raw_input, 4_200);
         for (size_label, input) in [("small", *raw_input), ("large", large_input.as_str())] {
@@ -1331,31 +1353,28 @@ fn raising_max_depth_keeps_earlier_parser_error_before_later_scanner_error() {
                 ]);
             }
             for (label, lo, hi) in results {
-                assert_ne!(
-                    lo.kind(),
-                    ErrorKind::Limit,
-                    "{name}/{size_label}/{label}: expected non-limit, got {lo:?}"
-                );
                 assert_eq!(
                     lo.code(),
-                    *expected_code,
-                    "{name}/{size_label}/{label}: {lo:?}"
+                    *expected_lo,
+                    "{name}/{size_label}/{label}: lo={lo:?}"
                 );
                 assert_eq!(
-                    lo.kind(),
-                    hi.kind(),
-                    "{name}/{size_label}/{label}: {lo:?} -> {hi:?}"
-                );
-                assert_eq!(
-                    lo.code(),
                     hi.code(),
-                    "{name}/{size_label}/{label}: {lo:?} -> {hi:?}"
+                    *expected_hi,
+                    "{name}/{size_label}/{label}: lo={lo:?} -> hi={hi:?}"
                 );
-                assert_eq!(
-                    lo.span(),
-                    hi.span(),
-                    "{name}/{size_label}/{label}: {lo:?} -> {hi:?}"
-                );
+                if lo.kind() != ErrorKind::Limit && lo.limit().is_none() {
+                    assert_eq!(
+                        lo.kind(),
+                        hi.kind(),
+                        "{name}/{size_label}/{label}: {lo:?} -> {hi:?}"
+                    );
+                    assert_eq!(
+                        lo.span(),
+                        hi.span(),
+                        "{name}/{size_label}/{label}: {lo:?} -> {hi:?}"
+                    );
+                }
             }
         }
     }
@@ -1457,34 +1476,38 @@ fn raising_max_depth_keeps_earlier_semantic_error_and_merge_parity() {
             ayaml::compat::ParseOptions::new().with_limits(Limits::default().with_max_depth(2));
         let lo = ayaml::compat::from_str_with::<Value>(compat_input, &compat_lo).unwrap_err();
         let hi = ayaml::compat::from_str_with::<Value>(compat_input, &compat_hi).unwrap_err();
-        assert_ne!(lo.kind(), ErrorKind::Limit);
-        assert_eq!(lo.kind(), hi.kind(), "{lo:?} -> {hi:?}");
-        assert_eq!(lo.code(), hi.code(), "{lo:?} -> {hi:?}");
-        assert_eq!(lo.span(), hi.span(), "{lo:?} -> {hi:?}");
+        // `max_depth(0)` directly enforces `DepthLimit` on the demanded mapping/flow line (remapped
+        // to `ErrorKind::Serde` with `limit().is_some()` in compat mode), while `max_depth(2)`
+        // reaches the non-limit syntax error (`TrailingContent`) monotonically (D110).
+        assert_eq!(lo.code(), ayaml::ErrorCode::DepthLimit, "{lo:?}");
+        assert!(lo.limit().is_some(), "{lo:?}");
+        assert_eq!(hi.code(), ayaml::ErrorCode::TrailingContent, "{hi:?}");
     }
 }
 
-/// Truncated flow runs after node properties or omitted keys/values must surface the deferred
-/// scanner error instead of synthesizing empty scalars that fail with resolver errors or
-/// premature event limits, and multi-document marker lines keep earlier syntax errors.
+/// Demanded flow and document-marker lines that hit a scanner limit surface the exact scanner
+/// limit error directly rather than fabricating empty-scalar resolver errors or non-monotonic
+/// parser errors (D110).
 #[test]
 fn truncated_flow_and_document_marker_lines_surface_exact_errors() {
     use serde::Deserialize as _;
 
-    // Multi-document marker lines with an earlier parser error before a flow collection and a
-    // later scanner limit error must remain monotonic across `max_depth`.
-    for (input, lo_limits, hi_limits, expected_code) in [
+    // Multi-document marker lines whose demanded line itself exceeds a scanner limit enforce the
+    // scanner limit directly and monotonically across `max_depth`.
+    for (input, lo_limits, hi_limits, expected_lo, expected_hi) in [
         (
             "[1]\n--- - [[1]] - - -\n",
             Limits::default().with_max_depth(1),
             Limits::default().with_max_depth(2),
-            ayaml::ErrorCode::InvalidDocumentStart,
+            ayaml::ErrorCode::DepthLimit,
+            ayaml::ErrorCode::DepthLimit,
         ),
         (
             "[1]\n... 'x' [[1]] 1234567890\n",
             Limits::default().with_max_depth(1).with_max_scalar_bytes(5),
             Limits::default().with_max_depth(2).with_max_scalar_bytes(5),
-            ayaml::ErrorCode::ContentAfterDocumentEnd,
+            ayaml::ErrorCode::DepthLimit,
+            ayaml::ErrorCode::ScalarSizeLimit,
         ),
     ] {
         let lo_opts = ParseOptions::new().with_limits(lo_limits);
@@ -1505,9 +1528,8 @@ fn truncated_flow_and_document_marker_lines_surface_exact_errors() {
                     .unwrap_err(),
             ),
         ] {
-            assert_eq!(lo.code(), expected_code, "{label}: {lo:?}");
-            assert_eq!(hi.code(), expected_code, "{label}: {lo:?} -> {hi:?}");
-            assert_eq!(lo.span(), hi.span(), "{label}: {lo:?} -> {hi:?}");
+            assert_eq!(lo.code(), expected_lo, "{label}: {lo:?}");
+            assert_eq!(hi.code(), expected_hi, "{label}: {lo:?} -> {hi:?}");
         }
     }
 
@@ -1715,3 +1737,6 @@ fn batch_crossing_document_order_errors_agree_across_readers() {
         assert_eq!(err.kind(), ErrorKind::Scanner, "{label}: {err}");
     }
 }
+
+#[path = "limit_consistency/monotonicity.rs"]
+mod monotonicity;
