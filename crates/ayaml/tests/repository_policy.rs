@@ -1141,6 +1141,29 @@ fn fuzz_targets_and_harness_unit_tests_are_wired_in_ci() {
         Ok(1),
         "CI must run fuzz harness unit tests unconditionally"
     );
+
+    assert!(
+        root.join("fuzz/yaml.dict").is_file(),
+        "fuzz/yaml.dict dictionary must exist"
+    );
+    let fuzz_hosted = read(&root, "tools/fuzz-hosted.sh");
+    assert!(
+        fuzz_hosted.contains("-rss_limit_mb=2048") && fuzz_hosted.contains("yaml.dict"),
+        "tools/fuzz-hosted.sh must enforce -rss_limit_mb=2048 and fuzz/yaml.dict"
+    );
+    for target in &expected {
+        let dir = root.join("fuzz/corpus").join(target);
+        let has_seed = std::fs::read_dir(&dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .any(|e| e.path().is_file());
+        assert!(
+            has_seed,
+            "fuzz/corpus/{target} must contain at least one tracked seed file"
+        );
+    }
 }
 
 /// Companion crate `ayaml-edit` stays wired into CI packaging, cross-check, unsafe census,
@@ -1229,13 +1252,53 @@ fn miri_and_kani_workflows_cover_post_023_apis_and_ayaml_edit() {
         "--test document_deserializer",
         "--test spanned_typed",
         "--test options",
-        "cargo +nightly miri test -p ayaml-edit --all-features --locked",
+        "--test spanned",
+        "--test masked_errors",
+        "--test error_codes",
+        "--test state_machines",
+        "cargo +nightly miri test -p ayaml-edit",
     ] {
         assert!(
             miri_runs.iter().any(|run| run.contains(needle)),
             ".github/workflows/miri.yml must execute {needle:?} inside a bounded Miri step"
         );
     }
+    assert!(
+        miri_steps.iter().any(|step| {
+            step.get("env")
+                .and_then(|env| env.get("RUSTFLAGS"))
+                .and_then(Value::as_str)
+                .is_some_and(|flags| flags.contains("--cfg ayaml_typed_from_events"))
+        }),
+        ".github/workflows/miri.yml must run a bounded Miri step with --cfg ayaml_typed_from_events"
+    );
+
+    let mutants_wf = read(&root, ".github/workflows/mutants.yml");
+    for needle in [
+        "crates/ayaml/src/frontmatter.rs",
+        "crates/ayaml/src/merge.rs",
+        "crates/ayaml/src/merge/events.rs",
+        "crates/ayaml/src/error.rs",
+        "crates/ayaml/src/resolver.rs",
+        "crates/ayaml/src/composer.rs",
+        "crates/ayaml/src/number.rs",
+        "crates/ayaml-edit/src/lib.rs",
+    ] {
+        assert!(
+            mutants_wf.contains(needle),
+            ".github/workflows/mutants.yml must mutate {needle:?}"
+        );
+    }
+    assert!(
+        !mutants_wf.contains("mutation survivors recorded in mutants.out\"; exit 0"),
+        ".github/workflows/mutants.yml must not swallow exit code 2 (surviving mutants) as exit 0"
+    );
+    assert!(
+        mutants_wf.matches("exit 2").count() >= 2
+            && mutants_wf.matches("mutants.out/missed.txt").count() >= 2
+            && mutants_wf.contains("--features libyaml-compat,bench-internals"),
+        ".github/workflows/mutants.yml must fail both ayaml and ayaml-edit jobs on exit code 2 or non-empty missed.txt and enable libyaml-compat,bench-internals"
+    );
 
     let kani_wf = read(&root, ".github/workflows/kani.yml");
     let kani_doc = parse_value(&kani_wf).expect(".github/workflows/kani.yml parses");

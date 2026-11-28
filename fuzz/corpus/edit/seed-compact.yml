@@ -1,0 +1,6 @@
+items:
+  - name: first
+    port: 8080
+  - name: second
+    port: 9090
+flags: [true, false]

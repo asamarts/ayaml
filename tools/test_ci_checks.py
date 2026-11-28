@@ -409,9 +409,11 @@ class FuzzHostedTests(unittest.TestCase):
         self.bin = self.root / "bin"
         self.bin.mkdir()
         (self.root / "tools").mkdir()
+        (self.root / "fuzz").mkdir()
         here = Path(__file__).resolve().parent
         shutil.copy(here / "fuzz-hosted.sh", self.root / "tools")
         shutil.copy(here / "fuzz-crash-recipient.txt", self.root / "tools")
+        shutil.copy(here.parent / "fuzz" / "yaml.dict", self.root / "fuzz")
         self.output = self.root / "sealed"
 
     def fuzzer(self, status: int, crash: bool = True) -> None:
@@ -449,6 +451,20 @@ class FuzzHostedTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "target=parse exit=0 runs=123\n")
         self.assertFalse(self.output.exists())
+
+    def test_hosted_fuzz_passes_rss_limit_and_yaml_dict(self) -> None:
+        args_file = self.root / "cargo-args.txt"
+        fake_tool(
+            self.bin,
+            "cargo",
+            f'printf "%s\\n" "$@" > {shlex.quote(str(args_file))}\n'
+            "echo 'stat::number_of_executed_units: 7'\nexit 0\n",
+        )
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0)
+        argv = args_file.read_text(encoding="utf-8").splitlines()
+        self.assertIn("-rss_limit_mb=2048", argv)
+        self.assertIn(f"-dict={self.root / 'fuzz' / 'yaml.dict'}", argv)
 
     def test_a_crash_keeps_its_exit_status_and_prints_no_input(self) -> None:
         self.fuzzer(77)

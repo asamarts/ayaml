@@ -1,0 +1,96 @@
+# LibFuzzer dictionary for YAML 1.2.2 tokens, directives, tags, escapes,
+# block scalars, flow collections, frontmatter, and YAML 1.1 merge keys (AY-171).
+# libFuzzer dictionary syntax only supports \xHH, \\, and \" escapes.
+
+# Document markers and frontmatter
+doc_start="---"
+doc_end="..."
+doc_start_nl="---\x0A"
+doc_end_nl="...\x0A"
+crlf="\x0D\x0A"
+bom="\xEF\xBB\xBF"
+
+# Directives
+dir_yaml="%YAML 1.2\x0A"
+dir_tag_primary="%TAG ! tag:example.com,2026:\x0A"
+dir_tag_named="%TAG !e! tag:example.com,2026:\x0A"
+dir_tag_secondary="%TAG !! tag:yaml.org,2002:\x0A"
+
+# Core schema tags and verbatim tags
+tag_str="!!str "
+tag_int="!!int "
+tag_float="!!float "
+tag_bool="!!bool "
+tag_null="!!null "
+tag_map="!!map "
+tag_seq="!!seq "
+tag_local="!local "
+tag_named="!e!node "
+tag_verbatim="!<tag:yaml.org,2002:str> "
+
+# Anchors, aliases, and merge keys
+anchor_a="&a "
+anchor_b="&b "
+alias_a="*a"
+alias_b="*b"
+merge_key="<<: *a\x0A"
+merge_seq="<<: [*a, *b]\x0A"
+merge_inline="{<<: *a, k: 1}"
+
+# Block and flow indicators
+seq_item="- "
+map_val=": "
+explicit_key="? "
+flow_seq_open="["
+flow_seq_close="]"
+flow_map_open="{"
+flow_map_close="}"
+flow_sep=", "
+comment=" # comment\x0A"
+
+# Block scalar headers
+lit_clip="|\x0A  "
+lit_strip="|-\x0A  "
+lit_keep="|+\x0A  "
+lit_indent="|2\x0A  "
+fold_clip=">\x0A  "
+fold_strip=">-\x0A  "
+fold_keep=">+\x0A  "
+fold_indent=">2-\x0A  "
+
+# Quotes and YAML escape sequences (literal backslash inside quotes)
+dq="\""
+sq="'"
+sq_esc="''"
+esc_nl="\\n"
+esc_cr="\\r"
+esc_tab="\\t"
+esc_nul="\\0"
+esc_bs="\\\\"
+esc_dq="\\\""
+esc_hex="\\x41"
+esc_u16="\\u00e9"
+esc_u32="\\U0001F680"
+esc_nel="\\N"
+esc_nbsp="\\_"
+esc_ls="\\L"
+esc_ps="\\P"
+
+# Core schema scalars
+sc_null="null"
+sc_tilde="~"
+sc_true="true"
+sc_false="false"
+sc_inf=".inf"
+sc_ninf="-.inf"
+sc_nan=".nan"
+sc_hex="0x10"
+sc_oct="0o10"
+sc_neg="-42"
+
+# Multi-byte UTF-8 and control edge cases
+utf8_2="\xC3\xA9"
+utf8_3="\xE2\x82\xAC"
+utf8_4="\xF0\x9F\x9A\x80"
+bidi_rlo="\xE2\x80\xAE"
+line_sep="\xE2\x80\xA8"

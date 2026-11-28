@@ -35,7 +35,7 @@ WATCHED_SPECS = (
     ("miri.yml", 36, True),
     ("kani.yml", 36, True),
     # Weekly schedule (Tuesday) — allow 8 days (192h) and do not treat its intentional
-    # `mutants-shard-*` summary artifacts on green runs as sealed crash files.
+    # `mutants-ayaml-shard-*` / `mutants-edit-shard-*` summary artifacts on green runs as sealed crash files.
     ("mutants.yml", 192, False),
 )
 WATCHED = tuple(name for name, _, _ in WATCHED_SPECS)

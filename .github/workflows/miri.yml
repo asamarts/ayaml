@@ -81,6 +81,59 @@ jobs:
               --test options \
               --all-features --locked
           )
+      - name: Run Miri on spanned, masked_errors, error_codes, and state_machines tests
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+        run: |
+          set -euo pipefail
+          # Exercise SpannedTree, Error::masked(), error code invariants, and emitter/cursor
+          # state machines under Miri while skipping combinatorial/large-corpus cases.
+          (
+            ulimit -v 8388608
+            timeout -k 5 600 nice -n 10 cargo +nightly miri test -p ayaml \
+              --test error_codes \
+              --test masked_errors \
+              --all-features --locked
+          )
+          (
+            ulimit -v 8388608
+            timeout -k 5 600 nice -n 10 cargo +nightly miri test -p ayaml \
+              --test spanned \
+              --all-features --locked -- \
+              --skip every_entry_span_of_a_generated_document_is_exact \
+              --skip workflow_files_have_exact_entry_spans_with_high_coverage \
+              --skip compact_first_mapping_key_and_alias_entries_have_exact_spans \
+              --skip spanned_tree_complex_keys_unique_duplicate_ambiguous_and_deep
+          )
+          (
+            ulimit -v 8388608
+            timeout -k 5 600 nice -n 10 cargo +nightly miri test -p ayaml \
+              --test state_machines \
+              --all-features --locked -- \
+              --skip emitter_io_error_at_every_byte_offset \
+              --skip deserializer_cursor_seeded_state_machine_fuzz \
+              --skip typed_streaming_seeded_visitor_matches_tree_reader \
+              --skip typed_streaming_partial_consumption_and_early_stop \
+              --skip typed_streaming_error_fallback_detects_late_document_faults
+          )
+      - name: Run Miri on typed-from-events path (--cfg ayaml_typed_from_events)
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+          RUSTFLAGS: --cfg ayaml_typed_from_events
+          CARGO_TARGET_DIR: target/miri-typed-from-events
+          PROPTEST_CASES: "2"
+        run: |
+          set -euo pipefail
+          (
+            ulimit -v 8388608
+            timeout -k 5 600 nice -n 10 cargo +nightly miri test -p ayaml \
+              --test frontmatter \
+              --test merge_keys \
+              --test document_deserializer \
+              --test spanned_typed \
+              --test options \
+              --all-features --locked
+          )
       - name: Run Miri on ayaml-edit tests
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
@@ -89,7 +142,9 @@ jobs:
           set -euo pipefail
           (
             ulimit -v 8388608
-            timeout -k 5 600 nice -n 10 cargo +nightly miri test -p ayaml-edit --all-features --locked
+            timeout -k 5 600 nice -n 10 cargo +nightly miri test -p ayaml-edit \
+              --lib --test edits --test api_freeze --test migration_guides \
+              --all-features --locked
           )
       - name: Run Miri on memcount counting global allocator tests
         run: |

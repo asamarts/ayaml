@@ -156,12 +156,15 @@ pub struct FuzzEventStream {
     pub events: Vec<Event<'static>>,
 }
 
+/// Total number of failure scenarios dispatched by `run_masked_errors`.
+pub const MASKED_ERROR_SCENARIOS: u8 = 27;
+
 /// A secret canary token paired with a failure-scenario selector for `Error::masked()` fuzzing.
 #[derive(Clone, Debug)]
 pub struct FuzzCanary {
     /// Secret token that must never appear in masked output.
     pub secret: String,
-    /// Scenario selector.
+    /// Scenario selector in `0..MASKED_ERROR_SCENARIOS`.
     pub scenario: u8,
 }
 
@@ -633,7 +636,8 @@ impl<'a> Arbitrary<'a> for FuzzCanary {
             2 => secret.push_str("_🚀"),
             _ => {}
         }
-        let scenario = u.int_in_range(0_u8..=19)?;
+        let max_scenario = MASKED_ERROR_SCENARIOS - 1;
+        let scenario = u.int_in_range(0_u8..=max_scenario)?;
         Ok(Self { secret, scenario })
     }
 }

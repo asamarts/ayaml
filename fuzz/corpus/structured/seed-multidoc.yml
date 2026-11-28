@@ -1,0 +1,8 @@
+---
+a: 1
+b: [true, null, "café"]
+...
+---
+name: doc2
+nested: {k: 42}
+...

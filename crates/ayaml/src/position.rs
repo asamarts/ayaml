@@ -739,26 +739,7 @@ impl<'a> LineIndex<'a> {
         }
         let utf16 = encoding == ColumnEncoding::Utf16;
         let bytes = content.as_bytes();
-        // Whole blocks that end before the column are passed by counting them, without
-        // decoding a character.
-        let (mut at, mut column) = (0, 0);
-        while let Some(block) = bytes.get(at..at + BLOCK) {
-            let counted = characters_begun(block)
-                + if utf16 {
-                    four_byte_characters(block)
-                } else {
-                    0
-                };
-            if column + counted > position.column {
-                break;
-            }
-            column += counted;
-            at += BLOCK;
-        }
-        // A block can end inside a character, which it counted by that character's first byte.
-        while bytes.get(at).is_some_and(|&byte| is_continuation(byte)) {
-            at += 1;
-        }
+        let (at, mut column) = advance_blocks::<BLOCK>(bytes, position.column, utf16);
         let Some(tail) = content.get(at..) else {
             return Err(PositionError::OutOfBounds);
         };
@@ -781,6 +762,30 @@ impl<'a> LineIndex<'a> {
 
 /// How many bytes `to_offset` counts at a time before it decodes characters.
 const BLOCK: usize = 256;
+
+/// Skip whole `B`-byte chunks whose character/UTF-16 count stays at or below `target_col`, then
+/// advance past any UTF-8 continuation bytes if the final chunk ended mid-character.
+fn advance_blocks<const B: usize>(bytes: &[u8], target_col: usize, utf16: bool) -> (usize, usize) {
+    let (mut at, mut column) = (0, 0);
+    while let Some(block) = bytes.get(at..at + B) {
+        let counted = characters_begun(block)
+            + if utf16 {
+                four_byte_characters(block)
+            } else {
+                0
+            };
+        if column + counted > target_col {
+            break;
+        }
+        column += counted;
+        at += B;
+    }
+    // A block can end inside a character, which it counted by that character's first byte.
+    while bytes.get(at).is_some_and(|&byte| is_continuation(byte)) {
+        at += 1;
+    }
+    (at, column)
+}
 
 /// Whether a byte continues a character that an earlier byte began.
 const fn is_continuation(byte: u8) -> bool {
@@ -1187,13 +1192,62 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn advance_blocks_returns_exact_chunk_boundaries_and_utf8_skips() {
+        use super::{BLOCK, advance_blocks};
+
+        // 1. Sub-block input never advances.
+        assert_eq!(advance_blocks::<BLOCK>(b"short", 100, false), (0, 0));
+        assert_eq!(advance_blocks::<BLOCK>(b"short", 100, true), (0, 0));
+
+        // 2. Single 256-byte chunk with 4-byte `'🚀'` straddling bytes 254..258:
+        //    bytes[0..256] holds 254 `'a'`s + lead byte of `'🚀'` (255 scalars, 256 UTF-16 units).
+        let mut line = "a".repeat(254);
+        line.push_str("🚀éz");
+        let bytes = line.as_bytes();
+        // Below chunk count: breaks before crossing (`(0, 0)`).
+        assert_eq!(advance_blocks::<BLOCK>(bytes, 254, false), (0, 0));
+        assert_eq!(advance_blocks::<BLOCK>(bytes, 255, true), (0, 0));
+        // Exact boundary (`column + counted == target_col`): advances past chunk + 2 continuation bytes.
+        assert_eq!(advance_blocks::<BLOCK>(bytes, 255, false), (258, 255));
+        assert_eq!(advance_blocks::<BLOCK>(bytes, 256, true), (258, 256));
+        assert_eq!(advance_blocks::<BLOCK>(bytes, 257, false), (258, 255));
+        assert_eq!(advance_blocks::<BLOCK>(bytes, 258, true), (258, 256));
+
+        // 3. Multi-block input (`> 2 * BLOCK`) with 4-byte emoji inside block 0 and block 1
+        //    proves multi-iteration accumulation and `utf16` vs scalar accounting.
+        let mut multi = String::new();
+        multi.push_str(&"a".repeat(252));
+        multi.push('🚀'); // ends cleanly at byte 256 (253 scalars, 254 UTF-16 units)
+        multi.push_str(&"b".repeat(252));
+        multi.push('🚀'); // ends cleanly at byte 512 (506 scalars, 508 UTF-16 units)
+        multi.push_str("tail");
+        let mbytes = multi.as_bytes();
+        assert_eq!(advance_blocks::<BLOCK>(mbytes, 253, false), (256, 253));
+        assert_eq!(advance_blocks::<BLOCK>(mbytes, 253, true), (0, 0));
+        assert_eq!(advance_blocks::<BLOCK>(mbytes, 254, true), (256, 254));
+        assert_eq!(advance_blocks::<BLOCK>(mbytes, 505, false), (256, 253));
+        assert_eq!(advance_blocks::<BLOCK>(mbytes, 506, false), (512, 506));
+        assert_eq!(advance_blocks::<BLOCK>(mbytes, 507, true), (256, 254));
+        assert_eq!(advance_blocks::<BLOCK>(mbytes, 508, true), (512, 508));
+
+        // 4. Small block size `B = 3` exercises continuation-byte skipping directly across multiple
+        //    3-byte chunks (`"aé🚀x"` -> bytes `[97, 195, 169 | 240, 159, 154 | 128, 120]`).
+        let small = "aé🚀x".as_bytes();
+        assert_eq!(advance_blocks::<3>(small, 1, false), (0, 0));
+        assert_eq!(advance_blocks::<3>(small, 2, false), (3, 2));
+        assert_eq!(advance_blocks::<3>(small, 3, false), (7, 3));
+        assert_eq!(advance_blocks::<3>(small, 3, true), (3, 2));
+        assert_eq!(advance_blocks::<3>(small, 4, true), (7, 4));
+    }
 }
 
 #[cfg(kani)]
 mod kani_proofs {
     use super::{
-        ColumnEncoding, LineIndex, Position, PositionError, characters_begun, four_byte_characters,
-        lines_at_most,
+        ColumnEncoding, LineIndex, Position, PositionError, advance_blocks, characters_begun,
+        four_byte_characters, is_continuation, lines_at_most,
     };
 
     #[kani::proof]
@@ -1341,6 +1395,85 @@ mod kani_proofs {
                 _ => Err(PositionError::OutOfBounds),
             };
             assert_eq!(actual, expected);
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn verify_line_index_to_offset_block_skip_symbolic() {
+        // Pure symbolic proof of `advance_blocks::<3>` over arbitrary valid multi-byte UTF-8 byte
+        // buffers (up to 7 bytes spanning 2 full 3-byte blocks + tail, with 1-, 2-, 3-, and 4-byte
+        // UTF-8 scalars straddling chunk boundaries): proves `at` always lands on a valid UTF-8
+        // char boundary `<= len`, `column <= target_col`, and `column` equals the exact scalar or
+        // UTF-16 count of `bytes[..at]`.
+        let mut buf = [0_u8; 7];
+        let mut len = 0_usize;
+        let c0: char = kani::any();
+        let c1: char = kani::any();
+        let c2: char = kani::any();
+        let l0 = c0.len_utf8();
+        let l1 = c1.len_utf8();
+        let l2 = c2.len_utf8();
+        kani::assume(l0 + l1 + l2 <= buf.len());
+        let _ = c0.encode_utf8(&mut buf[len..len + l0]);
+        len += l0;
+        let _ = c1.encode_utf8(&mut buf[len..len + l1]);
+        len += l1;
+        let _ = c2.encode_utf8(&mut buf[len..len + l2]);
+        len += l2;
+
+        let slice = &buf[..len];
+        let target_col: usize = kani::any();
+        kani::assume(target_col <= 8);
+        let utf16: bool = kani::any();
+
+        let (at, column) = advance_blocks::<3>(slice, target_col, utf16);
+        assert!(at <= len);
+        assert!(at == len || !is_continuation(slice[at]));
+        assert!(column <= target_col);
+        let expected_col = characters_begun(&slice[..at])
+            + if utf16 {
+                four_byte_characters(&slice[..at])
+            } else {
+                0
+            };
+        assert_eq!(column, expected_col);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(260)]
+    fn verify_line_index_to_offset_256_byte_chunk_loop() {
+        // Compile-time 261-byte line (254 `'a'`s + 4-byte `'🚀'` straddling bytes 254..258 across
+        // the real `BLOCK = 256` chunk boundary + 2-byte `'é'` + `'z'`). Directly proves
+        // `advance_blocks::<BLOCK>` (called by `LineIndex::to_offset`) exercises the 256-byte
+        // chunk loop and skips `'🚀'`'s trailing continuation bytes (256..258) for both scalar
+        // and UTF-16 column encodings across the full boundary range `252..=262`.
+        const SAMPLE: &str = concat!(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "🚀éz"
+        );
+        let bytes = SAMPLE.as_bytes();
+        let col: usize = kani::any();
+        kani::assume((252..=262).contains(&col));
+
+        // Scalar mode: 254 ASCII chars + start of '🚀' at 254 = 255 scalars in bytes[0..256].
+        let (at_scalar, col_scalar) = advance_blocks::<{ super::BLOCK }>(bytes, col, false);
+        if col < 255 {
+            assert_eq!((at_scalar, col_scalar), (0, 0));
+        } else {
+            // Chunk loop advances to 256, continuation skip advances across bytes 256..258 to 258.
+            assert_eq!((at_scalar, col_scalar), (258, 255));
+        }
+
+        // UTF-16 mode: 254 ASCII chars + 2 UTF-16 code units for '🚀' = 256 units in bytes[0..256].
+        let (at_utf16, col_utf16) = advance_blocks::<{ super::BLOCK }>(bytes, col, true);
+        if col < 256 {
+            assert_eq!((at_utf16, col_utf16), (0, 0));
+        } else {
+            assert_eq!((at_utf16, col_utf16), (258, 256));
         }
     }
 

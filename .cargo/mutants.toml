@@ -1,29 +1,15 @@
-# Bounded mutation testing defaults for hosted CI (AY-037).
+# Bounded mutation testing defaults for hosted CI (AY-037, AY-171).
 #
 # Never run limit-disabling mutants on a shared host: turning off an alias,
 # depth, or expansion guard can turn adversarial tests into real memory
 # exhaustion. Limit enforcement lives in `limits.rs` and is excluded below,
 # alongside the benchmark and conformance harness crates.
+#
+# Package-specific `--cargo-test-arg` filters are passed by `.github/workflows/mutants.yml`
+# so both `ayaml` and `ayaml-edit` run cleanly without colliding on package-local test names.
 
 gitignore = true
 additional_cargo_args = ["--locked", "--jobs", "2"]
-# Run the fast library unit tests and targeted integration tests (skipping the 60s
-# child-process `adversarial` and `properties` suites; limit guards are excluded below).
-additional_cargo_test_args = [
-    "--lib",
-    "--test", "mutation_targets",
-    "--test", "line_index",
-    "--test", "options",
-    "--test", "spanned",
-    "--test", "spanned_typed",
-    "--test", "merge_keys",
-    "--test", "document_deserializer",
-    "--test", "frontmatter",
-    "--test", "round_trips",
-    "--test", "writer_refusals",
-    "--test", "contracts",
-    "--test", "regressions",
-]
 
 exclude_globs = [
     "crates/ayaml/src/limits.rs",

@@ -1,0 +1,7 @@
+%TAG !e! tag:example.com,2026:
+---
+root: &r !e!node
+  x: |
+    line1
+    line2
+  ref: *r

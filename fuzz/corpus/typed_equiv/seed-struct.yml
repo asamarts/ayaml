@@ -1,0 +1,6 @@
+a: 1
+b: [one, two]
+name: alpha
+count: -7
+nested:
+  k: 3

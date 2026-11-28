@@ -76,6 +76,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   multi-PR cumulative creep, and expanded `instruction-probe.rs`, `ayaml-bench`, and `memcount`
   coverage to `ayaml-edit`, `frontmatter`, `merge_keys`, `Spanned<T>`, `DocumentDeserializer`,
   `from_reader`, `depth-64`, and `libyaml-compat`.
+- Hardened pre-1.0 verification and fuzzing coverage (`AY-171`): fixed 7 unreachable scenarios in
+  the `masked_errors` fuzz target (now 27 reachable scenarios verified by unit test), added
+  `fuzz/yaml.dict` and tracked seed corpora for all 10 fuzz targets, enforced `-rss_limit_mb=2048`
+  and `-dict=fuzz/yaml.dict` in `tools/fuzz-hosted.sh`, expanded `parse`, `merge_keys`, `edit`,
+  `typed_equiv`, and `emit` fuzz harnesses across all post-0.2.3 public APIs, added
+  process-isolated `in_child!` adversarial tests for post-0.2.3 APIs and `ayaml-edit`, expanded
+  weekly mutation testing in `.github/workflows/mutants.yml` to 12 `ayaml` modules plus
+  `ayaml-edit` with strict failure on unexpected survivors, strengthened
+  `position.rs`, `error.rs`, `frontmatter.rs`, and `ayaml-edit` Kani proofs to cover 256-byte
+  chunk skipping, all Unicode scalars, and 3-/4-byte UTF-8 boundaries, and extended daily bounded
+  Miri workflows to cover `spanned`, `masked_errors`, `error_codes`, `state_machines`, and
+  `--cfg ayaml_typed_from_events`.
 
 ### Deprecated
 
