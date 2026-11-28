@@ -2,7 +2,7 @@
 id: M-post-v1-perf-and-hardening
 title: Post-1.0 incremental limit streaming and iterative ValueWriter emission
 phase: 10
-status: todo
+status: done
 blocked_by:
 - AY-176
 tags:
@@ -10,6 +10,11 @@ tags:
 - post-v1
 - performance
 - security
+evidence:
+- kind: commit
+  ref: "0a9c427"
+- kind: test
+  ref: emitter::writer_tests::iterative_value_writer_and_tag_scan_handle_deep_nesting_on_small_stack
 ---
 
 ## Why
@@ -20,4 +25,4 @@ iterative `ValueWriter` / `TagDirectives::scan_at` emission.
 
 ## Acceptance criteria
 
-- [ ] `AY-176` is closed with full conformance, adversarial, allocation, and Callgrind evidence
+- [x] `AY-176` is closed with full conformance, adversarial, allocation, and Callgrind evidence

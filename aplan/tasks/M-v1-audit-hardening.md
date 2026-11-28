@@ -2,7 +2,7 @@
 id: M-v1-audit-hardening
 title: Resolve pre-1.0 adversarial audit findings across correctness, security, verification, API cleanup, and benchmarks
 phase: 9
-status: todo
+status: done
 blocked_by:
 - AY-169
 - AY-170
@@ -21,6 +21,33 @@ tags:
 - v1.0
 - correctness
 - performance
+evidence:
+- kind: commit
+  ref: "f7a1a7a"
+- kind: commit
+  ref: "437b9d3"
+- kind: commit
+  ref: "6cd03eb"
+- kind: commit
+  ref: "1707183"
+- kind: commit
+  ref: "50809b2"
+- kind: commit
+  ref: "8766f66"
+- kind: commit
+  ref: "7eb5f8a"
+- kind: commit
+  ref: "181d9b0"
+- kind: commit
+  ref: "a11a3d5"
+- kind: commit
+  ref: "8952017"
+- kind: commit
+  ref: "0318345"
+- kind: commit
+  ref: "f80c8e2"
+- kind: test
+  ref: monotonicity::limit_truncated_lines_preserve_monotonicity_across_all_readers
 ---
 
 ## Why
@@ -42,5 +69,5 @@ release candidate.
 
 ## Acceptance criteria
 
-- [ ] `AY-169` through `AY-175` and `AY-177` through `AY-181` are closed with full test, policy, profiling, and verification evidence
-- [ ] `ayaml` and `ayaml-edit` are ready to enter the `AY-150` 24+ core-hour soak and 1.0.0 release qualification
+- [x] `AY-169` through `AY-175` and `AY-177` through `AY-181` are closed with full test, policy, profiling, and verification evidence
+- [x] `ayaml` and `ayaml-edit` are ready to enter the `AY-150` 24+ core-hour soak and 1.0.0 release qualification

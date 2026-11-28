@@ -1035,7 +1035,10 @@ fn a_document_of_even_density_takes_few_reservations() {
 
 #[test]
 fn a_single_large_scalar_keeps_the_token_arena_small() {
-    let input = format!("{}\n", "x".repeat(1_000_000));
+    // Under Miri, 33,000 bytes still enters the > 32,768 large-input sparse-sample branch
+    // while running ~30x faster than 1,000,000 bytes.
+    let len = if cfg!(miri) { 33_000 } else { 1_000_000 };
+    let input = format!("{}\n", "x".repeat(len));
     let (capacity, len, growths) = arena_of(&input, &Limits::for_max_input());
     assert_eq!(len, 1);
     assert!(
@@ -1806,10 +1809,10 @@ fn line_window_medium_width_lines_stay_reusable_without_thrashing() {
 fn event_cursor_stops_at_empty_document_after_many_directives() {
     use std::fmt::Write as _;
 
-    let directive_count = if cfg!(miri) { 260 } else { 270 };
+    let directive_count = if cfg!(miri) { 255 } else { 270 };
     let mut header = String::new();
     for i in 0..directive_count {
-        let _ = writeln!(header, "%TAG !t{i}! tag:example.com,2024:{i}/");
+        let _ = writeln!(header, "%TAG !t{i}! t:{i}/");
     }
 
     // Document 1 is empty (`---`), followed by Document 2 with a scanner error (`---\n@\n`).

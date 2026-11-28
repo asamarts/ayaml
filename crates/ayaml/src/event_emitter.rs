@@ -1377,13 +1377,15 @@ mod stream_block_scalar_tests {
 
         use crate::{Anchor, CollectionStyle, Event, ScalarStyle, Span, Tag};
 
+        let repeat = if cfg!(miri) { 256 } else { 10_000 };
+
         vec![
             (
                 "double_quoted",
                 wrap_test_doc(
                     vec![],
                     vec![test_scalar(
-                        Cow::Owned("a\"b\\c\n".repeat(10_000)),
+                        Cow::Owned("a\"b\\c\n".repeat(repeat)),
                         ScalarStyle::DoubleQuoted,
                         None,
                         None,
@@ -1395,7 +1397,7 @@ mod stream_block_scalar_tests {
                 wrap_test_doc(
                     vec![],
                     vec![test_scalar(
-                        Cow::Owned("it's ".repeat(10_000)),
+                        Cow::Owned("it's ".repeat(repeat)),
                         ScalarStyle::SingleQuoted,
                         None,
                         None,
@@ -1407,7 +1409,7 @@ mod stream_block_scalar_tests {
                 wrap_test_doc(
                     vec![],
                     vec![test_scalar(
-                        Cow::Owned("line\n".repeat(10_000)),
+                        Cow::Owned("line\n".repeat(repeat)),
                         ScalarStyle::Folded,
                         None,
                         None,
@@ -1421,7 +1423,7 @@ mod stream_block_scalar_tests {
                     test_kv_map(
                         CollectionStyle::Block,
                         test_scalar(
-                            Cow::Owned("k\"\\".repeat(10_000)),
+                            Cow::Owned("k\"\\".repeat(repeat)),
                             ScalarStyle::DoubleQuoted,
                             None,
                             None,
@@ -1436,7 +1438,7 @@ mod stream_block_scalar_tests {
                     test_kv_map(
                         CollectionStyle::Flow,
                         test_scalar(
-                            Cow::Owned("k\"\\".repeat(10_000)),
+                            Cow::Owned("k\"\\".repeat(repeat)),
                             ScalarStyle::DoubleQuoted,
                             None,
                             None,
@@ -1451,7 +1453,7 @@ mod stream_block_scalar_tests {
                     vec![test_scalar(
                         Cow::Borrowed("v"),
                         ScalarStyle::Plain,
-                        Some(Tag::new(format!("custom {}:", "p".repeat(10_000)), "s")),
+                        Some(Tag::new(format!("custom {}:", "p".repeat(repeat)), "s")),
                         None,
                     )],
                 ),
@@ -1463,7 +1465,7 @@ mod stream_block_scalar_tests {
                     vec![test_scalar(
                         Cow::Borrowed("v"),
                         ScalarStyle::Plain,
-                        Some(Tag::local("x".repeat(10_000))),
+                        Some(Tag::local("x".repeat(repeat))),
                         None,
                     )],
                 ),
@@ -1475,7 +1477,7 @@ mod stream_block_scalar_tests {
                         name: Cow::Borrowed("TAG"),
                         value: Cow::Owned(format!(
                             "!e! tag:example.com,2026:{}:",
-                            "a".repeat(10_000)
+                            "a".repeat(repeat)
                         )),
                         span: Span::default(),
                     }],
@@ -1495,7 +1497,7 @@ mod stream_block_scalar_tests {
                         Cow::Borrowed("v"),
                         ScalarStyle::Plain,
                         None,
-                        Some(Anchor::owned("a".repeat(10_000))),
+                        Some(Anchor::owned("a".repeat(repeat))),
                     )],
                 ),
             ),
@@ -1509,7 +1511,7 @@ mod stream_block_scalar_tests {
                             Cow::Borrowed("k"),
                             ScalarStyle::Plain,
                             None,
-                            Some(Anchor::owned("a".repeat(10_000))),
+                            Some(Anchor::owned("a".repeat(repeat))),
                         ),
                     ),
                 ),
