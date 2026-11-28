@@ -48,8 +48,6 @@ pub enum ErrorKind {
     Scanner,
     /// The parser could not build an event.
     Parser,
-    /// An alias is unknown, cyclic, or over budget.
-    Alias,
     /// A mapping contains a duplicate semantic key.
     DuplicateKey,
     /// A tag is malformed or unsupported.
@@ -74,7 +72,6 @@ impl fmt::Display for ErrorKind {
             Self::InvalidEncoding => "invalid encoding",
             Self::Scanner => "scanner error",
             Self::Parser => "parser error",
-            Self::Alias => "alias error",
             Self::DuplicateKey => "duplicate key",
             Self::Tag => "tag error",
             Self::Resolution => "scalar resolution error",
@@ -361,7 +358,6 @@ impl ErrorCode {
         match kind {
             ErrorKind::InvalidEncoding => Self::InvalidUtf8,
             ErrorKind::Scanner | ErrorKind::Parser => Self::UnexpectedToken,
-            ErrorKind::Alias => Self::UnknownAnchor,
             ErrorKind::DuplicateKey => Self::DuplicateKey,
             ErrorKind::Tag => Self::InvalidTag,
             ErrorKind::Resolution => Self::InvalidScalar,
@@ -404,14 +400,8 @@ impl AsRef<str> for ErrorCode {
     }
 }
 
-/// An ayaml error with a stable category, a stable failure code, optional source span, and, for
-/// resource-limit failures, the structured limit that was exceeded.
-///
-/// Normal [`Display`](fmt::Display) and [`Debug`](fmt::Debug) formatting may include text from
-/// the YAML document (such as scalar values, mapping keys, tags, directives, or anchor names).
-/// Use [`Error::masked`] when logging or returning errors from sensitive or untrusted documents.
-#[derive(Clone, Debug)]
-pub struct Error {
+#[derive(Clone)]
+struct ErrorInner {
     kind: ErrorKind,
     code: ErrorCode,
     /// Whether a `ReservedIndicator` followed a byte-order mark at line start, for compat wording.
@@ -424,21 +414,50 @@ pub struct Error {
     span: Option<Span>,
     location: Option<Location>,
     message: String,
-    limit: Option<Box<crate::limits::LimitExceeded>>,
+    limit: Option<crate::limits::LimitExceeded>,
     source: Option<Arc<dyn StdError + Send + Sync + 'static>>,
+}
+
+/// An ayaml error with a stable category, a stable failure code, optional source span, and, for
+/// resource-limit failures, the structured limit that was exceeded.
+///
+/// Normal [`Display`](fmt::Display) and [`Debug`](fmt::Debug) formatting may include text from
+/// the YAML document (such as scalar values, mapping keys, tags, directives, or anchor names).
+/// Use [`Error::masked`] when logging or returning errors from sensitive or untrusted documents.
+#[derive(Clone)]
+pub struct Error {
+    inner: Box<ErrorInner>,
+}
+
+impl fmt::Debug for Error {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Error")
+            .field("kind", &self.inner.kind)
+            .field("code", &self.inner.code)
+            .field("reserved_after_bom", &self.inner.reserved_after_bom)
+            .field("path_len", &self.inner.path_len)
+            .field("context_len", &self.inner.context_len)
+            .field("span", &self.inner.span)
+            .field("location", &self.inner.location)
+            .field("message", &self.inner.message)
+            .field("limit", &self.inner.limit)
+            .field("source", &self.inner.source)
+            .finish()
+    }
 }
 
 impl PartialEq for Error {
     fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind
-            && self.code == other.code
-            && self.path_len == other.path_len
-            && self.context_len == other.context_len
-            && self.span == other.span
-            && self.location == other.location
-            && self.message == other.message
-            && self.limit == other.limit
-            && sources_eq(self.source.as_ref(), other.source.as_ref())
+        self.inner.kind == other.inner.kind
+            && self.inner.code == other.inner.code
+            && self.inner.path_len == other.inner.path_len
+            && self.inner.context_len == other.inner.context_len
+            && self.inner.span == other.inner.span
+            && self.inner.location == other.inner.location
+            && self.inner.message == other.inner.message
+            && self.inner.limit == other.inner.limit
+            && sources_eq(self.inner.source.as_ref(), other.inner.source.as_ref())
     }
 }
 
@@ -467,23 +486,25 @@ impl Error {
     #[must_use]
     pub(crate) fn coded(kind: ErrorKind, code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
-            kind,
-            code,
-            reserved_after_bom: false,
-            path_len: 0,
-            context_len: 0,
-            span: None,
-            location: None,
-            message: message.into(),
-            limit: None,
-            source: None,
+            inner: Box::new(ErrorInner {
+                kind,
+                code,
+                reserved_after_bom: false,
+                path_len: 0,
+                context_len: 0,
+                span: None,
+                location: None,
+                message: message.into(),
+                limit: None,
+                source: None,
+            }),
         }
     }
 
     /// Override the stable failure code on this error.
     #[must_use]
-    pub const fn with_code(mut self, code: ErrorCode) -> Self {
-        self.code = code;
+    pub fn with_code(mut self, code: ErrorCode) -> Self {
+        self.inner.code = code;
         self
     }
 
@@ -492,22 +513,22 @@ impl Error {
     /// Prefer matching on [`ErrorCode`] (or [`ErrorCode::as_str`]) over inspecting
     /// [`Error::message`].
     #[must_use]
-    pub const fn code(&self) -> ErrorCode {
-        self.code
+    pub fn code(&self) -> ErrorCode {
+        self.inner.code
     }
 
     /// Mark that a reserved indicator appeared immediately after a byte order mark.
     #[must_use]
-    pub(crate) const fn with_reserved_after_bom(mut self) -> Self {
-        self.reserved_after_bom = true;
+    pub(crate) fn with_reserved_after_bom(mut self) -> Self {
+        self.inner.reserved_after_bom = true;
         self
     }
 
     /// Whether this error is a reserved indicator immediately after a byte order mark.
     #[cfg(feature = "libyaml-compat")]
     #[must_use]
-    pub(crate) const fn is_reserved_after_bom(&self) -> bool {
-        self.reserved_after_bom
+    pub(crate) fn is_reserved_after_bom(&self) -> bool {
+        self.inner.reserved_after_bom
     }
 
     /// Attach a source span.
@@ -519,15 +540,15 @@ impl Error {
     /// after the span.
     #[must_use]
     pub fn with_span(mut self, span: Span) -> Self {
-        self.span = Some(span);
-        self.location = None;
+        self.inner.span = Some(span);
+        self.inner.location = None;
         self
     }
 
-    /// Attach the one-based line and column for this error's span.
+    /// Attach the one-based line and column for this error.
     #[must_use]
     pub fn with_location(mut self, location: Location) -> Self {
-        self.location = Some(location);
+        self.inner.location = Some(location);
         self
     }
 
@@ -539,14 +560,14 @@ impl Error {
     #[cold]
     #[must_use]
     pub(crate) fn with_input_location(mut self, input: &str, compat: bool) -> Self {
-        if self.location.is_some() {
+        if self.inner.location.is_some() {
             return self;
         }
-        let Some(span) = self.span else {
+        let Some(span) = self.inner.span else {
             return self;
         };
         if let Some(position) = crate::position::location_at(input, span.start(), compat) {
-            self.location = Some(position);
+            self.inner.location = Some(position);
         }
         self
     }
@@ -554,20 +575,24 @@ impl Error {
     /// End the message with `context`, which follows the location when the error is displayed.
     #[cold]
     pub(crate) fn with_context(mut self, context: &str) -> Self {
-        self.message.push_str(context);
+        self.inner.message.push_str(context);
         // The parser's contexts are short. A longer one would stay before the location.
-        self.context_len = u16::try_from(context.len()).unwrap_or(0);
+        self.inner.context_len = u16::try_from(context.len()).unwrap_or(0);
         self
     }
 
     /// Reword the message body, keeping any path prefix and trailing context intact.
     #[cold]
     pub(crate) fn map_message(mut self, update: impl FnOnce(&str) -> String) -> Self {
-        let start = self.path_len as usize;
-        let end = self.message.len().saturating_sub(self.context_len as usize);
+        let start = self.inner.path_len as usize;
+        let end = self
+            .inner
+            .message
+            .len()
+            .saturating_sub(self.inner.context_len as usize);
         if start <= end {
-            let replacement = update(&self.message[start..end]);
-            self.message.replace_range(start..end, &replacement);
+            let replacement = update(&self.inner.message[start..end]);
+            self.inner.message.replace_range(start..end, &replacement);
         }
         self
     }
@@ -575,7 +600,7 @@ impl Error {
     /// Attach a source error.
     #[must_use]
     pub fn with_source(mut self, source: impl StdError + Send + Sync + 'static) -> Self {
-        self.source = Some(Arc::new(source));
+        self.inner.source = Some(Arc::new(source));
         self
     }
 
@@ -585,40 +610,40 @@ impl Error {
     /// an earlier limit attached by this method), this updates the code to match `limit.kind()`.
     #[must_use]
     pub fn with_limit(mut self, limit: crate::limits::LimitExceeded) -> Self {
-        if self.code == ErrorCode::LimitExceeded
+        if self.inner.code == ErrorCode::LimitExceeded
             || self
+                .inner
                 .limit
-                .as_deref()
-                .is_some_and(|prev| self.code == ErrorCode::from_limit_kind(prev.kind()))
+                .is_some_and(|prev| self.inner.code == ErrorCode::from_limit_kind(prev.kind()))
         {
-            self.code = ErrorCode::from_limit_kind(limit.kind());
+            self.inner.code = ErrorCode::from_limit_kind(limit.kind());
         }
-        self.limit = Some(Box::new(limit));
+        self.inner.limit = Some(limit);
         self
     }
 
     /// The structured resource-limit failure, when this is a limit error.
     #[must_use]
     pub fn limit(&self) -> Option<crate::limits::LimitExceeded> {
-        self.limit.as_deref().copied()
+        self.inner.limit
     }
 
     /// The stable category.
     #[must_use]
-    pub const fn kind(&self) -> ErrorKind {
-        self.kind
+    pub fn kind(&self) -> ErrorKind {
+        self.inner.kind
     }
 
     /// The source span, if any.
     #[must_use]
-    pub const fn span(&self) -> Option<Span> {
-        self.span
+    pub fn span(&self) -> Option<Span> {
+        self.inner.span
     }
 
     /// The one-based line/column, if the error has a location.
     #[must_use]
     pub fn location(&self) -> Option<Location> {
-        self.location
+        self.inner.location
     }
 
     /// Return a wrapper whose [`Display`](fmt::Display) and [`Debug`](fmt::Debug) output hold no
@@ -666,7 +691,7 @@ impl Error {
     /// or a long path, is cut short with `…`.
     #[must_use]
     pub fn message(&self) -> &str {
-        &self.message
+        &self.inner.message
     }
 
     /// Say that this error came from inside element `index` of a sequence.
@@ -694,23 +719,28 @@ impl Error {
     /// Put one step in front of the path. Errors travel outwards, so the path grows from its
     /// deepest step, and only the step that reads a value adds to it.
     fn inside(mut self, step: &str) -> Self {
-        let path_len = self.path_len as usize;
-        if path_len == 0 {
-            self.message.insert_str(0, ": ");
-            self.message.insert_str(0, step);
-            self.path_len = path_bytes(step.len().saturating_add(2));
-            return self;
-        }
-        if self.message.starts_with(ELIDED) {
-            return self;
-        }
-        let (chosen, separator, next_len) =
-            resolve_path_step(path_len, self.message.starts_with('['), step);
-        self.message.insert_str(0, separator);
-        self.message.insert_str(0, chosen);
-        self.path_len = next_len;
+        prepend_path_step(&mut self.inner.message, &mut self.inner.path_len, step);
         self
     }
+}
+
+/// Prepend one path step onto `message` and update `path_len`, eliding once past `MAX_PATH_BYTES`.
+fn prepend_path_step(message: &mut String, path_len: &mut u16, step: &str) {
+    let current_len = *path_len as usize;
+    if current_len == 0 {
+        message.insert_str(0, ": ");
+        message.insert_str(0, step);
+        *path_len = path_bytes(step.len().saturating_add(2));
+        return;
+    }
+    if message.starts_with(ELIDED) {
+        return;
+    }
+    let (chosen, separator, next_len) =
+        resolve_path_step(current_len, message.starts_with('['), step);
+    message.insert_str(0, separator);
+    message.insert_str(0, chosen);
+    *path_len = next_len;
 }
 
 /// Decide the step text, separator, and updated saturating path byte length for one outer path step.
@@ -846,12 +876,15 @@ fn hides_text(character: char) -> bool {
 
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (Some(_span), Some(location)) = (self.span, self.location) else {
-            return formatter.write_str(&self.message);
+        let Some(location) = self.inner.location else {
+            return formatter.write_str(&self.inner.message);
         };
-        let (problem, context) = self
-            .message
-            .split_at(self.message.len() - self.context_len as usize);
+        let (problem, context) = self.inner.message.split_at(
+            self.inner
+                .message
+                .len()
+                .saturating_sub(self.inner.context_len as usize),
+        );
         write!(
             formatter,
             "{problem} at line {} column {}{context}",
@@ -867,7 +900,8 @@ impl StdError for Error {
         reason = "Arc<dyn Error + Send + Sync> is widened to the plain error trait object"
     )]
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        self.source
+        self.inner
+            .source
             .as_deref()
             .map(|source| source as &(dyn StdError + 'static))
     }
@@ -891,26 +925,26 @@ pub struct MaskedError<'a>(&'a Error);
 impl MaskedError<'_> {
     /// The stable coarse error category.
     #[must_use]
-    pub const fn kind(&self) -> ErrorKind {
-        self.0.kind
+    pub fn kind(&self) -> ErrorKind {
+        self.0.inner.kind
     }
 
     /// The stable machine-readable failure code.
     #[must_use]
-    pub const fn code(&self) -> ErrorCode {
-        self.0.code
+    pub fn code(&self) -> ErrorCode {
+        self.0.inner.code
     }
 
     /// The byte span of the failure, if any.
     #[must_use]
-    pub const fn span(&self) -> Option<Span> {
-        self.0.span
+    pub fn span(&self) -> Option<Span> {
+        self.0.inner.span
     }
 
     /// The one-based line and column of the failure, if any.
     #[must_use]
-    pub const fn location(&self) -> Option<Location> {
-        self.0.location
+    pub fn location(&self) -> Option<Location> {
+        self.0.inner.location
     }
 
     /// The structured resource-limit metadata, when this is a limit error.
@@ -922,11 +956,11 @@ impl MaskedError<'_> {
 
 impl PartialEq for MaskedError<'_> {
     fn eq(&self, other: &Self) -> bool {
-        self.0.kind == other.0.kind
-            && self.0.code == other.0.code
-            && self.0.span == other.0.span
-            && self.0.location == other.0.location
-            && self.0.limit == other.0.limit
+        self.0.inner.kind == other.0.inner.kind
+            && self.0.inner.code == other.0.inner.code
+            && self.0.inner.span == other.0.inner.span
+            && self.0.inner.location == other.0.inner.location
+            && self.0.inner.limit == other.0.inner.limit
     }
 }
 
@@ -934,16 +968,16 @@ impl Eq for MaskedError<'_> {}
 
 impl fmt::Display for MaskedError<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0.location {
+        match self.0.inner.location {
             Some(location) => write!(
                 formatter,
                 "{} ({}) at line {} column {}",
-                self.0.kind,
-                self.0.code,
+                self.0.inner.kind,
+                self.0.inner.code,
                 location.line(),
                 location.column()
             ),
-            None => write!(formatter, "{} ({})", self.0.kind, self.0.code),
+            None => write!(formatter, "{} ({})", self.0.inner.kind, self.0.inner.code),
         }
     }
 }
@@ -952,11 +986,11 @@ impl fmt::Debug for MaskedError<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("MaskedError")
-            .field("kind", &self.0.kind)
-            .field("code", &self.0.code)
-            .field("span", &self.0.span)
-            .field("location", &self.0.location)
-            .field("limit", &self.0.limit)
+            .field("kind", &self.0.inner.kind)
+            .field("code", &self.0.inner.code)
+            .field("span", &self.0.inner.span)
+            .field("location", &self.0.inner.location)
+            .field("limit", &self.0.inner.limit)
             .finish()
     }
 }
@@ -1059,652 +1093,13 @@ impl serde::ser::Error for Error {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{Error, ErrorCode, ErrorKind};
-    use crate::limits::{LimitExceeded, LimitKind};
-    use crate::span::{Location, Span};
-    use std::collections::HashSet;
-    use std::error::Error as _;
-
-    const ALL_CODES: &[ErrorCode] = &[
-        ErrorCode::InvalidUtf8,
-        ErrorCode::NonPrintableChar,
-        ErrorCode::InvalidBom,
-        ErrorCode::ReservedIndicator,
-        ErrorCode::InvalidTabIndentation,
-        ErrorCode::UnterminatedQuotedScalar,
-        ErrorCode::InvalidQuotedContinuation,
-        ErrorCode::InvalidEscape,
-        ErrorCode::InvalidBlockScalarHeader,
-        ErrorCode::InvalidBlockScalarIndentation,
-        ErrorCode::InvalidFlowIndentation,
-        ErrorCode::DocumentMarkerInFlow,
-        ErrorCode::InvalidFlowKey,
-        ErrorCode::MissingCommentWhitespace,
-        ErrorCode::InvalidDirective,
-        ErrorCode::DuplicateDirective,
-        ErrorCode::InvalidAnchor,
-        ErrorCode::InvalidTag,
-        ErrorCode::UndefinedTagHandle,
-        ErrorCode::DirectiveWithoutDocument,
-        ErrorCode::InvalidDocumentStart,
-        ErrorCode::ContentAfterDocumentEnd,
-        ErrorCode::TrailingContent,
-        ErrorCode::InvalidBlockIndentation,
-        ErrorCode::MissingMappingColon,
-        ErrorCode::TrailingDocuments,
-        ErrorCode::UnexpectedToken,
-        ErrorCode::UnexpectedMappingValue,
-        ErrorCode::UnterminatedFlowCollection,
-        ErrorCode::InvalidFlowCollection,
-        ErrorCode::DuplicateNodeProperties,
-        ErrorCode::MisplacedNodeProperties,
-        ErrorCode::InvalidImplicitKey,
-        ErrorCode::AliasWithProperties,
-        ErrorCode::UnknownAnchor,
-        ErrorCode::CyclicAlias,
-        ErrorCode::DuplicateKey,
-        ErrorCode::InvalidMergeOperand,
-        ErrorCode::MalformedEventStream,
-        ErrorCode::InvalidIntScalar,
-        ErrorCode::InvalidFloatScalar,
-        ErrorCode::InvalidBoolScalar,
-        ErrorCode::InvalidNullScalar,
-        ErrorCode::InvalidScalar,
-        ErrorCode::LimitExceeded,
-        ErrorCode::InvalidLimits,
-        ErrorCode::InputSizeLimit,
-        ErrorCode::DepthLimit,
-        ErrorCode::DocumentCountLimit,
-        ErrorCode::ScalarSizeLimit,
-        ErrorCode::CollectionEntriesLimit,
-        ErrorCode::EventCountLimit,
-        ErrorCode::AnchorCountLimit,
-        ErrorCode::AliasDereferenceLimit,
-        ErrorCode::AliasExpansionLimit,
-        ErrorCode::OutputSizeLimit,
-        ErrorCode::TagExpansionLimit,
-        ErrorCode::InvalidType,
-        ErrorCode::InvalidValue,
-        ErrorCode::InvalidLength,
-        ErrorCode::UnknownVariant,
-        ErrorCode::UnknownField,
-        ErrorCode::MissingField,
-        ErrorCode::DuplicateField,
-        ErrorCode::InvalidEnumRepresentation,
-        ErrorCode::MapValueBeforeKey,
-        ErrorCode::SerdeCustom,
-        ErrorCode::InvalidEmitterOptions,
-        ErrorCode::UnsupportedTag,
-        ErrorCode::InvalidEmitEvent,
-        ErrorCode::Io,
-    ];
-
-    /// Exhaustive match so adding an `ErrorCode` variant without adding it to `ALL_CODES` fails
-    /// to compile.
-    fn is_listed(code: ErrorCode) -> bool {
-        match code {
-            ErrorCode::InvalidUtf8
-            | ErrorCode::NonPrintableChar
-            | ErrorCode::InvalidBom
-            | ErrorCode::ReservedIndicator
-            | ErrorCode::InvalidTabIndentation
-            | ErrorCode::UnterminatedQuotedScalar
-            | ErrorCode::InvalidQuotedContinuation
-            | ErrorCode::InvalidEscape
-            | ErrorCode::InvalidBlockScalarHeader
-            | ErrorCode::InvalidBlockScalarIndentation
-            | ErrorCode::InvalidFlowIndentation
-            | ErrorCode::DocumentMarkerInFlow
-            | ErrorCode::InvalidFlowKey
-            | ErrorCode::MissingCommentWhitespace
-            | ErrorCode::InvalidDirective
-            | ErrorCode::DuplicateDirective
-            | ErrorCode::InvalidAnchor
-            | ErrorCode::InvalidTag
-            | ErrorCode::UndefinedTagHandle
-            | ErrorCode::DirectiveWithoutDocument
-            | ErrorCode::InvalidDocumentStart
-            | ErrorCode::ContentAfterDocumentEnd
-            | ErrorCode::TrailingContent
-            | ErrorCode::InvalidBlockIndentation
-            | ErrorCode::MissingMappingColon
-            | ErrorCode::TrailingDocuments
-            | ErrorCode::UnexpectedToken
-            | ErrorCode::UnexpectedMappingValue
-            | ErrorCode::UnterminatedFlowCollection
-            | ErrorCode::InvalidFlowCollection
-            | ErrorCode::DuplicateNodeProperties
-            | ErrorCode::MisplacedNodeProperties
-            | ErrorCode::InvalidImplicitKey
-            | ErrorCode::AliasWithProperties
-            | ErrorCode::UnknownAnchor
-            | ErrorCode::CyclicAlias
-            | ErrorCode::DuplicateKey
-            | ErrorCode::InvalidMergeOperand
-            | ErrorCode::MalformedEventStream
-            | ErrorCode::InvalidIntScalar
-            | ErrorCode::InvalidFloatScalar
-            | ErrorCode::InvalidBoolScalar
-            | ErrorCode::InvalidNullScalar
-            | ErrorCode::InvalidScalar
-            | ErrorCode::LimitExceeded
-            | ErrorCode::InvalidLimits
-            | ErrorCode::InputSizeLimit
-            | ErrorCode::DepthLimit
-            | ErrorCode::DocumentCountLimit
-            | ErrorCode::ScalarSizeLimit
-            | ErrorCode::CollectionEntriesLimit
-            | ErrorCode::EventCountLimit
-            | ErrorCode::AnchorCountLimit
-            | ErrorCode::AliasDereferenceLimit
-            | ErrorCode::AliasExpansionLimit
-            | ErrorCode::OutputSizeLimit
-            | ErrorCode::TagExpansionLimit
-            | ErrorCode::InvalidType
-            | ErrorCode::InvalidValue
-            | ErrorCode::InvalidLength
-            | ErrorCode::UnknownVariant
-            | ErrorCode::UnknownField
-            | ErrorCode::MissingField
-            | ErrorCode::DuplicateField
-            | ErrorCode::InvalidEnumRepresentation
-            | ErrorCode::MapValueBeforeKey
-            | ErrorCode::SerdeCustom
-            | ErrorCode::InvalidEmitterOptions
-            | ErrorCode::UnsupportedTag
-            | ErrorCode::InvalidEmitEvent
-            | ErrorCode::Io => ALL_CODES.contains(&code),
-        }
-    }
-
-    #[test]
-    fn every_error_code_has_a_unique_yaml_kebab_name() {
-        let mut seen = HashSet::new();
-        for &code in ALL_CODES {
-            assert!(is_listed(code));
-            let text = code.as_str();
-            assert_eq!(code.to_string(), text);
-            assert_eq!(code.as_ref(), text);
-            let rest = text
-                .strip_prefix("yaml.")
-                .unwrap_or_else(|| panic!("missing yaml. prefix: {text}"));
-            assert!(!rest.is_empty(), "empty suffix: {text}");
-            assert!(
-                !rest.starts_with('-') && !rest.ends_with('-') && !rest.contains("--"),
-                "{text}"
-            );
-            assert!(
-                rest.bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
-                "not kebab-case: {text}"
-            );
-            assert!(seen.insert(text), "duplicate error code string: {text}");
-        }
-    }
-
-    #[test]
-    fn every_error_code_is_documented_in_reference_page() {
-        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let root = manifest.join("../..");
-        let path = root.join("docs/error-codes.md");
-        if !path.is_file() {
-            assert!(
-                manifest.join("Cargo.toml.orig").is_file(),
-                "{} is neither in the repository nor an unpacked package",
-                manifest.display()
-            );
-            return;
-        }
-        let doc = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
-        let mut documented = HashSet::new();
-        for line in doc.lines() {
-            let trimmed = line.trim();
-            if !trimmed.starts_with('|') {
-                continue;
-            }
-            let cells: Vec<&str> = trimmed.split('|').map(str::trim).collect();
-            if cells.len() >= 4
-                && let Some(variant) = cells[1].strip_prefix('`').and_then(|s| s.strip_suffix('`'))
-                && let Some(code_str) = cells[2].strip_prefix('`').and_then(|s| s.strip_suffix('`'))
-                && code_str.starts_with("yaml.")
-            {
-                assert!(
-                    documented.insert((variant.to_owned(), code_str.to_owned())),
-                    "duplicate code in docs/error-codes.md: ({variant}, {code_str})"
-                );
-            }
-        }
-        let expected: HashSet<(String, String)> = ALL_CODES
-            .iter()
-            .map(|code| (format!("{code:?}"), code.as_str().to_owned()))
-            .collect();
-        let missing: Vec<_> = expected.difference(&documented).collect();
-        let extra: Vec<_> = documented.difference(&expected).collect();
-        assert!(
-            missing.is_empty() && extra.is_empty(),
-            "docs/error-codes.md drift: missing={missing:?}, extra={extra:?}"
-        );
-    }
-
-    #[test]
-    fn error_supports_clone_and_partial_eq() {
-        let a = Error::new(ErrorKind::Parser, "bad")
-            .with_code(ErrorCode::TrailingDocuments)
-            .with_span(Span::new(1, 3))
-            .with_location(Location::new(1, 2));
-        let b = a.clone();
-        assert_eq!(a, b);
-        assert_ne!(a, a.clone().with_code(ErrorCode::UnexpectedToken));
-
-        let with_limit = Error::new(ErrorKind::Limit, "too deep").with_limit(LimitExceeded::new(
-            LimitKind::Depth,
-            4,
-            5,
-        ));
-        assert_eq!(with_limit.code(), ErrorCode::DepthLimit);
-        assert_eq!(with_limit, with_limit.clone());
-        let replaced_limit = with_limit.with_limit(LimitExceeded::new(LimitKind::InputBytes, 8, 9));
-        assert_eq!(replaced_limit.code(), ErrorCode::InputSizeLimit);
-        let explicit_code = Error::new(ErrorKind::Limit, "custom")
-            .with_code(ErrorCode::InvalidLimits)
-            .with_limit(LimitExceeded::new(LimitKind::Depth, 4, 5));
-        assert_eq!(explicit_code.code(), ErrorCode::InvalidLimits);
-
-        let s1 = Error::new(ErrorKind::Io, "write failed")
-            .with_source(std::io::Error::other("broken pipe"));
-        let s2 = Error::new(ErrorKind::Io, "write failed")
-            .with_source(std::io::Error::other("broken pipe"));
-        let s3 = Error::new(ErrorKind::Io, "write failed")
-            .with_source(std::io::Error::other("disk full"));
-        assert_eq!(s1, s1.clone());
-        assert_eq!(s1, s2);
-        assert_ne!(s1, s3);
-        assert_ne!(s1, Error::new(ErrorKind::Io, "write failed"));
-    }
-
-    #[test]
-    fn default_codes_for_every_error_kind_are_pinned() {
-        let defaults = [
-            (ErrorKind::InvalidEncoding, ErrorCode::InvalidUtf8),
-            (ErrorKind::Scanner, ErrorCode::UnexpectedToken),
-            (ErrorKind::Parser, ErrorCode::UnexpectedToken),
-            (ErrorKind::Alias, ErrorCode::UnknownAnchor),
-            (ErrorKind::DuplicateKey, ErrorCode::DuplicateKey),
-            (ErrorKind::Tag, ErrorCode::InvalidTag),
-            (ErrorKind::Resolution, ErrorCode::InvalidScalar),
-            (ErrorKind::Limit, ErrorCode::LimitExceeded),
-            (ErrorKind::Composition, ErrorCode::MalformedEventStream),
-            (ErrorKind::Serde, ErrorCode::SerdeCustom),
-            (ErrorKind::Emitter, ErrorCode::InvalidEmitEvent),
-            (ErrorKind::Io, ErrorCode::Io),
-        ];
-        for (kind, expected) in defaults {
-            assert_eq!(Error::new(kind, "msg").code(), expected, "{kind:?}");
-        }
-    }
-
-    #[test]
-    fn kind_and_message_are_exposed() {
-        let error = Error::new(ErrorKind::Parser, "unexpected token");
-        assert_eq!(error.kind(), ErrorKind::Parser);
-        assert_eq!(error.code(), ErrorCode::UnexpectedToken);
-        assert_eq!(error.message(), "unexpected token");
-        assert_eq!(error.to_string(), "unexpected token");
-        assert!(error.span().is_none());
-        assert!(error.location().is_none());
-    }
-
-    #[test]
-    fn span_and_location_are_one_based() {
-        let span = Span::new(4, 5);
-        let error = Error::new(ErrorKind::Scanner, "bad token")
-            .with_span(span)
-            .with_location(Location::new(2, 3));
-        assert_eq!(error.span(), Some(span));
-        let location = error.location().expect("location");
-        assert_eq!((location.line(), location.column()), (2, 3));
-    }
-
-    #[test]
-    fn source_is_chained() {
-        let inner = std::io::Error::other("inner");
-        let error = Error::new(ErrorKind::Io, "outer").with_source(inner);
-        assert!(error.source().is_some());
-    }
-
-    #[test]
-    fn a_path_joins_its_steps_and_stands_before_the_message() {
-        let error = Error::new(ErrorKind::Serde, "bad")
-            .inside_key("c")
-            .inside_index(2)
-            .inside_key("b")
-            .inside_key("a b")
-            .inside_index(0);
-        assert_eq!(error.message(), "[0][\"a b\"].b[2].c: bad");
-        assert_eq!(error.kind(), ErrorKind::Serde);
-        let error = Error::new(ErrorKind::Serde, "bad").inside_collection_key();
-        assert_eq!(error.message(), "[?]: bad");
-    }
-
-    #[test]
-    fn a_key_is_bare_only_if_it_is_a_short_name() {
-        for bare in ["a", "_a", "runs-on", "a_1", &"k".repeat(64)] {
-            let error = Error::new(ErrorKind::Serde, "bad").inside_key(bare);
-            assert_eq!(error.message(), format!("{bare}: bad"));
-        }
-        for (key, shown) in [
-            ("", "[\"\"]"),
-            ("80", "[\"80\"]"),
-            ("-a", "[\"-a\"]"),
-            ("a.b", "[\"a.b\"]"),
-            ("名前", "[\"名前\"]"),
-            ("a\"b\\c", "[\"a\\\"b\\\\c\"]"),
-            ("a\nb\u{1b}", "[\"a\\u{a}b\\u{1b}\"]"),
-            ("\u{85}\u{2028}\u{2029}", "[\"\\u{85}\\u{2028}\\u{2029}\"]"),
-            ("\u{200e}\u{200f}", "[\"\\u{200e}\\u{200f}\"]"),
-            ("a\u{61c}b", "[\"a\\u{61c}b\"]"),
-            (
-                "\u{202e}\u{2066}\u{feff}",
-                "[\"\\u{202e}\\u{2066}\\u{feff}\"]",
-            ),
-        ] {
-            let error = Error::new(ErrorKind::Serde, "bad").inside_key(key);
-            assert_eq!(error.message(), format!("{shown}: bad"));
-        }
-    }
-
-    #[test]
-    fn a_long_key_and_a_long_path_are_cut_short() {
-        let error = Error::new(ErrorKind::Serde, "bad").inside_key(&"é".repeat(65));
-        assert_eq!(error.message(), format!("[\"{}…\"]: bad", "é".repeat(64)));
-
-        let mut error = Error::new(ErrorKind::Serde, "bad");
-        let name = "k".repeat(64);
-        for _ in 0..100 {
-            error = error.inside_key(&name);
-        }
-        let (path, rest) = error.message().split_once(": ").expect("a path");
-        assert_eq!(rest, "bad");
-        assert!(path.starts_with("….k"), "{path}");
-        assert!(path.len() <= 1024 + 4, "{}", path.len());
-        let before = error.message().to_owned();
-        let error = error.inside_key("outer").inside_index(1);
-        assert_eq!(error.message(), before);
-
-        let mut error = Error::new(ErrorKind::Serde, "bad").inside_index(7);
-        for _ in 0..200 {
-            error = error.inside_index(1_234_567);
-        }
-        assert!(error.message().starts_with("…["), "{}", error.message());
-    }
-
-    /// Text that reads like a location, in a key or in the message, never stands for the error's.
-    #[test]
-    fn a_location_in_the_text_does_not_stand_for_the_error_s() {
-        let span = Span::new(4, 5);
-        let error = Error::new(ErrorKind::Serde, "bad")
-            .with_span(span)
-            .with_location(Location::new(2, 3))
-            .inside_key("at line 9");
-        assert_eq!(error.to_string(), "[\"at line 9\"]: bad at line 2 column 3");
-        let error = Error::new(ErrorKind::Serde, "invalid type: string \"at line 9\"")
-            .with_span(span)
-            .with_location(Location::new(2, 3))
-            .inside_key("a");
-        assert_eq!(
-            error.to_string(),
-            "a: invalid type: string \"at line 9\" at line 2 column 3"
-        );
-    }
-
-    #[cfg(target_pointer_width = "64")]
-    #[test]
-    fn an_error_stays_small() {
-        assert_eq!(size_of::<Error>(), 104);
-        assert_eq!(size_of::<Result<crate::Value, Error>>(), 104);
-    }
-
-    /// A path's steps are as long as `inside` lets them be, and a context too long to keep its
-    /// length still shows.
-    #[test]
-    fn a_long_path_or_context_keeps_its_text() {
-        let long = "k".repeat(70_000);
-        let error = Error::new(ErrorKind::Serde, "bad").inside_key(&long);
-        assert!(
-            error.message().ends_with("…\"]: bad"),
-            "{}",
-            error.message()
-        );
-        let error = (0..2_000).fold(Error::new(ErrorKind::Serde, "bad"), |error, index| {
-            error.inside_index(index)
-        });
-        let start: String = error.message().chars().take(40).collect();
-        assert!(error.message().starts_with('…'), "{start}");
-        assert!(error.message().len() < 2_048);
-        let span = Span::new(4, 5);
-        let context = format!(", {}", "c".repeat(70_000));
-        let error = Error::new(ErrorKind::Parser, "bad")
-            .with_context(&context)
-            .with_span(span)
-            .with_location(Location::new(2, 3));
-        assert_eq!(
-            error.to_string(),
-            format!("bad{context} at line 2 column 3")
-        );
-    }
-
-    #[test]
-    fn the_location_goes_before_the_context() {
-        let span = Span::new(4, 5);
-        let error = Error::new(ErrorKind::Parser, "unterminated flow sequence")
-            .with_context(", opened at line 1 column 1")
-            .with_span(span)
-            .with_location(Location::new(2, 3));
-        assert_eq!(
-            error.message(),
-            "unterminated flow sequence, opened at line 1 column 1"
-        );
-        assert_eq!(
-            error.to_string(),
-            "unterminated flow sequence at line 2 column 3, opened at line 1 column 1"
-        );
-        let error = error.inside_index(0).inside_key("k");
-        assert_eq!(
-            error.to_string(),
-            "k[0]: unterminated flow sequence at line 2 column 3, opened at line 1 column 1"
-        );
-        // With no location, the context follows the problem.
-        let error = Error::new(ErrorKind::Parser, "unterminated flow sequence")
-            .with_context(", opened at line 1 column 1");
-        assert_eq!(
-            error.to_string(),
-            "unterminated flow sequence, opened at line 1 column 1"
-        );
-    }
-
-    #[test]
-    fn categories_display_stably() {
-        assert_eq!(ErrorKind::DuplicateKey.to_string(), "duplicate key");
-        assert_eq!(ErrorKind::Limit.to_string(), "resource limit");
-    }
-
-    #[test]
-    fn masked_error_shows_kind_code_and_location_without_message_or_source() {
-        fn assert_masked_traits<
-            T: Copy
-                + Clone
-                + PartialEq
-                + Eq
-                + Send
-                + Sync
-                + std::fmt::Display
-                + std::fmt::Debug
-                + std::error::Error,
-        >(
-            _: T,
-        ) {
-        }
-
-        let secret = "TOP_SECRET_VALUE_991";
-        let error = Error::new(
-            ErrorKind::Serde,
-            format!("invalid type: string \"{secret}\""),
-        )
-        .with_code(ErrorCode::InvalidType)
-        .with_span(Span::new(10, 20))
-        .with_location(Location::new(3, 5))
-        .with_context(", in flow mapping")
-        .inside_key("secret_key_991")
-        .with_source(std::io::Error::other(format!("inner {secret}")));
-
-        assert!(error.to_string().contains(secret));
-        assert!(error.to_string().contains("secret_key_991"));
-
-        let masked = error.masked();
-        let display = masked.to_string();
-        let debug = format!("{masked:?}");
-        let pretty_debug = format!("{masked:#?}");
-
-        assert_eq!(
-            display,
-            "serde error (yaml.invalid-type) at line 3 column 5"
-        );
-        assert!(!display.contains(secret), "leaked in display: {display}");
-        assert!(
-            !display.contains("secret_key_991"),
-            "leaked key in display: {display}"
-        );
-        assert!(!debug.contains(secret), "leaked in debug: {debug}");
-        assert!(
-            !debug.contains("secret_key_991"),
-            "leaked key in debug: {debug}"
-        );
-        assert!(
-            !pretty_debug.contains(secret) && !pretty_debug.contains("secret_key_991"),
-            "leaked in pretty debug: {pretty_debug}"
-        );
-        assert!(debug.contains("Serde") && debug.contains("InvalidType"));
-        assert!(masked.source().is_none());
-        assert_eq!(masked.kind(), ErrorKind::Serde);
-        assert_eq!(masked.code(), ErrorCode::InvalidType);
-        assert_eq!(masked.span(), Some(Span::new(10, 20)));
-        assert_eq!(masked.location(), Some(Location::new(3, 5)));
-        assert_eq!(masked.limit(), None);
-
-        let no_loc = Error::new(ErrorKind::Io, format!("write {secret}"))
-            .with_source(std::io::Error::other(secret));
-        assert_eq!(no_loc.masked().to_string(), "I/O error (yaml.io)");
-        assert!(!format!("{:?}", no_loc.masked()).contains(secret));
-        assert!(no_loc.masked().source().is_none());
-
-        let with_limit = Error::new(ErrorKind::Limit, format!("too deep {secret}"))
-            .with_limit(LimitExceeded::new(LimitKind::Depth, 4, 5));
-        assert_eq!(
-            with_limit.masked().to_string(),
-            "resource limit (yaml.depth-limit)"
-        );
-        assert_eq!(
-            with_limit.masked().limit(),
-            Some(LimitExceeded::new(LimitKind::Depth, 4, 5))
-        );
-        assert!(!format!("{:?}", with_limit.masked()).contains(secret));
-
-        let loc_without_span = Error::new(ErrorKind::Parser, format!("bad {secret}"))
-            .with_location(Location::new(2, 3));
-        assert_eq!(
-            loc_without_span.masked().to_string(),
-            "parser error (yaml.unexpected-token) at line 2 column 3"
-        );
-        assert_eq!(loc_without_span.masked().span(), None);
-        assert_eq!(
-            loc_without_span.masked().location(),
-            Some(Location::new(2, 3))
-        );
-
-        let span_without_loc =
-            Error::new(ErrorKind::Scanner, format!("bad {secret}")).with_span(Span::new(1, 5));
-        assert_eq!(
-            span_without_loc.masked().to_string(),
-            "scanner error (yaml.unexpected-token)"
-        );
-        assert_eq!(span_without_loc.masked().span(), Some(Span::new(1, 5)));
-        assert_eq!(span_without_loc.masked().location(), None);
-        assert!(!format!("{:?}", span_without_loc.masked()).contains(secret));
-        assert!(!format!("{:#?}", span_without_loc.masked()).contains(secret));
-
-        assert_masked_traits(masked);
-    }
-
-    #[test]
-    fn masked_error_equality_ignores_redacted_message_and_source() {
-        let a = Error::new(ErrorKind::Serde, "secret A")
-            .with_code(ErrorCode::InvalidType)
-            .with_span(Span::new(0, 4))
-            .with_location(Location::new(1, 1))
-            .with_source(std::io::Error::other("cause A"));
-        let b = Error::new(ErrorKind::Serde, "secret B")
-            .with_code(ErrorCode::InvalidType)
-            .with_span(Span::new(0, 4))
-            .with_location(Location::new(1, 1))
-            .with_source(std::io::Error::other("cause B"));
-        let c = Error::new(ErrorKind::Serde, "secret A")
-            .with_code(ErrorCode::InvalidValue)
-            .with_span(Span::new(0, 4))
-            .with_location(Location::new(1, 1));
-
-        assert_ne!(a, b);
-        assert_eq!(a.masked(), b.masked());
-        assert_ne!(a.masked(), c.masked());
-    }
-
-    #[test]
-    fn path_truncation_and_key_quoting_preserve_utf8_and_bounds() {
-        assert_eq!(super::path_bytes(0), 0);
-        assert_eq!(super::path_bytes(usize::MAX), u16::MAX);
-
-        // Long 4-byte emoji key truncates at MAX_KEY_CHARS without splitting UTF-8.
-        let emoji_key = "🚀".repeat(super::MAX_KEY_CHARS + 10);
-        let quoted = super::quoted_key(&emoji_key);
-        assert!(quoted.starts_with("[\""));
-        assert!(
-            quoted.ends_with(&format!("{}]", super::ELIDED))
-                || quoted.ends_with(&format!("{}\"]", super::ELIDED))
-        );
-        assert!(quoted.ends_with(&format!("{}\"]", super::ELIDED)));
-        assert_eq!(
-            quoted.chars().filter(|&c| c == '🚀').count(),
-            super::MAX_KEY_CHARS
-        );
-
-        // Control chars and BiDi override characters are always escaped in quoted keys.
-        let hostile = "a\u{0000}\u{202e}\u{feff}\"\\z";
-        let quoted_hostile = super::quoted_key(hostile);
-        assert!(quoted_hostile.chars().all(|c| !super::hides_text(c)));
-        assert!(quoted_hostile.contains("\\u{0}"));
-        assert!(quoted_hostile.contains("\\u{202e}"));
-        assert!(quoted_hostile.contains("\\u{feff}"));
-        assert!(quoted_hostile.contains("\\\""));
-        assert!(quoted_hostile.contains("\\\\"));
-
-        // Repeated `inside_key` calls cap path length and become idempotent once elided.
-        let mut err = Error::new(ErrorKind::Serde, "bad value");
-        for i in 0..40 {
-            err = err.inside_key(&format!("segment_with_long_name_{i:02}"));
-        }
-        assert!(err.message().starts_with(super::ELIDED));
-        let once_elided = err.message().to_owned();
-        let after_more = err.inside_key("outer_ignored");
-        assert_eq!(after_more.message(), once_elided);
-    }
-}
+mod tests;
 
 #[cfg(kani)]
 mod kani_proofs {
     use super::{
-        ELIDED, Error, ErrorKind, MAX_KEY_CHARS, MAX_PATH_BYTES, format_unicode_escape, hides_text,
-        is_short_name, path_bytes, resolve_path_step, write_quoted_key, write_quoted_key_char,
+        ELIDED, MAX_KEY_CHARS, MAX_PATH_BYTES, format_unicode_escape, hides_text, is_short_name,
+        path_bytes, prepend_path_step, resolve_path_step, write_quoted_key, write_quoted_key_char,
     };
 
     #[kani::proof]
@@ -1950,42 +1345,42 @@ mod kani_proofs {
         );
         assert_eq!(next_len, expected_len);
 
-        // 2. Verify `Error::inside` directly at concrete lengths straddling `MAX_PATH_BYTES`,
-        //    using pre-sized small buffers so `String::insert_str` never hits symbolic heap
-        //    reallocation: covers initial attachment, exact elision transition, and idempotence
-        //    of subsequent `inside` calls once elided.
+        // 2. Verify `prepend_path_step` (used directly by `Error::inside`) at concrete lengths
+        //    straddling `MAX_PATH_BYTES`, using pre-sized small buffers without boxing `ErrorInner`
+        //    on Kani's symbolic heap: covers initial attachment, exact elision transition, and
+        //    idempotence of subsequent steps once elided.
         let mut fresh_msg = String::with_capacity(16);
         fresh_msg.push_str("bad");
-        let fresh = Error::new(ErrorKind::Serde, fresh_msg).inside("k");
-        assert_eq!(fresh.path_len, 3);
-        assert_eq!(fresh.message.as_bytes(), b"k: bad");
+        let mut fresh_path_len = 0_u16;
+        prepend_path_step(&mut fresh_msg, &mut fresh_path_len, "k");
+        assert_eq!(fresh_path_len, 3);
+        assert_eq!(fresh_msg.as_bytes(), b"k: bad");
 
         for cap in (MAX_PATH_BYTES - 4)..=MAX_PATH_BYTES {
             let mut msg = String::with_capacity(48);
             msg.push_str("a: b");
-            let mut err = Error::new(ErrorKind::Serde, msg);
-            err.path_len = cap as u16;
+            let mut cur_path_len = cap as u16;
             // Step "xy" + "." = 3 bytes: fits when cap <= MAX_PATH_BYTES - 3, elides above.
-            let stepped = err.inside("xy");
+            prepend_path_step(&mut msg, &mut cur_path_len, "xy");
             if cap + 3 > MAX_PATH_BYTES {
-                assert!(stepped.message.starts_with(ELIDED));
-                let elided_len = stepped.message.len();
-                let elided_path_len = stepped.path_len;
-                let again = stepped.inside("outer_ignored");
-                assert_eq!(again.message.len(), elided_len);
-                assert_eq!(again.path_len, elided_path_len);
-                assert!(again.message.starts_with(ELIDED));
+                assert!(msg.starts_with(ELIDED));
+                let elided_len = msg.len();
+                let elided_path_len = cur_path_len;
+                prepend_path_step(&mut msg, &mut cur_path_len, "outer_ignored");
+                assert_eq!(msg.len(), elided_len);
+                assert_eq!(cur_path_len, elided_path_len);
+                assert!(msg.starts_with(ELIDED));
             } else {
-                assert!(stepped.message.starts_with("xy."));
-                assert_eq!(usize::from(stepped.path_len), cap + 3);
+                assert!(msg.starts_with("xy."));
+                assert_eq!(usize::from(cur_path_len), cap + 3);
                 // One more 10-byte step pushes every remaining cap over MAX_PATH_BYTES and elides.
-                let over = stepped.inside("over_limit");
-                assert!(over.message.starts_with(ELIDED));
-                let elided_len = over.message.len();
-                let elided_path_len = over.path_len;
-                let again = over.inside("outer_ignored");
-                assert_eq!(again.message.len(), elided_len);
-                assert_eq!(again.path_len, elided_path_len);
+                prepend_path_step(&mut msg, &mut cur_path_len, "over_limit");
+                assert!(msg.starts_with(ELIDED));
+                let elided_len = msg.len();
+                let elided_path_len = cur_path_len;
+                prepend_path_step(&mut msg, &mut cur_path_len, "outer_ignored");
+                assert_eq!(msg.len(), elided_len);
+                assert_eq!(cur_path_len, elided_path_len);
             }
         }
     }

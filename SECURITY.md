@@ -12,9 +12,10 @@ advisory and changelog describe the problem once that release is available.
 
 ## Supported versions
 
-Only the latest `0.2.x` release gets security fixes. The `0.1.x` line ended with 0.1.3: a fix
-isn't backported to it, or to an older patch release, so please upgrade. The changelog says what
-a caller of 0.1.x has to change for 0.2.x.
+Only the latest `0.2.x` release gets security fixes. Once `1.0.0` ships, security support moves to
+the latest `1.x` release and `0.2.x` will no longer receive backports. The `0.1.x` line ended with
+0.1.3: a fix isn't backported to it, or to an older patch release, so please upgrade. The changelog
+says what a caller of 0.1.x has to change for 0.2.x.
 
 ## What counts
 

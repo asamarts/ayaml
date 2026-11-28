@@ -45,7 +45,7 @@ underlying cause cannot leak through error-chain formatters.
 
 ## `ErrorKind` and `ErrorCode`
 
-`ErrorKind` answers which layer failed (encoding, scanner, parser, aliases, duplicate keys, tags,
+`ErrorKind` answers which layer failed (encoding, scanner, parser, duplicate keys, tags,
 resolution, resource limits, composition, Serde, emitter, or I/O). `ErrorCode` answers *why* it
 failed.
 
@@ -127,8 +127,8 @@ failed.
 
 | Variant | Code | Usual `ErrorKind` | Meaning |
 | --- | --- | --- | --- |
-| `UnknownAnchor` | `yaml.unknown-anchor` | `Composition`, `Alias` | An alias refers to an anchor name that was not defined earlier in the same document. Also the default code for `ErrorKind::Alias`. |
-| `CyclicAlias` | `yaml.cyclic-alias` | `Composition`, `Alias` | An alias refers to an enclosing collection whose anchor has not yet closed. |
+| `UnknownAnchor` | `yaml.unknown-anchor` | `Composition` | An alias refers to an anchor name that was not defined earlier in the same document. |
+| `CyclicAlias` | `yaml.cyclic-alias` | `Composition` | An alias refers to an enclosing collection whose anchor has not yet closed. |
 | `DuplicateKey` | `yaml.duplicate-key` | `DuplicateKey`, `Serde` | A mapping contains two semantically equal keys during YAML composition or Serde serialization. |
 | `InvalidMergeOperand` | `yaml.invalid-merge-operand` | `Composition` | A merge key (`<<`) evaluated by `Value::apply_merge_keys*` or `ParseOptions::with_merge_keys(true)` has a value that is neither a mapping nor a sequence of mappings. |
 | `MalformedEventStream` | `yaml.malformed-event-stream` | `Composition` | An event stream handed to composition is structurally unbalanced or incomplete. Also the default code for `ErrorKind::Composition`. |

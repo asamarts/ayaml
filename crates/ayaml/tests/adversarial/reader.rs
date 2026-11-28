@@ -4,7 +4,7 @@
 use std::error::Error as _;
 use std::io::{self, Read};
 
-use ayaml::{ErrorKind, LimitExceeded, LimitKind, Limits, Value};
+use ayaml::{ErrorKind, LimitExceeded, LimitKind, Limits, ParseOptions, Value};
 
 use super::in_child_named;
 
@@ -35,7 +35,6 @@ impl Read for FailingReader {
 /// Bounded reader entry points reject infinite and oversized streams after reading at most
 /// `max_input_bytes + 1` bytes, and propagate I/O errors cleanly.
 #[test]
-#[allow(deprecated, reason = "tests deprecated 0.x *_with_limits shims")]
 fn from_reader_rejects_infinite_and_oversized_streams_boundedly() {
     in_child!(|| {
         // Default limits bound an infinite stream to max_input_bytes + 1 bytes.
@@ -56,12 +55,12 @@ fn from_reader_rejects_infinite_and_oversized_streams_boundedly() {
         );
 
         // Custom limits bound both infinite and oversized finite streams to max_input_bytes + 1.
-        let limits = Limits::new().with_max_input_bytes(1024);
+        let options = ParseOptions::new().with_limits(Limits::new().with_max_input_bytes(1024));
         let mut custom_infinite = CountingReader {
             inner: io::repeat(b'x'),
             bytes_read: 0,
         };
-        let error = ayaml::from_reader_with_limits::<_, Value>(&mut custom_infinite, &limits)
+        let error = ayaml::from_reader_with::<_, Value>(&mut custom_infinite, &options)
             .expect_err("infinite custom");
         assert_eq!(error.kind(), ErrorKind::Limit);
         assert_eq!(
@@ -75,7 +74,7 @@ fn from_reader_rejects_infinite_and_oversized_streams_boundedly() {
             inner: oversized.as_slice(),
             bytes_read: 0,
         };
-        let error = ayaml::from_reader_with_limits::<_, Value>(&mut custom_finite, &limits)
+        let error = ayaml::from_reader_with::<_, Value>(&mut custom_finite, &options)
             .expect_err("oversized finite");
         assert_eq!(error.kind(), ErrorKind::Limit);
         assert_eq!(
@@ -85,8 +84,8 @@ fn from_reader_rejects_infinite_and_oversized_streams_boundedly() {
         assert_eq!(custom_finite.bytes_read, 1025);
 
         // I/O failures propagate as ErrorKind::Io with their underlying source preserved.
-        let error = ayaml::from_reader_with_limits::<_, Value>(FailingReader, &limits)
-            .expect_err("io failure");
+        let error =
+            ayaml::from_reader_with::<_, Value>(FailingReader, &options).expect_err("io failure");
         assert_eq!(error.kind(), ErrorKind::Io);
         assert_eq!(
             error

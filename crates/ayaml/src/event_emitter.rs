@@ -77,21 +77,6 @@ pub fn to_string_events_with(events: &[Event<'_>], options: &EmitOptions) -> Res
     emit_events_to_string(events, &options.limits)
 }
 
-/// Emit a collected event stream with an explicit output-size limit.
-///
-/// # Errors
-///
-/// Returns an error when the events cannot be written, a configured limit is exceeded, or the writer fails.
-#[deprecated(
-    note = "use `to_string_events_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
-)]
-pub fn to_string_events_with_limits(
-    events: &[Event<'_>],
-    limits: &Limits,
-) -> Result<String, Error> {
-    emit_events_to_string(events, limits)
-}
-
 fn emit_events_to_string(events: &[Event<'_>], limits: &Limits) -> Result<String, Error> {
     let mut output = Vec::new();
     write_events(
@@ -146,27 +131,6 @@ pub fn to_writer_events_with<W: Write>(
     )
 }
 
-/// Write a collected event stream to a writer, within `limits`: `max_output_bytes` for all that
-/// is written, `max_depth`, and `max_anchors` for the anchors of one document.
-///
-/// # Errors
-///
-/// Returns an error when the events cannot be written, a configured limit is exceeded, or the writer fails.
-#[deprecated(
-    note = "use `to_writer_events_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
-)]
-pub fn to_writer_events_with_limits<W: Write>(
-    writer: &mut W,
-    events: &[Event<'_>],
-    limits: &Limits,
-) -> Result<(), Error> {
-    write_events(
-        Output::new(writer, limits),
-        events.iter().map(Ok::<_, Error>),
-        limits,
-    )
-}
-
 /// Write a lazy event stream as it is parsed.
 ///
 /// The output is the same as [`to_string_events`] would produce for the
@@ -207,22 +171,6 @@ pub fn to_writer_event_stream_with<W: Write>(
         stream,
         &options.limits,
     )
-}
-
-/// Write a lazy event stream with a cumulative output limit.
-///
-/// # Errors
-///
-/// Returns an error when the events cannot be written, a configured limit is exceeded, or the writer fails.
-#[deprecated(
-    note = "use `to_writer_event_stream_with` with `EmitOptions`; deprecated through 0.x and will be removed in 1.0"
-)]
-pub fn to_writer_event_stream_with_limits<W: Write>(
-    writer: &mut W,
-    stream: EventStream<'_>,
-    limits: &Limits,
-) -> Result<(), Error> {
-    write_events(Output::new(writer, limits), stream, limits)
 }
 
 fn emitter_error(message: impl Into<String>) -> Error {

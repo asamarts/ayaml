@@ -352,8 +352,11 @@ jobs:
           toolchain: "1.99.1"
       - name: Install the pinned cargo-semver-checks
         run: tools/install-semver-checks.sh "${RUNNER_TEMP}/semver-checks" >> "$GITHUB_PATH"
+      # Pre-1.0 staging while workspace version is still 0.2.3 (AY-172): drop `--release-type major`
+      # in the 1.0.0 release PR itself (`cargo-semver-checks` auto-detects 0.2.3 -> 1.0.0 as major,
+      # and `repository_policy` forbids `--release-type major` on 1.x+ versions).
       - name: cargo-semver-checks
-        run: cargo semver-checks --package ayaml
+        run: cargo semver-checks --package ayaml --release-type major
       - name: cargo-semver-checks (ayaml-edit)
         run: |
           set -euo pipefail

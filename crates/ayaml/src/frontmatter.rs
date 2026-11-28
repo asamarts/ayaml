@@ -16,6 +16,7 @@ const UTF8_BOM: &str = "\u{feff}";
 
 /// The closing delimiter that terminated a frontmatter block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum FrontmatterDelimiter {
     /// Closed by a `---` document-start marker line.
     DocumentStart,

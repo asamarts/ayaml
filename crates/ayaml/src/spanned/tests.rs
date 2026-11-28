@@ -1,4 +1,5 @@
 use super::*;
+use crate::limits::Limits;
 
 #[test]
 fn complex_keys_detect_duplicates_and_ambiguity_in_linear_time() {

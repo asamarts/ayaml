@@ -555,26 +555,21 @@ server:
 }
 
 #[test]
-#[allow(deprecated, reason = "tests deprecated 0.x *_with_limits shims")]
 fn document_deserializer_enforces_limits_and_compat_options() {
     // Invalid limits fail fast before parsing.
     for bad in [
         Limits::new().with_max_depth(MAX_DEPTH_CAP + 1),
         Limits::new().with_node_cost_bytes(0),
     ] {
-        let opts = ParseOptions::new().with_limits(bad.clone());
-        for err in [
-            DocumentDeserializer::from_str_with("a: 1\n", &opts).unwrap_err(),
-            DocumentDeserializer::from_str_with_limits("a: 1\n", &bad).unwrap_err(),
-        ] {
-            assert_eq!(err.kind(), ErrorKind::Limit);
-            assert_eq!(err.limit(), None);
-        }
+        let opts = ParseOptions::new().with_limits(bad);
+        let err = DocumentDeserializer::from_str_with("a: 1\n", &opts).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Limit);
+        assert_eq!(err.limit(), None);
     }
 
     // Input-size, depth, duplicate-key, and trailing-document limits apply.
-    let small = Limits::new().with_max_input_bytes(4);
-    let err = DocumentDeserializer::from_str_with_limits("name: demo\n", &small).unwrap_err();
+    let small = ParseOptions::new().with_limits(Limits::new().with_max_input_bytes(4));
+    let err = DocumentDeserializer::from_str_with("name: demo\n", &small).unwrap_err();
     assert_eq!(
         err.limit().map(ayaml::LimitExceeded::kind),
         Some(LimitKind::InputBytes)
@@ -609,9 +604,10 @@ fn document_deserializer_enforces_limits_and_compat_options() {
 
         // Compat remaps depth limits to ErrorKind::Serde while keeping ErrorCode::DepthLimit and
         // LimitExceeded metadata, and remaps trailing/count document errors to libyaml's message.
-        let shallow_limits = Limits::new().with_max_depth(1);
-        let err = DocumentDeserializer::from_str_compat_with_limits("a: [1]\n", &shallow_limits)
-            .unwrap_err();
+        let shallow_opts =
+            ayaml::compat::ParseOptions::new().with_limits(Limits::new().with_max_depth(1));
+        let err =
+            DocumentDeserializer::from_str_compat_with("a: [1]\n", &shallow_opts).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::Serde);
         assert_eq!(err.code(), ErrorCode::DepthLimit);
         assert_eq!(

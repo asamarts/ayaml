@@ -299,27 +299,12 @@ fn readers() -> Vec<Reader> {
     readers
 }
 
-#[allow(deprecated, reason = "tests deprecated 0.x *_with_limits shims")]
-fn extra_typed_readers() -> [Reader; 7] {
+fn extra_typed_readers() -> [Reader; 4] {
     [
         Reader {
-            name: "from_str_with_limits (Value)",
-            read: |input, limits| ayaml::from_str_with_limits::<Value>(input, limits).map(drop),
-            values: true,
-            stream: false,
-        },
-        Reader {
-            name: "from_slice_with_limits (Value)",
+            name: "from_slice_with (IgnoredAny)",
             read: |input, limits| {
-                ayaml::from_slice_with_limits::<Value>(input.as_bytes(), limits).map(drop)
-            },
-            values: true,
-            stream: false,
-        },
-        Reader {
-            name: "from_slice_borrowed_with_limits (IgnoredAny)",
-            read: |input, limits| {
-                ayaml::from_slice_borrowed_with_limits::<IgnoredAny>(input.as_bytes(), limits)
+                ayaml::from_slice_with::<IgnoredAny>(input.as_bytes(), &parse_options(limits))
                     .map(drop)
             },
             values: true,
@@ -335,14 +320,6 @@ fn extra_typed_readers() -> [Reader; 7] {
             stream: false,
         },
         Reader {
-            name: "from_reader_with_limits (Value)",
-            read: |input, limits| {
-                ayaml::from_reader_with_limits::<_, Value>(input.as_bytes(), limits).map(drop)
-            },
-            values: true,
-            stream: false,
-        },
-        Reader {
             name: "DocumentDeserializer::from_str_with (Value)",
             read: |input, limits| {
                 use serde::Deserialize as _;
@@ -353,10 +330,10 @@ fn extra_typed_readers() -> [Reader; 7] {
             stream: false,
         },
         Reader {
-            name: "DocumentDeserializer::from_str_with_limits (IgnoredAny)",
+            name: "DocumentDeserializer::from_str_with (IgnoredAny)",
             read: |input, limits| {
                 use serde::Deserialize as _;
-                let de = ayaml::DocumentDeserializer::from_str_with_limits(input, limits)?;
+                let de = ayaml::DocumentDeserializer::from_str_with(input, &parse_options(limits))?;
                 IgnoredAny::deserialize(de).map(drop)
             },
             values: true,
