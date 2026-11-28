@@ -21,7 +21,7 @@ const HOME_BENCH_TABS = [
     label: 'Parse time',
     leftHint: 'Faster than ayaml',
     rightHint: 'Slower than ayaml',
-    ticks: [0.5, 1, 2, 4],
+    ticks: [0.5, 1, 2, 4, 8],
     rows: sortByRatio((r) => r.speedRatio).map((r) => ({
       label: r.label,
       ratio: r.speedRatio,
@@ -35,7 +35,7 @@ const HOME_BENCH_TABS = [
     label: 'Peak heap',
     leftHint: 'Less peak heap',
     rightHint: 'More peak heap',
-    ticks: [0.25, 0.5, 1, 2],
+    ticks: [0.5, 1, 2, 4, 8],
     rows: sortByRatio((r) => r.peakRatio).map((r) => ({
       label: r.label,
       ratio: r.peakRatio,
@@ -49,7 +49,7 @@ const HOME_BENCH_TABS = [
     label: 'Allocations',
     leftHint: 'Fewer allocations',
     rightHint: 'More allocations',
-    ticks: [0.5, 1, 2, 4],
+    ticks: [0.5, 1, 2, 4, 8],
     rows: sortByRatio((r) => r.allocRatio).map((r) => ({
       label: r.label,
       ratio: r.allocRatio,
@@ -306,7 +306,7 @@ const MIGRATIONS = [
         <div class="kpi-sub">
           Geometric mean across shared pinned fixtures (up to {HEADLINE.scenarioCount}) vs
           <code>yaml-rust2</code>, <code>saphyr</code>, <code>noyalib</code>,
-          <code>fast-yaml-core</code>, and <code>serde-saphyr</code>.
+          <code>fast-yaml-core</code>, and <code>serde-saphyr</code> (<code>serde_json::Value</code>).
         </div>
       </div>
       <div class="kpi-card">
@@ -315,16 +315,19 @@ const MIGRATIONS = [
         </div>
         <div class="kpi-label">Faster than C libyaml &amp; libfyaml</div>
         <div class="kpi-sub">
-          Spanned <code>ayaml</code> event stream vs C <code>libyaml</code> ({HEADLINE.vsLibyamlEvents.toFixed(2)}x)
-          and <code>libfyaml</code> ({HEADLINE.vsLibfyamlEvents.toFixed(2)}x), with zero unsafe FFI.
+          Public pull-based <code>ayaml::parse_events</code> vs C <code>libyaml</code> ({HEADLINE.vsLibyamlEvents.toFixed(2)}x
+          overall, {HEADLINE.vsLibyamlEventsExclLargeScalar.toFixed(2)}x excl. 1 MiB plain scalar) and
+          <code>libfyaml</code> ({HEADLINE.vsLibfyamlEvents.toFixed(2)}x), with zero unsafe FFI.
         </div>
       </div>
       <div class="kpi-card">
         <div class="kpi-val">{HEADLINE.largeScalarMib.toFixed(0)} MiB/s</div>
-        <div class="kpi-label">Large-scalar throughput</div>
+        <div class="kpi-label">1 MiB plain-scalar throughput</div>
         <div class="kpi-sub">
-          Over {HEADLINE.largeScalarVsRyml.toFixed(1)}x faster than C++ <code>rapidyaml</code> on
-          1 MiB scalars; up to {HEADLINE.emitMaxMib.toFixed(0)} MiB/s deterministic YAML emission.
+          <code>{HEADLINE.largeScalarVsLibfyaml.toFixed(2)}x</code> vs <code>libfyaml</code> events
+          ({HEADLINE.largeScalarLibfyamlMib.toFixed(0)} MiB/s) and
+          <code>{HEADLINE.largeScalarVsRyml.toFixed(1)}x</code> vs C++ <code>rapidyaml</code>;
+          up to {HEADLINE.emitMaxMib.toFixed(0)} MiB/s deterministic emission.
         </div>
       </div>
       <div class="kpi-card">

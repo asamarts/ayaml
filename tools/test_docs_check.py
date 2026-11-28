@@ -64,6 +64,7 @@ class DocsCheck(unittest.TestCase):
             "bytes": 1000,
             "median_ns": 5000,
             "throughput_mib_s": 200.0,
+            "rounds": 3,
             "fixture_sha256": SAMPLE_SHA,
         }
         mem_row = {
@@ -82,6 +83,8 @@ class DocsCheck(unittest.TestCase):
                 {
                     "schema_version": 1,
                     "fixture_manifest_sha256": SAMPLE_SHA,
+                    "public_git_sha": "1" * 40,
+                    "baseline_v023_git_sha": "2" * 40,
                     "speed_rows": 1,
                     "memory_rows": 1,
                 }
@@ -214,6 +217,81 @@ class DocsCheck(unittest.TestCase):
         fp_path.write_text("[]\n", encoding="utf-8")
         found = check_docs.problems(root)
         self.assertTrue(any("fingerprint.json: expected JSON object" in msg for msg in found), found)
+
+        # Invalid harness/commit SHAs (including trailing newline and missing baseline SHA),
+        # boolean schema_version/counts/criterion, empty-host/whitespace harness_repo,
+        # and invalid JSONL metrics fail cleanly.
+        fp_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": True,
+                    "fixture_manifest_sha256": SAMPLE_SHA + "\n",
+                    "public_git_sha": "a" * 40 + "\n",
+                    "harness_git_sha": "short",
+                    "harness_repo": "https:///empty-host",
+                    "criterion": {"warm_up_ms": 500, "measurement_ms": 0, "sample_size": 30, "rounds": True},
+                    "speed_rows": True,
+                    "memory_rows": True,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (bench_dir / "speed.jsonl").write_text(
+            json.dumps(
+                {
+                    "schema_version": True,
+                    "scenario": "openapi",
+                    "operation": "parse_value",
+                    "implementation": "ayaml",
+                    "bytes": -1,
+                    "median_ns": -5.0,
+                    "throughput_mib_s": True,
+                    "rounds": 0,
+                    "fixture_sha256": SAMPLE_SHA,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        found = check_docs.problems(root)
+        self.assertTrue(any("fingerprint.json: expected schema_version == 1" in msg for msg in found), found)
+        self.assertTrue(any("invalid fixture_manifest_sha256" in msg for msg in found), found)
+        self.assertTrue(any("invalid or missing public_git_sha" in msg for msg in found), found)
+        self.assertTrue(any("invalid or missing baseline_v023_git_sha" in msg for msg in found), found)
+        self.assertTrue(any("invalid harness_git_sha" in msg for msg in found), found)
+        self.assertTrue(any("invalid harness_repo URL" in msg for msg in found), found)
+        self.assertTrue(any("speed_rows=True" in msg for msg in found), found)
+        self.assertTrue(any("memory_rows=True" in msg for msg in found), found)
+        self.assertTrue(any("criterion.measurement_ms" in msg for msg in found), found)
+        self.assertTrue(any("criterion.rounds" in msg for msg in found), found)
+        self.assertTrue(any("speed.jsonl:1: expected schema_version == 1" in msg for msg in found), found)
+        self.assertTrue(any("speed.jsonl:1: field 'bytes'" in msg for msg in found), found)
+        self.assertTrue(any("speed.jsonl:1: field 'median_ns'" in msg for msg in found), found)
+        self.assertTrue(any("speed.jsonl:1: field 'throughput_mib_s'" in msg for msg in found), found)
+        self.assertTrue(any("speed.jsonl:1: field 'rounds'" in msg for msg in found), found)
+
+        # Non-dict criterion, whitespace harness_repo, and invalid baseline_v023_git_sha also fail.
+        fp_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "fixture_manifest_sha256": SAMPLE_SHA,
+                    "public_git_sha": "1" * 40,
+                    "baseline_v023_git_sha": "not-a-sha",
+                    "harness_repo": "https://github.com/asamarts/ayaml-benchmarks extra",
+                    "criterion": ["bad"],
+                    "speed_rows": 1,
+                    "memory_rows": 1,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        found = check_docs.problems(root)
+        self.assertTrue(any("invalid or missing baseline_v023_git_sha" in msg for msg in found), found)
+        self.assertTrue(any("invalid harness_repo URL" in msg for msg in found), found)
+        self.assertTrue(any("criterion must be a JSON object" in msg for msg in found), found)
 
         # Missing fingerprint.json fails when benchmarks directory exists.
         fp_path.unlink()

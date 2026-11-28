@@ -5,15 +5,18 @@ page coverage, doctest coverage, code fences, em-dash prose hygiene, and relativ
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import re
 import sys
+from urllib.parse import urlparse
 
 LINK_PATTERN = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 HTML_HREF_PATTERN = re.compile(r'href="([^"]+)"')
 INCLUDE_DOC_PATTERN = re.compile(r'include_str!\("\.\./\.\./\.\./([^"]+)"\)')
 HEADING_PATTERN = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
-SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+GIT_SHA_RE = re.compile(r"\A[0-9a-f]{40}\Z")
 EM_DASH_PATTERN = re.compile(r"\u2014|&mdash;|&#0*8212;|&#x0*2014;", re.IGNORECASE)
 
 
@@ -134,13 +137,57 @@ def check_benchmark_data(root: Path) -> list[str]:
     if not isinstance(fp, dict):
         return ["site/src/data/benchmarks/fingerprint.json: expected JSON object"]
 
-    if fp.get("schema_version") != 1:
+    fp_schema = fp.get("schema_version")
+    if isinstance(fp_schema, bool) or fp_schema != 1:
         errors.append("site/src/data/benchmarks/fingerprint.json: expected schema_version == 1")
     manifest_sha = fp.get("fixture_manifest_sha256", "")
     if not isinstance(manifest_sha, str) or not SHA256_RE.match(manifest_sha):
         errors.append("site/src/data/benchmarks/fingerprint.json: invalid fixture_manifest_sha256")
+    for sha_field in ("public_git_sha", "baseline_v023_git_sha"):
+        val = fp.get(sha_field)
+        if not isinstance(val, str) or not GIT_SHA_RE.match(val):
+            errors.append(f"site/src/data/benchmarks/fingerprint.json: invalid or missing {sha_field}")
+    if "harness_git_sha" in fp:
+        val = fp.get("harness_git_sha")
+        if not isinstance(val, str) or not GIT_SHA_RE.match(val):
+            errors.append("site/src/data/benchmarks/fingerprint.json: invalid harness_git_sha")
+    if "harness_repo" in fp:
+        repo_url = fp.get("harness_repo")
+        parsed = urlparse(repo_url) if isinstance(repo_url, str) else None
+        if (
+            not isinstance(repo_url, str)
+            or any(ch.isspace() for ch in repo_url)
+            or parsed is None
+            or parsed.scheme != "https"
+            or not parsed.netloc
+        ):
+            errors.append("site/src/data/benchmarks/fingerprint.json: invalid harness_repo URL")
+    if "criterion" in fp:
+        crit = fp.get("criterion")
+        if not isinstance(crit, dict):
+            errors.append("site/src/data/benchmarks/fingerprint.json: criterion must be a JSON object")
+        else:
+            for k in ("warm_up_ms", "measurement_ms", "sample_size", "rounds"):
+                v = crit.get(k)
+                if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+                    errors.append(
+                        f"site/src/data/benchmarks/fingerprint.json: criterion.{k} must be a positive integer"
+                    )
 
-    def load_jsonl(name: str, required_keys: tuple[str, ...]) -> tuple[bool, list[dict]]:
+    def _is_nonneg_num(val: object) -> bool:
+        return not isinstance(val, bool) and isinstance(val, (int, float)) and math.isfinite(val) and val >= 0
+
+    def _is_nonneg_int(val: object) -> bool:
+        return not isinstance(val, bool) and isinstance(val, int) and val >= 0
+
+    def load_jsonl(
+        name: str,
+        required_keys: tuple[str, ...],
+        *,
+        int_keys: tuple[str, ...] = (),
+        pos_int_keys: tuple[str, ...] = (),
+        num_keys: tuple[str, ...] = (),
+    ) -> tuple[bool, list[dict]]:
         path = bench_dir / name
         if not path.is_file():
             errors.append(f"site/src/data/benchmarks/{name}: missing benchmark file")
@@ -158,11 +205,28 @@ def check_benchmark_data(root: Path) -> list[str]:
             if not isinstance(row, dict):
                 errors.append(f"site/src/data/benchmarks/{name}:{idx}: expected JSON object")
                 continue
-            if row.get("schema_version") != 1:
+            row_schema = row.get("schema_version")
+            if isinstance(row_schema, bool) or row_schema != 1:
                 errors.append(f"site/src/data/benchmarks/{name}:{idx}: expected schema_version == 1")
             for key in required_keys:
                 if key not in row:
                     errors.append(f"site/src/data/benchmarks/{name}:{idx}: missing field {key!r}")
+            for key in int_keys:
+                if key in row and not _is_nonneg_int(row[key]):
+                    errors.append(
+                        f"site/src/data/benchmarks/{name}:{idx}: field {key!r} must be a non-negative integer"
+                    )
+            for key in pos_int_keys:
+                val = row.get(key)
+                if key in row and (not _is_nonneg_int(val) or val <= 0):
+                    errors.append(
+                        f"site/src/data/benchmarks/{name}:{idx}: field {key!r} must be a positive integer"
+                    )
+            for key in num_keys:
+                if key in row and not _is_nonneg_num(row[key]):
+                    errors.append(
+                        f"site/src/data/benchmarks/{name}:{idx}: field {key!r} must be a finite non-negative number"
+                    )
             sha = row.get("fixture_sha256", "")
             if not isinstance(sha, str) or not SHA256_RE.match(sha):
                 errors.append(f"site/src/data/benchmarks/{name}:{idx}: invalid fixture_sha256")
@@ -171,7 +235,15 @@ def check_benchmark_data(root: Path) -> list[str]:
             errors.append(f"site/src/data/benchmarks/{name}: benchmark file contains no rows")
         return True, rows
 
-    speed_keys = ("scenario", "operation", "implementation", "bytes", "median_ns", "throughput_mib_s")
+    speed_keys = (
+        "scenario",
+        "operation",
+        "implementation",
+        "bytes",
+        "median_ns",
+        "throughput_mib_s",
+        "rounds",
+    )
     mem_keys = (
         "scenario",
         "operation",
@@ -181,19 +253,41 @@ def check_benchmark_data(root: Path) -> list[str]:
         "live_bytes",
         "allocations",
     )
-    has_speed, speed_rows = load_jsonl("speed.jsonl", speed_keys)
-    has_mem, mem_rows = load_jsonl("memory.jsonl", mem_keys)
-    _, v023_speed_rows = load_jsonl("v023-speed.jsonl", speed_keys)
-    _, v023_mem_rows = load_jsonl("v023-memory.jsonl", mem_keys)
+    has_speed, speed_rows = load_jsonl(
+        "speed.jsonl",
+        speed_keys,
+        int_keys=("bytes",),
+        pos_int_keys=("rounds",),
+        num_keys=("median_ns", "throughput_mib_s"),
+    )
+    has_mem, mem_rows = load_jsonl(
+        "memory.jsonl",
+        mem_keys,
+        int_keys=("bytes", "peak_bytes", "live_bytes", "allocations"),
+    )
+    _, v023_speed_rows = load_jsonl(
+        "v023-speed.jsonl",
+        speed_keys,
+        int_keys=("bytes",),
+        pos_int_keys=("rounds",),
+        num_keys=("median_ns", "throughput_mib_s"),
+    )
+    _, v023_mem_rows = load_jsonl(
+        "v023-memory.jsonl",
+        mem_keys,
+        int_keys=("bytes", "peak_bytes", "live_bytes", "allocations"),
+    )
 
-    if has_speed and fp.get("speed_rows") != len(speed_rows):
+    speed_count = fp.get("speed_rows")
+    if has_speed and (isinstance(speed_count, bool) or speed_count != len(speed_rows)):
         errors.append(
-            f"site/src/data/benchmarks/fingerprint.json: speed_rows={fp.get('speed_rows')} "
+            f"site/src/data/benchmarks/fingerprint.json: speed_rows={speed_count} "
             f"!= speed.jsonl count {len(speed_rows)}"
         )
-    if has_mem and fp.get("memory_rows") != len(mem_rows):
+    mem_count = fp.get("memory_rows")
+    if has_mem and (isinstance(mem_count, bool) or mem_count != len(mem_rows)):
         errors.append(
-            f"site/src/data/benchmarks/fingerprint.json: memory_rows={fp.get('memory_rows')} "
+            f"site/src/data/benchmarks/fingerprint.json: memory_rows={mem_count} "
             f"!= memory.jsonl count {len(mem_rows)}"
         )
 

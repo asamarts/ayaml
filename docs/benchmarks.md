@@ -27,17 +27,19 @@ The catalog spans five categories:
   configs, tiny frontmatter headers, strict JSON-in-YAML, and multi-byte
   Unicode documents.
 - **Strategy boundary fixtures (4 sizes):** structured mappings straddling the
-  4 KiB threshold (`boundary-3kb`, `boundary-4kb-below`, `boundary-4kb-above`,
-  and `boundary-8kb`) where typed decoding switches from building an
-  intermediate tree to streaming directly from events.
+  historical 4 KiB threshold (`boundary-3kb`, `boundary-4kb-below`,
+  `boundary-4kb-above`, and `boundary-8kb`) verifying that typed decoding
+  streams directly from events across every input size with no heap cliff
+  (see D107 in [decisions.md](decisions.md)).
 - **Scaling ladders (9 fixtures):** 10 KiB, 100 KiB, and 1 MiB ladders across
   block mappings, block sequences, and nested OpenAPI documents for automated
   10x linear complexity verification.
 - **Structural stress shapes (11 fixtures):** deep flow nesting (`depth-64`,
-  `depth-128`), repeated aliases (`aliases-1000`), a 1 MiB scalar, 256 KiB flow
-  collections, dense short block entries (`short-seq-20000`, `short-map-20000`,
-  `short-explicit-20000`), nested complex mapping keys (`nested-keys`), and
-  late typed-decode mismatches (`typed-mismatch-late`).
+  `depth-128`), repeated aliases (`aliases-1000`), a 1 MiB single-line plain
+  scalar (`large-scalar-1mb`), 256 KiB flow collections, dense short block
+  entries (`short-seq-20000`, `short-map-20000`, `short-explicit-20000`),
+  nested complex mapping keys (`nested-keys`), and late typed-decode mismatches
+  (`typed-mismatch-late`).
 - **Error paths (5 fixtures):** early and late syntax errors, late duplicate
   keys, depth-limit rejection, and late invalid escapes.
 
@@ -235,6 +237,77 @@ token arena (8.4 MB), the line records (3.1 MB), the line index (1.0 MB), and
 the JSON tree (4.8 MB). While a tree of the document was built first, its node
 vector (10.5 MB) stood there in place of the JSON tree, and the shape peaked at
 23.1 MB, 1.28 times the reference (AY-104).
+
+## Comparative benchmarks and peer methodology
+
+`cargo xtask` inside `asamarts/ayaml` reproduces all pure-Rust `ayaml` timing,
+memory, scaling, and Callgrind checks against `crates/ayaml-fixtures` without
+introducing C/C++ build dependencies into the core workspace.
+
+Full 11-parser Rust, C, and C++ comparative benchmarks run from the standalone
+public harness repository
+[`asamarts/ayaml-benchmarks`](https://github.com/asamarts/ayaml-benchmarks)
+(pinned by commit SHA in `site/src/data/benchmarks/fingerprint.json`, currently
+`95759c29c15596412c31b6c9c850f8602674d6ef`). Before timing or memory probes
+start, the harness verifies semantic equivalence against `ayaml` over all 26
+shared `ayaml-fixtures` scenarios (including the 10 KiB, 100 KiB, and 1 MiB
+scaling ladders) and verifies identical typed Rust struct decodes.
+
+### Pinned peer versions and build flags
+
+- **Rust crates:** `ayaml` (measured commit `0318345798d8` vs `v0.2.3` engine
+  baseline `79e1368e7850`, the first commit carrying `ayaml-fixtures` with a
+  byte-identical parser and emitter engine to tag `v0.2.3`), `yaml-rust2 0.13.0`,
+  `saphyr 0.3.3`, `noyalib 0.0.63`, `fast-yaml-core 0.7.0`, `yaml_serde 0.10.7`,
+  `serde-saphyr 2.2.0`, `serde 1.0.229`, `serde_json 1.0.154`, and
+  `criterion 0.7.0`.
+- **Vendored C/C++ libraries:** `rapidyaml v0.16.0` (`-O3 -std=c++11`),
+  `fkYAML v0.5.0` (`-O3 -std=c++17`), `libyaml 0.2.6` (`-O3`), and
+  `libfyaml v1.0.0-rc2` (`-O3 -std=gnu11`, built with `HAVE_PORTABLE_TARGET=1`
+  and no host-specific SIMD flags, matching default Rust `target-cpu`).
+- **Rust build flags:** standard `release` / `bench` profile (`opt-level = 3`,
+  `lto = false`, `codegen-units = 16`, default `target-cpu`), compiled with
+  `rustc 1.97.0` and `GCC 16.1.1`.
+- **Criterion & multi-round aggregation:** `warm_up_time = 500 ms`,
+  `measurement_time = 1200 ms`, `sample_size = 30`, executed for `rounds = 3`
+  independent rounds pinned to one CPU core with the `performance` governor on
+  dedicated `x86_64` Intel Skylake-class Linux hardware. Each published row
+  reports the median of round medians alongside cross-round coefficient of
+  variation (`round_cv_pct`, summarized in `fingerprint.json`).
+
+### Disclosed caveats and semantic differences
+
+- **Pull events vs. tokenizer isolation:** `ayaml events` benchmarks the public
+  pull-based `ayaml::parse_events(input)` iterator and discards each event on
+  pull (`live_bytes = 0`), matching the C `libyaml` and raw non-resolving
+  `libfyaml` (`FYPCF_QUIET`) event loops. `ayaml scan` uses the `bench-internals`
+  feature solely to isolate scanner tokenization.
+- **`serde-saphyr` target type:** `serde-saphyr` provides a Serde deserializer
+  without a YAML-native `Value` DOM, so Tier 2 deserializes into
+  `serde_json::Value` (`BTreeMap`-backed string-only keys, no YAML tags).
+- **Per-peer scenario exclusions:** Single-document APIs (`ayaml serde-value`,
+  `ayaml compat-serde`, `fkYAML`, `yaml-serde`) exclude multi-document
+  `cluster-manifests`; `noyalib` excludes `aliases-1000` and
+  `container-compose`; `serde-saphyr` excludes `aliases-1000`;
+  `libfyaml events` covers all 26 scenarios using raw non-resolving
+  `FYPCF_QUIET` events (no alias expansion); and `libfyaml doc` deterministically
+  excludes `cluster-manifests`, `depth-64` (upstream depth limit 64),
+  `short-map-20000`, `short-explicit-20000`, `scale-map-100kb`,
+  `scale-map-1mb`, and `scale-openapi-1mb` (quadratic flat-map construction)
+  across both timing and memory.
+- **Duplicate-key and map-ordering differences:** `ayaml` rejects duplicate
+  mapping keys and preserves insertion order via `indexmap`. `rapidyaml` and
+  `libyaml` allow duplicate keys without hashing; `fkYAML` stores mappings in
+  sorted `std::map`; `serde_json::Value` uses `BTreeMap`; `yaml-rust2` and
+  `saphyr` use `LinkedHashMap` / `Hash` with differing duplicate policies.
+- **Plain-scalar vs. structured workloads:** `large-scalar-1mb` is a single-line
+  1,000,000-byte plain scalar (`"x".repeat(1_000_000) + "\n"`), not a literal or
+  folded block scalar. Published summaries disclose `libfyaml events` on
+  `large-scalar-1mb` alongside `ayaml` and report `libyaml events` geometric
+  means both with and without `large-scalar-1mb`.
+- **Synthetic fixture caveat:** `ayaml-fixtures` uses deterministic seeded
+  generators rather than raw third-party repositories. Re-run measurements on
+  your own documents before making production capacity decisions.
 
 ## Interpreting results
 

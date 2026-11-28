@@ -76,6 +76,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   multi-PR cumulative creep, and expanded `instruction-probe.rs`, `ayaml-bench`, and `memcount`
   coverage to `ayaml-edit`, `frontmatter`, `merge_keys`, `Spanned<T>`, `DocumentDeserializer`,
   `from_reader`, `depth-64`, and `libyaml-compat`.
+- Published the standalone comparative benchmark harness (`asamarts/ayaml-benchmarks`) and
+  refreshed the pinned 1.0 RC and `v0.2.3` benchmark snapshot (`AY-175`): fixed `libyaml`
+  multi-document memory loading (`cluster-manifests`), removed the unshared `fkYAML` post-parse
+  walk, switched `ayaml events` to the public pull-based `ayaml::parse_events` iterator, added
+  timed 1 MiB scaling rows (`scale-{map,seq,openapi}-1mb`), emit memory rows, and `noyalib`
+  borrowed boundary rows across 3 rounds (`rounds = 3`), accurately labeled `large-scalar-1mb` as a
+  1 MiB plain scalar alongside `libfyaml events`, and disclosed exact peer versions, compiler/LTO
+  flags, Criterion parameters, cross-round variance, and semantic caveats on `/benchmarks/` and
+  `docs/benchmarks.md`.
 - Hardened pre-1.0 verification and fuzzing coverage (`AY-171`): fixed 7 unreachable scenarios in
   the `masked_errors` fuzz target (now 27 reachable scenarios verified by unit test), added
   `fuzz/yaml.dict` and tracked seed corpora for all 10 fuzz targets, enforced `-rss_limit_mb=2048`

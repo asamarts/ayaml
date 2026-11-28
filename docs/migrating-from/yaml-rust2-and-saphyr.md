@@ -3,10 +3,11 @@
 `yaml-rust2`, `saphyr`, and `serde-saphyr` are pure-Rust YAML 1.2 libraries.
 `ayaml` brings event scanning, generic `Value` DOM, spanned trees, owned and
 borrowed Serde decoding, deterministic emission, and source-preserving edits
-under one parser. On geometric mean across 23 shared fixtures, `ayaml` runs
-1.40x to 1.54x faster than `yaml-rust2` and `saphyr` (with roughly 3x fewer
-allocations than `yaml-rust2`), and 3.2x faster than `serde-saphyr` across 22
-shared fixtures (see [Benchmarks](https://asamarts.github.io/ayaml/benchmarks/)
+under one parser. On geometric mean across 26 shared fixtures, `ayaml` runs
+2.09x to 2.33x faster than `yaml-rust2` and `saphyr` (with 4.1x fewer
+allocations than `yaml-rust2` and lower peak heap than both), and 4.81x faster
+than `serde-saphyr` across 25 shared fixtures (where `serde-saphyr` targets
+`serde_json::Value`; see [Benchmarks](https://asamarts.github.io/ayaml/benchmarks/)
 and [Benchmark methodology](../benchmarks.md)).
 
 ## Updating `Cargo.toml`

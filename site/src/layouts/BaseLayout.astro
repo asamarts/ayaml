@@ -85,7 +85,7 @@ const { title, description, canonical, indexInSearch = true } = Astro.props;
         const live = document.getElementById('copy-status');
         const timers = new WeakMap();
         for (const btn of document.querySelectorAll('[data-copy]')) {
-          btn.dataset.origLabel ??= btn.textContent || 'Copy';
+          btn.dataset.origLabel ??= btn.textContent?.trim() || 'Copy';
           btn.addEventListener('click', async () => {
             const text = btn.getAttribute('data-copy') || '';
             const prevTimer = timers.get(btn);

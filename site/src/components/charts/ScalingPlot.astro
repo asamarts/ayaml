@@ -22,8 +22,8 @@ const L_H = 154;
 
 const xMinKib = 8;
 const xMaxKib = 1800;
-const yMinKib = 80;
-const yMaxKib = 45000;
+const yMinKib = 25;
+const yMaxKib = 25000;
 
 const lx = (bytes: number): number => {
   const kib = Math.min(Math.max(bytes / 1024, xMinKib), xMaxKib);
@@ -40,7 +40,8 @@ const xTicks = [
   { bytes: 1024 * 1024, label: '1 MiB' },
 ];
 const yTicks = [
-  { bytes: 100 * 1024, label: '100 KiB' },
+  { bytes: 50 * 1024, label: '50 KiB' },
+  { bytes: 250 * 1024, label: '250 KiB' },
   { bytes: 1024 * 1024, label: '1 MiB' },
   { bytes: 10 * 1024 * 1024, label: '10 MiB' },
 ];
@@ -52,11 +53,11 @@ const FAMILY_STYLES: Record<string, { color: string; shape: 'circle' | 'square' 
 };
 
 // O(n) reference slope placed cleanly in upper-left whitespace above all three curves:
-// peak = 52 * input from 10 KiB (520 KiB) to 700 KiB (36.4 MiB).
+// peak = 25 * input from 10 KiB (250 KiB) to 700 KiB (17.5 MiB).
 const refX1 = lx(10 * 1024);
-const refY1 = ly(520 * 1024);
+const refY1 = ly(250 * 1024);
 const refX2 = lx(700 * 1024);
-const refY2 = ly(36400 * 1024);
+const refY2 = ly(17500 * 1024);
 
 // Right panel: normalized 10x step ratios around 1.00x ideal O(n)
 const R_LABEL_X = 486;
@@ -134,8 +135,8 @@ const rRowH = R_H / series.length;
       />
       <text
         class="ch-mono"
-        x={(refX1 + 12).toFixed(1)}
-        y={(refY1 - 22).toFixed(1)}
+        x={(refX1 + 4).toFixed(1)}
+        y={(refY1 - 42).toFixed(1)}
         font-size="9.5"
         fill="var(--muted)"
       >
@@ -235,7 +236,8 @@ const rRowH = R_H / series.length;
         series.map((s, idx) => {
           const yMid = R_Y + idx * rRowH + rRowH / 2;
           const xBase = rx(1.0);
-          const xTime = s.time10to100 !== null ? rx(s.time10to100) : null;
+          const xTime1 = s.time10to100 !== null ? rx(s.time10to100) : null;
+          const xTime2 = s.time100to1m !== null ? rx(s.time100to1m) : null;
           const xPeak1 = rx(s.peak10to100);
           const xPeak2 = rx(s.peak100to1m);
 
@@ -245,7 +247,10 @@ const rRowH = R_H / series.length;
               : { tx: x + 7, anchor: 'start' as const };
           const p1Lbl = labelSide(xPeak1);
           const p2Lbl = labelSide(xPeak2);
-          const tLbl = xTime !== null ? labelSide(xTime) : null;
+          const t2Lbl =
+            xTime2 !== null
+              ? { tx: xTime2 + 7, anchor: 'start' as const }
+              : null;
 
           return (
             <g>
@@ -257,29 +262,37 @@ const rRowH = R_H / series.length;
               </text>
 
               {/* Connecting guide from 1.00x to peak10to100 */}
-              <line x1={xBase.toFixed(1)} y1={(yMid - 13).toFixed(1)} x2={xPeak1.toFixed(1)} y2={(yMid - 13).toFixed(1)} stroke="var(--blue)" stroke-width="1.5" opacity="0.55" />
-              <rect x={(xPeak1 - 3.5).toFixed(1)} y={(yMid - 16.5).toFixed(1)} width="7" height="7" fill="var(--paper)" stroke="var(--blue)" stroke-width="2" />
-              <text class="ch-mono" x={p1Lbl.tx.toFixed(1)} y={(yMid - 10).toFixed(1)} font-size="9.5" fill="var(--blue)" text-anchor={p1Lbl.anchor}>
+              <line x1={xBase.toFixed(1)} y1={(yMid - 15).toFixed(1)} x2={xPeak1.toFixed(1)} y2={(yMid - 15).toFixed(1)} stroke="var(--blue)" stroke-width="1.5" opacity="0.55" />
+              <rect x={(xPeak1 - 3.5).toFixed(1)} y={(yMid - 18.5).toFixed(1)} width="7" height="7" fill="var(--paper)" stroke="var(--blue)" stroke-width="2" />
+              <text class="ch-mono" x={p1Lbl.tx.toFixed(1)} y={(yMid - 12).toFixed(1)} font-size="9.5" fill="var(--blue)" text-anchor={p1Lbl.anchor}>
                 {s.peak10to100.toFixed(2)}x
               </text>
 
-              {/* 10 -> 100 KiB time */}
-              {xTime !== null && tLbl !== null && (
+              {/* 10 -> 100 KiB time (filled accent dot) & 100 KiB -> 1 MiB time (ring) */}
+              {xTime1 !== null && (
                 <g>
-                  <circle cx={xTime.toFixed(1)} cy={yMid.toFixed(1)} r="4" fill="var(--accent)" />
-                  <text class="ch-mono" x={tLbl.tx.toFixed(1)} y={(yMid + 3).toFixed(1)} font-size="9.5" font-weight="700" fill="var(--accent-strong)" text-anchor={tLbl.anchor}>
+                  <circle cx={xTime1.toFixed(1)} cy={(yMid - 3).toFixed(1)} r="3.6" fill="var(--accent)" />
+                  <text class="ch-mono" x={(xTime1 - 7).toFixed(1)} y={(yMid).toFixed(1)} font-size="9.2" font-weight="700" fill="var(--accent-strong)" text-anchor="end">
                     {s.time10to100!.toFixed(2)}x
+                  </text>
+                </g>
+              )}
+              {xTime2 !== null && t2Lbl !== null && (
+                <g>
+                  <circle cx={xTime2.toFixed(1)} cy={(yMid + 5).toFixed(1)} r="3.6" fill="var(--paper)" stroke="var(--accent-strong)" stroke-width="1.8" />
+                  <text class="ch-mono" x={t2Lbl.tx.toFixed(1)} y={(yMid + 8).toFixed(1)} font-size="9.2" font-weight="700" fill="var(--accent-strong)" text-anchor={t2Lbl.anchor}>
+                    {s.time100to1m!.toFixed(2)}x
                   </text>
                 </g>
               )}
 
               {/* 100 KiB -> 1 MiB peak */}
-              <line x1={xBase.toFixed(1)} y1={(yMid + 13).toFixed(1)} x2={xPeak2.toFixed(1)} y2={(yMid + 13).toFixed(1)} stroke="var(--green)" stroke-width="1.5" opacity="0.6" />
+              <line x1={xBase.toFixed(1)} y1={(yMid + 16).toFixed(1)} x2={xPeak2.toFixed(1)} y2={(yMid + 16).toFixed(1)} stroke="var(--green)" stroke-width="1.5" opacity="0.6" />
               <polygon
-                points={`${xPeak2.toFixed(1)},${(yMid + 8.5).toFixed(1)} ${(xPeak2 + 4.5).toFixed(1)},${(yMid + 13).toFixed(1)} ${xPeak2.toFixed(1)},${(yMid + 17.5).toFixed(1)} ${(xPeak2 - 4.5).toFixed(1)},${(yMid + 13).toFixed(1)}`}
+                points={`${xPeak2.toFixed(1)},${(yMid + 11.5).toFixed(1)} ${(xPeak2 + 4.5).toFixed(1)},${(yMid + 16).toFixed(1)} ${xPeak2.toFixed(1)},${(yMid + 20.5).toFixed(1)} ${(xPeak2 - 4.5).toFixed(1)},${(yMid + 16).toFixed(1)}`}
                 fill="var(--green)"
               />
-              <text class="ch-mono" x={p2Lbl.tx.toFixed(1)} y={(yMid + 16.5).toFixed(1)} font-size="9.5" font-weight="600" fill="var(--green)" text-anchor={p2Lbl.anchor}>
+              <text class="ch-mono" x={p2Lbl.tx.toFixed(1)} y={(yMid + 19.5).toFixed(1)} font-size="9.5" font-weight="600" fill="var(--green)" text-anchor={p2Lbl.anchor}>
                 {s.peak100to1m.toFixed(2)}x
               </text>
             </g>
@@ -289,12 +302,14 @@ const rRowH = R_H / series.length;
 
       {/* Right panel legend */}
       <g>
-        <circle cx="430" cy="231" r="3.5" fill="var(--accent)" />
-        <text x="438" y="234" font-size="10" fill="var(--text)">10&rarr;100K time</text>
-        <rect x="526" y="227.5" width="7" height="7" fill="var(--paper)" stroke="var(--blue)" stroke-width="1.8" />
-        <text x="538" y="234" font-size="10" fill="var(--text)">10&rarr;100K peak</text>
-        <polygon points="632,226.5 636.5,231 632,235.5 627.5,231" fill="var(--green)" />
-        <text x="641" y="234" font-size="10" fill="var(--text)">100K&rarr;1M peak</text>
+        <circle cx="384" cy="231" r="3.3" fill="var(--accent)" />
+        <text x="391" y="234" font-size="9.5" fill="var(--text)">10&rarr;100K t</text>
+        <circle cx="464" cy="231" r="3.3" fill="var(--paper)" stroke="var(--accent-strong)" stroke-width="1.7" />
+        <text x="471" y="234" font-size="9.5" fill="var(--text)">100K&rarr;1M t</text>
+        <rect x="546" y="227.5" width="6.5" height="6.5" fill="var(--paper)" stroke="var(--blue)" stroke-width="1.7" />
+        <text x="557" y="234" font-size="9.5" fill="var(--text)">10&rarr;100K pk</text>
+        <polygon points="642,226.8 646.2,231 642,235.2 637.8,231" fill="var(--green)" />
+        <text x="650" y="234" font-size="9.5" fill="var(--text)">100K&rarr;1M pk</text>
       </g>
     </svg>
   </div>

@@ -1,5 +1,5 @@
 ---
-import type { ProgressRow } from '../../lib/bench';
+import { formatRatio, type ProgressRow } from '../../lib/bench';
 
 interface Props {
   id: string;
@@ -14,11 +14,11 @@ const { id, title, description, rows, caption } = Astro.props;
 const WIDTH = 760;
 const LABEL_X = 196;
 const PLOT_X = 212;
-const PLOT_W = 246;
-const SPEEDUP_X = 508;
-const THROUGHPUT_X = 638;
-const HEAP_X = 648;
-const HEAP_W = 104;
+const PLOT_W = 240;
+const SPEEDUP_X = 500;
+const THROUGHPUT_X = 630;
+const HEAP_X = 640;
+const HEAP_W = 112;
 
 const TOP = 42;
 const ROW_H = 28;
@@ -27,9 +27,11 @@ const HEIGHT = TOP + rows.length * ROW_H + BOTTOM;
 
 const minDomain = 1.0;
 const maxSpeedup = Math.max(...rows.map((r) => r.speedup), 2.5);
-const maxDomain = Math.ceil(maxSpeedup * 2) / 2 + 0.1;
+const tickStep = maxSpeedup > 6 ? 2.0 : maxSpeedup > 3.5 ? 1.0 : 0.5;
+const topTick = Math.ceil((maxSpeedup - minDomain) / tickStep) * tickStep + minDomain;
+const maxDomain = topTick + tickStep * 0.15;
 const ticks: number[] = [];
-for (let t = 1.0; t <= Math.ceil(maxSpeedup * 2) / 2 + 0.001; t += 0.5) {
+for (let t = minDomain; t <= topTick + 0.001; t += tickStep) {
   ticks.push(Number(t.toFixed(1)));
 }
 
@@ -182,7 +184,7 @@ const xFor = (v: number): number =>
                     fill="var(--green)"
                     text-anchor="middle"
                   >
-                    {r.peakRatio!.toFixed(2)}x less heap
+                    {formatRatio(r.peakRatio)} less heap
                   </text>
                 </g>
               ) : hasHeapRise ? (
@@ -204,7 +206,7 @@ const xFor = (v: number): number =>
                     fill="var(--ochre)"
                     text-anchor="middle"
                   >
-                    {(1 / r.peakRatio!).toFixed(2)}x more heap
+                    {formatRatio(1 / r.peakRatio!)} more heap
                   </text>
                 </g>
               ) : (
@@ -248,9 +250,9 @@ const xFor = (v: number): number =>
               {r.peakRatio === null
                 ? 'n/a'
                 : r.peakRatio > 1.02
-                  ? `${r.peakRatio.toFixed(2)}x less heap`
+                  ? `${formatRatio(r.peakRatio)} less heap`
                   : r.peakRatio < 0.98
-                    ? `${(1 / r.peakRatio).toFixed(2)}x more heap`
+                    ? `${formatRatio(1 / r.peakRatio)} more heap`
                     : 'steady'}
             </td>
           </tr>
