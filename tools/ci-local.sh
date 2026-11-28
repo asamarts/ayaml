@@ -549,7 +549,7 @@ job_fuzz-smoke() {
 # Mirrors: cargo update -Z minimal-versions
 # Mirrors: cargo test --workspace --all-features
 # Hosted-only: semver checks read the published baseline from crates.io.
-# Mirrors: cargo semver-checks --package ayaml
+# Mirrors: cargo semver-checks --package ayaml --release-type major
 
 job_leak-gate() {
   step "leak gate tests" python3 tools/leak-scan/test_gate.py

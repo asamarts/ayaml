@@ -160,7 +160,8 @@ feature does not change the root parsing functions; choose the compatibility
 entry points explicitly. Every compatibility entry point has a `_with` form
 (`compat::from_str_with`, `compat::from_str_seed_with`,
 `compat::deserialize_any_with`, `compat::parse_events_with`,
-`compat::parse_events_eager_with`, and `SpannedTree::parse_compat_with`) taking
+`compat::parse_events_eager_with`, `DocumentDeserializer::from_str_compat_with`,
+and `SpannedTree::parse_compat_with`) taking
 a `compat::ParseOptions` value for custom resource limits and global-tag
 handling. `compat::GlobalTags::Keep` (the default) keeps tags
 outside YAML's core schema as `Value::Tagged` and Serde enums;
@@ -174,8 +175,8 @@ and `compat::parse_events_with` return the same lazy `EventStream` as default
 mode; `compat::parse_events_eager_with` keeps the whole-stream vector used by
 the conformance runner. These event readers report aliases and syntax tags as
 written and do not check aliases against earlier anchors; the compatibility
-value readers do that check. The older `*_with_limits` shims remain available
-and deprecated through `0.x` until removal in `1.0`.
+value readers do that check. The legacy `0.x` `*_with_limits` shims were removed
+for `1.0` (D109).
 
 libyaml counts a column for a byte-order mark at the start of a line, so in
 compatibility mode a `---` right after one, or a `...` followed by more text on

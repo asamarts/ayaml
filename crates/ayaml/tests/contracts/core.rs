@@ -31,10 +31,12 @@ fn duplicate_key_diagnostics_print_the_key_and_location() {
 #[test]
 fn error_categories_and_locations_are_public() {
     let span = Span::new(3, 4);
-    let error = Error::new(ErrorKind::Alias, "unknown anchor")
+    let error = Error::new(ErrorKind::Composition, "unknown anchor")
+        .with_code(ayaml::ErrorCode::UnknownAnchor)
         .with_span(span)
         .with_location(Location::new(2, 4));
-    assert_eq!(error.kind(), ErrorKind::Alias);
+    assert_eq!(error.kind(), ErrorKind::Composition);
+    assert_eq!(error.code(), ayaml::ErrorCode::UnknownAnchor);
     assert_eq!(error.location(), Some(Location::new(2, 4)));
     assert_eq!(error.to_string(), "unknown anchor at line 2 column 4");
 }

@@ -138,9 +138,9 @@ fn main() -> Result<(), ayaml::Error> {
 `EmitOptions::flow()`) and `with_*` builders. `EmitOptions` combines resource
 limits, layout and indentation settings, and optional per-node `EmitterStyles`
 in one value. `Emitter` remains available to reuse borrowed `Limits` and
-`EmitterOptions` across calls. The older `*_with_limits`, `*_with_options`, and
-`*_with_styles` combination functions remain available and deprecated through
-`0.x` until removal in `1.0`.
+`EmitterOptions` across calls. The legacy `0.x` `*_with_limits`, `*_with_options`,
+and `*_with_styles` combination shims were removed for `1.0` (use the `*_with`
+entry points instead).
 
 ## Compatibility profile
 

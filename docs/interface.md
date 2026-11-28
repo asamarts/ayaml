@@ -18,7 +18,7 @@ This page says what ayaml offers at each layer today, and which task holds what 
 | Lossless, strict | `parse_strict` | Not offered. `SpannedTree` gives spans and source text for one document, and is no lossless document. |
 | Native value | `parse_value`, `parse_documents` | Offered. A YAML stream has no flat map, so there is no `parse_values`. |
 | Typed, with Serde | `from_str`, `from_slice`, `to_string`, `to_writer`, `from_value`, `to_value` | Offered. |
-| Options | one options value per operation | Offered (D98): `ParseOptions`, `compat::ParseOptions`, and `EmitOptions` are `#[non_exhaustive]` structs with `const` presets and `with_*` builders, passed to one `*_with` function per operation. Older `*_with_limits`, `*_with_options`, and `*_with_styles` functions are deprecated through `0.x` until removal in `1.0`. |
+| Options | one options value per operation | Offered (D98): `ParseOptions`, `compat::ParseOptions`, and `EmitOptions` are `#[non_exhaustive]` structs with `const` presets and `with_*` builders, passed to one `*_with` function per operation. Legacy `0.x` `*_with_limits`, `*_with_options`, and `*_with_styles` shims were removed for `1.0` (D109). |
 | Locate | a byte span for a value or an entry | Offered by `SpannedTree`: `span_at`, `entry_span_at`, `scalar_text_at`, and `scalar_encoding_at`. An entry span is given only where its removal is exact (D92). |
 | Edit | `edit`, returning verified edits | Offered by the companion `ayaml-edit` crate (`replace_scalar*`, `remove_entry*`, `apply_batch*`, `apply_edits`), checked against the shared `edit-order.json` vectors. |
 | Format | `format` | Not offered. It needs a lossless layer. |

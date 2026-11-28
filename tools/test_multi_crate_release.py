@@ -193,7 +193,7 @@ class MultiCrateReleaseChecksTests(unittest.TestCase):
         digest = check_release.check_package(self.root, crate_path, self.commit, package="ayaml-edit")
         self.assertEqual(digest, hashlib.sha256(crate_path.read_bytes()).hexdigest())
 
-        # Caret pin on ayaml is refused in packaged ayaml-edit.
+        # Caret pin on ayaml is refused in packaged 0.x ayaml-edit.
         bad_pin = self._edit_files(
             {
                 "Cargo.toml": (
@@ -206,6 +206,75 @@ class MultiCrateReleaseChecksTests(unittest.TestCase):
         with self.assertRaises(check_release.Refused) as caught:
             check_release.check_package(self.root, crate_path, self.commit, package="ayaml-edit")
         self.assertIn("pins ayaml", str(caught.exception))
+
+    def test_v1_releases_require_semver_caret_ayaml_dependency_in_ayaml_edit(self) -> None:
+        self.assertEqual(check_release.expected_ayaml_edit_dep_requirement("0.2.3"), "=0.2.3")
+        self.assertEqual(check_release.expected_ayaml_edit_dep_requirement("0.10.0"), "=0.10.0")
+        self.assertEqual(check_release.expected_ayaml_edit_dep_requirement("1.0.0"), "^1.0.0")
+        self.assertEqual(check_release.expected_ayaml_edit_dep_requirement("1.4.2"), "^1.4.2")
+        self.assertEqual(check_release.expected_ayaml_edit_dep_requirement("2.0.0"), "^2.0.0")
+        self.assertEqual(check_release.expected_ayaml_edit_dep_requirement("10.0.0"), "^10.0.0")
+
+        v1_edit_manifest = (
+            b'[package]\nname = "ayaml-edit"\nversion.workspace = true\n\n'
+            b'[dependencies]\nayaml = { path = "../ayaml", version = "^1.0.0" }\n'
+        )
+        v1_changelog = "# Changelog\n\n## [1.0.0] \u2014 2026-12-01\n\n- 1.0 release.\n"
+        (self.root / "Cargo.toml").write_text(
+            '[workspace.package]\nversion = "1.0.0"\n', encoding="utf-8"
+        )
+        (self.root / "crates/ayaml-edit/Cargo.toml").write_bytes(v1_edit_manifest)
+        (self.root / "CHANGELOG.md").write_text(v1_changelog, encoding="utf-8")
+        (self.root / "crates/ayaml/CHANGELOG.md").write_text(v1_changelog, encoding="utf-8")
+        _git(self.root, "commit", "-q", "-am", "v1.0.0 caret dep")
+        commit = _git(self.root, "rev-parse", "HEAD")
+        _git(self.root, "update-ref", "refs/remotes/origin/main", commit)
+        _git(self.root, "tag", "-a", "-m", "v1.0.0", "v1.0.0")
+
+        self.assertEqual(check_release.check_tag(self.root, "v1.0.0"), commit)
+
+        v1_files = {
+            ".cargo_vcs_info.json": json.dumps(
+                {"git": {"sha1": commit}, "path_in_vcs": "crates/ayaml-edit"}
+            ).encode(),
+            "Cargo.toml": (
+                b'[package]\nname = "ayaml-edit"\nversion = "1.0.0"\n\n'
+                b'[dependencies.ayaml]\nversion = "^1.0.0"\n'
+            ),
+            "Cargo.toml.orig": v1_edit_manifest,
+            "Cargo.lock": b"# lock\n",
+            "README.md": b"# ayaml-edit\n",
+            "src/lib.rs": b"//! ayaml-edit\n",
+        }
+        v1_crate = self.root.parent / "ayaml-edit-1.0.0.crate"
+        v1_crate.write_bytes(_make_crate("ayaml-edit-1.0.0", v1_files))
+        digest = check_release.check_package(self.root, v1_crate, commit, package="ayaml-edit")
+        self.assertEqual(digest, hashlib.sha256(v1_crate.read_bytes()).hexdigest())
+
+        # Exact `=1.0.0` pin in packaged 1.0.0 ayaml-edit is refused.
+        bad_packaged = dict(v1_files)
+        bad_packaged["Cargo.toml"] = (
+            b'[package]\nname = "ayaml-edit"\nversion = "1.0.0"\n\n'
+            b'[dependencies.ayaml]\nversion = "=1.0.0"\n'
+        )
+        v1_crate.write_bytes(_make_crate("ayaml-edit-1.0.0", bad_packaged))
+        with self.assertRaises(check_release.Refused) as caught:
+            check_release.check_package(self.root, v1_crate, commit, package="ayaml-edit")
+        self.assertIn("not '^1.0.0'", str(caught.exception))
+
+        # Exact `=1.0.0` pin in source manifest is refused for v1.0.0 tag.
+        (self.root / "crates/ayaml-edit/Cargo.toml").write_text(
+            '[package]\nname = "ayaml-edit"\nversion.workspace = true\n\n'
+            '[dependencies]\nayaml = { path = "../ayaml", version = "=1.0.0" }\n',
+            encoding="utf-8",
+        )
+        _git(self.root, "commit", "-q", "-am", "exact v1 pin")
+        bad_commit = _git(self.root, "rev-parse", "HEAD")
+        _git(self.root, "update-ref", "refs/remotes/origin/main", bad_commit)
+        _git(self.root, "tag", "-f", "-a", "-m", "v1.0.0", "v1.0.0")
+        with self.assertRaises(check_release.Refused) as caught:
+            check_release.check_tag(self.root, "v1.0.0")
+        self.assertIn("not '^1.0.0'", str(caught.exception))
 
     def test_published_and_registry_support_ayaml_edit(self) -> None:
         self.assertEqual(

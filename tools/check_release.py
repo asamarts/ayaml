@@ -4,8 +4,9 @@
 usage:
   tools/check_release.py tag TAG
       HEAD is the commit of TAG, an annotated tag; the checkout is clean; the commit is on
-      origin/main; each published workspace crate's version is TAG's (and ayaml-edit pins
-      ayaml = "=VERSION"); and CHANGELOG.md has a section for it.
+      origin/main; each published workspace crate's version is TAG's (with ayaml-edit requiring
+      ayaml = "=VERSION" for 0.x releases and ayaml = "^VERSION" for 1.x+ releases); and
+      CHANGELOG.md has a section for it.
   tools/check_release.py package [--package PKG] CRATE COMMIT
       CRATE, as `cargo package` wrote it, holds exactly COMMIT's files of PKG's directory,
       any workspace files it packages, and what cargo generates, and it names COMMIT.
@@ -114,6 +115,20 @@ def git_has_path(root: Path, commit: str, path: str) -> bool:
     return done.returncode == 0
 
 
+def expected_ayaml_edit_dep_requirement(version: str) -> str:
+    """Expected `ayaml` version requirement in `crates/ayaml-edit/Cargo.toml` and its `.crate`.
+
+    Pre-1.0 (`0.x`) releases use exact `=VERSION` pins because `0.x` allows breaking API changes
+    across minor versions; `1.x`+ releases use SemVer caret `^VERSION` requirements so downstream
+    callers can upgrade `ayaml` within the same major line without upgrading `ayaml-edit`.
+    """
+    match = SEMVER.fullmatch(version)
+    if match is None:
+        raise Refused(f"{version!r} isn't a release version (MAJOR.MINOR.PATCH)")
+    major = int(match.group(1))
+    return f"={version}" if major == 0 else f"^{version}"
+
+
 def package_version(root: Path, package: str = PACKAGE) -> str:
     pkg_dir, _ = package_spec(package)
     manifest = tomllib.loads((root / pkg_dir / "Cargo.toml").read_text(encoding="utf-8"))
@@ -170,9 +185,10 @@ def check_tag(root: Path, tag: str) -> str:
         edit_manifest = tomllib.loads(edit_manifest_path.read_text(encoding="utf-8"))
         ayaml_dep = edit_manifest.get("dependencies", {}).get("ayaml", {})
         dep_ver = ayaml_dep.get("version") if isinstance(ayaml_dep, dict) else ayaml_dep
-        if dep_ver != f"={version}":
+        expected_dep = expected_ayaml_edit_dep_requirement(version)
+        if dep_ver != expected_dep:
             raise Refused(
-                f"crates/ayaml-edit/Cargo.toml pins ayaml to {dep_ver!r}, not '={version}'"
+                f"crates/ayaml-edit/Cargo.toml pins ayaml to {dep_ver!r}, not {expected_dep!r}"
             )
     changelog_section((root / "CHANGELOG.md").read_text(encoding="utf-8"), version)
     print(f"{tag}: annotated, commit {commit} on origin/main, clean, version {version}, in CHANGELOG.md")
@@ -239,9 +255,10 @@ def check_package(root: Path, crate_path: Path, commit: str, package: str = PACK
         dependencies = document.get("dependencies", {})
         ayaml_spec = dependencies.get("ayaml", {})
         requirement = ayaml_spec.get("version") if isinstance(ayaml_spec, dict) else ayaml_spec
-        if requirement != f"={version}":
+        expected_dep = expected_ayaml_edit_dep_requirement(version)
+        if requirement != expected_dep:
             raise Refused(
-                f"the packaged {package} manifest pins ayaml to {requirement!r}, not '={version}'"
+                f"the packaged {package} manifest pins ayaml to {requirement!r}, not {expected_dep!r}"
             )
     expected: dict[str, bytes] = {}
     listing = git(root, "ls-tree", "-r", "--full-tree", commit, "--", pkg_dir)

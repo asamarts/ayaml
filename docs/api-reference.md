@@ -121,10 +121,12 @@ for input in docs {
   `ParseOptions::with_merge_keys(true)` on `SpannedTree::parse_with` suppresses
   `entry_span()` across the tree so deleting a merged entry cannot mutate the
   referenced anchor definition. `ayaml-edit` similarly refuses `merge_keys`.
-- **Deprecated `0.x` items:** Pre-1.0 `*_with_limits`, `*_with_options`,
-  `*_with_styles` functions and the legacy `Marker` type are deprecated in favor
-  of `*_with(..., &ParseOptions)`, `*_with(..., &EmitOptions)`, and byte `Span`
-  with `LineIndex` (see [Stability and versioning](stability.md)).
+- **Removed `0.x` shims:** Pre-1.0 `*_with_limits`, `*_with_options`,
+  `*_with_styles` functions, `Marker`, and dead `ErrorKind::Alias` have been
+  removed for `1.0` in favor of `*_with(..., &ParseOptions)`,
+  `*_with(..., &EmitOptions)`, byte `Span` with `LineIndex`, and
+  `ErrorKind::Composition` with `ErrorCode::UnknownAnchor` /
+  `ErrorCode::CyclicAlias` (see [Stability and versioning](stability.md)).
   `Value::apply_merge_keys_with_limits` remains stable in `1.0`.
 - **`Tape::deserialize` scalar typing:** `Tape` and `TapeRef` deserialize resolved
   YAML types strictly (rejecting non-string scalars such as `42`, `true`, or explicit

@@ -174,8 +174,7 @@ pub use number::Number;
 pub use options::{EmitOptions, ParseOptions};
 pub use position::{ColumnEncoding, LineIndex, PositionError};
 pub use scratch::ParserBuf;
-#[allow(deprecated, reason = "re-export the compatibility marker")]
-pub use span::{Location, Marker, Position, Span, Spanned};
+pub use span::{Location, Position, Span, Spanned};
 pub use spanned::{SpannedNode, SpannedTree};
 pub use tag::{Tag, TaggedValue};
 pub use tape::{
@@ -190,29 +189,9 @@ pub use emitter::{
     to_string_with, to_writer, to_writer_documents, to_writer_documents_with, to_writer_value,
     to_writer_value_with, to_writer_with,
 };
-#[allow(
-    deprecated,
-    reason = "re-export deprecated emitter combination functions through 0.x until removal in 1.0"
-)]
-pub use emitter::{
-    to_string_documents_with_limits, to_string_value_with_limits,
-    to_string_value_with_limits_and_styles, to_string_value_with_options,
-    to_string_value_with_options_and_styles, to_string_value_with_styles, to_string_with_limits,
-    to_string_with_options, to_writer_documents_with_limits, to_writer_value_with_limits,
-    to_writer_value_with_limits_and_styles, to_writer_value_with_options,
-    to_writer_value_with_options_and_styles, to_writer_value_with_styles, to_writer_with_limits,
-    to_writer_with_options,
-};
 pub use event_emitter::{
     to_string_events, to_string_events_with, to_writer_event_stream, to_writer_event_stream_with,
     to_writer_events, to_writer_events_with,
-};
-#[allow(
-    deprecated,
-    reason = "re-export deprecated event-emitter functions through 0.x until removal in 1.0"
-)]
-pub use event_emitter::{
-    to_string_events_with_limits, to_writer_event_stream_with_limits, to_writer_events_with_limits,
 };
 pub use serde_impl::{from_value, from_value_seed, to_value};
 
@@ -393,30 +372,6 @@ pub mod compat {
         from_str_seed_with(input, &ParseOptions::new(), seed)
     }
 
-    /// Deserialize one document with a caller-supplied seed and explicit limits
-    /// under the compatibility policies. What [`from_str_seed`] says of a document that is
-    /// refused holds here.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
-    #[deprecated(
-        note = "use `compat::from_str_seed_with` with `compat::ParseOptions`; deprecated through 0.x and will be removed in 1.0"
-    )]
-    pub fn from_str_seed_with_limits<'de, T: serde::de::DeserializeSeed<'de>>(
-        input: &'de str,
-        limits: &crate::Limits,
-        seed: T,
-    ) -> Result<T::Value, Error> {
-        crate::typed::from_str_seed_with_options(
-            input,
-            limits,
-            node_options(GlobalTags::Keep),
-            seed,
-        )
-        .map_err(map_error)
-    }
-
     /// Deserialize one document with a caller-supplied seed and compatibility options.
     ///
     /// What [`from_str_seed`] says of a document that is refused holds here.
@@ -446,23 +401,6 @@ pub mod compat {
     /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
     pub fn from_str<'de, T: serde::Deserialize<'de>>(input: &'de str) -> Result<T, Error> {
         from_str_with(input, &ParseOptions::new())
-    }
-
-    /// Deserialize a typed value with compatibility policies and explicit limits,
-    /// using borrowed scalar text where possible.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
-    #[deprecated(
-        note = "use `compat::from_str_with` with `compat::ParseOptions`; deprecated through 0.x and will be removed in 1.0"
-    )]
-    pub fn from_str_with_limits<'de, T: serde::Deserialize<'de>>(
-        input: &'de str,
-        limits: &crate::Limits,
-    ) -> Result<T, Error> {
-        crate::typed::from_str_with_options(input, limits, node_options(GlobalTags::Keep))
-            .map_err(map_error)
     }
 
     /// Deserialize a typed value with compatibility options, using borrowed scalar text where
@@ -579,26 +517,6 @@ pub mod compat {
             .map(crate::EventStream::from_cursor)
     }
 
-    /// Parse a stream into a lazy event traversal with explicit limits and the
-    /// libyaml-compatible scanner.
-    ///
-    /// Aliases are reported as written and are not checked against earlier anchors, as in
-    /// [`parse_events`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
-    #[deprecated(
-        note = "use `compat::parse_events_with` with `compat::ParseOptions`; deprecated through 0.x and will be removed in 1.0"
-    )]
-    pub fn parse_events_with_limits<'a>(
-        input: &'a str,
-        limits: &crate::Limits,
-    ) -> Result<crate::EventStream<'a>, Error> {
-        crate::parser::EventCursor::with_compat(input, limits, true)
-            .map(crate::EventStream::from_cursor)
-    }
-
     /// Parse a whole stream into an eager event vector with explicit
     /// compatibility options and the libyaml-compatible scanner. The
     /// conformance runner uses this to check compatibility deviations.
@@ -616,26 +534,6 @@ pub mod compat {
         crate::parser::parse_events_compat(input, &options.limits)
     }
 
-    /// Parse a whole stream into an eager event vector with the
-    /// libyaml-compatible scanner. The conformance runner uses this to check
-    /// compatibility deviations.
-    ///
-    /// Aliases are reported as written and are not checked against earlier anchors, as in
-    /// [`parse_events`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
-    #[deprecated(
-        note = "use `compat::parse_events_eager_with` with `compat::ParseOptions`; deprecated through 0.x and will be removed in 1.0"
-    )]
-    pub fn parse_events_eager_with_limits<'a>(
-        input: &'a str,
-        limits: &crate::Limits,
-    ) -> Result<Vec<crate::Event<'a>>, Error> {
-        crate::parser::parse_events_compat(input, limits)
-    }
-
     /// Deserialize one document with a visitor and compatibility policies.
     ///
     /// # Errors
@@ -646,24 +544,6 @@ pub mod compat {
         visitor: V,
     ) -> Result<V::Value, Error> {
         deserialize_any_with(input, &ParseOptions::new(), visitor)
-    }
-
-    /// Deserialize one document with a visitor, explicit limits, and compatibility
-    /// policies.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
-    #[deprecated(
-        note = "use `compat::deserialize_any_with` with `compat::ParseOptions`; deprecated through 0.x and will be removed in 1.0"
-    )]
-    pub fn deserialize_any_with_limits<'de, V: Visitor<'de>>(
-        input: &'de str,
-        limits: &crate::Limits,
-        visitor: V,
-    ) -> Result<V::Value, Error> {
-        crate::typed::from_str_visitor(input, limits, node_options(GlobalTags::Keep), visitor)
-            .map_err(map_error)
     }
 
     /// Deserialize one document with a visitor and compatibility options.
@@ -925,18 +805,6 @@ impl<'a> Deserializer<'a> {
         })
     }
 
-    /// Create a typed document cursor with explicit limits.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
-    #[deprecated(
-        note = "use `Deserializer::from_str_with` with `ParseOptions`; deprecated through 0.x and will be removed in 1.0"
-    )]
-    pub fn from_str_with_limits(input: &'a str, limits: &Limits) -> Result<Self, Error> {
-        Self::from_str_with(input, &ParseOptions::new().with_limits(limits.clone()))
-    }
-
     /// Deserialize the next document, or return `None` at end of stream.
     ///
     /// Decodes directly from spanned events so Serde errors preserve per-node
@@ -1073,23 +941,6 @@ pub fn parse_events_with<'a>(
     }
 }
 
-/// Parse a YAML input into a pull traversal with explicit limits.
-///
-/// # Errors
-///
-/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
-#[deprecated(
-    note = "use `parse_events_with` with `ParseOptions`; deprecated through 0.x and will be removed in 1.0"
-)]
-pub fn parse_events_with_limits<'a>(
-    input: &'a str,
-    limits: &Limits,
-) -> Result<EventStream<'a>, Error> {
-    parser::EventCursor::new(input, limits).map(|cursor| EventStream {
-        inner: EventStreamInner::Cursor(cursor),
-    })
-}
-
 /// Parse one YAML document into the generic value model.
 ///
 /// The default YAML 1.2.2 profile is used: `yes` and date-like scalars stay
@@ -1133,23 +984,6 @@ pub fn parse_value_with(input: &str, options: &ParseOptions) -> Result<Value, Er
     parse_single_value(input, &options.limits)
 }
 
-/// Parse one YAML document with explicit limits.
-///
-/// Limits are checked before scanning and again during composition. The input
-/// is never allowed to exceed `limits.max_input_bytes`, and alias materialization
-/// is charged before allocation. Trailing documents are rejected even when the
-/// limits would otherwise permit them.
-///
-/// # Errors
-///
-/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
-#[deprecated(
-    note = "use `parse_value_with` with `ParseOptions`; deprecated through 0.x and will be removed in 1.0"
-)]
-pub fn parse_value_with_limits(input: &str, limits: &Limits) -> Result<Value, Error> {
-    parse_single_value(input, limits)
-}
-
 fn parse_single_value(input: &str, limits: &Limits) -> Result<Value, Error> {
     limits.validate()?;
     limits.check_input(input.len()).map_err(|error| {
@@ -1191,18 +1025,6 @@ pub fn parse_documents_with(input: &str, options: &ParseOptions) -> Result<Vec<V
     parse_stream_documents(input, &options.limits)
 }
 
-/// Parse every YAML document in the stream with explicit limits.
-///
-/// # Errors
-///
-/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
-#[deprecated(
-    note = "use `parse_documents_with` with `ParseOptions`; deprecated through 0.x and will be removed in 1.0"
-)]
-pub fn parse_documents_with_limits(input: &str, limits: &Limits) -> Result<Vec<Value>, Error> {
-    parse_stream_documents(input, limits)
-}
-
 fn parse_stream_documents(input: &str, limits: &Limits) -> Result<Vec<Value>, Error> {
     limits.validate()?;
     limits.check_input(input.len()).map_err(|error| {
@@ -1231,23 +1053,6 @@ fn parse_stream_documents(input: &str, limits: &Limits) -> Result<Vec<Value>, Er
 /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
 pub fn from_str<T: serde::de::DeserializeOwned>(input: &str) -> Result<T, Error> {
     typed::from_str(input, &Limits::default_profile())
-}
-
-/// Deserialize one YAML document into a typed Serde value with explicit limits.
-///
-/// Accepts owned (`DeserializeOwned`) targets. See [`from_str`] for the decoding rules.
-///
-/// # Errors
-///
-/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
-#[deprecated(
-    note = "use `from_str_with` with `ParseOptions`; deprecated through 0.x and will be removed in 1.0"
-)]
-pub fn from_str_with_limits<T: serde::de::DeserializeOwned>(
-    input: &str,
-    limits: &Limits,
-) -> Result<T, Error> {
-    typed::from_str(input, limits)
 }
 
 /// Deserialize one YAML document into a typed Serde value with explicit parse
@@ -1295,21 +1100,6 @@ pub fn from_str_borrowed<'de, T: serde::Deserialize<'de>>(input: &'de str) -> Re
     typed::from_str(input, &Limits::default_profile())
 }
 
-/// Deserialize one YAML document with explicit limits, borrowing simple strings.
-///
-/// # Errors
-///
-/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
-#[deprecated(
-    note = "use `from_str_with` with `ParseOptions`; deprecated through 0.x and will be removed in 1.0"
-)]
-pub fn from_str_borrowed_with_limits<'de, T: serde::Deserialize<'de>>(
-    input: &'de str,
-    limits: &Limits,
-) -> Result<T, Error> {
-    typed::from_str(input, limits)
-}
-
 /// Deserialize one YAML document with a caller-supplied seed, borrowing simple strings from
 /// `input`.
 ///
@@ -1348,25 +1138,6 @@ pub fn from_str_seed_with<'de, T: serde::de::DeserializeSeed<'de>>(
     typed::from_str_seed_with_options(input, &options.limits, typed::NodeOptions::default(), seed)
 }
 
-/// Deserialize one YAML document with a caller-supplied seed and explicit limits, borrowing
-/// simple strings from `input`.
-///
-/// What [`from_str_seed`] says of a document that is refused holds here.
-///
-/// # Errors
-///
-/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
-#[deprecated(
-    note = "use `from_str_seed_with` with `ParseOptions`; deprecated through 0.x and will be removed in 1.0"
-)]
-pub fn from_str_seed_with_limits<'de, T: serde::de::DeserializeSeed<'de>>(
-    input: &'de str,
-    limits: &Limits,
-    seed: T,
-) -> Result<T::Value, Error> {
-    typed::from_str_seed_with_options(input, limits, typed::NodeOptions::default(), seed)
-}
-
 /// Deserialize one UTF-8 YAML document from bytes, borrowing simple strings.
 ///
 /// # Errors
@@ -1383,43 +1154,6 @@ pub fn from_slice_borrowed<'de, T: serde::Deserialize<'de>>(input: &'de [u8]) ->
 /// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
 pub fn from_slice<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, Error> {
     from_slice_with(input, &ParseOptions::new())
-}
-
-/// Deserialize one UTF-8 YAML document from bytes with explicit limits,
-/// borrowing simple strings from `input` where possible.
-///
-/// Checks `limits` before validating UTF-8 so oversized byte slices fail
-/// without scanning the whole buffer.
-///
-/// # Errors
-///
-/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
-#[deprecated(
-    note = "use `from_slice_with` with `ParseOptions`; deprecated through 0.x and will be removed in 1.0"
-)]
-pub fn from_slice_borrowed_with_limits<'de, T: serde::Deserialize<'de>>(
-    input: &'de [u8],
-    limits: &Limits,
-) -> Result<T, Error> {
-    typed::from_str(text_of_with(input, limits)?, limits)
-}
-
-/// Deserialize one UTF-8 YAML document from bytes with explicit limits.
-///
-/// Checks `limits` before validating UTF-8 so oversized byte slices fail
-/// without scanning the whole buffer.
-///
-/// # Errors
-///
-/// Returns an error when the input is invalid, a configured limit is exceeded, or the target cannot be decoded.
-#[deprecated(
-    note = "use `from_slice_with` with `ParseOptions`; deprecated through 0.x and will be removed in 1.0"
-)]
-pub fn from_slice_with_limits<T: serde::de::DeserializeOwned>(
-    input: &[u8],
-    limits: &Limits,
-) -> Result<T, Error> {
-    typed::from_str(text_of_with(input, limits)?, limits)
 }
 
 /// Deserialize one UTF-8 YAML document from bytes with explicit parse options,
@@ -1487,30 +1221,6 @@ pub fn from_reader_with<R: std::io::Read, T: serde::de::DeserializeOwned>(
     let bytes = read_bounded(reader, &options.limits)?;
     let text = text_of_with(&bytes, &options.limits)?;
     from_str_with(text, options)
-}
-
-/// Deserialize one UTF-8 YAML document from an I/O reader with explicit limits.
-///
-/// Validates `limits` before reading from `reader`, and reads at most
-/// `limits.max_input_bytes + 1` bytes before failing with [`ErrorKind::Limit`]
-/// (`LimitKind::InputBytes`), preventing unbounded reads from hostile or infinite streams.
-///
-/// # Errors
-///
-/// Returns [`ErrorKind::Io`] when reading from `reader` fails, [`ErrorKind::Limit`]
-/// when `limits` is invalid or a configured limit is exceeded,
-/// [`ErrorKind::InvalidEncoding`] when the input is not valid UTF-8, or a parse/Serde
-/// error when the document or target is invalid.
-#[deprecated(
-    note = "use `from_reader_with` with `ParseOptions`; deprecated through 0.x and will be removed in 1.0"
-)]
-pub fn from_reader_with_limits<R: std::io::Read, T: serde::de::DeserializeOwned>(
-    reader: R,
-    limits: &Limits,
-) -> Result<T, Error> {
-    let bytes = read_bounded(reader, limits)?;
-    let text = text_of_with(&bytes, limits)?;
-    typed::from_str(text, limits)
 }
 
 /// Read at most `limits.max_input_bytes + 1` bytes from `reader` after validating `limits`.

@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use crate::PathSegment;
 use crate::error::{Error, ErrorCode, ErrorKind};
 use crate::event::{Event, ScalarStyle};
-use crate::limits::Limits;
 use crate::mapping::{GlobalHasher, Mapping, SMALL_LIMIT};
 use crate::options::ParseOptions;
 use crate::resolver::{resolve_plain, resolve_scalar};
@@ -141,19 +140,6 @@ impl<'a> SpannedTree<'a> {
         crate::parser::parse_spanned(input, &options.limits, false)
     }
 
-    /// Parse one default-profile stream with explicit limits.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for the same syntax and limit failures as
-    /// [`crate::parse_events_with`].
-    #[deprecated(
-        note = "use `SpannedTree::parse_with` with `ParseOptions`; deprecated through 0.x and will be removed in 1.0"
-    )]
-    pub fn parse_with_limits(input: &'a str, limits: &Limits) -> Result<Self, Error> {
-        Self::parse_with(input, &ParseOptions::new().with_limits(limits.clone()))
-    }
-
     /// Parse one compatibility-profile stream into a spanned tree.
     ///
     /// # Errors
@@ -182,24 +168,6 @@ impl<'a> SpannedTree<'a> {
         options: &crate::compat::ParseOptions,
     ) -> Result<Self, Error> {
         crate::parser::parse_spanned(input, &options.limits, true)
-    }
-
-    /// Parse one compatibility-profile stream with explicit limits.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for the same syntax and limit failures as
-    /// [`crate::compat::parse_events_with`].
-    #[cfg(feature = "libyaml-compat")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "libyaml-compat")))]
-    #[deprecated(
-        note = "use `SpannedTree::parse_compat_with` with `compat::ParseOptions`; deprecated through 0.x and will be removed in 1.0"
-    )]
-    pub fn parse_compat_with_limits(input: &'a str, limits: &Limits) -> Result<Self, Error> {
-        Self::parse_compat_with(
-            input,
-            &crate::compat::ParseOptions::new().with_limits(limits.clone()),
-        )
     }
 
     /// The documents in source order.

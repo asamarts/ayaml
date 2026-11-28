@@ -24,12 +24,19 @@ fn assert_copy<T: Copy>() {}
 fn assert_default<T: Default>() {}
 fn assert_ord<T: Ord>() {}
 fn assert_debug<T: Debug>() {}
+fn assert_display<T: Display>() {}
+fn assert_std_error<T: StdError>() {}
+fn assert_as_ref_str<T: AsRef<str>>() {}
 fn assert_debug_clone<T: Clone + Debug>() {}
 fn assert_value_traits<T: Clone + Debug + PartialEq + Eq>() {}
 fn assert_hash_traits<T: Clone + Debug + PartialEq + Eq + Hash>() {}
 fn assert_error_traits<T: StdError + Send + Sync + Clone + Debug + Display + PartialEq + Eq>() {}
 fn assert_deserializer<'de, D: serde::Deserializer<'de>>() {}
 fn assert_exact_fused_iter<I: ExactSizeIterator + std::iter::FusedIterator>() {}
+fn assert_double_ended_exact_fused_iter<
+    I: DoubleEndedIterator + ExactSizeIterator + std::iter::FusedIterator,
+>() {
+}
 fn assert_value_index<I: ayaml::value::Index>() {}
 fn assert_mapping_index<I: ayaml::mapping::Index>() {}
 fn assert_tape_index<I: ayaml::tape::Index>() {}
@@ -42,10 +49,21 @@ fn public_api_auto_traits_and_standard_derives_are_frozen_for_v1() {
     assert_copy::<MaskedError<'_>>();
     assert_unpin::<Error>();
     assert_unpin::<MaskedError<'_>>();
+    assert_eq!(size_of::<Error>(), size_of::<usize>());
+    assert_eq!(size_of::<Result<Value, Error>>(), size_of::<Value>());
     assert_copy::<ErrorKind>();
     assert_copy::<ErrorCode>();
     assert_copy::<LimitKind>();
     assert_copy::<LimitExceeded>();
+    assert_send_sync::<ErrorKind>();
+    assert_send_sync::<ErrorCode>();
+    assert_send_sync::<LimitKind>();
+    assert_display::<ErrorKind>();
+    assert_display::<ErrorCode>();
+    assert_as_ref_str::<ErrorCode>();
+    assert_display::<LimitKind>();
+    assert_display::<LimitExceeded>();
+    assert_std_error::<LimitExceeded>();
     assert_hash_traits::<ErrorKind>();
     assert_hash_traits::<ErrorCode>();
     assert_hash_traits::<LimitKind>();
@@ -56,12 +74,21 @@ fn public_api_auto_traits_and_standard_derives_are_frozen_for_v1() {
     assert_send_sync::<Value>();
     assert_send_sync::<Mapping>();
     assert_send_sync::<Number>();
+    assert_display::<Number>();
     assert_send_sync::<Tag>();
+    assert_display::<Tag>();
     assert_send_sync::<TaggedValue>();
     assert_send_sync::<ayaml::Entry<'_>>();
+    assert_debug::<ayaml::Entry<'_>>();
     assert_send_sync::<ayaml::mapping::Iter<'_>>();
+    assert_debug_clone::<ayaml::mapping::Iter<'_>>();
+    assert_double_ended_exact_fused_iter::<ayaml::mapping::Iter<'_>>();
     assert_send_sync::<ayaml::mapping::IterMut<'_>>();
+    assert_debug::<ayaml::mapping::IterMut<'_>>();
+    assert_double_ended_exact_fused_iter::<ayaml::mapping::IterMut<'_>>();
     assert_send_sync::<ayaml::mapping::IntoIter>();
+    assert_debug_clone::<ayaml::mapping::IntoIter>();
+    assert_double_ended_exact_fused_iter::<ayaml::mapping::IntoIter>();
     assert_copy::<Number>();
     assert_default::<Mapping>();
     assert_hash_traits::<Value>();
@@ -125,9 +152,11 @@ fn public_api_auto_traits_and_standard_derives_are_frozen_for_v1() {
     assert_copy::<CollectionStyle>();
     assert_copy::<ColumnEncoding>();
     assert_copy::<PositionError>();
+    assert_display::<PositionError>();
+    assert_std_error::<PositionError>();
     assert_ord::<Position>();
     assert_ord::<Location>();
-    assert_value_traits::<Event<'_>>();
+    assert_hash_traits::<Event<'_>>();
     assert_debug_clone::<SpannedTree<'_>>();
     assert_debug_clone::<SpannedNode<'_>>();
     assert_hash_traits::<Span>();
@@ -157,7 +186,9 @@ fn public_api_auto_traits_and_standard_derives_are_frozen_for_v1() {
     assert_unwind_safe::<DocumentDeserializer<'_>>();
     assert_deserializer::<DocumentDeserializer<'_>>();
     assert_deserializer::<&mut DocumentDeserializer<'_>>();
-    assert_send::<ayaml::Emitter<'_>>();
+    assert_send_sync::<ayaml::Emitter<'_>>();
+    assert_copy::<ayaml::Emitter<'_>>();
+    assert_debug::<ayaml::Emitter<'_>>();
     assert_unpin::<ayaml::Emitter<'_>>();
     assert_unwind_safe::<ayaml::Emitter<'_>>();
 

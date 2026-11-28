@@ -409,8 +409,9 @@ fn the_ci_check_tests_all_run() {
 
 /// Every place that repeats the workspace version states the one in `Cargo.toml`, so a release
 /// that sets one and misses another fails here: the README's current release and install lines,
-/// the compatibility guide's install line, and the exact requirement of each crate that pins
-/// the library.
+/// the documentation install lines, `SECURITY.md`, the `ayaml` dependency requirements (`=0.Y.Z`
+/// pre-1.0, `^X.Y.Z` for `ayaml-edit` from `1.0.0` onward, and exact pins for internal helper
+/// crates), and CI `SemVer` staging flags.
 #[test]
 fn every_place_that_repeats_the_version_agrees_with_the_workspace() {
     let Some(root) = repository_root() else {
@@ -502,18 +503,32 @@ fn every_place_that_repeats_the_version_agrees_with_the_workspace() {
         )),
         "docs/compatibility.md's install line has the feature"
     );
-    let series = version.rsplit_once('.').expect("a patch number").0;
+    let series = expected_security_series(version);
     assert!(
         read(&root, "SECURITY.md").contains(&format!(
-            "Only the latest `{series}.x` release gets security fixes."
+            "Only the latest `{series}` release gets security fixes."
         )),
-        "SECURITY.md names another series than {series}.x as the one that gets fixes"
+        "SECURITY.md names another series than {series} as the one that gets fixes"
     );
+
+    let edit_dep = expected_ayaml_edit_requirement(version);
+    {
+        let text = read(&root, "crates/ayaml-edit/Cargo.toml");
+        let pins: Vec<&str> = text
+            .lines()
+            .filter(|line| line.starts_with("ayaml = {"))
+            .collect();
+        assert_eq!(pins.len(), 1, "crates/ayaml-edit/Cargo.toml: {pins:?}");
+        assert!(
+            pins[0].contains(&format!("version = \"{edit_dep}\"")),
+            "crates/ayaml-edit/Cargo.toml: {}",
+            pins[0]
+        );
+    }
 
     for name in [
         "crates/ayaml-bench/Cargo.toml",
         "crates/ayaml-conformance/Cargo.toml",
-        "crates/ayaml-edit/Cargo.toml",
         "crates/ayaml-fixtures/Cargo.toml",
         "crates/xtask/Cargo.toml",
         "fuzz/Cargo.toml",
@@ -564,6 +579,37 @@ fn every_place_that_repeats_the_version_agrees_with_the_workspace() {
             "crates/ayaml-edit/{legal} must match the workspace root {legal}"
         );
     }
+    if !version.starts_with("0.") {
+        for path in [".github/workflows/ci.yml", "tools/ci-local.sh"] {
+            assert!(
+                !read(&root, path).contains("--release-type major"),
+                "1.x+ releases must not keep `--release-type major` in {path}"
+            );
+        }
+    }
+}
+
+/// The expected `SECURITY.md` supported-series label for `version`: `0.<minor>.x` pre-1.0,
+/// and `<major>.x` from `1.0.0` onward.
+fn expected_security_series(version: &str) -> String {
+    let mut parts = version.split('.');
+    let major = parts.next().expect("a major number");
+    let minor = parts.next().expect("a minor number");
+    if major == "0" {
+        format!("{major}.{minor}.x")
+    } else {
+        format!("{major}.x")
+    }
+}
+
+/// The expected `ayaml` dependency requirement in `crates/ayaml-edit/Cargo.toml`: exact `=0.y.z`
+/// pre-1.0, and `SemVer` caret `^X.Y.Z` from `1.0.0` onward.
+fn expected_ayaml_edit_requirement(version: &str) -> String {
+    if version.starts_with("0.") {
+        format!("={version}")
+    } else {
+        format!("^{version}")
+    }
 }
 
 /// Each release that a text calls the current one.
@@ -607,6 +653,18 @@ fn a_stale_version_beside_a_true_one_is_found() {
     assert_eq!(stated_releases(text), ["1.2.3", "1.2.2"]);
     assert_eq!(dependency_versions(text), ["1.2.3", "1.2.2", "1.2.1", "7"]);
     assert_eq!(stated_releases("no release is stated"), Vec::<&str>::new());
+    assert_eq!(expected_security_series("0.2.3"), "0.2.x");
+    assert_eq!(expected_security_series("0.10.0"), "0.10.x");
+    assert_eq!(expected_security_series("1.0.0"), "1.x");
+    assert_eq!(expected_security_series("1.4.2"), "1.x");
+    assert_eq!(expected_security_series("2.0.0"), "2.x");
+    assert_eq!(expected_security_series("10.0.0"), "10.x");
+    assert_eq!(expected_ayaml_edit_requirement("0.2.3"), "=0.2.3");
+    assert_eq!(expected_ayaml_edit_requirement("0.10.0"), "=0.10.0");
+    assert_eq!(expected_ayaml_edit_requirement("1.0.0"), "^1.0.0");
+    assert_eq!(expected_ayaml_edit_requirement("1.4.2"), "^1.4.2");
+    assert_eq!(expected_ayaml_edit_requirement("2.0.0"), "^2.0.0");
+    assert_eq!(expected_ayaml_edit_requirement("10.0.0"), "^10.0.0");
 }
 
 /// Every Rust source file under `directory`.
@@ -986,7 +1044,7 @@ fn docs_book_and_reference_pages_are_complete_and_doctested_in_ci() {
         "#[non_exhaustive]",
         "libyaml-compat",
         "bench-internals",
-        "Deprecated",
+        "Removed for 1.0",
         "ErrorCode",
     ] {
         assert!(

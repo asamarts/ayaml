@@ -20,7 +20,8 @@ setup, no crates.io API token can publish the crate.
    `tools/check_release.py tag` checks that the tag is annotated and names
    `vMAJOR.MINOR.PATCH`, that the checkout is that commit and is clean, that the commit is on
    `main`, that both `crates/ayaml` and `crates/ayaml-edit` declare the tag's version (with
-   `ayaml-edit` pinning `ayaml = "=VERSION"`), and that `CHANGELOG.md` has a non-empty
+   `ayaml-edit` requiring `ayaml = "=VERSION"` for `0.x` releases and `ayaml = "^VERSION"` for
+   `1.x`+ releases), and that `CHANGELOG.md` has a non-empty
    section headed `## [VERSION] — YYYY-MM-DD`.
 3. **Package.** `cargo package`, with the toolchain that `RELEASE_TOOLCHAIN` pins, and then
    `tools/check_release.py package` for both `ayaml` and `ayaml-edit`. Each package must hold
@@ -84,15 +85,21 @@ These are done in the web interfaces by an owner. Each is recorded here once don
    it: the current release and the two install lines in `README.md`, the install lines in
    `docs/index.md`, `docs/getting-started.md`, `docs/compatibility.md`, `docs/migration.md`,
    `docs/editing.md`, and `docs/migrating-from/*.md`,
-   and the exact `ayaml` / `ayaml-edit` / `ayaml-fixtures` requirements in
+   and the `ayaml` / `ayaml-edit` / `ayaml-fixtures` requirements in
    `crates/ayaml-bench/Cargo.toml`, `crates/ayaml-conformance/Cargo.toml`,
-   `crates/ayaml-edit/Cargo.toml`, `crates/ayaml-fixtures/Cargo.toml`,
+   `crates/ayaml-edit/Cargo.toml` (`ayaml = "=0.Y.Z"` for `0.x`, and SemVer caret
+   `ayaml = "^X.Y.Z"` from `1.0.0` onward), `crates/ayaml-fixtures/Cargo.toml`,
    `crates/xtask/Cargo.toml`, and `fuzz/Cargo.toml`. A policy test fails while one of them
    disagrees. Rename `## [Unreleased]` to `## [VERSION] — YYYY-MM-DD` in `CHANGELOG.md` and in
    its copy under `crates/ayaml/CHANGELOG.md`, and refresh `Cargo.lock` and
    `fuzz/Cargo.lock`. Make sure any breaking or signature change since the last release tag is
    named in that release's `### Changed` section so the public API gate passes both on the release
-   pull request and on the tag. For a minor release, say in `SECURITY.md` which versions get fixes.
+   pull request and on the tag. For a minor or major release, update `SECURITY.md` to state the
+   supported series (`0.Y.x` pre-1.0, or `X.x` such as `1.x` from `1.0.0` onward). In the `1.0.0`
+   release pull request itself, drop `--release-type major` from the
+   `cargo semver-checks --package ayaml` step in `.github/workflows/ci.yml` and its mirror comment
+   in `tools/ci-local.sh` (`cargo-semver-checks` automatically treats `0.2.3 -> 1.0.0` as a major
+   bump, and a repository policy test forbids leaving `--release-type major` on `1.x`+ versions).
    CI is the gate, as for any change. Change `RELEASE_TOOLCHAIN` only in this pull request, never
    between a tag and its rerun.
 2. After the squash merge, tag the merge commit on `main` and push the tag:
@@ -218,7 +225,9 @@ attestation. Rebuilt with cargo 1.99.1, the 0.1.1 tag gives the bytes crates.io 
 
 ## Publishing `ayaml-edit`
 
-`ayaml-edit` lives in `crates/ayaml-edit`, depends only on `ayaml`'s public API (`ayaml = "=X.Y.Z"`),
+`ayaml-edit` lives in `crates/ayaml-edit`, depends only on `ayaml`'s public API (`ayaml = "=0.Y.Z"`
+in `0.x`, and SemVer caret `ayaml = "^X.Y.Z"` from `1.0.0` onward so callers can upgrade `ayaml`
+within a major line without waiting for an `ayaml-edit` release),
 and is packaged, verified, published, attested, and attached to the GitHub release automatically by
 [`.github/workflows/release.yml`](.github/workflows/release.yml) immediately after `ayaml` is live on
 the crates.io sparse index.

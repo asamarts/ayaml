@@ -1,11 +1,5 @@
-#![allow(
-    deprecated,
-    reason = "options contract suite explicitly verifies deprecated 0.x *_with_limits/_with_options/_with_styles shims"
-)]
-
 //! Contracts for the unified options API (`ParseOptions`, `compat::ParseOptions`,
-//! `EmitOptions`), every `*_with` entry point, and compatibility of every deprecated
-//! combination function through `0.x`.
+//! `EmitOptions`) and every `*_with` entry point.
 
 use std::marker::PhantomData;
 
@@ -190,45 +184,10 @@ fn from_slice_with_checks_limits_before_utf8_validation() {
     let enough = ParseOptions::new().with_limits(Limits::new().with_max_input_bytes(5));
     let error = ayaml::from_slice_with::<Value>(invalid_utf8, &enough).expect_err("invalid utf-8");
     assert_eq!(error.kind(), ErrorKind::InvalidEncoding);
-
-    // The _with_limits slice variants obey the same ordering.
-    let small_limits = Limits::new().with_max_input_bytes(4);
-    let enough_limits = Limits::new().with_max_input_bytes(5);
-    for (name, error) in [
-        (
-            "from_slice_with_limits",
-            ayaml::from_slice_with_limits::<Value>(invalid_utf8, &small_limits)
-                .expect_err("slice_with_limits too large"),
-        ),
-        (
-            "from_slice_borrowed_with_limits",
-            ayaml::from_slice_borrowed_with_limits::<Value>(invalid_utf8, &small_limits)
-                .expect_err("slice_borrowed_with_limits too large"),
-        ),
-    ] {
-        assert_eq!(error.kind(), ErrorKind::Limit, "{name}: {error}");
-        assert_eq!(
-            error.limit().map(ayaml::LimitExceeded::kind),
-            Some(LimitKind::InputBytes),
-            "{name}: {error}"
-        );
-    }
-    assert_eq!(
-        ayaml::from_slice_with_limits::<Value>(invalid_utf8, &enough_limits)
-            .expect_err("slice_with_limits utf-8")
-            .kind(),
-        ErrorKind::InvalidEncoding
-    );
-    assert_eq!(
-        ayaml::from_slice_borrowed_with_limits::<Value>(invalid_utf8, &enough_limits)
-            .expect_err("slice_borrowed_with_limits utf-8")
-            .kind(),
-        ErrorKind::InvalidEncoding
-    );
 }
 
 #[test]
-fn root_with_limits_and_from_reader_variants_cover_bounds_utf8_and_io_errors() {
+fn from_reader_variants_cover_bounds_utf8_and_io_errors() {
     use std::error::Error as _;
     use std::io;
 
@@ -254,31 +213,11 @@ fn root_with_limits_and_from_reader_variants_cover_bounds_utf8_and_io_errors() {
     }
 
     let input = "name: ayaml\ncount: 3\n";
-    let default_limits = Limits::default();
     let expected = Owned {
         name: "ayaml".to_owned(),
         count: 3,
     };
 
-    assert_eq!(
-        ayaml::from_str_with_limits::<Owned>(input, &default_limits).expect("str_with_limits"),
-        expected
-    );
-    assert_eq!(
-        ayaml::from_slice_with_limits::<Owned>(input.as_bytes(), &default_limits)
-            .expect("slice_with_limits"),
-        expected
-    );
-    let borrowed: Borrowed<'_> =
-        ayaml::from_slice_borrowed_with_limits(input.as_bytes(), &default_limits)
-            .expect("slice_borrowed_with_limits");
-    assert_eq!(
-        borrowed,
-        Borrowed {
-            name: "ayaml",
-            count: 3,
-        }
-    );
     assert_eq!(
         ayaml::from_reader::<_, Owned>(input.as_bytes()).expect("from_reader"),
         expected
@@ -288,26 +227,20 @@ fn root_with_limits_and_from_reader_variants_cover_bounds_utf8_and_io_errors() {
             .expect("from_reader_with"),
         expected
     );
-    assert_eq!(
-        ayaml::from_reader_with_limits::<_, Owned>(input.as_bytes(), &default_limits)
-            .expect("from_reader_with_limits"),
-        expected
-    );
 
     // Exact boundary is accepted; one byte above stops after reading at most max_input_bytes + 1.
-    let exact = Limits::new().with_max_input_bytes(input.len());
+    let exact = ParseOptions::new().with_limits(Limits::new().with_max_input_bytes(input.len()));
     assert_eq!(
-        ayaml::from_reader_with_limits::<_, Owned>(input.as_bytes(), &exact).expect("exact"),
+        ayaml::from_reader_with::<_, Owned>(input.as_bytes(), &exact).expect("exact"),
         expected
     );
 
-    let tight = Limits::new().with_max_input_bytes(10);
+    let tight = ParseOptions::new().with_limits(Limits::new().with_max_input_bytes(10));
     let mut counter = CountingReader {
         inner: io::repeat(b'a'),
         bytes_read: 0,
     };
-    let error =
-        ayaml::from_reader_with_limits::<_, Value>(&mut counter, &tight).expect_err("oversized");
+    let error = ayaml::from_reader_with::<_, Value>(&mut counter, &tight).expect_err("oversized");
     assert_eq!(error.kind(), ErrorKind::Limit);
     assert_eq!(
         error.limit().map(ayaml::LimitExceeded::kind),
@@ -317,9 +250,9 @@ fn root_with_limits_and_from_reader_variants_cover_bounds_utf8_and_io_errors() {
 
     // Oversized invalid UTF-8 fails with InputBytes before UTF-8 validation.
     let invalid_utf8 = b"\xff\xfe\xfd\xfc\xfb";
-    let error = ayaml::from_reader_with_limits::<_, Value>(
+    let error = ayaml::from_reader_with::<_, Value>(
         &invalid_utf8[..],
-        &Limits::new().with_max_input_bytes(4),
+        &ParseOptions::new().with_limits(Limits::new().with_max_input_bytes(4)),
     )
     .expect_err("oversized invalid utf-8");
     assert_eq!(error.kind(), ErrorKind::Limit);
@@ -329,9 +262,9 @@ fn root_with_limits_and_from_reader_variants_cover_bounds_utf8_and_io_errors() {
     );
 
     // Within limit, invalid UTF-8 fails with InvalidEncoding.
-    let error = ayaml::from_reader_with_limits::<_, Value>(
+    let error = ayaml::from_reader_with::<_, Value>(
         &invalid_utf8[..],
-        &Limits::new().with_max_input_bytes(5),
+        &ParseOptions::new().with_limits(Limits::new().with_max_input_bytes(5)),
     )
     .expect_err("invalid utf-8");
     assert_eq!(error.kind(), ErrorKind::InvalidEncoding);
@@ -355,17 +288,16 @@ fn root_with_limits_and_from_reader_variants_cover_bounds_utf8_and_io_errors() {
     assert_eq!(error.code(), ayaml::ErrorCode::Io);
 
     // Zero byte limit accepts an empty reader and rejects a 1-byte stream after reading 1 byte.
-    let zero = Limits::new().with_max_input_bytes(0);
+    let zero = ParseOptions::new().with_limits(Limits::new().with_max_input_bytes(0));
     assert_eq!(
-        ayaml::from_reader_with_limits::<_, Value>(&b""[..], &zero).expect("empty reader"),
+        ayaml::from_reader_with::<_, Value>(&b""[..], &zero).expect("empty reader"),
         Value::Null
     );
     let mut one_byte = CountingReader {
         inner: &b"a"[..],
         bytes_read: 0,
     };
-    let error =
-        ayaml::from_reader_with_limits::<_, Value>(&mut one_byte, &zero).expect_err("zero limit");
+    let error = ayaml::from_reader_with::<_, Value>(&mut one_byte, &zero).expect_err("zero limit");
     assert_eq!(error.kind(), ErrorKind::Limit);
     assert_eq!(
         error.limit().map(ayaml::LimitExceeded::kind),
@@ -379,8 +311,9 @@ fn root_with_limits_and_from_reader_variants_cover_bounds_utf8_and_io_errors() {
     assert_eq!(error.code(), ayaml::ErrorCode::TrailingDocuments);
 
     // Invalid limits fail before reading from the reader.
-    let bad_limits = Limits::new().with_max_depth(MAX_DEPTH_CAP + 1);
-    let error = ayaml::from_reader_with_limits::<_, Value>(FailingReader, &bad_limits)
+    let bad_options =
+        ParseOptions::new().with_limits(Limits::new().with_max_depth(MAX_DEPTH_CAP + 1));
+    let error = ayaml::from_reader_with::<_, Value>(FailingReader, &bad_options)
         .expect_err("bad limits before io");
     assert_eq!(error.kind(), ErrorKind::Limit);
     assert_eq!(error.limit(), None);
@@ -578,218 +511,6 @@ fn compat_parse_options_cover_every_compat_entry_point() {
     );
 }
 
-/// Every deprecated combination function remains callable through `0.x` and produces the exact
-/// same result as its `*_with` replacement.
-#[test]
-#[allow(
-    deprecated,
-    reason = "verify every deprecated combination function remains equivalent to its _with replacement until 1.0"
-)]
-fn every_deprecated_combination_function_matches_its_with_replacement() {
-    let input = "a:\n  - one\n  - two\n";
-    let multi = "a: 1\n---\nb: 2\n";
-    let limits = Limits::new().with_max_documents(4).with_max_depth(16);
-    let parse_opts = ParseOptions::new().with_limits(limits.clone());
-
-    // Default parsing / decoding shims.
-    assert_eq!(
-        ayaml::parse_events_with_limits(input, &limits)
-            .and_then(Iterator::collect::<Result<Vec<_>, _>>)
-            .unwrap(),
-        ayaml::parse_events_with(input, &parse_opts)
-            .and_then(Iterator::collect::<Result<Vec<_>, _>>)
-            .unwrap()
-    );
-    assert_eq!(
-        ayaml::parse_value_with_limits(input, &limits).unwrap(),
-        ayaml::parse_value_with(input, &parse_opts).unwrap()
-    );
-    assert_eq!(
-        ayaml::parse_documents_with_limits(multi, &limits).unwrap(),
-        ayaml::parse_documents_with(multi, &parse_opts).unwrap()
-    );
-    assert_eq!(
-        ayaml::from_str_borrowed_with_limits::<Value>(input, &limits).unwrap(),
-        ayaml::from_str_with::<Value>(input, &parse_opts).unwrap()
-    );
-    assert_eq!(
-        ayaml::from_str_seed_with_limits(input, &limits, PhantomData::<Value>).unwrap(),
-        ayaml::from_str_seed_with(input, &parse_opts, PhantomData::<Value>).unwrap()
-    );
-
-    let mut old_de = Deserializer::from_str_with_limits(multi, &limits).unwrap();
-    let mut new_de = Deserializer::from_str_with(multi, &parse_opts).unwrap();
-    assert_eq!(
-        old_de.next::<Value>().unwrap(),
-        new_de.next::<Value>().unwrap()
-    );
-    assert_eq!(
-        old_de.next::<Value>().unwrap(),
-        new_de.next::<Value>().unwrap()
-    );
-    assert_eq!(
-        old_de.next::<Value>().unwrap(),
-        new_de.next::<Value>().unwrap()
-    );
-
-    let old_tree = SpannedTree::parse_with_limits(input, &limits).unwrap();
-    let new_tree = SpannedTree::parse_with(input, &parse_opts).unwrap();
-    let path = [PathSegment::key("a"), PathSegment::index(1)];
-    assert_eq!(old_tree.span_at(&path), new_tree.span_at(&path));
-
-    // Compat shims.
-    #[cfg(feature = "libyaml-compat")]
-    {
-        use serde::de::IgnoredAny;
-
-        let compat_opts = ayaml::compat::ParseOptions::new().with_limits(limits.clone());
-        assert_eq!(
-            ayaml::compat::from_str_with_limits::<Value>(input, &limits).unwrap(),
-            ayaml::compat::from_str_with::<Value>(input, &compat_opts).unwrap()
-        );
-        assert_eq!(
-            ayaml::compat::from_str_seed_with_limits(input, &limits, PhantomData::<Value>).unwrap(),
-            ayaml::compat::from_str_seed_with(input, &compat_opts, PhantomData::<Value>).unwrap()
-        );
-        assert!(ayaml::compat::deserialize_any_with_limits(input, &limits, IgnoredAny).is_ok());
-        assert_eq!(
-            ayaml::compat::parse_events_with_limits(input, &limits)
-                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
-                .unwrap(),
-            ayaml::compat::parse_events_with(input, &compat_opts)
-                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
-                .unwrap()
-        );
-        assert_eq!(
-            ayaml::compat::parse_events_eager_with_limits(input, &limits).unwrap(),
-            ayaml::compat::parse_events_eager_with(input, &compat_opts).unwrap()
-        );
-        let old_compat_tree = SpannedTree::parse_compat_with_limits(input, &limits).unwrap();
-        let new_compat_tree = SpannedTree::parse_compat_with(input, &compat_opts).unwrap();
-        assert_eq!(
-            old_compat_tree.span_at(&path),
-            new_compat_tree.span_at(&path)
-        );
-    }
-
-    // Emitter shims (all 16 value/serde/documents functions + 3 event functions).
-    let value = ayaml::parse_value(input).unwrap();
-    let docs = ayaml::parse_documents(multi).unwrap();
-    let events: Vec<Event<'_>> = ayaml::parse_events(input)
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
-    let emitter_opts = EmitterOptions::new()
-        .with_flow(true)
-        .with_explicit_start(true)
-        .with_explicit_end(true);
-    let mut styles = EmitterStyles::new();
-    styles.set(
-        path.to_vec(),
-        NodeStyle::new().with_scalar_style(Some(ScalarStyle::SingleQuoted)),
-    );
-
-    let by_limits = EmitOptions::from(limits.clone());
-    let by_options = EmitOptions::from(emitter_opts);
-    let by_styles = EmitOptions::from(styles.clone());
-    let by_limits_styles = by_limits.clone().with_styles(styles.clone());
-    let by_options_styles = by_options.clone().with_styles(styles.clone());
-
-    assert_eq!(
-        ayaml::to_string_with_limits(&value, &limits).unwrap(),
-        ayaml::to_string_with(&value, &by_limits).unwrap()
-    );
-    assert_eq!(
-        ayaml::to_string_with_options(&value, &emitter_opts).unwrap(),
-        ayaml::to_string_with(&value, &by_options).unwrap()
-    );
-    assert_eq!(
-        ayaml::to_string_value_with_limits(&value, &limits).unwrap(),
-        ayaml::to_string_value_with(&value, &by_limits).unwrap()
-    );
-    assert_eq!(
-        ayaml::to_string_value_with_options(&value, &emitter_opts).unwrap(),
-        ayaml::to_string_value_with(&value, &by_options).unwrap()
-    );
-    assert_eq!(
-        ayaml::to_string_value_with_styles(&value, &styles).unwrap(),
-        ayaml::to_string_value_with(&value, &by_styles).unwrap()
-    );
-    assert_eq!(
-        ayaml::to_string_value_with_limits_and_styles(&value, &limits, &styles).unwrap(),
-        ayaml::to_string_value_with(&value, &by_limits_styles).unwrap()
-    );
-    assert_eq!(
-        ayaml::to_string_value_with_options_and_styles(&value, &emitter_opts, &styles).unwrap(),
-        ayaml::to_string_value_with(&value, &by_options_styles).unwrap()
-    );
-    assert_eq!(
-        ayaml::to_string_documents_with_limits(&docs, &limits).unwrap(),
-        ayaml::to_string_documents_with(&docs, &by_limits).unwrap()
-    );
-    assert_eq!(
-        ayaml::to_string_events_with_limits(&events, &limits).unwrap(),
-        ayaml::to_string_events_with(&events, &by_limits).unwrap()
-    );
-
-    let capture = |write: &dyn Fn(&mut Vec<u8>) -> Result<(), ayaml::Error>| -> Vec<u8> {
-        let mut out = Vec::new();
-        write(&mut out).unwrap();
-        out
-    };
-
-    assert_eq!(
-        capture(&|w| ayaml::to_writer_with_limits(w, &value, &limits)),
-        capture(&|w| ayaml::to_writer_with(w, &value, &by_limits))
-    );
-    assert_eq!(
-        capture(&|w| ayaml::to_writer_with_options(w, &value, &emitter_opts)),
-        capture(&|w| ayaml::to_writer_with(w, &value, &by_options))
-    );
-    assert_eq!(
-        capture(&|w| ayaml::to_writer_value_with_limits(w, &value, &limits)),
-        capture(&|w| ayaml::to_writer_value_with(w, &value, &by_limits))
-    );
-    assert_eq!(
-        capture(&|w| ayaml::to_writer_value_with_options(w, &value, &emitter_opts)),
-        capture(&|w| ayaml::to_writer_value_with(w, &value, &by_options))
-    );
-    assert_eq!(
-        capture(&|w| ayaml::to_writer_value_with_styles(w, &value, &styles)),
-        capture(&|w| ayaml::to_writer_value_with(w, &value, &by_styles))
-    );
-    assert_eq!(
-        capture(&|w| ayaml::to_writer_value_with_limits_and_styles(w, &value, &limits, &styles)),
-        capture(&|w| ayaml::to_writer_value_with(w, &value, &by_limits_styles))
-    );
-    assert_eq!(
-        capture(&|w| {
-            ayaml::to_writer_value_with_options_and_styles(w, &value, &emitter_opts, &styles)
-        }),
-        capture(&|w| ayaml::to_writer_value_with(w, &value, &by_options_styles))
-    );
-    assert_eq!(
-        capture(&|w| ayaml::to_writer_documents_with_limits(w, &docs, &limits)),
-        capture(&|w| ayaml::to_writer_documents_with(w, &docs, &by_limits))
-    );
-    assert_eq!(
-        capture(&|w| ayaml::to_writer_events_with_limits(w, &events, &limits)),
-        capture(&|w| ayaml::to_writer_events_with(w, &events, &by_limits))
-    );
-    assert_eq!(
-        capture(&|w| {
-            ayaml::to_writer_event_stream_with_limits(
-                w,
-                ayaml::parse_events(input).unwrap(),
-                &limits,
-            )
-        }),
-        capture(&|w| {
-            ayaml::to_writer_event_stream_with(w, ayaml::parse_events(input).unwrap(), &by_limits)
-        })
-    );
-}
-
 struct FailingSerialize;
 
 impl serde::Serialize for FailingSerialize {
@@ -853,32 +574,12 @@ fn every_with_entry_point_rejects_invalid_limits_consistently() {
             ayaml::from_reader_with::<_, Value>(input.as_bytes(), &parse_opts).unwrap_err(),
         );
         assert_config_limit(
-            "from_str_with_limits",
-            ayaml::from_str_with_limits::<Value>(input, limits).unwrap_err(),
-        );
-        assert_config_limit(
-            "from_slice_with_limits",
-            ayaml::from_slice_with_limits::<Value>(input.as_bytes(), limits).unwrap_err(),
-        );
-        assert_config_limit(
-            "from_slice_borrowed_with_limits",
-            ayaml::from_slice_borrowed_with_limits::<Value>(input.as_bytes(), limits).unwrap_err(),
-        );
-        assert_config_limit(
-            "from_reader_with_limits",
-            ayaml::from_reader_with_limits::<_, Value>(input.as_bytes(), limits).unwrap_err(),
-        );
-        assert_config_limit(
             "Deserializer::from_str_with",
             Deserializer::from_str_with(input, &parse_opts).unwrap_err(),
         );
         assert_config_limit(
             "DocumentDeserializer::from_str_with",
             ayaml::DocumentDeserializer::from_str_with(input, &parse_opts).unwrap_err(),
-        );
-        assert_config_limit(
-            "DocumentDeserializer::from_str_with_limits",
-            ayaml::DocumentDeserializer::from_str_with_limits(input, limits).unwrap_err(),
         );
         assert_config_limit(
             "SpannedTree::parse_with",
@@ -930,11 +631,6 @@ fn every_with_entry_point_rejects_invalid_limits_consistently() {
             assert_config_limit(
                 "DocumentDeserializer::from_str_compat_with",
                 ayaml::DocumentDeserializer::from_str_compat_with(input, &compat_opts).unwrap_err(),
-            );
-            assert_config_limit(
-                "DocumentDeserializer::from_str_compat_with_limits",
-                ayaml::DocumentDeserializer::from_str_compat_with_limits(input, limits)
-                    .unwrap_err(),
             );
         }
 

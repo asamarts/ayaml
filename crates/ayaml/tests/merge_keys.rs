@@ -560,7 +560,7 @@ fn merge_keys_shared_multi_doc_budget_composition_kind_and_complex_key_depth() {
         Some(LimitKind::AliasDereferences)
     );
 
-    // Merge alias errors report `ErrorKind::Composition` (never dead `ErrorKind::Alias`).
+    // Merge alias errors report `ErrorKind::Composition`.
     for (input, code) in [
         ("out:\n  <<: *missing\n", ErrorCode::UnknownAnchor),
         ("out:\n  <<: [*missing]\n", ErrorCode::UnknownAnchor),

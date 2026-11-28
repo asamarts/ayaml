@@ -19,13 +19,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   resource limits across `parse_events_with`, `parse_value_with`, `parse_documents_with`,
   `from_str_with`, `from_str_seed_with`, `from_slice_with`, `from_reader_with`, `Deserializer`,
   `DocumentDeserializer`, `SpannedTree`, and `parse_frontmatter*`.
-- Bounded I/O reader entry points (`from_reader`, `from_reader_with`, and deprecated
-  `from_reader_with_limits`) that validate limits first and read at most `max_input_bytes + 1`
-  bytes before rejecting oversized or infinite streams.
-- Frontmatter splitting and parsing helpers (`Frontmatter`, `FrontmatterDelimiter`,
-  `ParsedFrontmatter`, `split_frontmatter`, `split_frontmatter_with`, `parse_frontmatter`,
-  `parse_frontmatter_with`, `parse_frontmatter_value`, `parse_frontmatter_value_with`) preserving
-  exact byte offsets aligned with `LineIndex` and `SpannedTree`.
+- Bounded I/O reader entry points (`from_reader` and `from_reader_with`) that validate limits first
+  and read at most `max_input_bytes + 1` bytes before rejecting oversized or infinite streams.
+- Frontmatter splitting and parsing helpers (`Frontmatter`, `#[non_exhaustive]`
+  `FrontmatterDelimiter`, `ParsedFrontmatter`, `split_frontmatter`, `split_frontmatter_with`,
+  `parse_frontmatter`, `parse_frontmatter_with`, `parse_frontmatter_value`,
+  `parse_frontmatter_value_with`) preserving exact byte offsets aligned with `LineIndex` and
+  `SpannedTree`.
 - `DocumentDeserializer` (implementing `serde::Deserializer` by value and `&mut`) so Serde
   middleware wrappers can wrap `ayaml`'s borrowed, span-preserving source deserializer directly.
 - `Spanned<T>` typed deserialization wrapper capturing exact YAML byte spans on both the
@@ -88,16 +88,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chunk skipping, all Unicode scalars, and 3-/4-byte UTF-8 boundaries, and extended daily bounded
   Miri workflows to cover `spanned`, `masked_errors`, `error_codes`, `state_machines`, and
   `--cfg ayaml_typed_from_events`.
-
-### Deprecated
-
-- Newly added `*_with_limits` shims (`from_str_with_limits`, `from_slice_with_limits`,
-  `from_slice_borrowed_with_limits`, `from_reader_with_limits`,
-  `DocumentDeserializer::from_str_with_limits`, and
-  `DocumentDeserializer::from_str_compat_with_limits`) are deprecated alongside the existing
-  `*_with_limits` shims in favor of `*_with` taking `&ParseOptions` / `&compat::ParseOptions`
-  and are scheduled for removal in `1.0`. (`Value::apply_merge_keys_with_limits` takes no
-  `ParseOptions` and remains stable in `1.0`.)
+- **Breaking (1.0 API cleanup, D109):** Removed deprecated `Marker` and
+  `impl From<Marker> for Location` (`Location::from(Marker)`); use byte `Span` with `LineIndex`,
+  `Position`, and `Location`.
+- **Breaking (1.0 API cleanup, D109):** Removed dead `ErrorKind::Alias` (unknown anchors and cyclic
+  aliases continue to report `ErrorKind::Composition` with `ErrorCode::UnknownAnchor` and
+  `ErrorCode::CyclicAlias`).
+- **Breaking (1.0 API cleanup, D109):** Boxed `Error`'s private interior (`size_of::<Error>() == 8`,
+  shrinking `Result<Value, Error>` from 104 bytes to 32 bytes on 64-bit targets), dropping the
+  unreachable `const` qualifiers from `Error::with_code`, `Error::code`, `Error::kind`,
+  `Error::span`, `MaskedError::kind`, `MaskedError::code`, `MaskedError::span`, and
+  `MaskedError::location` (`Error::masked` remains `const`), and aligned `Error`'s `Display`
+  formatting with `MaskedError` so `Error::with_location` prints `at line L column C` consistently
+  even without a `Span`.
+- **Breaking (1.0 API cleanup, D109):** Removed all 32 deprecated `0.2.x` `*_with_limits`,
+  `*_with_options`, and `*_with_styles` shims (together with `Marker` above, 33 deprecated
+  `0.2.3` items in total) in favor of `*_with` taking `&ParseOptions`, `&compat::ParseOptions`, or
+  `&EmitOptions`:
+  - Root parsing and decoding: `parse_events_with_limits`, `parse_value_with_limits`,
+    `parse_documents_with_limits`, `from_str_borrowed_with_limits`, `from_str_seed_with_limits`,
+    `Deserializer::from_str_with_limits`, and `SpannedTree::parse_with_limits`.
+  - Compatibility (`libyaml-compat`): `compat::from_str_with_limits`,
+    `compat::from_str_seed_with_limits`, `compat::deserialize_any_with_limits`,
+    `compat::parse_events_with_limits`, `compat::parse_events_eager_with_limits`, and
+    `SpannedTree::parse_compat_with_limits`.
+  - Emitters: `to_string_with_limits`, `to_string_with_options`, `to_writer_with_limits`,
+    `to_writer_with_options`, `to_string_value_with_limits`, `to_string_value_with_options`,
+    `to_string_value_with_styles`, `to_string_value_with_limits_and_styles`,
+    `to_string_value_with_options_and_styles`, `to_writer_value_with_limits`,
+    `to_writer_value_with_options`, `to_writer_value_with_styles`,
+    `to_writer_value_with_limits_and_styles`, `to_writer_value_with_options_and_styles`,
+    `to_string_documents_with_limits`, `to_writer_documents_with_limits`,
+    `to_string_events_with_limits`, `to_writer_events_with_limits`, and
+    `to_writer_event_stream_with_limits`. (`Value::apply_merge_keys_with_limits` remains stable.)
+- Updated release policy (`tools/check_release.py`, `RELEASING.md`, `SECURITY.md`, and
+  `repository_policy`) so `1.x` releases of `ayaml-edit` use a SemVer caret dependency
+  (`ayaml = "^X.Y.Z"`) while keeping exact `=0.Y.Z` pins only for `0.x`, and prepared the
+  `SECURITY.md` transition to the `1.x` support series.
 
 ### Performance
 

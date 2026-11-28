@@ -48,55 +48,6 @@ fn take_trusted_span() -> Option<Span> {
     TRUSTED_SPANNED_SPAN.with(Cell::take)
 }
 
-/// A byte offset with one-based line and column values.
-///
-/// This is the pre-byte-span position type. Spans no longer store it; use
-/// [`LineIndex`](crate::LineIndex) for positions derived from a span.
-#[deprecated(note = "use Span byte offsets with LineIndex, Position, and Location")]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Marker {
-    index: usize,
-    line: usize,
-    column: usize,
-}
-
-#[allow(deprecated, reason = "this is the compatibility type itself")]
-impl Marker {
-    /// Create a marker at a byte offset and one-based line/column.
-    #[must_use]
-    pub const fn new(index: usize, line: usize, column: usize) -> Self {
-        Self {
-            index,
-            line,
-            column,
-        }
-    }
-
-    /// The zero-based byte offset from the start of the input.
-    #[must_use]
-    pub const fn index(self) -> usize {
-        self.index
-    }
-
-    /// The one-based line number.
-    #[must_use]
-    pub const fn line(self) -> usize {
-        self.line
-    }
-
-    /// The one-based column number.
-    #[must_use]
-    pub const fn column(self) -> usize {
-        self.column
-    }
-
-    /// The line/column location, without the byte offset.
-    #[must_use]
-    pub const fn location(self) -> Location {
-        Location::new(self.line, self.column)
-    }
-}
-
 /// A zero-based line and column, as a [`LineIndex`](crate::LineIndex) gives and takes them.
 ///
 /// This is the position for a machine: an editor protocol, a source map, another index. What
@@ -157,13 +108,6 @@ impl From<Position> for Location {
             position.line.saturating_add(1),
             position.column.saturating_add(1),
         )
-    }
-}
-
-#[allow(deprecated, reason = "converts the compatibility marker")]
-impl From<Marker> for Location {
-    fn from(marker: Marker) -> Self {
-        marker.location()
     }
 }
 
