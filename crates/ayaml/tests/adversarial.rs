@@ -1735,6 +1735,14 @@ fn an_error_at_the_end_holds_one_index_of_lines() {
 #[test]
 fn an_input_over_the_limit_is_refused_before_it_is_read() {
     in_child!(|| {
+        // Warm up entry-point code pages on a tiny input so `peak_growth` measures heap/stack
+        // growth from refusing the 32 MiB input rather than first-call ELF `.text` demand paging.
+        let _ = entry_points("a: 1\n");
+        let _ = ayaml::parse_events("a: 1\n");
+        let _ = ayaml::SpannedTree::parse("a: 1\n");
+        let _ = ayaml::from_slice::<Value>(b"\xff");
+        let _ = ayaml::from_slice_borrowed::<IgnoredAny>(b"\xff");
+
         let input = "\n".repeat(ayaml::MAX_INPUT_BYTES + 1);
         let bytes = vec![0xff_u8; ayaml::MAX_INPUT_BYTES + 1];
         let mut results = Vec::new();
