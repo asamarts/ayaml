@@ -14,6 +14,7 @@ export interface SpeedRow {
   median_ns: number;
   mean_ns: number;
   stddev_ns: number;
+  round_cv_pct?: number;
   throughput_mib_s: number;
   rounds: number;
 }
@@ -36,11 +37,35 @@ export interface BenchmarkFingerprint {
   schema_version: number;
   os: string;
   arch: string;
+  kernel?: string;
   cpu: string;
+  cpu_microarch?: string;
   cpu_count: number;
   cpu_pin: number;
   governor: string;
   rustc: string;
+  c_compiler?: string;
+  cxx_compiler?: string;
+  build_flags?: {
+    rust_profile: string;
+    c_flags: string;
+    cxx_flags: string;
+  };
+  criterion?: {
+    warm_up_ms: number;
+    measurement_ms: number;
+    sample_size: number;
+    rounds: number;
+  };
+  variance?: {
+    rounds: number;
+    median_round_cv_pct: number;
+    percentile_95_round_cv_pct: number;
+    max_round_cv_pct: number;
+  };
+  harness_repo?: string;
+  harness_git_sha?: string;
+  peer_versions?: Record<string, string>;
   fixture_manifest_sha256: string;
   public_git_sha: string;
   baseline_v023_git_sha: string;
@@ -155,16 +180,19 @@ const SCENARIO_SPECS: Array<Omit<ScenarioMeta, 'bytes'>> = [
   { id: 'boundary-4kb-above', category: 'boundary', label: 'Structured map above 4 KiB' },
   { id: 'scale-map-10kb', category: 'scaling', label: 'Block mapping (10 KiB)' },
   { id: 'scale-map-100kb', category: 'scaling', label: 'Block mapping (100 KiB)' },
+  { id: 'scale-map-1mb', category: 'scaling', label: 'Block mapping (1 MiB)' },
   { id: 'scale-seq-10kb', category: 'scaling', label: 'Block sequence (10 KiB)' },
   { id: 'scale-seq-100kb', category: 'scaling', label: 'Block sequence (100 KiB)' },
+  { id: 'scale-seq-1mb', category: 'scaling', label: 'Block sequence (1 MiB)' },
   { id: 'scale-openapi-10kb', category: 'scaling', label: 'Nested OpenAPI (10 KiB)' },
   { id: 'scale-openapi-100kb', category: 'scaling', label: 'Nested OpenAPI (100 KiB)' },
+  { id: 'scale-openapi-1mb', category: 'scaling', label: 'Nested OpenAPI (1 MiB)' },
   { id: 'depth-64', category: 'stress', label: 'Deep flow nesting (depth 64)' },
   { id: 'aliases-1000', category: 'stress', label: 'Repeated alias fan-out (1,000)' },
   { id: 'short-seq-20000', category: 'stress', label: '20,000 short sequence items' },
   { id: 'short-map-20000', category: 'stress', label: '20,000 short mapping entries' },
   { id: 'short-explicit-20000', category: 'stress', label: '20,000 explicit-key entries' },
-  { id: 'large-scalar-1mb', category: 'stress', label: '1 MiB block scalar' },
+  { id: 'large-scalar-1mb', category: 'stress', label: '1 MiB plain scalar' },
 ];
 
 export const ALL_SCENARIOS: ScenarioMeta[] = SCENARIO_SPECS.map((spec) => {
@@ -295,9 +323,9 @@ export const TIER2_PEERS = computeTierComparison('ayaml', 'value', [
   {
     impl: 'serde-saphyr',
     op: 'serde-json',
-    label: 'serde-saphyr',
+    label: 'serde-saphyr (JSON Value)',
     lang: 'Rust',
-    safety: 'Safe Rust Serde',
+    safety: 'Safe Rust Serde (serde_json::Value)',
   },
 ]);
 
@@ -307,7 +335,7 @@ export const TIER1_PEERS = computeTierComparison('ayaml', 'events', [
     op: 'scan',
     label: 'ayaml (scanner only)',
     lang: 'Rust',
-    safety: 'Safe Rust tokenizer',
+    safety: 'Safe Rust tokenizer (bench-internals)',
     isAyaml: true,
   },
   {
@@ -337,9 +365,9 @@ export const TIER1_PEERS = computeTierComparison('ayaml', 'events', [
   {
     impl: 'ayaml',
     op: 'events',
-    label: 'ayaml (spanned events)',
+    label: 'ayaml (pull events)',
     lang: 'Rust',
-    safety: 'Safe Rust YAML 1.2.2',
+    safety: 'Safe Rust YAML 1.2.2 (parse_events)',
     isAyaml: true,
   },
   { impl: 'libyaml', op: 'events', label: 'libyaml (events)', lang: 'C', safety: 'Unsafe C parser' },
@@ -352,8 +380,8 @@ export const TIER1_PEERS = computeTierComparison('ayaml', 'events', [
     safety: 'Safe Rust spanned tree',
     isAyaml: true,
   },
-  { impl: 'libfyaml', op: 'events', label: 'libfyaml (events)', lang: 'C', safety: 'Unsafe C parser' },
-  { impl: 'libfyaml', op: 'doc', label: 'libfyaml (doc)', lang: 'C', safety: 'Unsafe C document' },
+  { impl: 'libfyaml', op: 'events', label: 'libfyaml (events)', lang: 'C', safety: 'Unsafe C parser (portable)' },
+  { impl: 'libfyaml', op: 'doc', label: 'libfyaml (doc)', lang: 'C', safety: 'Unsafe C document (portable)' },
 ]);
 
 export const TYPED_SCENARIOS = [
@@ -416,6 +444,9 @@ export interface EmitRow {
   label: string;
   medianUs: number;
   throughput: number;
+  peakBytes: number | null;
+  liveBytes: number | null;
+  allocations: number | null;
   isAyaml: boolean;
   isUnsafeArena?: boolean;
 }
@@ -432,12 +463,16 @@ export function getEmitRows(scenario: string): EmitRow[] {
   for (const spec of specs) {
     const sp = getSpeed(spec.impl, 'emit', scenario);
     if (!sp) continue;
+    const mm = getMemory(spec.impl, 'emit', scenario);
     out.push({
       scenario,
       impl: spec.impl,
       label: spec.label,
       medianUs: sp.median_ns / 1000,
       throughput: sp.throughput_mib_s,
+      peakBytes: mm ? mm.peak_bytes : null,
+      liveBytes: mm ? mm.live_bytes : null,
+      allocations: mm ? mm.allocations : null,
       isAyaml: spec.isAyaml,
       isUnsafeArena: spec.isUnsafeArena,
     });
@@ -460,16 +495,16 @@ export interface ProgressRow {
 
 export function getProgressSinceV023(): ProgressRow[] {
   const picks = [
-    { label: 'Emit CI workflow', scenario: 'ci-workflow', op: 'emit' },
-    { label: 'Emit OpenAPI spec', scenario: 'openapi-spec', op: 'emit' },
-    { label: 'Emit frontmatter', scenario: 'frontmatter-tiny', op: 'emit' },
+    { label: 'Value DOM: 1 MiB plain scalar', scenario: 'large-scalar-1mb', op: 'value' },
+    { label: 'Events: 1 MiB plain scalar', scenario: 'large-scalar-1mb', op: 'events' },
+    { label: 'Events: 1 MiB block map', scenario: 'scale-map-1mb', op: 'events' },
     { label: 'Events: 20k short map', scenario: 'short-map-20000', op: 'events' },
     { label: 'Events: 4 KiB boundary', scenario: 'boundary-4kb-below', op: 'events' },
-    { label: 'Events: 1 MiB scalar', scenario: 'large-scalar-1mb', op: 'events' },
-    { label: 'Events: CI workflow', scenario: 'ci-workflow', op: 'events' },
-    { label: 'Events: OpenAPI spec', scenario: 'openapi-spec', op: 'events' },
+    { label: 'Emit OpenAPI spec', scenario: 'openapi-spec', op: 'emit' },
+    { label: 'Emit CI workflow', scenario: 'ci-workflow', op: 'emit' },
+    { label: 'Emit frontmatter', scenario: 'frontmatter-tiny', op: 'emit' },
     { label: 'Borrowed decode: 4 KiB', scenario: 'boundary-4kb-below', op: 'borrowed' },
-    { label: 'Value DOM: 1 MiB scalar', scenario: 'large-scalar-1mb', op: 'value' },
+    { label: 'Events: OpenAPI spec', scenario: 'openapi-spec', op: 'events' },
   ];
   return picks
     .map((p) => {
@@ -534,6 +569,7 @@ export interface ScalingFamilySeries {
   family: string;
   points: ScalingPoint[];
   time10to100: number | null;
+  time100to1m: number | null;
   peak10to100: number;
   peak100to1m: number;
 }
@@ -578,6 +614,10 @@ export function getScalingSeries(): ScalingFamilySeries[] {
       time10to100:
         p10.timeMs !== null && p100.timeMs !== null
           ? p100.timeMs / p10.timeMs / sizeRatio1
+          : null,
+      time100to1m:
+        p100.timeMs !== null && p1m.timeMs !== null
+          ? p1m.timeMs / p100.timeMs / sizeRatio2
           : null,
       peak10to100: p100.peakBytes / p10.peakBytes / sizeRatio1,
       peak100to1m: p1m.peakBytes / p100.peakBytes / sizeRatio2,
@@ -656,6 +696,7 @@ export const HEADLINE = (() => {
   const largeScalar = mustSpeed('ayaml', 'events', 'large-scalar-1mb');
   const largeScalarRyml = mustSpeed('rapidyaml', 'parse-arena', 'large-scalar-1mb');
   const largeScalarLibyaml = mustSpeed('libyaml', 'events', 'large-scalar-1mb');
+  const largeScalarLibfyaml = mustSpeed('libfyaml', 'events', 'large-scalar-1mb');
   const ciEmit = mustSpeed('ayaml', 'emit', 'ci-workflow');
   const ciEmitYamlSerde = mustSpeed('yaml-serde', 'emit', 'ci-workflow');
 
@@ -678,8 +719,19 @@ export const HEADLINE = (() => {
   if (vsYamlSerde.allocRatio === null || vsYamlSerde.peakRatio === null) {
     throw new Error('bench.ts: missing yaml-serde memory ratios');
   }
-  if (vsLibyaml.allocRatio === null) {
-    throw new Error('bench.ts: missing libyaml events alloc ratio');
+  if (vsLibyaml.allocRatio === null || vsLibyaml.peakRatio === null) {
+    throw new Error('bench.ts: missing libyaml events memory ratios');
+  }
+
+  // Transparently compute libyaml events geomean excluding large-scalar-1mb as well.
+  const libyamlExclLargeRatios: number[] = [];
+  for (const s of ALL_SCENARIOS) {
+    if (s.id === 'large-scalar-1mb') continue;
+    const ay = getSpeed('ayaml', 'events', s.id);
+    const ly = getSpeed('libyaml', 'events', s.id);
+    if (ay && ly && ay.median_ns > 0 && ly.median_ns > 0) {
+      libyamlExclLargeRatios.push(ly.median_ns / ay.median_ns);
+    }
   }
 
   const emitMibs = EMIT_SCENARIOS.map((sc) => mustSpeed('ayaml', 'emit', sc).throughput_mib_s);
@@ -696,11 +748,10 @@ export const HEADLINE = (() => {
     const ys = mustMemory('yaml-serde', 'typed', sc.id).peak_bytes;
     return ys / ay;
   });
-  const below4kPeak = mustMemory('ayaml', 'borrowed', 'boundary-4kb-below').peak_bytes;
-  const above4kPeak = mustMemory('ayaml', 'borrowed', 'boundary-4kb-above').peak_bytes;
-  const typedStreamingHeapDropPct = ((below4kPeak - above4kPeak) / below4kPeak) * 100;
+  const below4kPeakKib = mustMemory('ayaml', 'borrowed', 'boundary-4kb-below').peak_bytes / 1024;
+  const above4kPeakKib = mustMemory('ayaml', 'borrowed', 'boundary-4kb-above').peak_bytes / 1024;
 
-  // Compute overall v0.2.3 -> current geomean across every shared speed & memory row.
+  // Compute overall v0.2.3 -> current geomean across every shared speed & non-zero memory row.
   const v023SpeedRatios: number[] = [];
   for (const oldRow of v023SpeedRows) {
     const curRow = getSpeed('ayaml', oldRow.operation, oldRow.scenario);
@@ -725,8 +776,11 @@ export const HEADLINE = (() => {
 
   return {
     largeScalarMib: largeScalar.throughput_mib_s,
+    largeScalarLibfyamlMib: largeScalarLibfyaml.throughput_mib_s,
+    largeScalarVsLibfyaml: largeScalarLibfyaml.median_ns / largeScalar.median_ns,
     largeScalarVsRyml: largeScalarRyml.median_ns / largeScalar.median_ns,
     largeScalarVsLibyaml: largeScalarLibyaml.median_ns / largeScalar.median_ns,
+    vsLibyamlEventsExclLargeScalar: geomean(libyamlExclLargeRatios),
     ciEmitMib: ciEmit.throughput_mib_s,
     ciEmitVsYamlSerde: ciEmitYamlSerde.median_ns / ciEmit.median_ns,
     emitMinMib: Math.min(...emitMibs),
@@ -738,7 +792,8 @@ export const HEADLINE = (() => {
     emitVsYamlSerdeMin: Math.min(...emitYamlSerde),
     emitVsYamlSerdeMax: Math.max(...emitYamlSerde),
     typedMaxPeakSavingsVsYamlSerde: Math.max(...typedPeakSavings),
-    typedStreamingHeapDropPct,
+    below4kPeakKib,
+    above4kPeakKib,
     vsYamlRust2: vsYamlRust2.speedRatio,
     vsSaphyr: vsSaphyr.speedRatio,
     vsYamlSerde: vsYamlSerde.speedRatio,
@@ -746,6 +801,7 @@ export const HEADLINE = (() => {
     vsYamlSerdePeak: vsYamlSerde.peakRatio,
     vsSerdeSaphyr: vsSerdeSaphyr.speedRatio,
     vsLibyamlEvents: vsLibyaml.speedRatio,
+    vsLibyamlEventsPeak: vsLibyaml.peakRatio,
     vsLibyamlEventsAllocs: vsLibyaml.allocRatio,
     vsLibfyamlEvents: vsLibfyaml.speedRatio,
     vsFkyaml: vsFkyaml.speedRatio,

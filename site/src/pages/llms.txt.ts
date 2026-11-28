@@ -56,12 +56,12 @@ export const GET = async () => {
 - Repository: ${GITHUB_URL}
 - Rustdoc API: ${DOCS_RS_AYAML} and ${DOCS_RS_EDIT}
 
-## Performance summary (pinned dataset ${fingerprint.captured_date})
+## Performance summary (pinned dataset ${fingerprint.captured_date}, ${fingerprint.criterion?.rounds ?? 3} rounds)
 
-- Geometric mean across shared \`ayaml-fixtures\` workloads (${HEADLINE.scenarioCount} timed fixtures, ${HEADLINE.memoryScenarioCount} memory fixtures):
-  - \`ayaml value\` is ${HEADLINE.vsYamlRust2.toFixed(2)}x faster than \`yaml-rust2\`, ${HEADLINE.vsSaphyr.toFixed(2)}x faster than \`saphyr\`, ${HEADLINE.vsYamlSerde.toFixed(2)}x faster than \`yaml-serde\` (${HEADLINE.vsYamlSerdeAllocs.toFixed(1)}x fewer allocations, ${HEADLINE.vsYamlSerdePeak.toFixed(2)}x lower peak heap), ${HEADLINE.vsSerdeSaphyr.toFixed(2)}x faster than \`serde-saphyr\`, and ${HEADLINE.vsFkyaml.toFixed(2)}x faster than C++ \`fkYAML\`.
-  - \`ayaml events\` is ${HEADLINE.vsLibyamlEvents.toFixed(2)}x faster than C \`libyaml\` events and ${HEADLINE.vsLibfyamlEvents.toFixed(2)}x faster than C \`libfyaml\` events.
-  - Large-scalar streaming reaches ${HEADLINE.largeScalarMib.toFixed(1)} MiB/s (${HEADLINE.largeScalarVsRyml.toFixed(2)}x faster than \`rapidyaml\`); deterministic emission reaches ${HEADLINE.ciEmitMib.toFixed(1)} MiB/s.
+- Geometric mean across shared \`ayaml-fixtures\` workloads (${HEADLINE.scenarioCount} timed fixtures, ${HEADLINE.memoryScenarioCount} memory fixtures, standalone comparative harness: ${fingerprint.harness_repo ?? 'https://github.com/asamarts/ayaml-benchmarks'}):
+  - \`ayaml value\` is ${HEADLINE.vsYamlRust2.toFixed(2)}x faster than \`yaml-rust2\`, ${HEADLINE.vsSaphyr.toFixed(2)}x faster than \`saphyr\`, ${HEADLINE.vsYamlSerde.toFixed(2)}x faster than \`yaml-serde\` (${HEADLINE.vsYamlSerdeAllocs.toFixed(1)}x fewer allocations, ${HEADLINE.vsYamlSerdePeak.toFixed(2)}x lower peak heap), ${HEADLINE.vsSerdeSaphyr.toFixed(2)}x faster than \`serde-saphyr\` (targeting \`serde_json::Value\`), and ${HEADLINE.vsFkyaml.toFixed(2)}x faster than C++ \`fkYAML\`.
+  - Public pull-based \`ayaml::parse_events\` is ${HEADLINE.vsLibyamlEvents.toFixed(2)}x faster than C \`libyaml\` events (${HEADLINE.vsLibyamlEventsExclLargeScalar.toFixed(2)}x excluding \`large-scalar-1mb\`, with ${HEADLINE.vsLibyamlEventsPeak.toFixed(2)}x lower peak heap and ${HEADLINE.vsLibyamlEventsAllocs.toFixed(0)}x fewer allocations) and ${HEADLINE.vsLibfyamlEvents.toFixed(2)}x faster than C \`libfyaml\` events.
+  - On the 1 MiB plain scalar (\`large-scalar-1mb\`), \`ayaml::parse_events\` reaches ${HEADLINE.largeScalarMib.toFixed(1)} MiB/s (${HEADLINE.largeScalarVsLibfyaml.toFixed(2)}x vs C \`libfyaml\` events at ${HEADLINE.largeScalarLibfyamlMib.toFixed(0)} MiB/s and ${HEADLINE.largeScalarVsRyml.toFixed(2)}x vs C++ \`rapidyaml\`); deterministic emission reaches ${HEADLINE.ciEmitMib.toFixed(1)} MiB/s.
 - Benchmarks: ${SITE_URL}/benchmarks/
 
 ## Documentation pages

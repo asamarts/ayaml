@@ -15,6 +15,7 @@ export default defineConfig({
   site: 'https://asamarts.github.io',
   base: '/ayaml',
   trailingSlash: 'always',
+  compressHTML: false,
   integrations: [
     starlight({
       title: 'ayaml',

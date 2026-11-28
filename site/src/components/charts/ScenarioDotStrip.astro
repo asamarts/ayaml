@@ -21,7 +21,7 @@ const BOTTOM = 26;
 const HEIGHT = TOP + rows.length * ROW_H + BOTTOM;
 
 const LEGEND_X = [118, 240, 344, 442, 526, 632] as const;
-const ticks = [0.25, 0.5, 1, 2, 4, 8, 16];
+const ticks = [0.25, 0.5, 1, 2, 4, 8, 16, 32, 64];
 const logMin = Math.log(ticks[0]);
 const logMax = Math.log(ticks[ticks.length - 1]);
 const xFor = (v: number): number => {
@@ -127,7 +127,7 @@ function layoutRowPoints(points: ScenarioDotRow['points']) {
       }
       <line x1={PLOT_X} y1={TOP - 8} x2={PLOT_X + PLOT_W} y2={TOP - 8} stroke="var(--rule)" stroke-width="1" />
 
-      {/* 23 scenario rows */}
+      {/* Per-scenario rows */}
       {
         rows.map((row, idx) => {
           const yTop = TOP + idx * ROW_H;

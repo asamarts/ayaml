@@ -5,9 +5,9 @@
 C-transpiled `libyaml` code (`unsafe-libyaml` / `libyaml-rs`). Moving to `ayaml`
 removes `unsafe` parser code from your dependency graph (`#![forbid(unsafe_code)]`)
 and adds zero-copy borrowed decoding, `Spanned<T>`, and `DocumentDeserializer`
-for Serde middleware. On geometric mean across 22 shared pinned fixtures,
-`ayaml` parses `Value` trees roughly 2.01x faster than `yaml-serde` with 3.8x
-fewer heap allocations and 1.67x lower peak heap (see
+for Serde middleware. On geometric mean across 25 shared pinned fixtures,
+`ayaml` parses `Value` trees 3.00x faster than `yaml-serde` with 5.1x
+fewer heap allocations and 4.57x lower peak heap (see
 [Benchmarks](https://asamarts.github.io/ayaml/benchmarks/) and
 [Benchmark methodology](../benchmarks.md)).
 

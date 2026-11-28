@@ -2,15 +2,54 @@
   "schema_version": 1,
   "os": "linux",
   "arch": "x86_64",
-  "cpu": "x86_64 quad-core (8 threads) @ 2.6 GHz",
+  "kernel": "Linux 7.1.3-arch1-2",
+  "cpu": "x86_64 Intel Skylake-class quad-core (8 threads) @ 2.60 GHz",
+  "cpu_microarch": "Intel Skylake (x86_64, 6th-gen Core class)",
   "cpu_count": 8,
   "cpu_pin": 2,
   "governor": "performance",
   "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+  "c_compiler": "cc (GCC) 16.1.1 20260625",
+  "cxx_compiler": "c++ (GCC) 16.1.1 20260625",
+  "build_flags": {
+    "rust_profile": "release / bench (opt-level=3, lto=false, codegen-units=16, default target-cpu)",
+    "c_flags": "-O3 (libyaml: default C; libfyaml: -std=gnu11, HAVE_PORTABLE_TARGET=1)",
+    "cxx_flags": "-O3 (rapidyaml: -std=c++11; fkYAML: -std=c++17)"
+  },
+  "criterion": {
+    "warm_up_ms": 500,
+    "measurement_ms": 1200,
+    "sample_size": 30,
+    "rounds": 3
+  },
+  "variance": {
+    "rounds": 3,
+    "median_round_cv_pct": 0.316,
+    "percentile_95_round_cv_pct": 1.495,
+    "max_round_cv_pct": 4.73
+  },
+  "harness_repo": "https://github.com/asamarts/ayaml-benchmarks",
+  "harness_git_sha": "95759c29c15596412c31b6c9c850f8602674d6ef",
+  "peer_versions": {
+    "ayaml": "0.2.3 (1.0 RC, commit 03183457)",
+    "rapidyaml": "v0.16.0",
+    "fkYAML": "v0.5.0",
+    "libyaml": "0.2.6",
+    "libfyaml": "v1.0.0-rc2",
+    "noyalib": "0.0.63",
+    "fast-yaml-core": "0.7.0",
+    "saphyr": "0.3.3",
+    "serde-saphyr": "2.2.0",
+    "yaml-rust2": "0.13.0",
+    "yaml_serde": "0.10.7",
+    "serde": "1.0.229",
+    "serde_json": "1.0.154",
+    "criterion": "0.7.0"
+  },
   "fixture_manifest_sha256": "2f523fd5ca6b3c0125b488a051ead2b2b2caae3ab5b43b6d84a546be994df71e",
-  "public_git_sha": "47d2485631e97997da288190b0883772ce90dc32",
+  "public_git_sha": "0318345798d804e019a8c655d01a8a56f41ee751",
   "baseline_v023_git_sha": "79e1368e785064ca9dcad667be56f064c902e18c",
-  "captured_date": "2026-11-24",
-  "speed_rows": 501,
-  "memory_rows": 523
+  "captured_date": "2026-11-28",
+  "speed_rows": 565,
+  "memory_rows": 539
 }
